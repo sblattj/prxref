@@ -47,7 +47,7 @@ def _make_ref(forge: str) -> PRRef:
 class TestLoadConfigDefaults:
     def test_all_defaults_present(self):
         cfg = load_config()
-        assert cfg["llm_backend"] == "http"
+        assert cfg["llm_backend"] == "openai-compat"
         assert cfg["llm_base_url"] == ""
         assert cfg["llm_api_key"] == ""
         assert cfg["llm_models"] == []

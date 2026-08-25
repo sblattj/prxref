@@ -1,0 +1,15 @@
+services:
+  prxref:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: prxref:latest
+    container_name: prxref
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    # Supply secrets and environment variables via an env file (see docs/env-vars.md / .env.example)
+    # env_file:
+    #   - .env
+    environment:
+      - PYTHONUNBUFFERED=1

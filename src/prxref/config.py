@@ -3,7 +3,7 @@
 Canonical environment-variable table (every name prefixed PRXREF_):
 
 LLM / pipeline:
-  PRXREF_LLM_BACKEND            LLM backend: ferry | litellm | http (default "http")
+  PRXREF_LLM_BACKEND            LLM backend: openai-compat | ferry | http (aliases) | litellm
   PRXREF_LLM_BASE_URL           Base URL for the chosen backend (optional)
   PRXREF_LLM_API_KEY            API key for the chosen backend (optional)
   PRXREF_LLM_MODELS             Comma-separated model fallback chain, first
@@ -42,7 +42,7 @@ from prxref.forges.base import Forge, PRRef
 _ENV_PREFIX = "PRXREF_"
 
 _DEFAULTS: dict[str, object] = {
-    "llm_backend": "http",
+    "llm_backend": "openai-compat",
     "llm_base_url": "",
     "llm_api_key": "",
     "llm_models": [],

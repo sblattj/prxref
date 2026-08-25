@@ -193,8 +193,12 @@ def create_llm_client(
     cfg = cfg or {}
 
     def _get(key: str, env: str, default: str | None = None) -> str | None:
-        if cfg.get(key) is not None:
-            return str(cfg[key])
+        for k in (key, key.lower()):
+            v = cfg.get(k)
+            if isinstance(v, (list, tuple)):
+                v = ",".join(str(x) for x in v)
+            if v not in (None, ""):
+                return str(v)
         return os.environ.get(env, default)
 
     backend = (_get("LLM_BACKEND", "PRXREF_LLM_BACKEND", "openai-compat") or "").strip().lower() or "openai-compat"
@@ -202,7 +206,7 @@ def create_llm_client(
     models = [m.strip() for m in raw_models.split(",") if m.strip()]
     if not models:
         raise LLMError("PRXREF_LLM_MODELS resolved to an empty model chain")
-    if backend in ("openai-compat", "ferry"):
+    if backend in ("openai-compat", "ferry", "http"):
         return OpenAICompatClient(
             base_url=_get("LLM_BASE_URL", "PRXREF_LLM_BASE_URL", DEFAULT_BASE_URL) or DEFAULT_BASE_URL,
             api_key=_get("LLM_API_KEY", "PRXREF_LLM_API_KEY", DEFAULT_API_KEY) or DEFAULT_API_KEY,
@@ -211,4 +215,4 @@ def create_llm_client(
         )
     if backend == "litellm":
         return LiteLLMClient(models=models)
-    raise LLMError(f"unknown PRXREF_LLM_BACKEND {backend!r}; expected openai-compat|ferry|litellm")
+    raise LLMError(f"unknown PRXREF_LLM_BACKEND {backend!r}; expected openai-compat|ferry|http|litellm")

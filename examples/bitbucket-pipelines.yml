@@ -1,0 +1,32 @@
+# Example Bitbucket Pipelines configuration for running prxref on pull requests.
+#
+# Bitbucket Pipelines automatically provides $BITBUCKET_WORKSPACE, $BITBUCKET_REPO_SLUG,
+# and $BITBUCKET_PR_ID when triggered from a pull request.
+#
+# Authentication:
+#   Configure PRXREF_BITBUCKET_TOKEN (Repository or Workspace Access Token with PR read/write)
+#   in Repository settings > Repository variables (masked & secured).
+#
+# LLM configuration:
+#   Configure PRXREF_LLM_BASE_URL and PRXREF_LLM_API_KEY in Repository variables.
+
+image: python:3.12-slim
+
+pipelines:
+  pull-requests:
+    '**':
+      - step:
+          name: prxref review
+          # prxref is non-blocking and exits 0 on advisory warnings/network timeouts
+          fail-fast: false
+          script:
+            - pip install --no-cache-dir prxref
+            - |
+              PR_URL="https://bitbucket.org/${BITBUCKET_WORKSPACE}/${BITBUCKET_REPO_SLUG}/pull-requests/${BITBUCKET_PR_ID}"
+              prxref review --pr-url "$PR_URL" -v
+          variables:
+            # Set via Bitbucket Repository variables:
+            # PRXREF_BITBUCKET_TOKEN: $PRXREF_BITBUCKET_TOKEN
+            # PRXREF_LLM_BASE_URL: $PRXREF_LLM_BASE_URL
+            # PRXREF_LLM_API_KEY: $PRXREF_LLM_API_KEY
+            PRXREF_LLM_MODELS: "flash,orch"

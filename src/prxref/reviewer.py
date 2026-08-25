@@ -28,7 +28,8 @@ _CONTEXT_MARKER = "## Review Context"
 
 def load_prompt(name: str) -> str:
     """Load a prompt template from the packaged ``prxref/prompts`` directory."""
-    return resources.files("prxref").joinpath("prompts").joinpath(name).read_text(encoding="utf-8")
+    fname = f"{name}.md" if not name.endswith(".md") else name
+    return resources.files("prxref").joinpath("prompts").joinpath(fname).read_text(encoding="utf-8")
 
 
 def _render_file(f: FileDiff) -> str:

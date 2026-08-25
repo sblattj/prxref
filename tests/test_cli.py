@@ -30,11 +30,17 @@ def fake_runtime(monkeypatch):
 
     def fake_orchestrate_review(**kwargs):
         recorded_orchestrate.append(kwargs)
+
+        class F:
+            def __init__(self, severity):
+                self.severity = severity
+
         return {
             "verdict": "commented",
-            "counts": {"critical": 1, "warning": 2},
-            "dropped": 3,
-            "tokens": {"input": 1200, "output": 350},
+            "findings_active": [F("critical"), F("warning"), F("warning")],
+            "findings_dropped": [{}, {}, {}],
+            "input_tokens": 1200,
+            "output_tokens": 350,
         }
 
     _install_fake_module(
