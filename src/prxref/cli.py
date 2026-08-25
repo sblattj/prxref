@@ -79,13 +79,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def _fmt_counts(result: Any) -> str:
     if not isinstance(result, dict):
         return "-"
-    counts = result.get("counts")
-    if counts is None:
+    active = result.get("findings_active")
+    if not isinstance(active, list):
         return "-"
-    if isinstance(counts, dict):
-        items = [f"{k}={v}" for k, v in sorted(counts.items())]
-        return " ".join(items) if items else "0"
-    return str(counts)
+    sev: dict[str, int] = {}
+    for f in active:
+        sev[getattr(f, "severity", "?")] = sev.get(getattr(f, "severity", "?"), 0) + 1
+    items = [f"{k}={v}" for k, v in sorted(sev.items())]
+    return " ".join(items) if items else "0"
 
 
 def _fmt_tokens(result: Any) -> str:
@@ -111,7 +112,8 @@ def _print_summary(
     print(f"verdict: {verdict if verdict is not None else 'done'}", file=target)
     if not verbose:
         return
-    dropped = result.get("dropped", 0) if isinstance(result, dict) else 0
+    dropped = result.get("findings_dropped", []) if isinstance(result, dict) else []
+    dropped = len(dropped) if isinstance(dropped, list) else 0
     print(f"counts: {_fmt_counts(result)} (dropped: {dropped})", file=target)
     print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)}", file=target)
 

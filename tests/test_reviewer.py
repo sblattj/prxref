@@ -84,7 +84,7 @@ class TestLoadPrompt:
 
     def test_loads_summary_template_via_resources(self):
         content = load_prompt("summary.md")
-        for placeholder in ("{verdict}", "{attribution}", "{elapsed_ms}", "{findings_table}"):
+        for placeholder in ("{verdict}", "{attribution}", "{findings}", "{error_count}"):
             assert placeholder in content
 
 

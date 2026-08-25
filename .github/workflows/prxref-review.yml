@@ -1,0 +1,44 @@
+name: prxref review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: prxref review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # prxref is non-blocking by design (exits 0 on all network/LLM/forge errors),
+    # but continue-on-error provides belt-and-braces protection for CI pipeline continuity.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install prxref
+        # Install from the current repository in editable/local mode
+        run: uv pip install --system .
+
+      - name: Run prxref review
+        env:
+          # A personal access token (PAT) with repo/pull-requests write scope is recommended
+          # for private repos or cross-fork workflows. The default GITHUB_TOKEN works for public
+          # repos when given 'pull-requests: write' permissions.
+          PRXREF_GITHUB_TOKEN: ${{ secrets.PRXREF_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          PRXREF_LLM_BASE_URL: ${{ vars.PRXREF_LLM_BASE_URL }}
+          PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
+          PRXREF_LLM_MODELS: flash,orch
+        run: |
+          prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v

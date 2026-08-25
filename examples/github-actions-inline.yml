@@ -1,0 +1,47 @@
+# Example GitHub Actions workflow for reviewing pull requests in other repositories.
+#
+# Authentication:
+#   PRXREF_GITHUB_TOKEN: Set via secrets.PRXREF_GITHUB_TOKEN (Personal Access Token with 'repo' scope
+#   or fine-grained token with 'Pull requests: Read and write' permissions).
+#   For public repos, standard secrets.GITHUB_TOKEN can be used when pull-requests: write is set.
+#
+# LLM backend:
+#   PRXREF_LLM_BASE_URL: Set via repository variables (e.g. https://llm.example.com/v1 or http://vpn-host:8090/v1)
+#   PRXREF_LLM_API_KEY: Set via repository secrets
+
+name: prxref review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: prxref review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install prxref
+        # Install published package from PyPI, or install directly from GitHub if not yet published:
+        # pip install git+https://github.com/sblattj/prxref.git
+        run: pip install --no-cache-dir prxref
+
+      - name: Run prxref review
+        env:
+          PRXREF_GITHUB_TOKEN: ${{ secrets.PRXREF_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          PRXREF_LLM_BASE_URL: ${{ vars.PRXREF_LLM_BASE_URL }}
+          PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
+          PRXREF_LLM_MODELS: flash,orch
+        run: |
+          prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v
