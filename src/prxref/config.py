@@ -29,7 +29,7 @@ Webhooks:
   PRXREF_BITBUCKET_WEBHOOK_SECRET HMAC secret for Bitbucket webhook payloads
   PRXREF_GITHUB_WEBHOOK_SECRET    HMAC secret for GitHub webhook payloads
   PRXREF_GITLAB_WEBHOOK_SECRET    HMAC secret for GitLab webhook payloads
-  PRXREF_ALLOW_UNSIGNED           "1"/"true"/"yes"/"on" accepts unsigned
+  PRXREF_ALLOW_UNSIGNED           literal "1" accepts unsigned
                                   webhooks (default off; insecure)
 
 Precedence: built-in defaults < environment < ``overrides`` kwargs.

@@ -37,7 +37,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_BITBUCKET_WEBHOOK_SECRET` | *(empty)* | HMAC secret for Bitbucket webhooks (verified against `X-Hub-Signature` via HMAC-SHA256). |
 | `PRXREF_GITHUB_WEBHOOK_SECRET` | *(empty)* | HMAC secret for GitHub webhooks (verified against `X-Hub-Signature-256` via HMAC-SHA256). |
 | `PRXREF_GITLAB_WEBHOOK_SECRET` | *(empty)* | Secret token for GitLab webhooks (verified against `X-Gitlab-Token`). |
-| `PRXREF_ALLOW_UNSIGNED` | `False` | Boolean (`1`, `true`, `yes`, `on`). Accepts webhooks without valid HMAC/token signatures (dev/testing only; logs a warning). |
+| `PRXREF_ALLOW_UNSIGNED` | `False` | Accepts webhooks without valid HMAC/token signatures (dev/testing only; logs a warning). Must be the literal string `1` — `true`/`yes`/`on` deliberately do **not** enable the bypass, so it cannot be switched on by a stray truthy value. |
 
 ## Environment Cross-Check & Defaults
 
