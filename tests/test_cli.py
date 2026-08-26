@@ -69,7 +69,20 @@ def test_version_flag(capsys):
     assert rc == 0
     out, _ = capsys.readouterr()
     assert out.strip() == __version__
-    assert out.strip() == "0.1.0"
+
+
+def test_version_matches_packaging_metadata():
+    """pyproject.toml and prxref.__version__ declare the version separately, and
+    a release is precisely when they drift.
+
+    Pinned to the installed metadata rather than to a literal: a literal has to
+    be hand-edited on every bump, and the one that used to live in
+    test_version_flag would have passed a release with a stale __version__ as
+    long as someone remembered to edit the test too.
+    """
+    from importlib.metadata import version as installed_version
+
+    assert installed_version("prxref") == __version__
 
 
 def test_no_subcommand_prints_help_and_exits_2(capsys):
