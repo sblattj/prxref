@@ -71,7 +71,7 @@ class TestLoadConfigEnv:
         monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "0.85")
         monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "5")
         monkeypatch.setenv("PRXREF_MAX_CHUNKS", "12")
-        monkeypatch.setenv("PRXREF_ALLOW_UNSIGNED", "true")
+        monkeypatch.setenv("PRXREF_ALLOW_UNSIGNED", "1")
         monkeypatch.setenv("PRXREF_BITBUCKET_TOKEN", "bb-token")
         monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "gh-token")
         monkeypatch.setenv("PRXREF_GITLAB_TOKEN", "gl-token")
@@ -91,14 +91,20 @@ class TestLoadConfigEnv:
 
     @pytest.mark.parametrize("raw,expected", [
         ("1", True),
-        ("true", True),
-        ("TRUE", True),
-        ("yes", True),
-        ("on", True),
+        (" 1 ", True),
+        # Rejected on purpose: the webhook gate accepts only the literal "1",
+        # so anything else must read as False here too, or config would promise
+        # a bypass that never happens.
+        ("true", False),
+        ("TRUE", False),
+        ("yes", False),
+        ("on", False),
+        ("01", False),
         ("0", False),
         ("false", False),
         ("no", False),
         ("off", False),
+        ("", False),
     ])
     def test_bool_coercion_variants(self, monkeypatch, raw, expected):
         monkeypatch.setenv("PRXREF_ALLOW_UNSIGNED", raw)
@@ -174,3 +180,28 @@ class TestMakeForge:
     def test_unknown_forge_raises(self):
         with pytest.raises(ValueError, match="unknown forge: 'gitea'"):
             make_forge(_make_ref("gitea"))
+
+
+class TestAllowUnsignedAgreesWithGate:
+    """config's parse and the gate that actually runs must never disagree.
+
+    Before this test, config.py accepted "1"/"true"/"yes"/"on" while
+    webhooks._allow_unsigned accepted only "1". Reading config.py would tell you
+    PRXREF_ALLOW_UNSIGNED=true disabled signature verification; it never did.
+    Two tests pinned the opposing behaviours, so neither could be changed
+    without appearing to break the other.
+    """
+
+    @pytest.mark.parametrize("raw", [
+        "1", " 1 ", "01", "1 1",
+        "true", "TRUE", "True", "yes", "on",
+        "0", "false", "no", "off", "", "   ",
+    ])
+    def test_config_matches_webhook_gate(self, monkeypatch, raw):
+        from prxref import webhooks
+
+        monkeypatch.setenv("PRXREF_ALLOW_UNSIGNED", raw)
+        assert load_config()["allow_unsigned"] is webhooks._allow_unsigned(), (
+            f"config and the webhook gate disagree for {raw!r}"
+        )
+
