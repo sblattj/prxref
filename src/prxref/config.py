@@ -78,7 +78,14 @@ _LEGACY_ENV_ALIASES: dict[str, str] = {
 
 
 def _truthy(raw: str) -> bool:
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    """Parse a security-gating boolean; only the literal "1" enables it.
+
+    Deliberately rejects "true"/"yes"/"on" so a typo or a shell quirk fails safe
+    with verification left ON. Must stay identical to
+    prxref.webhooks._allow_unsigned, which is the gate that actually runs;
+    TestAllowUnsignedAgreesWithGate pins the two together.
+    """
+    return raw.strip() == "1"
 
 
 def _coerce_env(key: str, raw: str) -> object:
