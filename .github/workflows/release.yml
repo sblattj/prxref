@@ -28,7 +28,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          # Explicit patterns, not dist/*: `uv build` writes a dist/.gitignore
+          # containing "*" so the directory self-ignores, and the glob swept it
+          # into the v0.2.0 release as a 1-byte asset named "default.gitignore"
+          # (renamed because asset names cannot begin with a dot).
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           generate_release_notes: true
 
 
