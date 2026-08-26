@@ -169,6 +169,30 @@ class TestReviewSubcommand:
         _, err = capsys.readouterr()
         assert "review failed: Bedrock throttled: 429 Too Many Requests" in err
 
+    def test_partial_coverage_prints_without_verbose(self, fake_runtime, monkeypatch, capsys):
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=42,
+            url="https://github.com/org/repo/pull/42",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+
+        def _partial_orchestrate(**kwargs):
+            return {"verdict": "Approved", "chunks_reviewed": 1, "chunks_failed": 1}
+
+        fake_runtime["set_orchestrate_side_effect"](_partial_orchestrate)
+
+        rc = main(["review", "--pr-url", "https://github.com/org/repo/pull/42", "--no-post"])
+
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        assert "verdict: Approved" in out
+        assert "coverage: 1/2 chunks reviewed" in out
+        assert "counts:" not in out
+
 
 class TestServeSubcommand:
     def test_serve_wiring_and_handler_execution(self, fake_runtime, monkeypatch):

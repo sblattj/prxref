@@ -7,10 +7,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    short-circuits to a summary-only run with verdict ``Approved``.
 2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``).
 3. Parallel worker fan-out: one ``reviewer.review_chunk(llm, files, pr)``
-   call per chunk on a ThreadPoolExecutor capped at 4 workers. The
-   expected return contract is ``{"findings": [Finding | dict],
-   "error": str | None, "input_tokens": int, "output_tokens": int,
-   "model": str}``; dict findings are coerced to ``triage.Finding``.
+   call per chunk on a ThreadPoolExecutor capped at 4 workers. The actual
+   contract is ``(findings, meta) -> tuple[list[Finding | dict], dict]``,
+   with ``meta["error"]`` the empty string on success and the failure
+   reason otherwise; dict findings are coerced to ``triage.Finding``. A
+   legacy dict-shaped stub (``{"findings": ..., "error": ...}``) is still
+   accepted for test doubles.
 4. Quality passes in order: ``apply_line_align`` → thread dedup
    (existing threads fetched best-effort; failure means no threads) →
    ``apply_quality_gate``. Dropped findings are retained in the result
