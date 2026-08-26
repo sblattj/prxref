@@ -10,6 +10,12 @@ dependencies = [
     "requests>=2.31",
 ]
 
+[project.urls]
+Homepage = "https://github.com/sblattj/prxref"
+Repository = "https://github.com/sblattj/prxref"
+Issues = "https://github.com/sblattj/prxref/issues"
+Changelog = "https://github.com/sblattj/prxref/releases"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
@@ -26,10 +32,28 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# Non-Python files under the package dir (prompts/*.md) ship automatically.
+# Do NOT use force-include here: it relocates prompts to the sdist root, which
+# breaks `uv build` (wheel is built from the sdist, where src/prxref/prompts
+# then no longer exists).
 packages = ["src/prxref"]
 
-[tool.hatch.build.force-include]
-"src/prxref/prompts" = "prxref/prompts"
+[tool.hatch.build.targets.sdist]
+# Explicit allow-list. Hatchling's default sdist sweeps the project root and has
+# been observed packaging untracked, gitignored working directories
+# (.superpowers/, .research/); an explicit include list cannot regress that way.
+include = [
+    "src/prxref",
+    "tests",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "docs/superpowers",
+]
 
 [tool.ruff]
 line-length = 120
