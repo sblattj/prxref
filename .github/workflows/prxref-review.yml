@@ -41,7 +41,10 @@ jobs:
         # additionally tells uv to ignore the virtualenv setup-uv provisions.
         # Install into an explicit venv and invoke it by path instead.
         run: |
-          uv venv
+          # setup-uv with python-version set already creates .venv and exports
+          # VIRTUAL_ENV, so an unconditional `uv venv` fails with "a virtual
+          # environment already exists". Only create one if it is missing.
+          [ -d .venv ] || uv venv
           uv pip install .
 
       - name: Run prxref review
