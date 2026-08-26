@@ -15,7 +15,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_LLM_API_KEY` | `local` | API key / Bearer token sent to the OpenAI-compatible endpoint. |
 | `PRXREF_LLM_MODELS` | `flash,orch` | Comma-separated model fallback chain evaluated in order (e.g. `flash,orch`). First model that answers successfully wins. |
 | `PRXREF_CONFIDENCE_FLOOR` | `0.6` | Minimum confidence score (float `0.0`–`1.0`). Findings below this threshold are dropped. |
-| `PRXREF_MAX_ERRORS` | `3` | Maximum number of worker chunk errors tolerated per PR review before aborting the run. |
+| `PRXREF_MAX_ERROR_FINDINGS` | `10` | Maximum number of error-severity findings reported per review. Excess errors are dropped lowest-confidence-first. (Legacy alias: `PRXREF_MAX_ERRORS`.) |
 | `PRXREF_MAX_CHUNKS` | `8` | Maximum number of diff chunks reviewed per PR. |
 
 ### Per-Forge Authentication
@@ -42,7 +42,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 
 The table above defines all 16 configuration keys supported in `src/prxref/config.py` and `.env.example`:
 
-- **LLM / Pipeline (7):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERRORS`, `PRXREF_MAX_CHUNKS`
+- **LLM / Pipeline (7):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`
 - **Per-Forge Auth (6):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
 - **Webhooks (4):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 

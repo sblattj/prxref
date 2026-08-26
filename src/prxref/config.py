@@ -10,8 +10,8 @@ LLM / pipeline:
                                 that answers wins; empty = backend default
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped
                                 (default 0.6)
-  PRXREF_MAX_ERRORS             Max worker errors tolerated per review before
-                                aborting the run (default 3)
+  PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
+                                review (legacy alias: PRXREF_MAX_ERRORS)
   PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR (default 8)
 
 Per-forge auth:
@@ -39,6 +39,8 @@ import os
 
 from prxref.forges.base import Forge, PRRef
 
+from .quality import DEFAULT_MAX_ERRORS
+
 _ENV_PREFIX = "PRXREF_"
 
 _DEFAULTS: dict[str, object] = {
@@ -47,7 +49,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_api_key": "",
     "llm_models": [],
     "confidence_floor": 0.6,
-    "max_errors": 3,
+    "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
     "bitbucket_token": "",
     "bitbucket_user": "",
@@ -61,10 +63,14 @@ _DEFAULTS: dict[str, object] = {
     "allow_unsigned": False,
 }
 
-_INT_KEYS = frozenset({"max_errors", "max_chunks"})
+_INT_KEYS = frozenset({"max_error_findings", "max_chunks"})
 _FLOAT_KEYS = frozenset({"confidence_floor"})
 _BOOL_KEYS = frozenset({"allow_unsigned"})
 _LIST_KEYS = frozenset({"llm_models"})
+
+_LEGACY_ENV_ALIASES: dict[str, str] = {
+    "max_error_findings": _ENV_PREFIX + "MAX_ERRORS",
+}
 
 
 def _truthy(raw: str) -> bool:
@@ -96,6 +102,9 @@ def load_config(**overrides: object) -> dict:
     cfg: dict[str, object] = dict(_DEFAULTS)
     for key in _DEFAULTS:
         raw = os.environ.get(_ENV_PREFIX + key.upper())
+        if raw is None or raw == "":
+            legacy = _LEGACY_ENV_ALIASES.get(key)
+            raw = os.environ.get(legacy) if legacy else None
         if raw is None or raw == "":
             continue
         cfg[key] = _coerce_env(key, raw)

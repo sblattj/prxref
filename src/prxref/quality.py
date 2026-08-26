@@ -190,12 +190,13 @@ def _resolve_confidence_floor(explicit: float | None) -> float:
 def _resolve_max_errors(explicit: int | None) -> int:
     if explicit is not None:
         return explicit
-    raw = os.environ.get("PRXREF_MAX_ERRORS")
-    if raw is not None:
-        try:
-            return int(raw)
-        except ValueError:
-            pass
+    for name in ("PRXREF_MAX_ERROR_FINDINGS", "PRXREF_MAX_ERRORS"):
+        raw = os.environ.get(name)
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
     return DEFAULT_MAX_ERRORS
 
 

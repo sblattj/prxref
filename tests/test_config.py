@@ -5,6 +5,7 @@ import requests
 from prxref.config import load_config, make_forge
 from prxref.forges import bitbucket, github, gitlab
 from prxref.forges.base import PRRef
+from prxref.quality import DEFAULT_MAX_ERRORS
 
 _ALL_ENV_KEYS = [
     "PRXREF_LLM_BACKEND",
@@ -13,6 +14,7 @@ _ALL_ENV_KEYS = [
     "PRXREF_LLM_MODELS",
     "PRXREF_CONFIDENCE_FLOOR",
     "PRXREF_MAX_ERRORS",
+    "PRXREF_MAX_ERROR_FINDINGS",
     "PRXREF_MAX_CHUNKS",
     "PRXREF_BITBUCKET_TOKEN",
     "PRXREF_BITBUCKET_USER",
@@ -52,7 +54,7 @@ class TestLoadConfigDefaults:
         assert cfg["llm_api_key"] == ""
         assert cfg["llm_models"] == []
         assert cfg["confidence_floor"] == 0.6
-        assert cfg["max_errors"] == 3
+        assert cfg["max_error_findings"] == DEFAULT_MAX_ERRORS
         assert cfg["max_chunks"] == 8
         assert cfg["bitbucket_token"] == ""
         assert cfg["github_token"] == ""
@@ -67,7 +69,7 @@ class TestLoadConfigEnv:
         monkeypatch.setenv("PRXREF_LLM_API_KEY", "secret-key")
         monkeypatch.setenv("PRXREF_LLM_MODELS", "claude-opus-4-7, gpt-5.2 ,")
         monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "0.85")
-        monkeypatch.setenv("PRXREF_MAX_ERRORS", "5")
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "5")
         monkeypatch.setenv("PRXREF_MAX_CHUNKS", "12")
         monkeypatch.setenv("PRXREF_ALLOW_UNSIGNED", "true")
         monkeypatch.setenv("PRXREF_BITBUCKET_TOKEN", "bb-token")
@@ -80,7 +82,7 @@ class TestLoadConfigEnv:
         assert cfg["llm_api_key"] == "secret-key"
         assert cfg["llm_models"] == ["claude-opus-4-7", "gpt-5.2"]
         assert cfg["confidence_floor"] == 0.85
-        assert cfg["max_errors"] == 5
+        assert cfg["max_error_findings"] == 5
         assert cfg["max_chunks"] == 12
         assert cfg["allow_unsigned"] is True
         assert cfg["bitbucket_token"] == "bb-token"
@@ -112,6 +114,23 @@ class TestLoadConfigEnv:
         monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "high")
         with pytest.raises(ValueError, match="PRXREF_CONFIDENCE_FLOOR"):
             load_config()
+
+
+class TestMaxErrorFindingsConfig:
+    def test_default_matches_quality_default(self, monkeypatch):
+        monkeypatch.delenv("PRXREF_MAX_ERROR_FINDINGS", raising=False)
+        monkeypatch.delenv("PRXREF_MAX_ERRORS", raising=False)
+        assert load_config()["max_error_findings"] == DEFAULT_MAX_ERRORS
+
+    def test_new_env_name_populates_config(self, monkeypatch):
+        monkeypatch.delenv("PRXREF_MAX_ERRORS", raising=False)
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "6")
+        assert load_config()["max_error_findings"] == 6
+
+    def test_legacy_env_name_still_populates_config(self, monkeypatch):
+        monkeypatch.delenv("PRXREF_MAX_ERROR_FINDINGS", raising=False)
+        monkeypatch.setenv("PRXREF_MAX_ERRORS", "5")
+        assert load_config()["max_error_findings"] == 5
 
 
 class TestLoadConfigOverrides:

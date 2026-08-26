@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from prxref.forges.base import Thread
 from prxref.quality import (
+    _resolve_max_errors,
     active,
     apply_line_align,
     apply_quality_gate,
@@ -231,3 +232,24 @@ class TestQualityGate:
         apply_quality_gate([original])
         assert original.drop_reason is None
         assert original.confidence == 0.3
+
+
+class TestMaxErrorFindingsEnv:
+    def test_new_env_name_is_honored(self, monkeypatch):
+        monkeypatch.delenv("PRXREF_MAX_ERRORS", raising=False)
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "2")
+        assert _resolve_max_errors(None) == 2
+
+    def test_legacy_env_name_still_works(self, monkeypatch):
+        monkeypatch.delenv("PRXREF_MAX_ERROR_FINDINGS", raising=False)
+        monkeypatch.setenv("PRXREF_MAX_ERRORS", "4")
+        assert _resolve_max_errors(None) == 4
+
+    def test_new_name_wins_over_legacy(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "2")
+        monkeypatch.setenv("PRXREF_MAX_ERRORS", "9")
+        assert _resolve_max_errors(None) == 2
+
+    def test_explicit_argument_beats_both_env_names(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "2")
+        assert _resolve_max_errors(7) == 7

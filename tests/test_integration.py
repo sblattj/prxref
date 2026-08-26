@@ -172,6 +172,7 @@ def clean_prxref_env(monkeypatch):
         "PRXREF_LLM_MODELS",
         "PRXREF_CONFIDENCE_FLOOR",
         "PRXREF_MAX_ERRORS",
+        "PRXREF_MAX_ERROR_FINDINGS",
         "PRXREF_MAX_CHUNKS",
         "PRXREF_GITHUB_TOKEN",
         "PRXREF_BITBUCKET_TOKEN",
