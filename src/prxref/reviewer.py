@@ -127,7 +127,9 @@ def review_chunk(
     ``elapsed_ms`` — zeros when the call failed). Severity passes through
     unfiltered — the quality gate normalizes and drops downstream. A missing
     ``confidence`` maps to 0.5. Any LLM or parse failure logs a warning and
-    yields ``([], zeroed_meta)``; this layer never raises and never retries.
+    yields ``([], meta)`` with ``meta["error"]`` set to the failure reason;
+    this layer never raises and never retries. ``meta["error"]`` is the
+    empty string on success.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -142,6 +144,7 @@ def review_chunk(
         "output_tokens": 0,
         "model": "",
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+        "error": "",
     }
     try:
         result = llm.invoke(
@@ -153,6 +156,8 @@ def review_chunk(
         parsed = loads_lenient(result.text)
     except Exception as e:  # noqa: BLE001
         logger.warning("worker review failed for chunk of %d files: %s", len(chunk), e)
+        meta["error"] = f"{type(e).__name__}: {e}"
+        meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
         return [], meta
 
     meta["input_tokens"] = result.input_tokens
@@ -162,6 +167,7 @@ def review_chunk(
 
     if not isinstance(parsed, dict):
         logger.warning("worker review JSON is not an object: %s", type(parsed).__name__)
+        meta["error"] = f"worker review JSON is not an object: {type(parsed).__name__}"
         return [], meta
 
     raw_findings = parsed.get("findings")

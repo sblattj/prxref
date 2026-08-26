@@ -161,12 +161,14 @@ class TestReviewChunk:
         findings, meta = review_chunk(llm, self._chunk())
         assert findings == []
         assert meta["escalations"] == []
+        assert meta["error"]
 
     def test_non_object_json_returns_empty_tuple(self):
         llm = FakeLLM("[1, 2, 3]")
         findings, meta = review_chunk(llm, self._chunk())
         assert findings == []
         assert meta["escalations"] == []
+        assert "not an object" in meta["error"]
 
     def test_llm_exception_returns_empty_tuple_never_raises(self):
         class ExplodingLLM:
@@ -176,6 +178,12 @@ class TestReviewChunk:
         findings, meta = review_chunk(ExplodingLLM(), self._chunk())
         assert findings == []
         assert meta["escalations"] == []
+        assert "upstream timeout" in meta["error"]
+
+    def test_successful_review_reports_empty_error(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert meta["error"] == ""
 
     def test_invoke_called_with_json_mode_and_token_cap(self):
         llm = FakeLLM(CLEAN_RESPONSE)
