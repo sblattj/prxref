@@ -14,7 +14,7 @@ dependencies = [
 Homepage = "https://github.com/sblattj/prxref"
 Repository = "https://github.com/sblattj/prxref"
 Issues = "https://github.com/sblattj/prxref/issues"
-Changelog = "https://github.com/sblattj/prxref/releases"
+Changelog = "https://github.com/sblattj/prxref/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -49,6 +49,9 @@ include = [
     "examples",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "pyproject.toml",
 ]
 exclude = [
