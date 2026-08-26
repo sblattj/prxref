@@ -15,8 +15,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    (existing threads fetched best-effort; failure means no threads) →
    ``apply_quality_gate``. Dropped findings are retained in the result
    with ``drop_reason`` set, never silently discarded.
-5. Verdict: ``"Request-Changes"`` iff any active error-severity finding
-   survives, else ``"Approved"``.
+5. Verdict: ``"Error"`` when no chunk was reviewed successfully;
+   ``"Request-Changes"`` iff any active error-severity finding survives;
+   else ``"Approved"``. A partial failure keeps the verdict but the summary
+   declares reduced coverage.
 6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {note_count} {findings} {attribution}`` filled, plus
@@ -65,9 +67,9 @@ def orchestrate_review(
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
-    elapsed_ms, input_tokens, output_tokens, posted}``. Never raises on
-    forge or LLM stage failure — the run degrades to verdict ``"Error"``
-    with a posted notice when ``post`` is true.
+    chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
+    posted}``. Never raises on forge or LLM stage failure — the run degrades
+    to verdict ``"Error"`` with a posted notice when ``post`` is true.
     """
     t0 = time.perf_counter()
 
@@ -103,6 +105,9 @@ def orchestrate_review(
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
         )
 
+    chunks_failed = sum(1 for r in results if r["error"])
+    chunks_reviewed = len(results) - chunks_failed
+
     findings = [f for r in results if not r["error"] for f in r["findings"]]
 
     try:
@@ -130,6 +135,7 @@ def orchestrate_review(
         summary = _render_summary(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
+            chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
         )
         try:
             forge.post_summary(ref, summary)
@@ -155,6 +161,8 @@ def orchestrate_review(
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
         "chunk_count": len(chunks),
+        "chunks_reviewed": chunks_reviewed,
+        "chunks_failed": chunks_failed,
         "elapsed_ms": elapsed_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -213,7 +221,7 @@ def _run_worker(index: int, total: int, llm: LLMClient, chunk, pr: PRData) -> di
             "output_tokens": meta.get("output_tokens", 0),
             "model": meta.get("model", ""),
             "elapsed_ms": meta.get("elapsed_ms", _elapsed_ms(t0)),
-            "error": "",
+            "error": meta.get("error", ""),
         }
 
     findings = []
@@ -269,6 +277,9 @@ def _render_summary(
     input_tokens: int,
     output_tokens: int,
     elapsed_ms: int,
+    *,
+    chunks_reviewed: int = 0,
+    chunks_failed: int = 0,
 ) -> str:
     try:
         template = reviewer.load_prompt("summary")
@@ -305,6 +316,12 @@ def _render_summary(
     )
     if attribution not in rendered:
         rendered = f"{rendered}\n\n{attribution}"
+    if chunks_failed:
+        total = chunks_reviewed + chunks_failed
+        rendered = (
+            f"{rendered}\n\n> ⚠️ Partial review: {chunks_reviewed} of {total} "
+            f"chunks were reviewed; {chunks_failed} failed. Findings may be incomplete."
+        )
     return rendered
 
 
@@ -324,6 +341,7 @@ def _summary_only_run(forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t
     if post:
         summary = _render_summary(
             pr, files, "Approved", [], "unknown", 0, 0, elapsed_ms,
+            chunks_reviewed=0, chunks_failed=0,
         )
         try:
             forge.post_summary(ref, summary)
@@ -335,6 +353,8 @@ def _summary_only_run(forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t
         "findings_active": [],
         "findings_dropped": [],
         "chunk_count": 0,
+        "chunks_reviewed": 0,
+        "chunks_failed": 0,
         "elapsed_ms": elapsed_ms,
         "input_tokens": 0,
         "output_tokens": 0,
@@ -375,6 +395,8 @@ def _error_run(
         "findings_active": [],
         "findings_dropped": [],
         "chunk_count": chunk_count,
+        "chunks_reviewed": 0,
+        "chunks_failed": chunk_count,
         "elapsed_ms": elapsed_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,

@@ -54,6 +54,7 @@ def _contract_review_chunk(llm, files, *, pr_title="", pr_description="", repo_h
         "output_tokens": result.output_tokens,
         "model": result.model,
         "elapsed_ms": 1,
+        "error": "",
     }
 
 
@@ -103,9 +104,13 @@ def _added_file_diff(path: str, n_lines: int) -> str:
     )
 
 
+TWO_FILE_DIFF = _added_file_diff("src/one.py", 400) + _added_file_diff("other/two.py", 400)
+
+
 class FakeLLM:
-    def __init__(self, findings_by_path: dict | None = None, error: Exception | None = None):
-        self.findings_by_path = findings_by_path or {}
+    def __init__(self, findings_by_path: dict | str | None = None, error: Exception | None = None):
+        self._raw_text = findings_by_path if isinstance(findings_by_path, str) else None
+        self.findings_by_path = findings_by_path if isinstance(findings_by_path, dict) else {}
         self.error = error
         self.calls = 0
         self._lock = threading.Lock()
@@ -115,10 +120,14 @@ class FakeLLM:
             self.calls += 1
         if self.error is not None:
             raise self.error
-        paths = json.loads(user)
-        payload = [f for p in paths for f in self.findings_by_path.get(p, [])]
+        if self._raw_text is not None:
+            text = self._raw_text
+        else:
+            paths = json.loads(user)
+            payload = [f for p in paths for f in self.findings_by_path.get(p, [])]
+            text = json.dumps({"findings": payload})
         return InvokeResult(
-            text=json.dumps({"findings": payload}),
+            text=text,
             input_tokens=100,
             output_tokens=50,
             model="test-model-1",
@@ -196,6 +205,7 @@ class TestHappyPath:
 
         assert set(res) == {
             "verdict", "findings_active", "findings_dropped", "chunk_count",
+            "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
         }
         assert res["verdict"] == "Request-Changes"
@@ -396,3 +406,67 @@ class TestEmptyDiff:
         assert "Approved" in forge.summaries[0]
         assert "No findings — nice work." in forge.summaries[0]
         assert forge.inline_batches == []
+
+
+class TestCoverageAwareVerdict:
+    def test_all_workers_failing_yields_error_not_approved(self, monkeypatch):
+        def _failing_review_chunk(llm, files, **kwargs):
+            return [], {
+                "escalations": [], "input_tokens": 0, "output_tokens": 0,
+                "model": "", "elapsed_ms": 0, "error": "LLMError: all models failed",
+            }
+
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _failing_review_chunk)
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+        assert result["verdict"] == "Error"
+        assert result["chunks_reviewed"] == 0
+
+    def test_partial_failure_keeps_verdict_and_reports_coverage(self, monkeypatch):
+        calls = {"n": 0}
+
+        def _flaky_review_chunk(llm, files, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [], {
+                    "escalations": [], "input_tokens": 0, "output_tokens": 0,
+                    "model": "", "elapsed_ms": 0, "error": "LLMError: timeout",
+                }
+            return [], {
+                "escalations": [], "input_tokens": 5, "output_tokens": 5,
+                "model": "m", "elapsed_ms": 1, "error": "",
+            }
+
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _flaky_review_chunk)
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False, max_chunks=2)
+        assert result["verdict"] == "Approved"
+        assert result["chunks_failed"] == 1
+        assert result["chunks_reviewed"] >= 1
+
+    def test_clean_run_reports_full_coverage(self, monkeypatch):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        result = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+        assert result["verdict"] == "Approved"
+        assert result["chunks_failed"] == 0
+        assert result["chunks_reviewed"] == result["chunk_count"]
+
+    def test_degraded_coverage_is_declared_in_posted_summary(self, monkeypatch):
+        calls = {"n": 0}
+
+        def _flaky_review_chunk(llm, files, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [], {
+                    "escalations": [], "input_tokens": 0, "output_tokens": 0,
+                    "model": "", "elapsed_ms": 0, "error": "LLMError: timeout",
+                }
+            return [], {
+                "escalations": [], "input_tokens": 5, "output_tokens": 5,
+                "model": "m", "elapsed_ms": 1, "error": "",
+            }
+
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _flaky_review_chunk)
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        orchestrate_review(forge, REF, FakeLLM("{}"), post=True, max_chunks=2)
+        assert "Partial review" in forge.summaries[0]
