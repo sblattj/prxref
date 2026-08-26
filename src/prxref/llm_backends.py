@@ -1,16 +1,19 @@
-"""LLM backends: OpenAI-compatible plain-HTTP client (llm-ferry) and optional litellm.
+"""LLM backends: an OpenAI-compatible plain-HTTP client and an optional litellm wrapper.
 
-The primary backend speaks plain HTTP to any OpenAI-compatible endpoint —
-by default the llm-ferry daemon (http://<host>.local:8090/v1, api key
-"local", lane names such as "flash"/"orch" as model strings, standard
-OpenAI usage fields). Fallback is a caller-side loop over the model chain:
-a model that answers with HTTP >= 500, HTTP 429, a connection error, or a
-timeout is advanced past immediately — no same-model retry, fast failover
-is the product promise. The optional ``litellm`` extra wraps the in-process
-SDK and delegates the chain to its native ``fallbacks=`` mechanism.
+The primary backend speaks plain HTTP to any OpenAI-compatible
+``/chat/completions`` endpoint. There is no default endpoint and no default
+model chain: ``PRXREF_LLM_BASE_URL`` and ``PRXREF_LLM_MODELS`` are required,
+and an unset one raises ``ConfigError`` rather than guessing a host.
+
+Fallback is a caller-side loop over the model chain: a model that answers
+with HTTP >= 500, HTTP 429, a connection error, or a timeout is advanced
+past immediately — no same-model retry, fast failover is the product
+promise. The optional ``litellm`` extra wraps the in-process SDK and
+delegates the chain to its native ``fallbacks=`` mechanism.
 
 Tenet: no provider credential is ever read and no env name is
-provider-specific — provider keys live on the ferry host, never here.
+provider-specific — provider keys live behind the configured endpoint,
+never here.
 """
 from __future__ import annotations
 
@@ -19,11 +22,11 @@ import time
 
 import requests
 
-from .llm import InvokeResult, LLMClient
+from .llm import ConfigError, InvokeResult, LLMClient
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8090/v1"
-DEFAULT_API_KEY = "local"
-DEFAULT_MODELS = "flash,orch"
+DEFAULT_BASE_URL = ""
+DEFAULT_API_KEY = ""
+DEFAULT_MODELS = ""
 DEFAULT_TIMEOUT = 45.0
 
 
@@ -32,7 +35,7 @@ class LLMError(Exception):
 
 
 class OpenAICompatClient(LLMClient):
-    """Plain-HTTP client for an OpenAI-compatible endpoint (llm-ferry lanes).
+    """Plain-HTTP client for an OpenAI-compatible endpoint.
 
     Tries each model in ``models`` order (cheap first for speed). A model
     fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
@@ -190,8 +193,10 @@ def create_llm_client(
     ``cfg`` keys (LLM_BACKEND, LLM_BASE_URL, LLM_API_KEY, LLM_MODELS,
     LLM_REASONING_EFFORT) win over env; env never includes provider
     credentials. PRXREF_LLM_BACKEND selects ``openai-compat`` (default)
-    with ``ferry`` as an alias, or ``litellm``. PRXREF_LLM_BASE_URL /
-    PRXREF_LLM_API_KEY / PRXREF_LLM_MODELS feed the openai-compat client;
+    with ``ferry`` as an alias, or ``litellm``. PRXREF_LLM_BASE_URL and
+    PRXREF_LLM_MODELS are required and have no defaults — an unset one
+    raises :class:`~prxref.llm.ConfigError`. PRXREF_LLM_API_KEY is
+    optional and may be empty for a local no-auth server.
     PRXREF_LLM_MODELS (comma list, cheap first) feeds litellm too.
     PRXREF_LLM_REASONING_EFFORT is passed through unvalidated to the
     openai-compat client for models that cannot disable reasoning
@@ -211,11 +216,22 @@ def create_llm_client(
     backend = (_get("LLM_BACKEND", "PRXREF_LLM_BACKEND", "openai-compat") or "").strip().lower() or "openai-compat"
     raw_models = _get("LLM_MODELS", "PRXREF_LLM_MODELS", DEFAULT_MODELS) or ""
     models = [m.strip() for m in raw_models.split(",") if m.strip()]
+    base_url = _get("LLM_BASE_URL", "PRXREF_LLM_BASE_URL", DEFAULT_BASE_URL) or ""
+    if not base_url.strip():
+        raise ConfigError(
+            "no LLM endpoint configured. Set PRXREF_LLM_BASE_URL to an "
+            "OpenAI-compatible /chat/completions endpoint "
+            "(see README > LLM Configuration)."
+        )
     if not models:
-        raise LLMError("PRXREF_LLM_MODELS resolved to an empty model chain")
+        raise ConfigError(
+            "no LLM model chain configured. Set PRXREF_LLM_MODELS to a "
+            "comma-separated list, cheapest first "
+            "(see README > LLM Configuration)."
+        )
     if backend in ("openai-compat", "ferry", "http"):
         return OpenAICompatClient(
-            base_url=_get("LLM_BASE_URL", "PRXREF_LLM_BASE_URL", DEFAULT_BASE_URL) or DEFAULT_BASE_URL,
+            base_url=base_url,
             api_key=_get("LLM_API_KEY", "PRXREF_LLM_API_KEY", DEFAULT_API_KEY) or DEFAULT_API_KEY,
             models=models,
             session=session,

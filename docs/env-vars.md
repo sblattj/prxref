@@ -11,9 +11,9 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | Variable | Default | Purpose |
 |---|---|---|
 | `PRXREF_LLM_BACKEND` | `openai-compat` | LLM backend selector: `openai-compat`, `ferry`, or `http` (aliases for plain-HTTP OpenAI-compatible endpoint), or `litellm` (in-process LiteLLM router). |
-| `PRXREF_LLM_BASE_URL` | `http://127.0.0.1:8090/v1` | Base URL for the OpenAI-compatible endpoint (e.g. `llm-ferry` daemon). |
-| `PRXREF_LLM_API_KEY` | `local` | API key / Bearer token sent to the OpenAI-compatible endpoint. |
-| `PRXREF_LLM_MODELS` | `flash,orch` | Comma-separated model fallback chain evaluated in order (e.g. `flash,orch`). First model that answers successfully wins. |
+| `PRXREF_LLM_BASE_URL` | *(none — required)* | Base URL for the OpenAI-compatible endpoint (e.g. `https://openrouter.ai/api/v1`). Unset raises `ConfigError` and `prxref review` exits `2`. |
+| `PRXREF_LLM_API_KEY` | *(empty)* | API key / Bearer token sent to the OpenAI-compatible endpoint. Optional: leave empty for a local no-auth server. |
+| `PRXREF_LLM_MODELS` | *(none — required)* | Comma-separated model fallback chain evaluated in order, cheapest first. First model that answers successfully wins. Unset raises `ConfigError` and `prxref review` exits `2`. |
 | `PRXREF_LLM_REASONING_EFFORT` | *(empty)* | Reasoning effort for models that cannot disable reasoning (e.g. `low`\|`high`\|`max` for GLM-5.3-Flash). Empty omits the parameter entirely from the request. Provider-specific vocabulary; not validated client-side. |
 | `PRXREF_CONFIDENCE_FLOOR` | `0.6` | Minimum confidence score (float `0.0`–`1.0`). Findings below this threshold are dropped. |
 | `PRXREF_MAX_ERROR_FINDINGS` | `10` | Maximum number of error-severity findings reported per review. Excess errors are dropped lowest-confidence-first. (Legacy alias: `PRXREF_MAX_ERRORS`.) |

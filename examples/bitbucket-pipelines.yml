@@ -29,4 +29,4 @@ pipelines:
             # PRXREF_BITBUCKET_TOKEN: $PRXREF_BITBUCKET_TOKEN
             # PRXREF_LLM_BASE_URL: $PRXREF_LLM_BASE_URL
             # PRXREF_LLM_API_KEY: $PRXREF_LLM_API_KEY
-            PRXREF_LLM_MODELS: "flash,orch"
+            PRXREF_LLM_MODELS: "z-ai/glm-5.3-flash"

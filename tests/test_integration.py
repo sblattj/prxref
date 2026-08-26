@@ -2,7 +2,7 @@
 
 Proves the real chain end-to-end without sys.modules stubs:
 - Scenario 1: Happy path with 1 chunk, 2 findings (one dropped for confidence).
-- Scenario 2: Model fallback across "flash" (500) -> "orch" (200).
+- Scenario 2: Model fallback across "fast" (500) -> "strong" (200).
 - Scenario 3: Real webhook verify_signature with valid HMAC/token and wrong sig.
 - Scenario 4: Cross-forge parse_pr_url matrix.
 - Scenario 5: CLI end-to-end with real localhost LLM server and monkeypatched forge session.
@@ -244,10 +244,10 @@ class TestScenario1HappyPath:
 
         server = MockOpenAIServer(
             routes={
-                "flash": {
+                "fast": {
                     "id": "cmpl-1",
                     "object": "chat.completion",
-                    "model": "flash",
+                    "model": "fast",
                     "choices": [
                         {
                             "index": 0,
@@ -267,7 +267,7 @@ class TestScenario1HappyPath:
             monkeypatch.setenv("PRXREF_LLM_BACKEND", "openai-compat")
             monkeypatch.setenv("PRXREF_LLM_BASE_URL", base_url)
             monkeypatch.setenv("PRXREF_LLM_API_KEY", "test-key")
-            monkeypatch.setenv("PRXREF_LLM_MODELS", "flash")
+            monkeypatch.setenv("PRXREF_LLM_MODELS", "fast")
 
             cfg = load_config()
             llm_client = create_llm_client(cfg)
@@ -305,7 +305,7 @@ class TestScenario1HappyPath:
             assert "Request-Changes" in summary
             assert "Reviewed by prxref" in summary
             assert "1 error" in summary
-            assert "model=flash" in summary
+            assert "model=fast" in summary
 
             assert len(forge.inline_batches) == 1
             comments = forge.inline_batches[0]
@@ -313,9 +313,9 @@ class TestScenario1HappyPath:
             assert comments[0].path == "src/auth.py"
             assert comments[0].line == 4
             assert "Uncaught token decode exception" in comments[0].body
-            assert "Reviewed by prxref · model=flash" in comments[0].body
+            assert "Reviewed by prxref · model=fast" in comments[0].body
 
-            assert [r["model"] for r in server.requests] == ["flash"]
+            assert [r["model"] for r in server.requests] == ["fast"]
         finally:
             server.stop()
 
@@ -323,9 +323,9 @@ class TestScenario1HappyPath:
 class TestScenario2ModelFallback:
     """Scenario 2: Model fallback across two models.
 
-    The LLM server returns HTTP 500 for model "flash" and 200 for "orch".
-    The review must succeed with InvokeResult.model == "orch", verified both
-    via the summary attribution (model=orch) and the server-side record of
+    The LLM server returns HTTP 500 for model "fast" and 200 for "strong".
+    The review must succeed with InvokeResult.model == "strong", verified both
+    via the summary attribution (model=strong) and the server-side record of
     which model each request carried.
     """
 
@@ -346,11 +346,11 @@ class TestScenario2ModelFallback:
 
         server = MockOpenAIServer(
             routes={
-                "flash": (500, {"error": "Internal server error in flash lane"}),
-                "orch": {
+                "fast": (500, {"error": "Internal server error in the fast lane"}),
+                "strong": {
                     "id": "cmpl-2",
                     "object": "chat.completion",
-                    "model": "orch",
+                    "model": "strong",
                     "choices": [
                         {
                             "index": 0,
@@ -370,7 +370,7 @@ class TestScenario2ModelFallback:
             monkeypatch.setenv("PRXREF_LLM_BACKEND", "openai-compat")
             monkeypatch.setenv("PRXREF_LLM_BASE_URL", base_url)
             monkeypatch.setenv("PRXREF_LLM_API_KEY", "test-key")
-            monkeypatch.setenv("PRXREF_LLM_MODELS", "flash,orch")
+            monkeypatch.setenv("PRXREF_LLM_MODELS", "fast,strong")
 
             cfg = load_config()
             llm_client = create_llm_client(cfg)
@@ -395,10 +395,10 @@ class TestScenario2ModelFallback:
             assert result["verdict"] == "Approved"
             assert len(result["findings_active"]) == 1
 
-            assert [r["model"] for r in server.requests] == ["flash", "orch"]
+            assert [r["model"] for r in server.requests] == ["fast", "strong"]
 
             assert len(forge.summaries) == 1
-            assert "model=orch" in forge.summaries[0]
+            assert "model=strong" in forge.summaries[0]
             assert "Reviewed by prxref" in forge.summaries[0]
         finally:
             server.stop()
@@ -542,10 +542,10 @@ class TestScenario5CliEndToEnd:
 
         server = MockOpenAIServer(
             routes={
-                "flash": {
+                "fast": {
                     "id": "cmpl-cli",
                     "object": "chat.completion",
-                    "model": "flash",
+                    "model": "fast",
                     "choices": [
                         {
                             "index": 0,
@@ -564,7 +564,7 @@ class TestScenario5CliEndToEnd:
         try:
             monkeypatch.setenv("PRXREF_LLM_BASE_URL", base_url)
             monkeypatch.setenv("PRXREF_LLM_API_KEY", "local")
-            monkeypatch.setenv("PRXREF_LLM_MODELS", "flash")
+            monkeypatch.setenv("PRXREF_LLM_MODELS", "fast")
             monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "fake-gh-token")
 
             diff_text = _make_diff("src/cli.py")
@@ -611,6 +611,6 @@ class TestScenario5CliEndToEnd:
             assert rc == 0
             captured = capsys.readouterr()
             assert "verdict: Request-Changes" in captured.out
-            assert [r["model"] for r in server.requests] == ["flash"]
+            assert [r["model"] for r in server.requests] == ["fast"]
         finally:
             server.stop()
