@@ -1,7 +1,11 @@
 name: prxref review
 
+# pull_request_target runs in the BASE repository context, so it has access to
+# secrets and a write token even for fork PRs. That is only safe because we
+# never check out or execute the pull request's code: prxref fetches the diff
+# over the GitHub API from the PR URL alone.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -14,12 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # prxref is non-blocking by design (exits 0 on all network/LLM/forge errors),
-    # but continue-on-error provides belt-and-braces protection for CI pipeline continuity.
+    # but continue-on-error provides belt-and-braces protection for CI continuity.
     continue-on-error: true
 
     steps:
-      - name: Checkout repository
+      - name: Checkout base ref (never the PR head)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -27,18 +34,16 @@ jobs:
           enable-cache: true
           python-version: "3.12"
 
-      - name: Install prxref
-        # Install from the current repository in editable/local mode
+      - name: Install prxref from the base checkout
         run: uv pip install --system .
 
       - name: Run prxref review
         env:
-          # A personal access token (PAT) with repo/pull-requests write scope is recommended
-          # for private repos or cross-fork workflows. The default GITHUB_TOKEN works for public
-          # repos when given 'pull-requests: write' permissions.
-          PRXREF_GITHUB_TOKEN: ${{ secrets.PRXREF_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          PRXREF_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRXREF_LLM_BACKEND: http
           PRXREF_LLM_BASE_URL: ${{ vars.PRXREF_LLM_BASE_URL }}
           PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
-          PRXREF_LLM_MODELS: flash,orch
+          PRXREF_LLM_MODELS: ${{ vars.PRXREF_LLM_MODELS }}
+          PRXREF_LLM_REASONING_EFFORT: ${{ vars.PRXREF_LLM_REASONING_EFFORT }}
         run: |
           prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v
