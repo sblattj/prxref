@@ -110,15 +110,15 @@ def _print_summary(
     target = sys.stdout if out is None else out
     verdict = result.get("verdict") if isinstance(result, dict) else result
     print(f"verdict: {verdict if verdict is not None else 'done'}", file=target)
+    failed = result.get("chunks_failed", 0) if isinstance(result, dict) else 0
+    if failed:
+        reviewed = result.get("chunks_reviewed", 0)
+        print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
     if not verbose:
         return
     dropped = result.get("findings_dropped", []) if isinstance(result, dict) else []
     dropped = len(dropped) if isinstance(dropped, list) else 0
     print(f"counts: {_fmt_counts(result)} (dropped: {dropped})", file=target)
-    failed = result.get("chunks_failed", 0) if isinstance(result, dict) else 0
-    if failed:
-        reviewed = result.get("chunks_reviewed", 0)
-        print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
     print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)}", file=target)
 
 

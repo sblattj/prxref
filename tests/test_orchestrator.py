@@ -8,6 +8,7 @@ is absent, and an autouse fixture that pins behavior either way.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import sys
 import threading
@@ -423,11 +424,10 @@ class TestCoverageAwareVerdict:
         assert result["chunks_reviewed"] == 0
 
     def test_partial_failure_keeps_verdict_and_reports_coverage(self, monkeypatch):
-        calls = {"n": 0}
+        counter = itertools.count(1)
 
         def _flaky_review_chunk(llm, files, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            if next(counter) == 1:
                 return [], {
                     "escalations": [], "input_tokens": 0, "output_tokens": 0,
                     "model": "", "elapsed_ms": 0, "error": "LLMError: timeout",
@@ -442,9 +442,10 @@ class TestCoverageAwareVerdict:
         result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False, max_chunks=2)
         assert result["verdict"] == "Approved"
         assert result["chunks_failed"] == 1
-        assert result["chunks_reviewed"] >= 1
+        assert result["chunks_reviewed"] == 1
+        assert result["chunks_reviewed"] + result["chunks_failed"] == result["chunk_count"]
 
-    def test_clean_run_reports_full_coverage(self, monkeypatch):
+    def test_clean_run_reports_full_coverage(self):
         forge = FakeForge(diff=TWO_FILE_DIFF)
         result = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
         assert result["verdict"] == "Approved"
@@ -452,11 +453,10 @@ class TestCoverageAwareVerdict:
         assert result["chunks_reviewed"] == result["chunk_count"]
 
     def test_degraded_coverage_is_declared_in_posted_summary(self, monkeypatch):
-        calls = {"n": 0}
+        counter = itertools.count(1)
 
         def _flaky_review_chunk(llm, files, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            if next(counter) == 1:
                 return [], {
                     "escalations": [], "input_tokens": 0, "output_tokens": 0,
                     "model": "", "elapsed_ms": 0, "error": "LLMError: timeout",
@@ -470,3 +470,4 @@ class TestCoverageAwareVerdict:
         forge = FakeForge(diff=TWO_FILE_DIFF)
         orchestrate_review(forge, REF, FakeLLM("{}"), post=True, max_chunks=2)
         assert "Partial review" in forge.summaries[0]
+        assert "1 of 2" in forge.summaries[0]
