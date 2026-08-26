@@ -60,6 +60,9 @@ uvx prxref review --pr-url https://github.com/org/repo/pull/123
 # Or install tool globally
 uv tool install prxref
 prxref review --pr-url https://github.com/org/repo/pull/123
+
+# Or install straight from source (works before the first PyPI release)
+uv tool install git+https://github.com/sblattj/prxref
 ```
 
 ### Review Any Forge
