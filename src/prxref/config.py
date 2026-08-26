@@ -8,6 +8,9 @@ LLM / pipeline:
   PRXREF_LLM_API_KEY            API key for the chosen backend (optional)
   PRXREF_LLM_MODELS             Comma-separated model fallback chain, first
                                 that answers wins; empty = backend default
+  PRXREF_LLM_REASONING_EFFORT   Reasoning effort for models that cannot
+                                disable reasoning; provider-specific string,
+                                passed through unvalidated; empty = omit
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped
                                 (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -48,6 +51,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_base_url": "",
     "llm_api_key": "",
     "llm_models": [],
+    "llm_reasoning_effort": "",
     "confidence_floor": 0.6,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,

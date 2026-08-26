@@ -51,6 +51,34 @@ def _client(session, models=("m1", "m2")):
     )
 
 
+class _PayloadCapturingSession:
+    """Appends every posted ``json=`` payload; fails the first call when ``fail_first``."""
+
+    def __init__(self, captured, fail_first):
+        self.captured = captured
+        self.fail_first = fail_first
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.captured.append(json)
+        if self.fail_first and len(self.captured) == 1:
+            return _resp(status_code=500)
+        return _resp()
+
+
+def _client_capturing_payload(models=("m1",), reasoning_effort=None, fail_first=False):
+    """Build an OpenAICompatClient whose session records posted payloads; returns (client, captured)."""
+    captured: list[dict] = []
+    client = OpenAICompatClient(
+        base_url="http://ferry.local:8090/v1/",
+        api_key="local",
+        models=list(models),
+        session=_PayloadCapturingSession(captured, fail_first),
+        default_timeout=45.0,
+        reasoning_effort=reasoning_effort,
+    )
+    return client, captured
+
+
 class TestFallbackLoop:
     def test_advances_on_500(self):
         s = _ScriptedSession(_resp(status_code=500), _resp())
@@ -143,6 +171,30 @@ class TestUsageMapping:
         assert r.elapsed_ms >= 0
 
 
+class TestReasoningEffort:
+    def test_absent_by_default(self):
+        client, captured = _client_capturing_payload()
+        client.invoke(system="s", user="u")
+        assert "reasoning_effort" not in captured[0]
+
+    def test_sent_when_configured(self):
+        client, captured = _client_capturing_payload(reasoning_effort="low")
+        client.invoke(system="s", user="u")
+        assert captured[0]["reasoning_effort"] == "low"
+
+    def test_applies_to_every_model_in_the_chain(self):
+        client, captured = _client_capturing_payload(
+            models=["a", "b"], reasoning_effort="low", fail_first=True
+        )
+        client.invoke(system="s", user="u")
+        assert [c.get("reasoning_effort") for c in captured] == ["low", "low"]
+
+    def test_empty_string_normalises_to_none(self):
+        client, captured = _client_capturing_payload(reasoning_effort="")
+        client.invoke(system="s", user="u")
+        assert "reasoning_effort" not in captured[0]
+
+
 class TestCreateLLMClient:
     def test_defaults(self, monkeypatch):
         for var in (
@@ -187,6 +239,16 @@ class TestCreateLLMClient:
         monkeypatch.setenv("PRXREF_LLM_MODELS", " , ")
         with pytest.raises(LLMError):
             create_llm_client()
+
+    def test_reasoning_effort_defaults_to_none(self, monkeypatch):
+        monkeypatch.delenv("PRXREF_LLM_REASONING_EFFORT", raising=False)
+        c = create_llm_client()
+        assert c.reasoning_effort is None
+
+    def test_reasoning_effort_env_var_passed_through(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_REASONING_EFFORT", "low")
+        c = create_llm_client()
+        assert c.reasoning_effort == "low"
 
 
 class TestLiteLLMClient:
