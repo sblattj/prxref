@@ -47,6 +47,7 @@ class OpenAICompatClient(LLMClient):
         models: list[str],
         session: requests.Session | None = None,
         default_timeout: float = DEFAULT_TIMEOUT,
+        reasoning_effort: str | None = None,
     ):
         if not models:
             raise ValueError("models must be a non-empty list")
@@ -55,6 +56,7 @@ class OpenAICompatClient(LLMClient):
         self.models = list(models)
         self.session = session if session is not None else requests.Session()
         self.default_timeout = default_timeout
+        self.reasoning_effort = reasoning_effort or None
 
     def invoke(
         self,
@@ -76,6 +78,8 @@ class OpenAICompatClient(LLMClient):
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         failures: list[str] = []
@@ -183,12 +187,15 @@ def create_llm_client(
 ) -> LLMClient:
     """Build the configured client from ``cfg`` overrides then PRXREF_LLM_* env.
 
-    ``cfg`` keys (LLM_BACKEND, LLM_BASE_URL, LLM_API_KEY, LLM_MODELS) win
-    over env; env never includes provider credentials. PRXREF_LLM_BACKEND
-    selects ``openai-compat`` (default) with ``ferry`` as an alias, or
-    ``litellm``. PRXREF_LLM_BASE_URL / PRXREF_LLM_API_KEY /
-    PRXREF_LLM_MODELS feed the openai-compat client; PRXREF_LLM_MODELS
-    (comma list, cheap first) feeds litellm too.
+    ``cfg`` keys (LLM_BACKEND, LLM_BASE_URL, LLM_API_KEY, LLM_MODELS,
+    LLM_REASONING_EFFORT) win over env; env never includes provider
+    credentials. PRXREF_LLM_BACKEND selects ``openai-compat`` (default)
+    with ``ferry`` as an alias, or ``litellm``. PRXREF_LLM_BASE_URL /
+    PRXREF_LLM_API_KEY / PRXREF_LLM_MODELS feed the openai-compat client;
+    PRXREF_LLM_MODELS (comma list, cheap first) feeds litellm too.
+    PRXREF_LLM_REASONING_EFFORT is passed through unvalidated to the
+    openai-compat client for models that cannot disable reasoning
+    (e.g. GLM-5.3-Flash's ``low``/``high``/``max``); empty omits it.
     """
     cfg = cfg or {}
 
@@ -212,6 +219,7 @@ def create_llm_client(
             api_key=_get("LLM_API_KEY", "PRXREF_LLM_API_KEY", DEFAULT_API_KEY) or DEFAULT_API_KEY,
             models=models,
             session=session,
+            reasoning_effort=_get("LLM_REASONING_EFFORT", "PRXREF_LLM_REASONING_EFFORT"),
         )
     if backend == "litellm":
         return LiteLLMClient(models=models)
