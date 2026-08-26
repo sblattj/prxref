@@ -6,7 +6,7 @@
 #   For public repos, standard secrets.GITHUB_TOKEN can be used when pull-requests: write is set.
 #
 # LLM backend:
-#   PRXREF_LLM_BASE_URL: Set via repository variables (e.g. https://llm.example.com/v1 or http://vpn-host:8090/v1)
+#   PRXREF_LLM_BASE_URL: Set via repository variables (e.g. https://openrouter.ai/api/v1). Required.
 #   PRXREF_LLM_API_KEY: Set via repository secrets
 
 name: prxref review
@@ -42,6 +42,6 @@ jobs:
           PRXREF_GITHUB_TOKEN: ${{ secrets.PRXREF_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           PRXREF_LLM_BASE_URL: ${{ vars.PRXREF_LLM_BASE_URL }}
           PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
-          PRXREF_LLM_MODELS: flash,orch
+          PRXREF_LLM_MODELS: z-ai/glm-5.3-flash
         run: |
           prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v

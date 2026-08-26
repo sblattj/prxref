@@ -8,6 +8,7 @@ import pytest
 from prxref import __version__
 from prxref.cli import main
 from prxref.forges.base import PRRef
+from prxref.llm import ConfigError
 
 
 def _install_fake_module(monkeypatch, fullname: str, **attrs) -> types.ModuleType:
@@ -168,6 +169,29 @@ class TestReviewSubcommand:
 
         _, err = capsys.readouterr()
         assert "review failed: Bedrock throttled: 429 Too Many Requests" in err
+
+    def test_config_error_exits_2(self, fake_runtime, monkeypatch, capsys):
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=5,
+            url="https://github.com/org/repo/pull/5",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+
+        def _unconfigured(**kwargs):
+            raise ConfigError("no LLM endpoint configured. Set PRXREF_LLM_BASE_URL to ...")
+
+        fake_runtime["set_orchestrate_side_effect"](_unconfigured)
+
+        rc = main(["review", "--pr-url", "https://github.com/org/repo/pull/5"])
+        assert rc == 2
+
+        _, err = capsys.readouterr()
+        assert "configuration error: no LLM endpoint configured" in err
+        assert "PRXREF_LLM_BASE_URL" in err
 
     def test_partial_coverage_prints_without_verbose(self, fake_runtime, monkeypatch, capsys):
         test_ref = PRRef(

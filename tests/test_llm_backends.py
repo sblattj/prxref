@@ -1,6 +1,8 @@
 """Tests for prxref.llm_backends: fast fallback loop, request shape, factory, litellm guard."""
 from __future__ import annotations
 
+import inspect
+import pathlib
 import sys
 import types
 from types import SimpleNamespace
@@ -8,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+import prxref.llm_backends
+from prxref.llm import ConfigError
 from prxref.llm_backends import (
     LiteLLMClient,
     LLMError,
@@ -43,7 +47,7 @@ class _ScriptedSession:
 
 def _client(session, models=("m1", "m2")):
     return OpenAICompatClient(
-        base_url="http://ferry.local:8090/v1/",
+        base_url="https://llm.test/v1/",
         api_key="local",
         models=list(models),
         session=session,
@@ -69,7 +73,7 @@ def _client_capturing_payload(models=("m1",), reasoning_effort=None, fail_first=
     """Build an OpenAICompatClient whose session records posted payloads; returns (client, captured)."""
     captured: list[dict] = []
     client = OpenAICompatClient(
-        base_url="http://ferry.local:8090/v1/",
+        base_url="https://llm.test/v1/",
         api_key="local",
         models=list(models),
         session=_PayloadCapturingSession(captured, fail_first),
@@ -133,7 +137,7 @@ class TestRequestShape:
         s = _ScriptedSession(_resp())
         _client(s).invoke("be system", "be user", max_tokens=99, timeout_s=12)
         call = s.calls[0]
-        assert call["url"] == "http://ferry.local:8090/v1/chat/completions"
+        assert call["url"] == "https://llm.test/v1/chat/completions"
         assert call["headers"] == {"Authorization": "Bearer local"}
         assert call["timeout"] == 12
         assert call["json"]["model"] == "m1"
@@ -161,12 +165,12 @@ class TestRequestShape:
 
 class TestUsageMapping:
     def test_usage_and_model_mapping(self):
-        s = _ScriptedSession(_resp(model="ferry/gemini-flash", prompt=120, completion=45, text="body"))
+        s = _ScriptedSession(_resp(model="vendor/gemini-flash", prompt=120, completion=45, text="body"))
         r = _client(s).invoke("sys", "usr")
         assert r.text == "body"
         assert r.input_tokens == 120
         assert r.output_tokens == 45
-        assert r.model == "ferry/gemini-flash"
+        assert r.model == "vendor/gemini-flash"
         assert r.backend == "openai-compat"
         assert r.elapsed_ms >= 0
 
@@ -195,58 +199,89 @@ class TestReasoningEffort:
         assert "reasoning_effort" not in captured[0]
 
 
-class TestCreateLLMClient:
-    def test_defaults(self, monkeypatch):
-        for var in (
-            "PRXREF_LLM_BACKEND",
-            "PRXREF_LLM_BASE_URL",
-            "PRXREF_LLM_API_KEY",
-            "PRXREF_LLM_MODELS",
-        ):
-            monkeypatch.delenv(var, raising=False)
-        c = create_llm_client()
-        assert isinstance(c, OpenAICompatClient)
-        assert c.base_url == "http://127.0.0.1:8090/v1"
-        assert c.api_key == "local"
-        assert c.models == ["flash", "orch"]
+class TestNoShippedDefaults:
+    def test_unset_endpoint_raises_config_error(self, monkeypatch):
+        for v in ("PRXREF_LLM_BASE_URL", "PRXREF_LLM_MODELS", "PRXREF_LLM_API_KEY"):
+            monkeypatch.delenv(v, raising=False)
+        with pytest.raises(ConfigError) as exc:
+            create_llm_client()
+        assert "PRXREF_LLM_BASE_URL" in str(exc.value)
 
+    def test_unset_models_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.delenv("PRXREF_LLM_MODELS", raising=False)
+        with pytest.raises(ConfigError) as exc:
+            create_llm_client()
+        assert "PRXREF_LLM_MODELS" in str(exc.value)
+
+    def test_no_private_host_or_lane_names_in_source(self):
+        src = pathlib.Path(inspect.getfile(prxref.llm_backends)).read_text()
+        for token in ("8090", "flash,orch", "llm-ferry"):
+            assert token not in src, f"private default {token!r} still in source"
+
+    def test_explicit_config_still_builds(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
+        c = create_llm_client()
+        assert c.base_url == "https://llm.test/v1"
+        assert c.models == ["a", "b"]
+
+    def test_api_key_may_be_empty(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a")
+        monkeypatch.delenv("PRXREF_LLM_API_KEY", raising=False)
+        assert create_llm_client().api_key == ""
+
+
+class TestCreateLLMClient:
     def test_ferry_alias_maps_to_openai_compat(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "ferry")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
         assert isinstance(create_llm_client(), OpenAICompatClient)
 
     def test_litellm_selection(self, monkeypatch):
         fake = types.SimpleNamespace(completion=lambda **kw: None)
         monkeypatch.setitem(sys.modules, "litellm", fake)
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "litellm")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
         assert isinstance(create_llm_client(), LiteLLMClient)
 
     def test_unknown_backend_raises(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "skynet")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
         with pytest.raises(LLMError):
             create_llm_client()
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.delenv("PRXREF_LLM_BACKEND", raising=False)
-        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "http://mini.local:8090/v1")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://override.test/v1")
         monkeypatch.setenv("PRXREF_LLM_API_KEY", "sekrit")
         monkeypatch.setenv("PRXREF_LLM_MODELS", "a, b ,c")
         c = create_llm_client()
-        assert c.base_url == "http://mini.local:8090/v1"
+        assert c.base_url == "https://override.test/v1"
         assert c.api_key == "sekrit"
         assert c.models == ["a", "b", "c"]
 
-    def test_empty_models_env_raises(self, monkeypatch):
+    def test_whitespace_only_models_env_raises(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
         monkeypatch.setenv("PRXREF_LLM_MODELS", " , ")
-        with pytest.raises(LLMError):
+        with pytest.raises(ConfigError):
             create_llm_client()
 
     def test_reasoning_effort_defaults_to_none(self, monkeypatch):
         monkeypatch.delenv("PRXREF_LLM_REASONING_EFFORT", raising=False)
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
         c = create_llm_client()
         assert c.reasoning_effort is None
 
     def test_reasoning_effort_env_var_passed_through(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_REASONING_EFFORT", "low")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
         c = create_llm_client()
         assert c.reasoning_effort == "low"
 

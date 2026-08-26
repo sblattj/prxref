@@ -19,7 +19,7 @@ prxref-review:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   allow_failure: true
   variables:
-    PRXREF_LLM_MODELS: "flash,orch"
+    PRXREF_LLM_MODELS: "z-ai/glm-5.3-flash"
   before_script:
     - pip install --no-cache-dir prxref
   script:

@@ -82,14 +82,15 @@ prxref review --pr-url https://gitlab.com/group/subgroup/project/-/merge_request
 
 ## LLM Configuration
 
-prxref operates without direct cloud provider SDK keys (no Anthropic API keys). Connect to an OpenAI-compatible daemon such as **llm-ferry** by default, or install the optional `litellm` extra:
+prxref operates without direct cloud provider SDK keys (no Anthropic API keys). It ships with **no default endpoint and no default model chain**: point it at any OpenAI-compatible `/chat/completions` server (OpenRouter, Together, Groq, vLLM, Ollama, a self-hosted gateway), or install the optional `litellm` extra. `PRXREF_LLM_BASE_URL` and `PRXREF_LLM_MODELS` are required — leaving either unset exits `2` with an error naming the variable.
 
 ```bash
-# Default: OpenAI-compatible daemon (e.g. llm-ferry on local host or LAN)
-export PRXREF_LLM_BACKEND=ferry
-export PRXREF_LLM_BASE_URL="http://127.0.0.1:8090/v1"
-export PRXREF_LLM_API_KEY="local"
-export PRXREF_LLM_MODELS="flash,orch"
+# Default backend: plain HTTP to any OpenAI-compatible endpoint
+export PRXREF_LLM_BACKEND=http
+export PRXREF_LLM_BASE_URL="https://openrouter.ai/api/v1"
+export PRXREF_LLM_API_KEY="$OPENROUTER_API_KEY"
+export PRXREF_LLM_MODELS="z-ai/glm-5.3-flash"
+export PRXREF_LLM_REASONING_EFFORT=low
 
 # Optional: in-process litellm extra
 # pip install 'prxref[litellm]'

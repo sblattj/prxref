@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+class ConfigError(Exception):
+    """Required LLM configuration is missing; a usage error, not a review failure."""
+
+
 @dataclass
 class InvokeResult:
     text: str

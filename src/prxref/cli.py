@@ -4,9 +4,11 @@ Provides two subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a forge URL.
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
 
-Non-blocking doctrine: ``review`` exits 0 on all errors (empty diffs, network
-failures, LLM timeouts, bad credentials), printing diagnostic notes to stderr
-so a pipeline step never fails the build over an advisor's error.
+Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
+network failures, LLM timeouts, bad credentials), printing diagnostic notes to
+stderr so a pipeline step never fails the build over an advisor's error. The one
+exception is a missing-configuration error, which is a usage error rather than a
+review outcome and exits 2.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from typing import Any
 import prxref
 from prxref.config import load_config, make_forge
 from prxref.forges.base import detect_forge
+from prxref.llm import ConfigError
 
 logger = logging.getLogger("prxref")
 
@@ -160,6 +163,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
             post=not args.no_post,
             max_chunks=args.max_chunks,
         )
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
     except Exception as exc:
         print(f"review failed: {exc}", file=sys.stderr)
         logger.debug("review failed with traceback", exc_info=True)

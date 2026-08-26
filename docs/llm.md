@@ -1,6 +1,6 @@
 # LLM Backends & Failover Architecture
 
-`prxref` connects to LLM inference endpoints using two interchangeable backends: a lightweight OpenAI-compatible plain-HTTP client (`llm-ferry`) or an optional in-process `litellm` wrapper.
+`prxref` connects to LLM inference endpoints using two interchangeable backends: a lightweight OpenAI-compatible plain-HTTP client or an optional in-process `litellm` wrapper. There is no default endpoint and no default model chain — `PRXREF_LLM_BASE_URL` and `PRXREF_LLM_MODELS` are required, and leaving either unset raises `ConfigError` (`prxref review` exits `2`).
 
 ## Key Architectural Principles
 
@@ -9,27 +9,27 @@
 
 ---
 
-## Primary Backend: `llm-ferry` (`openai-compat`)
+## Primary Backend: OpenAI-compatible HTTP
 
-The primary and default backend communicates via plain HTTP requests with the `llm-ferry` local daemon or any OpenAI-compatible `/v1/chat/completions` server.
+The primary and default backend communicates via plain HTTP requests with any OpenAI-compatible `/v1/chat/completions` server — a hosted router (OpenRouter, Together, Groq), a self-hosted gateway such as `llm-ferry`, or a local runtime such as vLLM or Ollama.
 
 - **Default Backend Alias:** `PRXREF_LLM_BACKEND=openai-compat` (aliases: `ferry`, `http`).
-- **Endpoint URL:** `PRXREF_LLM_BASE_URL=http://<host>.local:8090/v1` (defaults to `http://127.0.0.1:8090/v1`).
-- **API Key:** `PRXREF_LLM_API_KEY=local` (sent as `Authorization: Bearer local`).
-- **Model Lanes:** Model names correspond to configured lanes on the daemon (e.g. `flash`, `orch`).
+- **Endpoint URL:** `PRXREF_LLM_BASE_URL=https://llm.example.com/v1`. Required; there is no default.
+- **API Key:** `PRXREF_LLM_API_KEY` (sent as `Authorization: Bearer <key>`). Optional — leave empty for a local no-auth server.
+- **Models:** Model names are whatever the endpoint accepts, listed cheapest first. Required; there is no default.
 
 ### Configuration Example
 
 ```bash
 PRXREF_LLM_BACKEND=openai-compat
-PRXREF_LLM_BASE_URL=http://mac-studio.local:8090/v1
-PRXREF_LLM_API_KEY=local
-PRXREF_LLM_MODELS=flash,orch
+PRXREF_LLM_BASE_URL=https://llm.example.com/v1
+PRXREF_LLM_API_KEY=$MY_ENDPOINT_KEY
+PRXREF_LLM_MODELS=z-ai/glm-5.3-flash,openai/gpt-4.1-mini
 ```
 
 ### Failover Semantics
 
-The client iterates through `PRXREF_LLM_MODELS` in left-to-right priority order (e.g., cheap/fast lane `flash` first, escalating to `orch` on failure):
+The client iterates through `PRXREF_LLM_MODELS` in left-to-right priority order (cheapest/fastest model first, escalating to a stronger one on failure):
 - A model attempt fails if it encounters:
   - Request timeout
   - Connection/network error
@@ -42,7 +42,7 @@ The client iterates through `PRXREF_LLM_MODELS` in left-to-right priority order 
 
 ## Optional Backend: `litellm`
 
-For environments running without a centralized ferry daemon, `prxref` supports in-process multi-provider routing via `litellm`.
+For environments running without a centralized inference gateway, `prxref` supports in-process multi-provider routing via `litellm`.
 
 - **Backend Setting:** `PRXREF_LLM_BACKEND=litellm`
 - **Installation:** `pip install 'prxref[litellm]'`
