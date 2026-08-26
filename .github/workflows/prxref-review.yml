@@ -35,7 +35,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install prxref from the base checkout
-        run: uv pip install --system .
+        # NOT `uv pip install --system .`. The runner's system interpreter is
+        # PEP 668 externally-managed, so uv refuses it outright ("The
+        # interpreter at /usr is externally managed", exit 2), and --system
+        # additionally tells uv to ignore the virtualenv setup-uv provisions.
+        # Install into an explicit venv and invoke it by path instead.
+        run: |
+          uv venv
+          uv pip install .
 
       - name: Run prxref review
         env:
@@ -46,4 +53,4 @@ jobs:
           PRXREF_LLM_MODELS: ${{ vars.PRXREF_LLM_MODELS }}
           PRXREF_LLM_REASONING_EFFORT: ${{ vars.PRXREF_LLM_REASONING_EFFORT }}
         run: |
-          prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v
+          .venv/bin/prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v
