@@ -388,6 +388,59 @@ class TestPreExistingNumericRanges:
         numeric = config._INT_KEYS | config._FLOAT_KEYS
         assert numeric - set(config._RANGES) == set()
 
+    def test_a_numeric_default_is_both_coerced_and_range_checked(self):
+        """The wider drift guard, for the gap the one above cannot see.
+
+        That guard starts from ``_INT_KEYS | _FLOAT_KEYS``, so it only ever
+        looks at keys someone already remembered to classify. A numeric key
+        added to ``_DEFAULTS`` ALONE walks straight past it and fails twice
+        over: ``_coerce_env`` matches none of its branches, so the environment
+        value stays a ``str`` and reaches the wire as ``"8"`` rather than ``8``;
+        and ``_check_ranges`` iterates ``_RANGES``, so nothing bounds it either.
+        Starting from the DEFAULT VALUE catches that, because the default is
+        the one thing a new key cannot be added without.
+
+        ``llm_temperature`` is the deliberate exception and is pinned
+        separately below; it is invisible here because its default is a string.
+        """
+        numeric_defaults = {
+            key for key, value in config._DEFAULTS.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        assert numeric_defaults - (config._INT_KEYS | config._FLOAT_KEYS) == set()
+        assert numeric_defaults - set(config._RANGES) == set()
+
+    def test_llm_temperature_is_a_string_by_decision_not_by_omission(self):
+        """The one numeric-LOOKING key deliberately left out of the coercion
+        sets, written down here so the next reader does not file it as an
+        oversight and "fix" it.
+
+        It is stored as a string because "unset" and "0.0" are different
+        requests: an empty value omits ``temperature`` from the payload
+        entirely — some endpoints reject it alongside reasoning parameters —
+        and no float can encode "omit me". Coercing it would force a numeric
+        default and destroy that distinction. Its parse and its bound are not
+        skipped, only moved: ``llm_backends._float_setting`` performs both when
+        the client is built, and raises the same ``ConfigError`` naming the
+        same variable.
+        """
+        assert config._DEFAULTS["llm_temperature"] == ""
+        assert "llm_temperature" not in config._INT_KEYS | config._FLOAT_KEYS
+        assert "llm_temperature" not in config._RANGES
+        # Evidence for the "only moved" claim, rather than a comment asserting it.
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TEMPERATURE"):
+            llm_backends._float_setting("-1", "PRXREF_LLM_TEMPERATURE", minimum=0.0)
+
+    def test_every_coercion_key_is_a_real_config_key(self):
+        """The other direction: a typo in a coercion set is dead code, because
+        ``_coerce_env`` is only ever asked about keys that exist in
+        ``_DEFAULTS``. A misspelt entry would silently coerce nothing."""
+        declared = (
+            config._INT_KEYS | config._FLOAT_KEYS
+            | config._BOOL_KEYS | config._LIST_KEYS
+        )
+        assert declared - set(config._DEFAULTS) == set()
+
     @pytest.mark.parametrize("raw", ["0", "-1", "-8"])
     def test_non_positive_max_chunks_rejected(self, monkeypatch, raw):
         """PRXREF_MAX_CHUNKS=0 used to reach build_chunks and raise
