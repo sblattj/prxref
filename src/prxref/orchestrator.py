@@ -5,9 +5,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 1. ``forge.get_pr`` → PRData, ``forge.get_diff`` → raw diff,
    ``parse_unified_diff`` → files. An empty or unchunkable diff
    short-circuits to a summary-only run with verdict ``Approved``.
-2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``).
+2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``, each chunk
+   sized to ``token_budget``).
 3. Parallel worker fan-out: one ``reviewer.review_chunk(llm, files, pr)``
-   call per chunk on a ThreadPoolExecutor capped at 4 workers. The actual
+   call per chunk on a ThreadPoolExecutor capped at ``max_workers``. The actual
    contract is ``(findings, meta) -> tuple[list[Finding | dict], dict]``,
    with ``meta["error"]`` the empty string on success and the failure
    reason otherwise; dict findings are coerced to ``triage.Finding``. A
@@ -15,8 +16,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    accepted for test doubles.
 4. Quality passes in order: ``apply_line_align`` → thread dedup
    (existing threads fetched best-effort; failure means no threads) →
-   ``apply_quality_gate``. Dropped findings are retained in the result
-   with ``drop_reason`` set, never silently discarded.
+   ``apply_quality_gate(confidence_floor=, max_errors=)``. Dropped findings
+   are retained in the result with ``drop_reason`` set, never silently
+   discarded.
 5. Verdict: ``"Error"`` when no chunk was reviewed successfully;
    ``"Request-Changes"`` iff any active error-severity finding survives;
    else ``"Approved"``. A partial failure keeps the verdict but the summary
@@ -24,7 +26,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {note_count} {findings} {attribution}`` filled, plus
-   inline comments for up to 15 active findings.
+   inline comments for up to ``max_inline_comments`` active findings.
 
 No stage failure raises out of ``orchestrate_review``: a forge failure or
 a total LLM failure degrades to verdict ``"Error"`` with a posted notice
@@ -40,7 +42,13 @@ from . import reviewer
 from .forges.base import Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import active, apply_line_align, apply_quality_gate, apply_thread_dedup
-from .triage import Finding, added_lines_by_file, build_chunks, parse_unified_diff
+from .triage import (
+    DEFAULT_TOKEN_BUDGET,
+    Finding,
+    added_lines_by_file,
+    build_chunks,
+    parse_unified_diff,
+)
 
 logger = logging.getLogger("prxref")
 
@@ -66,6 +74,11 @@ def orchestrate_review(
     post: bool = True,
     max_chunks: int = 8,
     max_tokens: int | None = None,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    max_workers: int = MAX_WORKERS,
+    max_inline_comments: int = MAX_INLINE_COMMENTS,
+    confidence_floor: float | None = None,
+    max_errors: int | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -75,8 +88,12 @@ def orchestrate_review(
     to verdict ``"Error"`` with a posted notice when ``post`` is true.
 
     ``max_tokens`` is the per-chunk completion budget handed to every worker;
-    ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. It is a request knob
-    only and is deliberately absent from the returned dict.
+    ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. ``token_budget`` sizes
+    each diff chunk, ``max_workers`` the fan-out, ``max_inline_comments`` the
+    posted batch. ``confidence_floor`` and ``max_errors`` are forwarded to
+    ``apply_quality_gate``; ``None`` leaves that pass reading the environment
+    itself, which is what a library caller with no config dict wants. All of
+    these are request knobs and are deliberately absent from the returned dict.
     """
     t0 = time.perf_counter()
 
@@ -93,12 +110,14 @@ def orchestrate_review(
         return _error_run(forge, ref, post, 0, f"get_diff failed: {e}", t0)
 
     files = parse_unified_diff(raw)
-    chunks = build_chunks(files, max_chunks=max_chunks)
+    chunks = build_chunks(files, max_chunks=max_chunks, token_budget=token_budget)
 
     if not chunks:
         return _summary_only_run(forge, ref, pr, files, post, t0)
 
-    results = _run_workers(llm, chunks, pr, max_tokens=max_tokens)
+    results = _run_workers(
+        llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
+    )
 
     input_tokens = sum(r["input_tokens"] for r in results)
     output_tokens = sum(r["output_tokens"] for r in results)
@@ -125,7 +144,9 @@ def orchestrate_review(
 
     findings = apply_line_align(findings, added_lines_by_file(files))
     findings = apply_thread_dedup(findings, threads)
-    findings = apply_quality_gate(findings)
+    findings = apply_quality_gate(
+        findings, confidence_floor=confidence_floor, max_errors=max_errors,
+    )
 
     findings_active = active(findings)
     findings_dropped = [f for f in findings if f.drop_reason is not None]
@@ -156,7 +177,7 @@ def orchestrate_review(
                     line=f.line,
                     body=_format_finding(f, model),
                 )
-                for f in findings_active[:MAX_INLINE_COMMENTS]
+                for f in findings_active[:max_inline_comments]
             ]
             try:
                 forge.post_inline_comments(ref, comments)
@@ -186,9 +207,12 @@ def _attribution(model: str, tokens: int, elapsed_ms: int) -> str:
 
 
 def _run_workers(
-    llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None
+    llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
+    max_workers: int = MAX_WORKERS,
 ) -> list[dict]:
-    workers = min(MAX_WORKERS, len(chunks))
+    # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
+    # library caller is not gated by config's range check.
+    workers = max(1, min(max_workers, len(chunks)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
             ex.submit(_run_worker, i + 1, len(chunks), llm, chunk, pr, max_tokens)

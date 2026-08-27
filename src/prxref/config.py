@@ -23,6 +23,13 @@ LLM / pipeline:
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
                                 review (legacy alias: PRXREF_MAX_ERRORS)
   PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR (default 8)
+  PRXREF_CHUNK_TOKEN_BUDGET     Approximate token budget per diff chunk;
+                                lowering it splits a PR into more, smaller
+                                chunks (positive int, default 25000)
+  PRXREF_MAX_WORKERS            Parallel chunk-review workers; positive int
+                                (default 4)
+  PRXREF_MAX_INLINE_COMMENTS    Max inline comments posted per review, after
+                                the quality gate; positive int (default 15)
 
 Per-forge auth:
   PRXREF_BITBUCKET_TOKEN        Bitbucket bearer token
@@ -57,6 +64,7 @@ from prxref.forges.base import Forge, PRRef
 
 from .llm import ConfigError
 from .quality import DEFAULT_MAX_ERRORS
+from .triage import DEFAULT_TOKEN_BUDGET
 
 _ENV_PREFIX = "PRXREF_"
 
@@ -72,6 +80,13 @@ _DEFAULTS: dict[str, object] = {
     "confidence_floor": 0.6,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
+    "chunk_token_budget": DEFAULT_TOKEN_BUDGET,
+    # Mirrors orchestrator.MAX_WORKERS / MAX_INLINE_COMMENTS. Restated rather
+    # than imported: config is a leaf module and importing the orchestrator
+    # here would pull the whole review pipeline into every config read.
+    # TestChunkingAndFanoutKnobs pins the three literals together.
+    "max_workers": 4,
+    "max_inline_comments": 15,
     "bitbucket_token": "",
     "bitbucket_user": "",
     "bitbucket_app_password": "",
@@ -84,15 +99,23 @@ _DEFAULTS: dict[str, object] = {
     "allow_unsigned": False,
 }
 
-_INT_KEYS = frozenset({"max_error_findings", "max_chunks", "llm_max_tokens"})
+_INT_KEYS = frozenset({
+    "max_error_findings", "max_chunks", "llm_max_tokens",
+    "chunk_token_budget", "max_workers", "max_inline_comments",
+})
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned"})
 _LIST_KEYS = frozenset({"llm_models"})
 
 # Numbers that are meaningless at or below zero: a zero token budget asks the
-# model for an empty completion, a zero timeout fails every request instantly.
+# model for an empty completion, a zero timeout fails every request instantly,
+# a zero worker count is rejected by ThreadPoolExecutor, and a zero chunk
+# budget or inline-comment cap silently reviews or reports nothing.
 # Checked after overrides, so no path into the config can smuggle one through.
-_POSITIVE_KEYS = frozenset({"llm_max_tokens", "llm_timeout"})
+_POSITIVE_KEYS = frozenset({
+    "llm_max_tokens", "llm_timeout",
+    "chunk_token_budget", "max_workers", "max_inline_comments",
+})
 
 _LEGACY_ENV_ALIASES: dict[str, str] = {
     "max_error_findings": _ENV_PREFIX + "MAX_ERRORS",
