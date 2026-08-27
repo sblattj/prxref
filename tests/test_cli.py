@@ -358,3 +358,90 @@ class TestServeSubcommand:
 
         # Must not raise
         handler("https://github.com/org/repo/pull/1")
+
+
+class TestConfiguredKnobsReachTheOrchestrator:
+    """Every configured knob must arrive as an ``orchestrate_review`` kwarg.
+
+    Two of these are regressions for keys that were documented but dead:
+    ``PRXREF_MAX_CHUNKS`` (read under an UPPERCASE key that ``load_config``
+    never returns) and the quality-gate pair (never passed at all, so the gate
+    re-read the environment and any programmatic override was silently lost).
+    """
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+
+    def _review(self, monkeypatch, argv_extra=()):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+        return main([
+            "review", "--pr-url", "https://github.com/org/repo/pull/7", *argv_extra,
+        ])
+
+    def test_max_chunks_env_reaches_the_orchestrator(self, fake_runtime, monkeypatch):
+        """Regression: cli read ``cfg.get("MAX_CHUNKS", 8)``; config keys are lowercase."""
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "3")
+        assert self._review(monkeypatch) == 0
+        assert fake_runtime["orchestrate_calls"][0]["max_chunks"] == 3
+
+    def test_cli_flag_still_beats_the_environment(self, fake_runtime, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "3")
+        assert self._review(monkeypatch, ["--max-chunks", "5"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["max_chunks"] == 5
+
+    def test_quality_gate_knobs_reach_the_orchestrator(self, fake_runtime, monkeypatch):
+        """Regression: apply_quality_gate() was called with no arguments."""
+        monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "0.85")
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "3")
+        assert self._review(monkeypatch) == 0
+        call = fake_runtime["orchestrate_calls"][0]
+        assert call["confidence_floor"] == 0.85
+        assert call["max_errors"] == 3
+
+    def test_chunking_and_fanout_knobs_reach_the_orchestrator(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_CHUNK_TOKEN_BUDGET", "9000")
+        monkeypatch.setenv("PRXREF_MAX_WORKERS", "2")
+        monkeypatch.setenv("PRXREF_MAX_INLINE_COMMENTS", "5")
+        assert self._review(monkeypatch) == 0
+        call = fake_runtime["orchestrate_calls"][0]
+        assert call["token_budget"] == 9000
+        assert call["max_workers"] == 2
+        assert call["max_inline_comments"] == 5
+
+    def test_defaults_are_todays_hardcoded_values(self, fake_runtime, monkeypatch):
+        """Zero behaviour change when nothing is configured."""
+        assert self._review(monkeypatch) == 0
+        call = fake_runtime["orchestrate_calls"][0]
+        assert call["max_chunks"] == 8
+        assert call["token_budget"] == 25_000
+        assert call["max_workers"] == 4
+        assert call["max_inline_comments"] == 15
+        assert call["confidence_floor"] == 0.6
+        assert call["max_errors"] == 10
+
+    @pytest.mark.parametrize("name,raw", [
+        ("PRXREF_CHUNK_TOKEN_BUDGET", "lots"),
+        ("PRXREF_CHUNK_TOKEN_BUDGET", "0"),
+        ("PRXREF_CHUNK_TOKEN_BUDGET", "-1"),
+        ("PRXREF_MAX_WORKERS", "many"),
+        ("PRXREF_MAX_WORKERS", "0"),
+        ("PRXREF_MAX_INLINE_COMMENTS", "all"),
+        ("PRXREF_MAX_INLINE_COMMENTS", "0"),
+    ])
+    def test_bad_value_exits_2_and_names_the_variable(
+        self, fake_runtime, monkeypatch, capsys, name, raw
+    ):
+        monkeypatch.setenv(name, raw)
+        assert self._review(monkeypatch) == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert name in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
