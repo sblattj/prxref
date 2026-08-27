@@ -7,6 +7,31 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+
+- **A posted failure reason could publish the LLM endpoint and its
+  credential.** A `requests` `ConnectionError` carries the gateway host, the
+  request path, and the query string in its message; that string was wrapped
+  into `LLMError`, stored as the chunk's failure reason, and interpolated
+  verbatim into a comment on the pull request — by the total-failure notice and
+  by the partial-review banner alike. On a public repository that published the
+  operator's endpoint and any `api_key=` riding in its URL. Both posting paths
+  now sanitise the reason through one allowlist-flavoured redaction: URLs,
+  quoted network locators, bearer tokens, and every `key=value` pair whose key
+  is not explicitly postable lose their value. The diagnostic shape survives —
+  the exception class, `HTTP 429`, a timeout, and the truncation message with
+  its `PRXREF_LLM_MAX_TOKENS` hint are unchanged — and the stderr logs still
+  carry the full, unredacted text, because they are operator-only.
+
+### Fixed
+
+- **A multi-line failure reason broke out of the partial-review blockquote.**
+  The `> ` prefix was applied per reason rather than per line, so a two-line
+  reason mangled the rest of the posted comment.
+- **The truncation message quoted a normalised stop reason** rather than the
+  one the provider actually sent, sending an operator whose gateway logged
+  `MAX_TOKENS` to grep for a string that was not in their log.
+
 ## [0.2.0] — 2026-08-26
 
 First published release. 0.1.0 was never tagged or uploaded — its entry is kept

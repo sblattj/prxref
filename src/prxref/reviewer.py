@@ -52,19 +52,24 @@ _TRUNCATED_ERROR = (
 def _budget_stop_reason(result: Any) -> str:
     """The provider's stop reason, when it says generation hit the token budget.
 
-    Returns the normalised reason (``"length"``, ``"max_tokens"``) so the error
-    can quote what the provider actually said, or ``""`` when the response was
-    not truncated. Tolerant of a backend or test double whose result predates
+    Returns the reason AS THE PROVIDER SPELLED IT (whitespace stripped, casing
+    left alone), or ``""`` when the response was not truncated. Matching is
+    casefolded because the vocabulary is the provider's and gateways disagree
+    on casing, but the reported string is not: quoting a normalised
+    ``max_tokens`` back at an operator whose gateway logged ``MAX_TOKENS``
+    sends them grepping for a string that is not in their log.
+
+    Tolerant of a backend or test double whose result predates
     ``InvokeResult.finish_reason``: an absent or non-string attribute reads as
-    "not reported", never as truncation. Casefolded because the string is a
-    provider's, not ours; an unrecognised spelling falls back to the plain parse
-    error, which is the safe direction — a missed hint, never a false claim.
+    "not reported", never as truncation. An unrecognised spelling falls back to
+    the plain parse error, which is the safe direction — a missed hint, never a
+    false claim.
     """
     reason = getattr(result, "finish_reason", "")
     if not isinstance(reason, str):
         return ""
-    normalised = reason.strip().lower()
-    return normalised if normalised in _TRUNCATION_FINISH_REASONS else ""
+    literal = reason.strip()
+    return literal if literal.lower() in _TRUNCATION_FINISH_REASONS else ""
 
 
 def load_prompt(name: str) -> str:
