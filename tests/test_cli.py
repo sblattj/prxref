@@ -157,7 +157,12 @@ class TestReviewSubcommand:
 
         _, err = capsys.readouterr()
         assert "unrecognized PR URL" in err
-        assert "bitbucket.org" in err
+        # Name the forges, not their SaaS hostnames: three of the four adapters
+        # serve self-hosted deployments, so a hint listing bitbucket.org /
+        # github.com / gitlab.com reads as a restriction that does not exist.
+        for forge in ("Bitbucket", "GitHub", "GitLab"):
+            assert forge in err
+        assert "Self-hosted" in err
 
     def test_orchestration_exception_exits_0_non_blocking(
         self, fake_runtime, monkeypatch, capsys

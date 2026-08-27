@@ -1,6 +1,6 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, and GitHub.
+Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
 
 prxref inspects pull and merge requests across the three major code hosting forges in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary.
 
@@ -73,6 +73,9 @@ Pass any PR or MR URL directly. Forge type, repository namespace, and pull reque
 # Bitbucket Cloud
 prxref review --pr-url https://bitbucket.org/workspace/repo/pull-requests/42
 
+# Bitbucket Server / Data Center (self-hosted, including a context path)
+prxref review --pr-url https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42
+
 # GitHub & GitHub Enterprise
 prxref review --pr-url https://github.com/owner/repository/pull/108
 
@@ -106,8 +109,10 @@ Configure the authentication token matching your forge:
 
 | Forge | Environment Variable | Notes |
 |---|---|---|
-| **Bitbucket** | `PRXREF_BITBUCKET_TOKEN` | Bearer token (workspace or repo access token) |
-| **Bitbucket (Basic)** | `PRXREF_BITBUCKET_USER` + `PRXREF_BITBUCKET_APP_PASSWORD` | App password fallback |
+| **Bitbucket Cloud** | `PRXREF_BITBUCKET_TOKEN` | Bearer token (workspace or repo access token) |
+| **Bitbucket Cloud (Basic)** | `PRXREF_BITBUCKET_USER` + `PRXREF_BITBUCKET_APP_PASSWORD` | App password fallback |
+| **Bitbucket Server / DC** | `PRXREF_BITBUCKET_SERVER_TOKEN` | HTTP access token (falls back to `PRXREF_BITBUCKET_TOKEN`) |
+| **Bitbucket Server (Basic)** | `PRXREF_BITBUCKET_SERVER_USER` + `PRXREF_BITBUCKET_SERVER_PASSWORD` | Basic-auth fallback |
 | **GitHub** | `PRXREF_GITHUB_TOKEN` | Personal Access Token (PAT) or GitHub App token |
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |

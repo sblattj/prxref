@@ -1,6 +1,6 @@
 # Forge Integrations & Webhooks
 
-`prxref` provides unified pull/merge request reviews across Bitbucket Cloud, GitHub (Cloud and Enterprise Server), and GitLab (SaaS and self-hosted).
+`prxref` provides unified pull/merge request reviews across Bitbucket (Cloud and Server / Data Center), GitHub (Cloud and Enterprise Server), and GitLab (SaaS and self-hosted).
 
 ---
 
@@ -22,7 +22,8 @@
   - **Thread List:** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` (paginated, up to 500 comments).
 - **Webhook Integration:**
   - **Event Header:** `X-Event-Key`
-  - **Accepted Events:** `pr:opened`, `pr:modified`
+  - **Accepted Events:** `pullrequest:created`, `pullrequest:updated`
+  - **Payload:** PR URL read from `pullrequest.links.html.href`.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against `PRXREF_BITBUCKET_WEBHOOK_SECRET`.
 
 ---
@@ -69,3 +70,53 @@
   - **Event Header:** `X-Gitlab-Event` (normalized to `MergeRequestHook`)
   - **Accepted Actions:** `open`, `update`
   - **Signature Header:** `X-Gitlab-Token` (plain secret token) validated against `PRXREF_GITLAB_WEBHOOK_SECRET`.
+
+---
+
+## 4. Bitbucket Server / Data Center
+
+Self-hosted Bitbucket is a different product from Bitbucket Cloud, not the same
+API on another host: `/rest/api/1.0` rather than `/2.0`, project keys rather
+than workspaces, an activity feed rather than a comment list, and `start`/`limit`
+paging rather than `page`/`pagelen`. It therefore gets its own adapter.
+
+- **Forge Identifier:** `bitbucket-server`
+- **Supported URL Shapes:**
+  - `https://{host}/projects/{PROJECTKEY}/repos/{slug}/pull-requests/{number}`
+  - `https://{host}/users/{userslug}/repos/{slug}/pull-requests/{number}` (personal repository)
+  - Either shape behind a deployment context path, e.g. `https://{host}/bitbucket/projects/...`
+  - A trailing route (`/overview`, `/diff`, …) is tolerated and normalized away.
+- **Project Key Note:** a personal repository browses under `/users/{slug}` but is
+  addressed in the API as the project key `~{slug}`. `PRRef.owner` always holds the
+  API form, so every request path is built identically for both kinds.
+- **Authentication Environment Variables:**
+  - `PRXREF_BITBUCKET_SERVER_TOKEN` (HTTP access token, sent as `Bearer`). Falls back to
+    `PRXREF_BITBUCKET_TOKEN` when unset, mirroring how GitHub Enterprise falls back to
+    `PRXREF_GITHUB_TOKEN`.
+  - `PRXREF_BITBUCKET_SERVER_USER` + `PRXREF_BITBUCKET_SERVER_PASSWORD` (HTTP Basic fallback)
+- **API Endpoints & Behavior:**
+  - **Base URL:** `https://{host}{context}/rest/api/1.0/projects/{key}/repos/{slug}/pull-requests/{number}`
+  - **Metadata:** `GET` on the base URL. Branches and SHAs come from `fromRef`/`toRef`
+    (`displayId`, `latestCommit`); author from `author.user.name`.
+  - **Diffs:** `GET {base}.diff` with `Accept: text/plain` — the `.diff` suffix on the PR
+    resource, not a `/diff` subpath. Returns one raw unified diff for the whole PR.
+  - **Summary Comments:** `POST {base}/comments` with `{"text": body}`. Dedup scans the
+    activity feed for `<!-- prxref-summary -->` on a comment with no `anchor`, and updates
+    via `PUT {base}/comments/{id}`. **Data Center rejects an update that omits the
+    comment's current `version`**, so the lookup keeps the version, not just the id.
+  - **Inline Comments:** `POST {base}/comments` with an `anchor` object
+    (`path`, `line`, `lineType: ADDED`, `fileType: TO`) rather than Cloud's `inline.path` /
+    `inline.to`. Individual 4xx responses (line outside the diff) are skipped, as elsewhere.
+  - **Thread List:** `GET {base}/activities`, filtered to `action == "COMMENTED"`. There is
+    no flat comment listing on Data Center. Paged with `start`/`limit`, following
+    `nextPageStart` until `isLastPage`, capped at 5 pages.
+  - **Resolution:** read from whichever of `state == "RESOLVED"`, `threadResolved`, or
+    `resolvedDate` the deployment's version exposes.
+- **Webhook Integration:**
+  - **Event Header:** `X-Event-Key` (shared with Cloud; the two are told apart by event
+    name and payload shape)
+  - **Accepted Events:** `pr:opened`, `pr:modified`, `pr:from_ref_updated`
+  - **Payload:** PR URL read from the first entry of `pullRequest.links.self` — note the
+    capital `R`, and the list, both of which differ from Cloud.
+  - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against
+    `PRXREF_BITBUCKET_WEBHOOK_SECRET`, the same secret Cloud uses.

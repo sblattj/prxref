@@ -173,8 +173,11 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
     if result is None:
         print(
-            f"unrecognized PR URL {args.pr_url!r} — expected bitbucket.org, "
-            "github.com, or gitlab.com PR/MR link",
+            f"unrecognized PR URL {args.pr_url!r} — expected a Bitbucket "
+            "pull-requests, GitHub pull, or GitLab merge_requests link. "
+            "Self-hosted hosts are supported (Bitbucket Data Center, GitHub "
+            "Enterprise Server, self-managed GitLab); the URL must keep the "
+            "forge's own path shape.",
             file=sys.stderr,
         )
         return 0

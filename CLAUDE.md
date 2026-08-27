@@ -1,6 +1,6 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, and GitHub.
+Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
 
 ## What This Is
 
@@ -15,7 +15,7 @@ auto-detects the forge.
 ## Tech
 
 - Python 3.12+, `uv` for env/lock, hatchling packaging
-- One `Forge` Protocol (src/prxref/forges/base.py), three adapters
+- One `Forge` Protocol (src/prxref/forges/base.py), four adapters
 - LLM access via a fallback chain (llm-ferry preferred, litellm optional,
   plain-HTTP client as zero-dependency default) — provider-agnostic, no
   Anthropic key by design

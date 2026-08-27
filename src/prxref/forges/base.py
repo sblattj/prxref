@@ -1,9 +1,12 @@
-"""Forge contract: one Protocol, three implementations (bitbucket, github, gitlab).
+"""Forge contract: one Protocol, four implementations.
+
+The implementations are bitbucket (Cloud), bitbucket_server (Server / Data
+Center), github (Cloud and Enterprise Server) and gitlab (SaaS and self-hosted).
 
 Every value that flows through the pipeline is forge-agnostic past this module.
 Diff handling is deliberately unified: each forge returns ONE raw unified diff
-string; parsing/chunking happens downstream in triage.py, identically for all
-three forges.
+string; parsing/chunking happens downstream in triage.py, identically for every
+forge.
 """
 from __future__ import annotations
 
@@ -16,7 +19,7 @@ from typing import Protocol
 class PRRef:
     """A pull/merge request identity, normalized across forges."""
 
-    forge: str  # "bitbucket" | "github" | "gitlab"
+    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab"
     host: str  # e.g. "bitbucket.org", "github.com", "gitlab.com", or self-hosted host
     owner: str  # workspace / org / group
     repo: str
@@ -91,10 +94,15 @@ class Forge(Protocol):
 
 
 def detect_forge(url: str) -> PRRef | None:
-    """Try each registered forge's URL parser in order."""
-    from . import bitbucket, github, gitlab
+    """Try each registered forge's URL parser in order.
 
-    for forge in (bitbucket, github, gitlab):
+    Bitbucket Cloud is tried before Bitbucket Server because Cloud pins itself
+    to bitbucket.org while Server matches any host; the reverse order would let
+    Server claim a bitbucket.org URL whose path happened to fit its shape.
+    """
+    from . import bitbucket, bitbucket_server, github, gitlab
+
+    for forge in (bitbucket, bitbucket_server, github, gitlab):
         ref = forge.ForgeImpl.parse_pr_url(url)
         if ref is not None:
             return ref

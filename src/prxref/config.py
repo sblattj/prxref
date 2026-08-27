@@ -18,9 +18,13 @@ LLM / pipeline:
   PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR (default 8)
 
 Per-forge auth:
-  PRXREF_BITBUCKET_TOKEN        Bitbucket bearer token
-  PRXREF_BITBUCKET_USER         Bitbucket username (app-password pair)
-  PRXREF_BITBUCKET_APP_PASSWORD Bitbucket app password
+  PRXREF_BITBUCKET_TOKEN        Bitbucket Cloud bearer token
+  PRXREF_BITBUCKET_USER         Bitbucket Cloud username (app-password pair)
+  PRXREF_BITBUCKET_APP_PASSWORD Bitbucket Cloud app password
+  PRXREF_BITBUCKET_SERVER_TOKEN Bitbucket Server/Data Center HTTP access token
+                                (falls back to PRXREF_BITBUCKET_TOKEN)
+  PRXREF_BITBUCKET_SERVER_USER  Bitbucket Server username (basic-auth pair)
+  PRXREF_BITBUCKET_SERVER_PASSWORD Bitbucket Server password (basic-auth pair)
   PRXREF_GITHUB_TOKEN           GitHub token (github.com)
   PRXREF_GITHUB_ENTERPRISE_TOKEN GitHub Enterprise token (GHES hosts)
   PRXREF_GITLAB_TOKEN           GitLab token
@@ -58,6 +62,9 @@ _DEFAULTS: dict[str, object] = {
     "bitbucket_token": "",
     "bitbucket_user": "",
     "bitbucket_app_password": "",
+    "bitbucket_server_token": "",
+    "bitbucket_server_user": "",
+    "bitbucket_server_password": "",
     "github_token": "",
     "github_enterprise_token": "",
     "gitlab_token": "",
@@ -134,10 +141,11 @@ def make_forge(ref: PRRef, session=None) -> Forge:
     ``session`` optionally injects a custom ``requests.Session`` (tests,
     shared connection pools). Unknown forge names raise ``ValueError``.
     """
-    from prxref.forges import bitbucket, github, gitlab
+    from prxref.forges import bitbucket, bitbucket_server, github, gitlab
 
     impls = {
         "bitbucket": bitbucket.ForgeImpl,
+        "bitbucket-server": bitbucket_server.ForgeImpl,
         "github": github.ForgeImpl,
         "gitlab": gitlab.ForgeImpl,
     }
