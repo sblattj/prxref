@@ -7,6 +7,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **`PRXREF_FAIL_ON`** (default `never`) — the exit-code policy for
+  `prxref review`, from a field report running prxref over human-authored PRs
+  where the review must stay advisory. `never` keeps the standing contract:
+  the exit code never reflects findings. `error` exits 1 when the completed
+  review carries an active error-severity finding; `any` exits 1 on any
+  active finding. Under either non-`never` value a review that fails to
+  complete also exits 1, so a gating lane cannot read a broken run as green.
+  A value outside the vocabulary is a configuration error (exit 2) naming the
+  legal values. The webhook daemon has no exit code and is unaffected.
+
 ## [0.3.0] — 2026-08-27
 
 The configuration surface release. Driven by a field report from an on-prem
