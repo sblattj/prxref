@@ -65,6 +65,7 @@ def orchestrate_review(
     *,
     post: bool = True,
     max_chunks: int = 8,
+    max_tokens: int | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -72,6 +73,10 @@ def orchestrate_review(
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted}``. Never raises on forge or LLM stage failure — the run degrades
     to verdict ``"Error"`` with a posted notice when ``post`` is true.
+
+    ``max_tokens`` is the per-chunk completion budget handed to every worker;
+    ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. It is a request knob
+    only and is deliberately absent from the returned dict.
     """
     t0 = time.perf_counter()
 
@@ -93,7 +98,7 @@ def orchestrate_review(
     if not chunks:
         return _summary_only_run(forge, ref, pr, files, post, t0)
 
-    results = _run_workers(llm, chunks, pr)
+    results = _run_workers(llm, chunks, pr, max_tokens=max_tokens)
 
     input_tokens = sum(r["input_tokens"] for r in results)
     output_tokens = sum(r["output_tokens"] for r in results)
@@ -180,11 +185,13 @@ def _attribution(model: str, tokens: int, elapsed_ms: int) -> str:
     return f"Reviewed by prxref · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
 
 
-def _run_workers(llm: LLMClient, chunks, pr: PRData) -> list[dict]:
+def _run_workers(
+    llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None
+) -> list[dict]:
     workers = min(MAX_WORKERS, len(chunks))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
-            ex.submit(_run_worker, i + 1, len(chunks), llm, chunk, pr)
+            ex.submit(_run_worker, i + 1, len(chunks), llm, chunk, pr, max_tokens)
             for i, chunk in enumerate(chunks)
         ]
         results = []
@@ -200,11 +207,15 @@ def _run_workers(llm: LLMClient, chunks, pr: PRData) -> list[dict]:
         return results
 
 
-def _run_worker(index: int, total: int, llm: LLMClient, chunk, pr: PRData) -> dict:
+def _run_worker(
+    index: int, total: int, llm: LLMClient, chunk, pr: PRData,
+    max_tokens: int | None = None,
+) -> dict:
     t0 = time.perf_counter()
     try:
         res = reviewer.review_chunk(
-            llm, chunk, pr_title=pr.title, pr_description=pr.description
+            llm, chunk, pr_title=pr.title, pr_description=pr.description,
+            max_tokens=max_tokens,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[chunk %d/%d] worker raised: %s", index, total, e)

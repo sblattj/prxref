@@ -41,6 +41,9 @@ class OpenAICompatClient(LLMClient):
     fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
     error, a timeout, or a malformed body — the next model is tried at once,
     and exhausting the chain raises :class:`LLMError` with per-model reasons.
+    ``temperature`` is omitted from the payload entirely when unset (like
+    ``reasoning_effort``), never sent as a numeric default: some endpoints
+    reject it alongside reasoning parameters.
     """
 
     def __init__(
@@ -51,6 +54,7 @@ class OpenAICompatClient(LLMClient):
         session: requests.Session | None = None,
         default_timeout: float = DEFAULT_TIMEOUT,
         reasoning_effort: str | None = None,
+        temperature: float | None = None,
     ):
         if not models:
             raise ValueError("models must be a non-empty list")
@@ -60,6 +64,7 @@ class OpenAICompatClient(LLMClient):
         self.session = session if session is not None else requests.Session()
         self.default_timeout = default_timeout
         self.reasoning_effort = reasoning_effort or None
+        self.temperature = temperature
 
     def invoke(
         self,
@@ -83,6 +88,8 @@ class OpenAICompatClient(LLMClient):
             payload["response_format"] = {"type": "json_object"}
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         failures: list[str] = []
@@ -130,9 +137,15 @@ class LiteLLMClient(LLMClient):
     Requires the optional extra (``pip install 'prxref[litellm]'``).
     ``num_retries=0`` keeps failover fast; the chain itself is delegated to
     litellm via ``fallbacks=``. Only usage is mapped into InvokeResult.
+    ``temperature`` is omitted entirely when unset, never defaulted.
     """
 
-    def __init__(self, models: list[str], default_timeout: float = DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        models: list[str],
+        default_timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
+    ):
         if not models:
             raise ValueError("models must be a non-empty list")
         try:
@@ -144,6 +157,7 @@ class LiteLLMClient(LLMClient):
             ) from exc
         self.models = list(models)
         self.default_timeout = default_timeout
+        self.temperature = temperature
         self._completion = litellm.completion
 
     def invoke(
@@ -170,6 +184,8 @@ class LiteLLMClient(LLMClient):
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         t0 = time.perf_counter()
         response = self._completion(**kwargs)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
@@ -183,6 +199,22 @@ class LiteLLMClient(LLMClient):
             backend="litellm",
             elapsed_ms=elapsed_ms,
         )
+
+
+def _numeric(raw: str | None, env: str, cast):
+    """Cast a cfg/env string to a number, naming the variable when it is malformed.
+
+    ``None`` or an all-whitespace string means "unset" and yields ``None``, so
+    the caller keeps the built-in default (timeout) or omits the field from the
+    payload entirely (temperature). A malformed value raises ``ValueError``
+    naming the environment variable, mirroring ``config._coerce_env``.
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return cast(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{env}: {exc}") from exc
 
 
 def create_llm_client(
@@ -201,6 +233,13 @@ def create_llm_client(
     PRXREF_LLM_REASONING_EFFORT is passed through unvalidated to the
     openai-compat client for models that cannot disable reasoning
     (e.g. GLM-5.3-Flash's ``low``/``high``/``max``); empty omits it.
+    PRXREF_LLM_TIMEOUT (seconds, default 45.0) becomes the client's
+    ``default_timeout``; PRXREF_LLM_TEMPERATURE is parsed to a float and
+    omitted from the request entirely when unset. A malformed value for
+    either raises ``ValueError`` naming the variable.
+    ``PRXREF_LLM_MAX_TOKENS`` is deliberately NOT read here: it is a
+    per-call budget threaded cfg -> orchestrator -> reviewer -> ``invoke``,
+    so a client-level copy could never win and would be dead config.
     """
     cfg = cfg or {}
 
@@ -229,14 +268,22 @@ def create_llm_client(
             "comma-separated list, cheapest first "
             "(see README > LLM Configuration)."
         )
+    timeout = _numeric(_get("LLM_TIMEOUT", "PRXREF_LLM_TIMEOUT"), "PRXREF_LLM_TIMEOUT", float)
+    if timeout is None:
+        timeout = DEFAULT_TIMEOUT
+    temperature = _numeric(
+        _get("LLM_TEMPERATURE", "PRXREF_LLM_TEMPERATURE"), "PRXREF_LLM_TEMPERATURE", float
+    )
     if backend in ("openai-compat", "ferry", "http"):
         return OpenAICompatClient(
             base_url=base_url,
             api_key=_get("LLM_API_KEY", "PRXREF_LLM_API_KEY", DEFAULT_API_KEY) or DEFAULT_API_KEY,
             models=models,
             session=session,
+            default_timeout=timeout,
             reasoning_effort=_get("LLM_REASONING_EFFORT", "PRXREF_LLM_REASONING_EFFORT"),
+            temperature=temperature,
         )
     if backend == "litellm":
-        return LiteLLMClient(models=models)
+        return LiteLLMClient(models=models, default_timeout=timeout, temperature=temperature)
     raise LLMError(f"unknown PRXREF_LLM_BACKEND {backend!r}; expected openai-compat|ferry|http|litellm")

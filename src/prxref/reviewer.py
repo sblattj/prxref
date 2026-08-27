@@ -20,7 +20,7 @@ from .triage import FileDiff, Finding
 
 logger = logging.getLogger("prxref")
 
-MAX_TOKENS = 4096
+MAX_TOKENS = 4096  # fallback only; the configured budget arrives per call
 DEFAULT_CONFIDENCE = 0.5
 
 _CONTEXT_MARKER = "## Review Context"
@@ -119,6 +119,7 @@ def review_chunk(
     pr_title: str = "",
     pr_description: str = "",
     repo_hint: str = "",
+    max_tokens: int | None = None,
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -130,6 +131,10 @@ def review_chunk(
     yields ``([], meta)`` with ``meta["error"]`` set to the failure reason;
     this layer never raises and never retries. ``meta["error"]`` is the
     empty string on success.
+
+    ``max_tokens`` is the completion budget for the call; ``None`` keeps the
+    module default :data:`MAX_TOKENS`, so direct callers and older stubs are
+    unaffected. The CLI threads ``PRXREF_LLM_MAX_TOKENS`` down to here.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -150,7 +155,7 @@ def review_chunk(
         result = llm.invoke(
             system=system,
             user=user,
-            max_tokens=MAX_TOKENS,
+            max_tokens=MAX_TOKENS if max_tokens is None else max_tokens,
             json_mode=True,
         )
         parsed = loads_lenient(result.text)

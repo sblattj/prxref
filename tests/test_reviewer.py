@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 from prxref.llm import InvokeResult
-from prxref.reviewer import load_prompt, render_chunk, review_chunk
+from prxref.reviewer import MAX_TOKENS, load_prompt, render_chunk, review_chunk
 from prxref.triage import Finding, parse_unified_diff
 
 MINI_DIFF = """\
@@ -191,6 +191,16 @@ class TestReviewChunk:
         assert len(llm.calls) == 1
         assert llm.calls[0]["json_mode"] is True
         assert llm.calls[0]["max_tokens"] == 4096
+
+    def test_explicit_max_tokens_reaches_the_payload(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, self._chunk(), max_tokens=12000)
+        assert llm.calls[0]["max_tokens"] == 12000
+
+    def test_none_max_tokens_falls_back_to_the_module_default(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, self._chunk(), max_tokens=None)
+        assert llm.calls[0]["max_tokens"] == MAX_TOKENS == 4096
 
     def test_prompt_renders_diff_text_and_pr_context(self):
         llm = FakeLLM(CLEAN_RESPONSE)

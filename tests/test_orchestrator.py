@@ -30,7 +30,9 @@ SUMMARY_TEMPLATE = (
 )
 
 
-def _contract_review_chunk(llm, files, *, pr_title="", pr_description="", repo_hint=""):
+def _contract_review_chunk(
+    llm, files, *, pr_title="", pr_description="", repo_hint="", max_tokens=None
+):
     result = llm.invoke(
         system="review the chunk",
         user=json.dumps([f.path for f in files]),
@@ -184,6 +186,9 @@ def _contract_and_clean_env(monkeypatch):
     monkeypatch.delenv("PRXREF_CONFIDENCE_FLOOR", raising=False)
     monkeypatch.delenv("PRXREF_MAX_ERRORS", raising=False)
     monkeypatch.delenv("PRXREF_MAX_ERROR_FINDINGS", raising=False)
+    monkeypatch.delenv("PRXREF_LLM_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("PRXREF_LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("PRXREF_LLM_TEMPERATURE", raising=False)
     monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _contract_review_chunk)
     monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _contract_load_prompt)
 
@@ -264,7 +269,9 @@ class TestParallelFanOut:
         diff = "\n".join(_added_file_diff(p, 650) for p in paths) + "\n"
         barrier = threading.Barrier(3, timeout=10)
 
-        def barrier_review_chunk(llm, files, *, pr_title="", pr_description="", repo_hint=""):
+        def barrier_review_chunk(
+            llm, files, *, pr_title="", pr_description="", repo_hint="", max_tokens=None
+        ):
             barrier.wait()
             return [Finding(
                     file=files[0].path, line=1, severity="warning",
@@ -472,3 +479,45 @@ class TestCoverageAwareVerdict:
         orchestrate_review(forge, REF, FakeLLM("{}"), post=True, max_chunks=2)
         assert "Partial review" in forge.summaries[0]
         assert "1 of 2" in forge.summaries[0]
+
+
+class TestMaxTokensThreading:
+    """The configured completion budget must reach every worker, and stay out of the result."""
+
+    def _recording_review_chunk(self, seen):
+        def _rc(llm, files, **kwargs):
+            seen.append(kwargs.get("max_tokens"))
+            return [], {
+                "escalations": [], "input_tokens": 1, "output_tokens": 1,
+                "model": "m", "elapsed_ms": 1, "error": "",
+            }
+        return _rc
+
+    def test_configured_budget_reaches_every_chunk(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk", self._recording_review_chunk(seen)
+        )
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        orchestrate_review(forge, REF, FakeLLM("{}"), post=False, max_chunks=2, max_tokens=9001)
+        assert seen == [9001, 9001]
+
+    def test_default_is_none_so_the_reviewer_default_wins(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk", self._recording_review_chunk(seen)
+        )
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+        assert seen == [None]
+
+    def test_result_key_set_is_unchanged_by_the_new_knob(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post=False, max_tokens=2048
+        )
+        assert set(res) == {
+            "verdict", "findings_active", "findings_dropped", "chunk_count",
+            "chunks_reviewed", "chunks_failed",
+            "elapsed_ms", "input_tokens", "output_tokens", "posted",
+        }
