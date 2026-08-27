@@ -133,8 +133,10 @@ def review_chunk(
     empty string on success.
 
     ``max_tokens`` is the completion budget for the call; ``None`` keeps the
-    module default :data:`MAX_TOKENS`, so direct callers and older stubs are
-    unaffected. The CLI threads ``PRXREF_LLM_MAX_TOKENS`` down to here.
+    module default :data:`MAX_TOKENS`, so direct callers are unaffected. The
+    orchestrator always passes the keyword (``None`` included), so any test
+    double for this function must accept it. The CLI threads
+    ``PRXREF_LLM_MAX_TOKENS`` down to here.
     """
     system, user = _render_prompt(
         chunk=chunk,

@@ -10,8 +10,6 @@ import threading
 import types
 from http.server import ThreadingHTTPServer
 
-import pytest
-
 from prxref.webhooks import _worker_loop, make_webhook_handler, verify_signature
 
 GH_SECRET = "gh-secret"
@@ -21,17 +19,6 @@ GL_SECRET = "gl-secret"
 GH_URL = "https://github.com/owner/repo/pull/42"
 BB_URL = "https://bitbucket.org/owner/repo/pull-requests/7"
 GL_URL = "https://gitlab.com/group/repo/-/merge_requests/9"
-
-
-@pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    for var in (
-        "PRXREF_GITHUB_WEBHOOK_SECRET",
-        "PRXREF_BITBUCKET_WEBHOOK_SECRET",
-        "PRXREF_GITLAB_WEBHOOK_SECRET",
-        "PRXREF_ALLOW_UNSIGNED",
-    ):
-        monkeypatch.delenv(var, raising=False)
 
 
 def _sign(secret: str, body: bytes) -> str:

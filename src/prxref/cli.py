@@ -7,8 +7,9 @@ Provides two subcommands:
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
 stderr so a pipeline step never fails the build over an advisor's error. The one
-exception is a missing-configuration error, which is a usage error rather than a
-review outcome and exits 2.
+exception is a configuration error — a required value missing, or one that is
+malformed or out of range — which is a usage error rather than a review outcome
+and exits 2. Both kinds raise ``ConfigError`` and name the offending variable.
 """
 from __future__ import annotations
 
