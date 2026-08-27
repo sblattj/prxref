@@ -538,16 +538,42 @@ def _findings(*specs) -> dict:
 class TestChunkTokenBudget:
     """The chunk token budget is a knob, and a smaller one means more chunks."""
 
-    def test_default_matches_the_triage_default(self):
+    def test_signature_defaults_are_the_triage_constant(self):
+        """Pinned by identity, not by outcome.
+
+        Comparing a default run to an explicit ``DEFAULT_TOKEN_BUDGET`` run is
+        insensitive over a wide band: any default in roughly 16 001-32 000
+        yields 4 chunks on this fixture, so that comparison would still pass if
+        someone replaced the signature default with a nearby literal.
+        """
+        import inspect
+
+        from prxref import triage
+        from prxref.triage import build_chunks
+
+        assert triage.DEFAULT_TOKEN_BUDGET == 25_000
+        for fn in (orchestrate_review, build_chunks):
+            default = inspect.signature(fn).parameters["token_budget"].default
+            assert default is triage.DEFAULT_TOKEN_BUDGET, fn.__name__
+
+    def test_the_default_run_actually_chunks_at_that_budget(self):
+        """Boundary-sensitive companion: 35 000 gives a different answer on this
+        fixture, so a silently widened default shows up as a failure here."""
         from prxref import triage
 
-        forge = FakeForge(diff=FOUR_FILE_DIFF)
-        default_run = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
-        explicit = orchestrate_review(
+        at_default = orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
+        )
+        at_constant = orchestrate_review(
             FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
             token_budget=triage.DEFAULT_TOKEN_BUDGET,
         )
-        assert default_run["chunk_count"] == explicit["chunk_count"]
+        at_wider = orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
+            token_budget=35_000,
+        )
+        assert at_default["chunk_count"] == at_constant["chunk_count"] == 4
+        assert at_wider["chunk_count"] == 2
 
     @pytest.mark.parametrize("budget,expected_chunks", [
         (70_000, 1),
