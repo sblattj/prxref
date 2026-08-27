@@ -24,6 +24,7 @@ import prxref
 from prxref.config import load_config, make_forge
 from prxref.forges.base import detect_forge
 from prxref.llm import ConfigError
+from prxref.triage import DEFAULT_TOKEN_BUDGET
 
 logger = logging.getLogger("prxref")
 
@@ -145,8 +146,19 @@ def _run_review(
         ref=ref,
         llm=llm,
         post=post,
-        max_chunks=max_chunks if max_chunks is not None else cfg.get("MAX_CHUNKS", 8),
+        # Lowercase: load_config returns lowercase, unprefixed keys. The
+        # uppercase spelling that used to be here silently pinned every run to
+        # the literal default, so PRXREF_MAX_CHUNKS never reached the pipeline.
+        max_chunks=max_chunks if max_chunks is not None else cfg.get("max_chunks", 8),
         max_tokens=cfg.get("llm_max_tokens"),
+        token_budget=cfg.get("chunk_token_budget", DEFAULT_TOKEN_BUDGET),
+        max_workers=cfg.get("max_workers", 4),
+        max_inline_comments=cfg.get("max_inline_comments", 15),
+        # Passed explicitly so the resolved config wins: apply_quality_gate
+        # otherwise falls back to re-reading the environment itself, which
+        # discards any value an override or a .env-driven load resolved.
+        confidence_floor=cfg.get("confidence_floor"),
+        max_errors=cfg.get("max_error_findings"),
     )
 
 

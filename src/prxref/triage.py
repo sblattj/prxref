@@ -11,6 +11,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+# Per-chunk token budget used when no caller supplies one. Named so config and
+# the orchestrator can share this single literal instead of restating it;
+# PRXREF_CHUNK_TOKEN_BUDGET overrides it.
+DEFAULT_TOKEN_BUDGET: int = 25_000
+
 
 @dataclass
 class Finding:
@@ -314,7 +319,7 @@ def _shared_dir_depth(p1: str, p2: str) -> int:
 def build_chunks(
     files: list[FileDiff],
     max_chunks: int = 8,
-    token_budget: int = 25_000,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
     churn_by_path: dict[str, int] | None = None,
 ) -> list[list[FileDiff]]:
     """Group files into review chunks (~token_budget tokens, ≤max_chunks).

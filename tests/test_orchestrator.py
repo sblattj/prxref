@@ -516,3 +516,204 @@ class TestMaxTokensThreading:
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
         }
+
+
+FOUR_FILE_DIFF = "".join(
+    _added_file_diff(path, 400)
+    for path in ("a/one.py", "b/two.py", "c/three.py", "d/four.py")
+)
+
+
+def _findings(*specs) -> dict:
+    """Build a findings_by_path payload from (line, severity, confidence) triples."""
+    return {
+        "src/app.py": [
+            {"file": "src/app.py", "line": line, "severity": severity,
+             "confidence": confidence, "title": f"f{line}", "body": "b"}
+            for line, severity, confidence in specs
+        ],
+    }
+
+
+class TestChunkTokenBudget:
+    """The chunk token budget is a knob, and a smaller one means more chunks."""
+
+    def test_default_matches_the_triage_default(self):
+        from prxref import triage
+
+        forge = FakeForge(diff=FOUR_FILE_DIFF)
+        default_run = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+        explicit = orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
+            token_budget=triage.DEFAULT_TOKEN_BUDGET,
+        )
+        assert default_run["chunk_count"] == explicit["chunk_count"]
+
+    @pytest.mark.parametrize("budget,expected_chunks", [
+        (70_000, 1),
+        (35_000, 2),
+        (16_000, 4),
+    ])
+    def test_lower_budget_yields_more_chunks(self, budget, expected_chunks):
+        forge = FakeForge(diff=FOUR_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=False, token_budget=budget,
+        )
+        assert res["chunk_count"] == expected_chunks
+        assert res["chunks_reviewed"] == expected_chunks
+
+
+class TestMaxWorkers:
+    """The fan-out width is a knob; narrowing it must not narrow coverage."""
+
+    def _recording_pool(self, monkeypatch, seen):
+        real = orchestrator.ThreadPoolExecutor
+
+        def _factory(max_workers=None, **kwargs):
+            seen.append(max_workers)
+            return real(max_workers=max_workers, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "ThreadPoolExecutor", _factory)
+
+    def test_default_is_the_module_constant(self, monkeypatch):
+        seen: list = []
+        self._recording_pool(monkeypatch, seen)
+        orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
+        )
+        assert orchestrator.MAX_WORKERS == 4
+        assert seen == [orchestrator.MAX_WORKERS]
+
+    def test_configured_width_caps_the_pool(self, monkeypatch):
+        seen: list = []
+        self._recording_pool(monkeypatch, seen)
+        orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
+            max_workers=2,
+        )
+        assert seen == [2]
+
+    def test_one_worker_still_reviews_every_chunk(self, monkeypatch):
+        seen: list = []
+        self._recording_pool(monkeypatch, seen)
+        res = orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM('{"findings": []}'),
+            post=False, max_workers=1,
+        )
+        assert seen == [1]
+        assert res["chunk_count"] == 4
+        assert res["chunks_reviewed"] == 4
+        assert res["chunks_failed"] == 0
+
+    def test_width_never_exceeds_the_chunk_count(self, monkeypatch):
+        seen: list = []
+        self._recording_pool(monkeypatch, seen)
+        orchestrate_review(
+            FakeForge(diff=_added_file_diff("src/app.py", 20)), REF, FakeLLM("{}"),
+            post=False, max_workers=16,
+        )
+        assert seen == [1]
+
+
+class TestMaxInlineComments:
+    def test_configured_cap_limits_the_posted_batch(self):
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": i, "severity": "warning",
+                 "confidence": 0.75, "title": f"warning {i}", "body": "b"}
+                for i in range(1, 19)
+            ],
+        }
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=findings), max_inline_comments=3,
+        )
+        assert len(res["findings_active"]) == 18
+        assert len(forge.inline_batches[0]) == 3
+
+    def test_default_is_the_module_constant(self):
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": i, "severity": "warning",
+                 "confidence": 0.75, "title": f"warning {i}", "body": "b"}
+                for i in range(1, 19)
+            ],
+        }
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM(findings_by_path=findings))
+        assert len(forge.inline_batches[0]) == orchestrator.MAX_INLINE_COMMENTS == 15
+
+
+class TestQualityGateKnobsAreThreaded:
+    """Regression: ``apply_quality_gate(findings)`` was called with no arguments.
+
+    The gate then re-read ``PRXREF_CONFIDENCE_FLOOR`` / ``PRXREF_MAX_ERROR_FINDINGS``
+    from the environment itself, so a value that ``load_config`` had resolved —
+    including an explicit programmatic override — never reached it. The
+    environment fallback stays in ``quality`` for library callers who never build
+    a config; an explicit value must win over it.
+    """
+
+    def test_explicit_floor_beats_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "0.1")
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=_findings((3, "warning", 0.5))),
+            post=False, confidence_floor=0.99,
+        )
+        assert res["findings_active"] == []
+        assert len(res["findings_dropped"]) == 1
+        assert "below floor 0.99" in res["findings_dropped"][0].drop_reason
+
+    def test_environment_still_applies_when_no_value_is_supplied(self, monkeypatch):
+        """Library callers that never build a config keep the env fallback."""
+        monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "0.1")
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=_findings((3, "warning", 0.5))),
+            post=False,
+        )
+        assert len(res["findings_active"]) == 1
+        assert res["findings_dropped"] == []
+
+    def test_explicit_error_cap_beats_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "10")
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF,
+            FakeLLM(findings_by_path=_findings(
+                (3, "error", 0.9), (7, "error", 0.8), (11, "error", 0.7),
+            )),
+            post=False, max_errors=1,
+        )
+        assert len(res["findings_active"]) == 1
+        assert res["findings_active"][0].confidence == 0.9
+        assert len(res["findings_dropped"]) == 2
+        assert all(
+            "error cap exceeded (max 1)" in f.drop_reason
+            for f in res["findings_dropped"]
+        )
+
+    def test_environment_error_cap_still_applies_when_unsupplied(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "1")
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF,
+            FakeLLM(findings_by_path=_findings((3, "error", 0.9), (7, "error", 0.8))),
+            post=False,
+        )
+        assert len(res["findings_active"]) == 1
+        assert len(res["findings_dropped"]) == 1
+
+    def test_result_key_set_is_unchanged_by_the_new_knobs(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post=False,
+            token_budget=30_000, max_workers=2, max_inline_comments=4,
+            confidence_floor=0.5, max_errors=5,
+        )
+        assert set(res) == {
+            "verdict", "findings_active", "findings_dropped", "chunk_count",
+            "chunks_reviewed", "chunks_failed",
+            "elapsed_ms", "input_tokens", "output_tokens", "posted",
+        }

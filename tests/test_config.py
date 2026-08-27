@@ -298,3 +298,70 @@ class TestAllowUnsignedAgreesWithGate:
             f"config and the webhook gate disagree for {raw!r}"
         )
 
+
+
+class TestChunkingAndFanoutKnobs:
+    """PRXREF_CHUNK_TOKEN_BUDGET / _MAX_WORKERS / _MAX_INLINE_COMMENTS."""
+
+    def test_defaults_equal_todays_hardcoded_values(self):
+        from prxref import orchestrator, triage
+
+        cfg = load_config()
+        assert cfg["chunk_token_budget"] == triage.DEFAULT_TOKEN_BUDGET == 25_000
+        assert cfg["max_workers"] == orchestrator.MAX_WORKERS == 4
+        assert cfg["max_inline_comments"] == orchestrator.MAX_INLINE_COMMENTS == 15
+
+    def test_env_coercions(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CHUNK_TOKEN_BUDGET", "9000")
+        monkeypatch.setenv("PRXREF_MAX_WORKERS", "2")
+        monkeypatch.setenv("PRXREF_MAX_INLINE_COMMENTS", "5")
+        cfg = load_config()
+        assert cfg["chunk_token_budget"] == 9000
+        assert isinstance(cfg["chunk_token_budget"], int)
+        assert cfg["max_workers"] == 2
+        assert cfg["max_inline_comments"] == 5
+
+    @pytest.mark.parametrize("name", [
+        "PRXREF_CHUNK_TOKEN_BUDGET",
+        "PRXREF_MAX_WORKERS",
+        "PRXREF_MAX_INLINE_COMMENTS",
+    ])
+    def test_malformed_value_names_the_variable(self, monkeypatch, name):
+        monkeypatch.setenv(name, "plenty")
+        with pytest.raises(ConfigError, match=name):
+            load_config()
+
+    @pytest.mark.parametrize("name", [
+        "PRXREF_CHUNK_TOKEN_BUDGET",
+        "PRXREF_MAX_WORKERS",
+        "PRXREF_MAX_INLINE_COMMENTS",
+    ])
+    @pytest.mark.parametrize("raw", ["0", "-1"])
+    def test_non_positive_value_rejected(self, monkeypatch, name, raw):
+        monkeypatch.setenv(name, raw)
+        with pytest.raises(ConfigError, match=name):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", [
+        ("chunk_token_budget", "PRXREF_CHUNK_TOKEN_BUDGET"),
+        ("max_workers", "PRXREF_MAX_WORKERS"),
+        ("max_inline_comments", "PRXREF_MAX_INLINE_COMMENTS"),
+    ])
+    def test_overrides_cannot_smuggle_a_degenerate_value(self, key, env):
+        with pytest.raises(ConfigError, match=env):
+            load_config(**{key: 0})
+
+    def test_overrides_accept_the_new_keys(self):
+        cfg = load_config(chunk_token_budget=1, max_workers=1, max_inline_comments=1)
+        assert cfg["chunk_token_budget"] == 1
+        assert cfg["max_workers"] == 1
+        assert cfg["max_inline_comments"] == 1
+
+    @pytest.mark.parametrize("name,key,expected", [
+        ("PRXREF_CHUNK_TOKEN_BUDGET", "chunk_token_budget", 25_000),
+        ("PRXREF_MAX_WORKERS", "max_workers", 4),
+        ("PRXREF_MAX_INLINE_COMMENTS", "max_inline_comments", 15),
+    ])
+    def test_whitespace_only_env_reads_as_unset(self, monkeypatch, name, key, expected):
+        monkeypatch.setenv(name, "   ")
+        assert load_config()[key] == expected
