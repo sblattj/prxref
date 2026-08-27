@@ -18,11 +18,13 @@ LLM / pipeline:
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
                                 >= 0, no upper bound (provider-specific);
                                 empty = omit from the request
-  PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped
-                                (default 0.6)
+  PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped;
+                                a probability in [0.0, 1.0] (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
-                                review (legacy alias: PRXREF_MAX_ERRORS)
-  PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR (default 8)
+                                review; >= 0, where 0 caps every error
+                                (legacy alias: PRXREF_MAX_ERRORS)
+  PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR; positive int
+                                (default 8)
   PRXREF_CHUNK_TOKEN_BUDGET     Approximate token budget per diff chunk;
                                 lowering it splits a PR into more, smaller
                                 chunks (positive int, default 25000)
@@ -59,11 +61,12 @@ from __future__ import annotations
 
 import math
 import os
+from typing import NamedTuple
 
 from prxref.forges.base import Forge, PRRef
 
 from .llm import ConfigError
-from .quality import DEFAULT_MAX_ERRORS
+from .quality import DEFAULT_CONFIDENCE_FLOOR, DEFAULT_MAX_ERRORS
 from .triage import DEFAULT_TOKEN_BUDGET
 
 _ENV_PREFIX = "PRXREF_"
@@ -77,7 +80,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_max_tokens": 4096,
     "llm_timeout": 45.0,
     "llm_temperature": "",
-    "confidence_floor": 0.6,
+    "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
     "chunk_token_budget": DEFAULT_TOKEN_BUDGET,
@@ -107,15 +110,61 @@ _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned"})
 _LIST_KEYS = frozenset({"llm_models"})
 
-# Numbers that are meaningless at or below zero: a zero token budget asks the
-# model for an empty completion, a zero timeout fails every request instantly,
-# a zero worker count is rejected by ThreadPoolExecutor, and a zero chunk
-# budget or inline-comment cap silently reviews or reports nothing.
-# Checked after overrides, so no path into the config can smuggle one through.
-_POSITIVE_KEYS = frozenset({
-    "llm_max_tokens", "llm_timeout",
-    "chunk_token_budget", "max_workers", "max_inline_comments",
-})
+
+class _Range(NamedTuple):
+    """The legal interval for one numeric config key.
+
+    ``high`` defaults to ``math.inf`` — unbounded above, deliberately. The
+    ceiling for a token budget, a timeout or a worker count is provider- and
+    machine-specific, and an invented limit would be worse than none. Only a
+    semantically bounded quantity gets a real ``high``: today that is the
+    confidence floor, which is a 0-1 probability everywhere in
+    ``triage.Finding`` and in the prompts.
+
+    ``low_inclusive`` distinguishes "must be positive" from "must not be
+    negative". Zero is meaningless for a token budget (it asks the model for an
+    empty completion), for a timeout (every request fails instantly), for a
+    worker count (``ThreadPoolExecutor`` rejects it) and for a chunk count
+    (``build_chunks`` raises on the overflow branch). Zero IS meaningful for the
+    error cap, where it means "report no errors".
+    """
+
+    low: float
+    high: float = math.inf
+    low_inclusive: bool = False
+
+    def accepts(self, value: float) -> bool:
+        """True if ``value`` lies inside the interval; assumes it is finite."""
+        low_ok = value >= self.low if self.low_inclusive else value > self.low
+        return low_ok and value <= self.high
+
+    def describe(self) -> str:
+        """The bound in words, for the error an operator has to act on."""
+        low = (
+            f"greater than or equal to {self.low}"
+            if self.low_inclusive
+            else f"greater than {self.low}"
+        )
+        if math.isinf(self.high):
+            return f"must be a finite number {low}"
+        return f"must be a finite number {low} and at most {self.high}"
+
+
+# The whole numeric surface, in one place. Checked after environment AND
+# overrides, so no path into the config can smuggle a degenerate value through.
+# Every key in _INT_KEYS | _FLOAT_KEYS must appear here;
+# TestPreExistingNumericRanges::test_every_numeric_key_declares_a_range fails
+# if a future key is added without a bound.
+_RANGES: dict[str, _Range] = {
+    "llm_max_tokens": _Range(0),
+    "llm_timeout": _Range(0),
+    "chunk_token_budget": _Range(0),
+    "max_workers": _Range(0),
+    "max_inline_comments": _Range(0),
+    "max_chunks": _Range(0),
+    "max_error_findings": _Range(0, low_inclusive=True),
+    "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
+}
 
 _LEGACY_ENV_ALIASES: dict[str, str] = {
     "max_error_findings": _ENV_PREFIX + "MAX_ERRORS",
@@ -150,25 +199,23 @@ def _coerce_env(key: str, raw: str) -> object:
 
 
 def _check_ranges(cfg: dict[str, object]) -> None:
-    """Reject degenerate numbers before they reach the wire.
+    """Reject out-of-range numbers before they reach the wire.
 
     Runs after environment AND overrides, so every path into the config is
     covered. Failures name the environment variable and are ``ConfigError``
     (exit 2) rather than a mid-review error the operator has to decode from a
-    provider's rejection.
+    provider's rejection — or, worse, a review that looks like it succeeded.
     """
-    for key in sorted(_POSITIVE_KEYS):
+    for key, rng in sorted(_RANGES.items()):
         value = cfg[key]
-        ok = (
+        finite = (
             isinstance(value, (int, float))
             and not isinstance(value, bool)
             and math.isfinite(value)
-            and value > 0
         )
-        if not ok:
+        if not finite or not rng.accepts(value):
             raise ConfigError(
-                f"{_ENV_PREFIX}{key.upper()}: must be a finite number greater "
-                f"than 0, got {value!r}"
+                f"{_ENV_PREFIX}{key.upper()}: {rng.describe()}, got {value!r}"
             )
 
 

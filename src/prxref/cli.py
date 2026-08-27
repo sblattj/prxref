@@ -24,7 +24,6 @@ import prxref
 from prxref.config import load_config, make_forge
 from prxref.forges.base import detect_forge
 from prxref.llm import ConfigError
-from prxref.triage import DEFAULT_TOKEN_BUDGET
 
 logger = logging.getLogger("prxref")
 
@@ -132,12 +131,16 @@ def _run_review(
     *,
     post: bool = True,
     max_chunks: int | None = None,
-    config: dict | None = None,
 ) -> Any:
     ref = detect_forge(url)
     if ref is None:
         return None
-    cfg = config if config is not None else load_config(max_chunks=max_chunks)
+    # --max-chunks arrives as a load_config override (None is ignored), so the
+    # flag is range-checked on exactly the same path as PRXREF_MAX_CHUNKS and
+    # its precedence is derived once, here. There is deliberately no way to
+    # inject a pre-built config dict: that would bypass _check_ranges and make
+    # every range guarantee conditional on nobody using the bypass.
+    cfg = load_config(max_chunks=max_chunks)
     forge = make_forge(ref)
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
@@ -146,19 +149,20 @@ def _run_review(
         ref=ref,
         llm=llm,
         post=post,
-        # Lowercase: load_config returns lowercase, unprefixed keys. The
+        # Lowercase, and indexed rather than .get(): load_config returns
+        # lowercase, unprefixed keys and always returns every one of them. The
         # uppercase spelling that used to be here silently pinned every run to
         # the literal default, so PRXREF_MAX_CHUNKS never reached the pipeline.
-        max_chunks=max_chunks if max_chunks is not None else cfg.get("max_chunks", 8),
-        max_tokens=cfg.get("llm_max_tokens"),
-        token_budget=cfg.get("chunk_token_budget", DEFAULT_TOKEN_BUDGET),
-        max_workers=cfg.get("max_workers", 4),
-        max_inline_comments=cfg.get("max_inline_comments", 15),
+        max_chunks=cfg["max_chunks"],
+        max_tokens=cfg["llm_max_tokens"],
+        token_budget=cfg["chunk_token_budget"],
+        max_workers=cfg["max_workers"],
+        max_inline_comments=cfg["max_inline_comments"],
         # Passed explicitly so the resolved config wins: apply_quality_gate
         # otherwise falls back to re-reading the environment itself, which
         # discards any value an override or a .env-driven load resolved.
-        confidence_floor=cfg.get("confidence_floor"),
-        max_errors=cfg.get("max_error_findings"),
+        confidence_floor=cfg["confidence_floor"],
+        max_errors=cfg["max_error_findings"],
     )
 
 

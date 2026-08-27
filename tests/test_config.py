@@ -299,7 +299,6 @@ class TestAllowUnsignedAgreesWithGate:
         )
 
 
-
 class TestChunkingAndFanoutKnobs:
     """PRXREF_CHUNK_TOKEN_BUDGET / _MAX_WORKERS / _MAX_INLINE_COMMENTS."""
 
@@ -365,3 +364,107 @@ class TestChunkingAndFanoutKnobs:
     def test_whitespace_only_env_reads_as_unset(self, monkeypatch, name, key, expected):
         monkeypatch.setenv(name, "   ")
         assert load_config()[key] == expected
+
+
+class TestPreExistingNumericRanges:
+    """The three numeric keys that predate the range check are now covered too.
+
+    Making a documented-but-dead key authoritative makes its missing range check
+    reachable, so the config surface has to validate its whole numeric surface
+    rather than only the keys most recently added.
+    """
+
+    def test_every_numeric_key_declares_a_range(self):
+        """Drift guard: a new int/float key without a range is a silent gap."""
+        numeric = config._INT_KEYS | config._FLOAT_KEYS
+        assert numeric - set(config._RANGES) == set()
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "-8"])
+    def test_non_positive_max_chunks_rejected(self, monkeypatch, raw):
+        """PRXREF_MAX_CHUNKS=0 used to reach build_chunks and raise
+        ``ValueError: min() iterable argument is empty`` out of
+        orchestrate_review, which the CLI reported as a review failure (exit 0)."""
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", raw)
+        with pytest.raises(ConfigError, match="PRXREF_MAX_CHUNKS"):
+            load_config()
+
+    def test_max_chunks_override_cannot_smuggle_zero(self):
+        """The --max-chunks flag arrives as an override, so it is checked too."""
+        with pytest.raises(ConfigError, match="PRXREF_MAX_CHUNKS"):
+            load_config(max_chunks=0)
+
+    def test_smallest_legal_max_chunks_accepted(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "1")
+        assert load_config()["max_chunks"] == 1
+
+    @pytest.mark.parametrize("raw", ["-1", "-5"])
+    def test_negative_max_error_findings_rejected(self, monkeypatch, raw):
+        """A negative cap negative-slices ``ranked[cap:]``, silently dropping the
+        |cap| LOWEST-confidence errors under the reason "error cap exceeded"."""
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", raw)
+        with pytest.raises(ConfigError, match="PRXREF_MAX_ERROR_FINDINGS"):
+            load_config()
+
+    def test_zero_max_error_findings_is_legal(self, monkeypatch):
+        """0 means "cap every error", which is coherent; negative is not."""
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "0")
+        assert load_config()["max_error_findings"] == 0
+
+    def test_legacy_alias_is_range_checked_too(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_MAX_ERRORS", "-5")
+        with pytest.raises(ConfigError, match="PRXREF_MAX_ERROR_FINDINGS"):
+            load_config()
+
+    @pytest.mark.parametrize("raw", ["1.5", "95", "-0.1", "nan", "inf", "-inf"])
+    def test_out_of_band_confidence_floor_rejected(self, monkeypatch, raw):
+        """Confidence is a 0-1 probability everywhere in triage.Finding.
+
+        A fat-fingered ``PRXREF_CONFIDENCE_FLOOR=95`` (meant as a percentage)
+        drops every finding, and the run then posts a confident
+        "Approved - No findings" on a PR full of real errors. ``nan`` is the
+        mirror: every ``conf < nan`` is False, so the gate is silently disabled.
+        Both fail AS SUCCESS, which is the worst mode for an advisory reviewer.
+        """
+        monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", raw)
+        with pytest.raises(ConfigError, match="PRXREF_CONFIDENCE_FLOOR"):
+            load_config()
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("0", 0.0),
+        ("0.0", 0.0),
+        ("0.6", 0.6),
+        ("1", 1.0),
+        ("1.0", 1.0),
+    ])
+    def test_both_endpoints_of_the_closed_interval_accepted(
+        self, monkeypatch, raw, expected
+    ):
+        """0.0 (keep everything) and 1.0 (only certainty) are both legitimate."""
+        monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", raw)
+        assert load_config()["confidence_floor"] == expected
+
+    @pytest.mark.parametrize("value", [1.5, -0.1, float("nan"), float("inf")])
+    def test_confidence_floor_override_cannot_smuggle_an_out_of_band_value(self, value):
+        with pytest.raises(ConfigError, match="PRXREF_CONFIDENCE_FLOOR"):
+            load_config(confidence_floor=value)
+
+    def test_message_states_the_bound_it_broke(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "1.5")
+        with pytest.raises(ConfigError) as exc:
+            load_config()
+        assert "0.0" in str(exc.value) and "1.0" in str(exc.value)
+
+    def test_no_upper_bound_is_invented_for_the_open_numerics(self, monkeypatch):
+        """Ceilings for these are provider- and machine-specific; an invented
+        limit would be worse than none."""
+        monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", "1000000")
+        monkeypatch.setenv("PRXREF_MAX_WORKERS", "512")
+        monkeypatch.setenv("PRXREF_CHUNK_TOKEN_BUDGET", "10000000")
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "9999")
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "86400")
+        cfg = load_config()
+        assert cfg["llm_max_tokens"] == 1_000_000
+        assert cfg["max_workers"] == 512
+        assert cfg["chunk_token_budget"] == 10_000_000
+        assert cfg["max_chunks"] == 9999
+        assert cfg["llm_timeout"] == 86400.0
