@@ -2,6 +2,16 @@
 
 `prxref` provides unified pull/merge request reviews across Bitbucket Cloud, GitHub (Cloud and Enterprise Server), and GitLab (SaaS and self-hosted).
 
+## Supported Hosts
+
+| Forge | Cloud | Self-hosted |
+|---|---|---|
+| **Bitbucket** | `bitbucket.org` only | **Not supported** — Bitbucket Server / Data Center has no adapter |
+| **GitHub** | `github.com` | Supported — GitHub Enterprise Server, any host |
+| **GitLab** | `gitlab.com` | Supported — any host, including nested subgroups |
+
+The asymmetry is real and worth stating plainly: GitHub and GitLab are host-agnostic because their self-hosted products speak the same REST API as their SaaS ones, differing only in base URL (`/api/v3` for GHES, `/api/v4` for every GitLab). Bitbucket Server / Data Center does not — it exposes a different API surface (`/rest/api/1.0`) with different resource shapes, so supporting it means writing a fourth adapter, not setting a base URL. See [Bitbucket Server / Data Center](#bitbucket-server--data-center-unsupported).
+
 ---
 
 ## 1. Bitbucket Cloud
@@ -24,6 +34,21 @@
   - **Event Header:** `X-Event-Key`
   - **Accepted Events:** `pr:opened`, `pr:modified`
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against `PRXREF_BITBUCKET_WEBHOOK_SECRET`.
+
+### Bitbucket Server / Data Center (unsupported)
+
+Only `bitbucket.org` is recognized. A Bitbucket Server or Data Center URL — `https://<your-host>/projects/{KEY}/repos/{repo}/pull-requests/{n}` — is rejected by `ForgeImpl.parse_pr_url`, which checks the host before anything else:
+
+```python
+if parsed.netloc.lower() != "bitbucket.org":
+    return None
+```
+
+Two consequences follow from *where* that check sits.
+
+**Credentials are never the problem.** `parse_pr_url` is a `staticmethod` that reads no environment; auth is only consulted later, at request time. So a Server URL fails identically whether `PRXREF_BITBUCKET_TOKEN` is correct, wrong, or unset — do not go debugging the token. `detect_forge` returns `None` for the URL, and `prxref review` prints `unrecognized PR URL ...` and exits `0`, because an unusable URL is a review error and review errors never fail a build.
+
+**There is no base-URL setting that would fix it.** The Cloud API root is the module constant `_API_BASE = "https://api.bitbucket.org/2.0"`, and every request path (`/2.0/repositories/{owner}/{repo}/pullrequests/...`) is written against Cloud's v2 resource shapes. Server's `/rest/api/1.0` returns different bodies for the same concepts, so pointing this adapter at a Server host would fail on the first response rather than the first URL. Bitbucket Server support is a fourth adapter implementing the `Forge` Protocol in `forges/base.py` — see [CONTRIBUTING.md](../CONTRIBUTING.md), which is exactly the shape of contribution the Protocol exists for.
 
 ---
 
