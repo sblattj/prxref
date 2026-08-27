@@ -23,12 +23,16 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``"Request-Changes"`` iff any active error-severity finding survives;
    else ``"Approved"``. A partial failure keeps the verdict but the summary
    declares reduced coverage AND names the distinct reasons (deduplicated,
-   capped, inside the same blockquote) — a partial review reads as a
+   capped, redacted, inside the same blockquote) — a partial review reads as a
    successful one, so a reason left only in the logs reaches nobody.
 6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {note_count} {findings} {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
+
+Every failure reason that reaches a POSTED comment goes through
+:func:`redact_for_post` first — on both posting paths, the partial-review
+banner and the total-failure notice. The logs keep the full text.
 
 No stage failure raises out of ``orchestrate_review``: a forge failure, an
 unparseable or unchunkable diff, or a total LLM failure degrades to verdict
@@ -39,6 +43,7 @@ config-level range check in front of these arguments.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -67,6 +72,112 @@ MAX_INLINE_COMMENTS = 15
 MAX_REPORTED_REASONS = 3
 
 _SEVERITY_EMOJI = {"error": "🚨", "warning": "⚠️", "note": "📝"}
+
+_REDACTED = "[redacted]"
+
+# Key=value pairs whose VALUE is safe to post. An ALLOWLIST, deliberately: an
+# unrecognised key's value is dropped, so a future exception string carrying
+# ``gateway=``, ``session=`` or ``account=`` is covered without anyone having
+# had to think of it first. Everything listed here is prxref's own vocabulary,
+# emitted by prxref itself, and names a diagnostic the operator acts on —
+# ``max_tokens`` and ``finish_reason`` are the truncation message, whose whole
+# purpose is telling the operator which lever to pull, and ``model`` is already
+# posted verbatim by _attribution. ``port`` is NOT here: with a host it is the
+# endpoint's identity, and it diagnoses nothing on its own.
+_POSTABLE_KV_KEYS = frozenset({
+    "max_tokens", "finish_reason", "model", "status", "status_code", "code", "errno",
+})
+
+# Any scheme://rest-of-token. A URL is the single densest leak: it carries the
+# host, the path, and whatever the operator put in the query string.
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://\S+")
+
+# requests writes the request target as ``with url: /path?query`` — a bare path,
+# so _URL_RE never sees it, and the query string is where an api_key rides.
+_URL_FIELD_RE = re.compile(r"\burl\s*[:=]\s*\S+", re.IGNORECASE)
+
+# ``Bearer <token>``, with or without the ``Authorization:`` label in front,
+# then a labelled credential with no ``Bearer`` in it. Two patterns rather than
+# one so the label and its value are consumed together instead of leaving the
+# token behind as a bare word.
+_BEARER_RE = re.compile(
+    r"\b(?:authorization\s*[:=]?\s*)?bearer\b[\s:=]*\S*", re.IGNORECASE
+)
+_AUTH_FIELD_RE = re.compile(r"\bauthorization\b\s*[:=]\s*\S*", re.IGNORECASE)
+
+_IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+
+# A quoted single token containing a dot, colon, slash or at-sign: a hostname,
+# an address, a path, an account. ``Failed to resolve 'host.example'`` is not a
+# key=value pair and nothing else catches it. Quoted PROSE (anything with
+# whitespace in it) is left alone and sanitised by the other rules instead, so
+# a nested exception message keeps its diagnostic text.
+_QUOTED_LOCATOR_RE = re.compile(r"(['\"])([^'\"\s]*[.:/@][^'\"\s]*)\1")
+
+# The placeholder is listed as a value alternative FIRST so redaction is
+# idempotent: without it ``url=[redacted]`` (written a moment earlier by
+# _URL_FIELD_RE) re-matches with the value ``[redacted`` and leaves a stray
+# bracket behind.
+_KV_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*"
+    + r"(" + re.escape(_REDACTED) + r"|'[^']*'|\"[^\"]*\"|[^\s,;)\]}]+)"
+)
+
+# Known credential prefixes, for the ones too short to trip the length rule.
+_KNOWN_SECRET_RE = re.compile(
+    r"\b(?:sk|pk|rk|ghp|gho|ghu|ghs|glpat|xox[abprs])[-_][A-Za-z0-9_\-]{8,}\b"
+)
+
+# A long unbroken run of opaque characters is a credential shape (an API key, a
+# JWT segment, a session id). PRXREF_* names are exempt: they are the operator's
+# levers, prxref emits them itself, and PRXREF_GITHUB_ENTERPRISE_TOKEN is long
+# enough to trip this. A dotted Python name is exempt for free — ``.`` is a word
+# boundary, so ``requests.exceptions.ConnectionError`` is measured per segment.
+_OPAQUE_RE = re.compile(r"\b(?!PRXREF_)[A-Za-z0-9_\-]{24,}\b")
+
+
+def _redact_kv(match: re.Match) -> str:
+    """Keep an allowlisted key's value; drop every other one."""
+    key = match.group(1)
+    if key.lower() in _POSTABLE_KV_KEYS:
+        return match.group(0)
+    return f"{key}={_REDACTED}"
+
+
+def redact_for_post(reason: str) -> str:
+    """Strip endpoint and credential detail out of a reason before POSTING it.
+
+    prxref's entire job is writing comments onto pull requests, and a chunk
+    failure reason is one of the things it writes. ``requests`` puts the
+    gateway host, the request path and the query string into a
+    ``ConnectionError``'s message; ``OpenAICompatClient.invoke`` wraps that
+    verbatim; the reviewer stores it in ``meta["error"]``. Posted unedited on a
+    public repository, that publishes the operator's endpoint and any
+    credential riding in its URL.
+
+    The approach is allowlist-flavoured rather than a catalogue of secret
+    patterns: URLs, quoted network locators and every key=value pair whose key
+    is not in :data:`_POSTABLE_KV_KEYS` lose their value, so a leak shape
+    nobody anticipated is covered by default. What survives is the diagnostic
+    SHAPE an author can act on — the exception class, ``HTTP 429``, a timeout,
+    and the truncation message with its ``PRXREF_LLM_MAX_TOKENS`` hint, which
+    is byte-for-byte untouched — naming that lever is the only reason the
+    reason string is posted at all.
+
+    Applies to the POSTED text only. stderr keeps the full reason: the logs are
+    operator-only, and an operator debugging a dead gateway needs the host.
+    """
+    if not reason:
+        return reason
+    out = _URL_RE.sub(_REDACTED, reason)
+    out = _URL_FIELD_RE.sub(f"url={_REDACTED}", out)
+    out = _BEARER_RE.sub(_REDACTED, out)
+    out = _AUTH_FIELD_RE.sub(_REDACTED, out)
+    out = _IPV4_RE.sub(_REDACTED, out)
+    out = _QUOTED_LOCATOR_RE.sub(rf"\1{_REDACTED}\1", out)
+    out = _KV_RE.sub(_redact_kv, out)
+    out = _KNOWN_SECRET_RE.sub(_REDACTED, out)
+    return _OPAQUE_RE.sub(_REDACTED, out)
 
 _FALLBACK_SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
@@ -404,17 +515,30 @@ def _render_summary(
 
 
 def _failure_reason_lines(reasons: Sequence[str]) -> list[str]:
-    """Render distinct chunk-failure reasons as blockquote list items.
+    """Render distinct chunk-failure reasons as blockquote-ready lines.
+
+    Redacted first (:func:`redact_for_post`), because this text is posted onto
+    a pull request. Redaction runs BEFORE the dedup so that two reasons
+    differing only in a stripped detail collapse into the one fact they are.
 
     Deduplicated, because seven chunks starved by the same budget is one fact
     and not seven; capped at :data:`MAX_REPORTED_REASONS`, because a
     pathological run must not flood the comment. The overflow is counted out
     loud rather than dropped — a silent truncation here would repeat the very
     failure this banner exists to fix.
+
+    Returns one entry per RENDERED LINE, not one per reason. The caller
+    prefixes ``"> "`` per entry, so a reason containing a newline used to put
+    every line after the first outside the blockquote and mangle the rest of
+    the comment; continuation lines are indented under their bullet instead.
     """
-    distinct = sorted({reason for reason in reasons if reason})
-    lines = [f"- {reason}" for reason in distinct[:MAX_REPORTED_REASONS]]
-    hidden = len(distinct) - len(lines)
+    distinct = sorted({redact_for_post(reason) for reason in reasons if reason})
+    lines: list[str] = []
+    for reason in distinct[:MAX_REPORTED_REASONS]:
+        first, *rest = reason.splitlines() or [""]
+        lines.append(f"- {first}")
+        lines.extend(f"  {line}" for line in rest)
+    hidden = max(0, len(distinct) - MAX_REPORTED_REASONS)
     if hidden:
         plural = "s" if hidden > 1 else ""
         lines.append(f"- …and {hidden} more distinct reason{plural} (see logs)")
@@ -475,9 +599,12 @@ def _error_run(
         attribution = _attribution(
             model, input_tokens + output_tokens, elapsed_ms,
         )
+        # The same redaction the partial banner uses: this notice interpolates
+        # the reason into a public comment, and the caller has already logged
+        # the unredacted text for the operator.
         body = (
             "🤖 **prxref review — Error**\n\n"
-            f"The review could not complete: {reason}\n\n"
+            f"The review could not complete: {redact_for_post(reason)}\n\n"
             "No findings were produced.\n\n"
             f"{attribution}"
         )

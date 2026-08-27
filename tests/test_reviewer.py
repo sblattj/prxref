@@ -419,6 +419,15 @@ class TestOtherProviderTruncationSpellings:
         _findings, meta = review_chunk(llm, self._chunk())
         assert "(finish_reason=max_tokens)" in meta["error"]
 
+    @pytest.mark.parametrize("raw", ["LENGTH", " Length ", "Max_Tokens"])
+    def test_the_reason_is_quoted_as_the_provider_spelled_it(self, raw):
+        """Matching is casefolded; the message is not. Reporting a normalised
+        ``length`` for a gateway that logged ``LENGTH`` sends an operator
+        grepping for a string that is not in their log."""
+        llm = FakeLLM("", finish_reason=raw)
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert f"(finish_reason={raw.strip()})" in meta["error"]
+
     @pytest.mark.parametrize("raw", ["length_finish", "max_tokens_reached", "lengthy"])
     def test_a_neighbouring_spelling_is_not_a_false_positive(self, raw):
         """Matching is exact against the accepted set, never a substring test."""

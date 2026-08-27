@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import json
+import logging
 import sys
 import threading
 import types
@@ -147,6 +148,10 @@ class FakeForge:
         self.diff = diff
         self.threads = threads or []
         self.fail: set[str] = set()
+        # What get_pr raises when "get_pr" is in ``fail``. A test that cares
+        # about the TEXT of a forge failure (a URL in a 404, say) supplies its
+        # own; everything else keeps the generic boom.
+        self.pr_error: Exception | None = None
         self.summaries: list[str] = []
         self.inline_batches: list[list[InlineComment]] = []
 
@@ -156,7 +161,7 @@ class FakeForge:
 
     def get_pr(self, ref: PRRef) -> PRData:
         if "get_pr" in self.fail:
-            raise RuntimeError("boom get_pr")
+            raise self.pr_error or RuntimeError("boom get_pr")
         return self.pr
 
     def get_diff(self, ref: PRRef) -> str:
@@ -973,6 +978,27 @@ class TestPartialBannerNamesTheReasons:
         assert "…and 1 more distinct reason (see logs)" in tail
         assert tail.count("\n> - ") == orchestrator.MAX_REPORTED_REASONS + 1
 
+    def test_exactly_the_cap_reports_every_reason_and_no_overflow_line(self):
+        """The no-overflow boundary, one below the case above.
+
+        Three distinct reasons is exactly MAX_REPORTED_REASONS, so all three
+        are named and the "…and N more" line must NOT appear. It has to stay a
+        genuine PARTIAL run: with all four chunks failing this is a TOTAL
+        failure that never reaches the banner at all.
+        """
+        forge, res = self._with({
+            "a/one.py": "reason A",
+            "b/two.py": "reason B",
+            "c/three.py": "reason C",
+        })
+        assert res["chunks_failed"] == orchestrator.MAX_REPORTED_REASONS
+        assert res["chunks_reviewed"] == 1
+        tail = self._banner(forge)
+        for reason in ("reason A", "reason B", "reason C"):
+            assert reason in tail
+        assert "…and" not in tail
+        assert tail.count("\n> - ") == orchestrator.MAX_REPORTED_REASONS
+
     def test_a_clean_full_review_adds_nothing(self):
         """The discriminating control: no failures, no banner at all."""
         forge, res = self._with({})
@@ -1026,3 +1052,237 @@ class TestFailedChunkTelemetryIsCounted:
         assert res["verdict"] == "Error"
         assert "model=test-model-1" in forge.summaries[0]
         assert TRUNCATED_REASON in forge.summaries[0]
+
+
+# A fabricated stand-in for what ``requests`` actually produces: the gateway
+# host, the full request path, and a credential riding in the query string all
+# arrive inside one ConnectionError string, which invoke() wraps verbatim.
+LEAKY_HOST = "gateway.internal.example"
+LEAKY_SECRET = "sk-AbCdEf0123456789AbCdEf0123456789"
+LEAKY_REASON = (
+    "LLMError: all models failed: m1: ConnectionError: "
+    f"HTTPSConnectionPool(host='{LEAKY_HOST}', port=8443): "
+    "Max retries exceeded with url: "
+    f"/v1/chat/completions?api_key={LEAKY_SECRET} "
+    f"(Caused by NameResolutionError(\"Failed to resolve '{LEAKY_HOST}'\"))"
+)
+
+
+class TestPostedFailureReasonsAreSanitised:
+    """A failure reason is POSTED onto a pull request, and it can carry secrets.
+
+    ``requests`` writes the gateway host and the whole request URL — query
+    string included — into a ConnectionError's string;
+    ``OpenAICompatClient.invoke`` wraps that verbatim into ``LLMError``, the
+    reviewer stores it in ``meta["error"]``, and both posting paths interpolate
+    it into a comment. On a public repository that publishes the operator's
+    endpoint and any credential riding in its query string.
+
+    Redaction applies to what is POSTED only. stderr is operator-only, and an
+    operator debugging a dead gateway needs the host, so the logs keep the full
+    text.
+    """
+
+    def _partial(self, monkeypatch, reason):
+        """One chunk of four fails: a genuine partial run, banner path."""
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing({"a/one.py": reason}),
+        )
+        forge = FakeForge(diff=FOUR_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, max_chunks=4, token_budget=1000,
+        )
+        return forge, res
+
+    def _total(self, monkeypatch, reason):
+        """Every chunk fails: the _error_run notice path."""
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing(dict.fromkeys(
+                ("a/one.py", "b/two.py", "c/three.py", "d/four.py"), reason,
+            )),
+        )
+        forge = FakeForge(diff=FOUR_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, max_chunks=4, token_budget=1000,
+        )
+        return forge, res
+
+    def test_the_partial_banner_posts_neither_the_host_nor_the_credential(
+        self, monkeypatch,
+    ):
+        forge, res = self._partial(monkeypatch, LEAKY_REASON)
+        assert res["chunks_failed"] == 1 and res["chunks_reviewed"] == 3
+        body = forge.summaries[0]
+        assert "Partial review" in body
+        assert LEAKY_SECRET not in body
+        assert LEAKY_HOST not in body
+        assert "[redacted]" in body
+
+    def test_the_total_failure_notice_posts_neither_either(self, monkeypatch):
+        forge, res = self._total(monkeypatch, LEAKY_REASON)
+        assert res["verdict"] == "Error"
+        body = forge.summaries[0]
+        assert "could not complete" in body
+        assert LEAKY_SECRET not in body
+        assert LEAKY_HOST not in body
+        assert "[redacted]" in body
+
+    def test_a_forge_stage_failure_is_sanitised_on_the_same_path(self):
+        """``get_pr failed: <exc>`` reaches the same notice, and a forge client
+        puts its base URL in the exception just as readily."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail = {"get_pr"}
+        forge.pr_error = RuntimeError(
+            f"404 Client Error for url: https://{LEAKY_HOST}/api/v1/pulls/1"
+        )
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=True)
+        assert res["verdict"] == "Error"
+        body = forge.summaries[0]
+        assert "get_pr failed" in body
+        assert LEAKY_HOST not in body
+
+    @pytest.mark.parametrize("path", ["partial", "total"])
+    def test_the_truncation_message_and_its_lever_survive_intact(
+        self, monkeypatch, path,
+    ):
+        """The whole point of naming the budget is that the operator can act on
+        it, so redaction must not eat ``max_tokens=`` or the variable name."""
+        run = self._partial if path == "partial" else self._total
+        forge, _res = run(monkeypatch, TRUNCATED_REASON)
+        assert TRUNCATED_REASON in forge.summaries[0]
+
+    def test_the_diagnostic_shape_survives_on_both_paths(self, monkeypatch):
+        """Redacted is not the same as useless: the exception class and the
+        failure mode still reach the reader."""
+        forge, _res = self._partial(monkeypatch, LEAKY_REASON)
+        assert "ConnectionError" in forge.summaries[0]
+        assert "LLMError" in forge.summaries[0]
+
+    def test_the_unredacted_reason_still_reaches_the_log(self, monkeypatch, caplog):
+        """The discriminating control: the operator's stderr is NOT degraded."""
+        with caplog.at_level(logging.ERROR, logger="prxref"):
+            forge, _res = self._partial(monkeypatch, LEAKY_REASON)
+        assert LEAKY_SECRET in caplog.text
+        assert LEAKY_HOST in caplog.text
+        assert LEAKY_SECRET not in forge.summaries[0]
+
+    def test_the_total_failure_log_keeps_the_full_reason_too(
+        self, monkeypatch, caplog,
+    ):
+        with caplog.at_level(logging.ERROR, logger="prxref"):
+            forge, _res = self._total(monkeypatch, LEAKY_REASON)
+        assert LEAKY_SECRET in caplog.text
+        assert LEAKY_SECRET not in forge.summaries[0]
+
+    def test_a_clean_reason_is_posted_unchanged(self, monkeypatch):
+        """Control: redaction must not fire on a reason carrying no secret."""
+        forge, _res = self._partial(monkeypatch, "RuntimeError: connection reset")
+        assert "- RuntimeError: connection reset" in forge.summaries[0]
+        assert "[redacted]" not in forge.summaries[0]
+
+
+class TestRedactForPost:
+    """Unit coverage for the single redaction both posting paths call."""
+
+    @pytest.mark.parametrize("reason", [
+        "ConnectionError: failed to reach https://gw.example.test/v1/chat?key=abc123",
+        "InvalidURL: http://user:pw@gw.example.test:8443/v1",
+    ])
+    def test_a_url_is_replaced_wholesale(self, reason):
+        out = orchestrator.redact_for_post(reason)
+        assert "://" not in out
+        assert "gw.example.test" not in out
+        assert "[redacted]" in out
+
+    def test_a_host_fragment_is_replaced_quoted_or_bare(self):
+        quoted = orchestrator.redact_for_post("Pool(host='gw.example.test', port=443)")
+        bare = orchestrator.redact_for_post("Pool(host=gw.example.test, port=443)")
+        assert "gw.example.test" not in quoted
+        assert "gw.example.test" not in bare
+
+    def test_a_bare_quoted_hostname_is_replaced_too(self):
+        """``Failed to resolve 'gw.example.test'`` is not a key=value pair."""
+        out = orchestrator.redact_for_post(
+            "NameResolutionError: Failed to resolve 'gw.example.test'"
+        )
+        assert "gw.example.test" not in out
+        assert "NameResolutionError" in out
+
+    @pytest.mark.parametrize("reason", [
+        "auth failed: api_key=sk-AbCdEf0123456789AbCdEf0123456789",
+        "auth failed: token=AbCdEf0123456789AbCdEf0123456789",
+        "auth failed: key=AbCdEf0123456789AbCdEf0123456789",
+        "auth failed: Authorization: Bearer AbCdEf0123456789AbCdEf",
+    ])
+    def test_credential_shapes_are_replaced(self, reason):
+        out = orchestrator.redact_for_post(reason)
+        assert "AbCdEf" not in out
+        assert "[redacted]" in out
+
+    def test_an_ip_address_is_replaced(self):
+        out = orchestrator.redact_for_post("ConnectionError: no route to 10.11.12.13")
+        assert "10.11.12.13" not in out
+
+    def test_the_truncation_message_is_byte_identical(self):
+        """``max_tokens=`` is a key=value pair and must NOT be mistaken for a
+        credential; the env-var hint must survive too."""
+        assert orchestrator.redact_for_post(TRUNCATED_REASON) == TRUNCATED_REASON
+
+    @pytest.mark.parametrize("reason", [
+        "LLMError: all models failed: m1: HTTP 429",
+        "RuntimeError: timeout",
+        "get_pr failed: boom get_pr",
+        "parse_unified_diff failed: unparseable diff",
+        "worker review JSON is not an object: list",
+    ])
+    def test_a_reason_carrying_nothing_sensitive_is_untouched(self, reason):
+        assert orchestrator.redact_for_post(reason) == reason
+
+    def test_redaction_is_idempotent(self):
+        """Re-redacting must not chew on its own placeholder: the kv rule used
+        to re-match ``url=[redacted]`` and leave a stray bracket behind."""
+        once = orchestrator.redact_for_post(LEAKY_REASON)
+        assert orchestrator.redact_for_post(once) == once
+        assert "[redacted]]" not in once
+
+    def test_the_model_name_is_allowed_through(self):
+        """``_attribution`` already posts ``model=`` by design."""
+        out = orchestrator.redact_for_post("failed on model=glm-5.3-flash")
+        assert "model=glm-5.3-flash" in out
+
+
+class TestMultiLineReasonsStayInTheBlockquote:
+    """A reason with a newline used to break out of the ``> ⚠️`` blockquote.
+
+    ``_failure_reason_lines`` prefixed ``> `` once per REASON, not once per
+    LINE, so a provider that answers with a two-line message mangled the whole
+    comment from that point on.
+    """
+
+    def _run(self, monkeypatch, reason):
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing({"a/one.py": reason}),
+        )
+        forge = FakeForge(diff=FOUR_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, max_chunks=4, token_budget=1000,
+        )
+        return forge, res
+
+    MULTILINE = "RuntimeError: upstream refused the request\nsecond line of the reason"
+
+    def test_every_line_carries_the_blockquote_marker(self, monkeypatch):
+        forge, res = self._run(monkeypatch, self.MULTILINE)
+        assert res["chunks_failed"] == 1
+        tail = forge.summaries[0].split("> ⚠️ Partial review:")[1]
+        assert [
+            line for line in tail.splitlines()[1:]
+            if line.strip() and not line.startswith(">")
+        ] == []
+
+    def test_the_continuation_text_is_still_reported(self, monkeypatch):
+        forge, _res = self._run(monkeypatch, self.MULTILINE)
+        assert "second line of the reason" in forge.summaries[0]
