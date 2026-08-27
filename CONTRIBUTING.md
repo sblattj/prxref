@@ -19,13 +19,19 @@ Both must pass before a PR can merge. CI runs exactly these on Python 3.12 and
 3.13:
 
 ```bash
-uv run pytest              # 236 tests, no network required
+uv run pytest              # no network required
 uv run ruff check src tests
 ```
 
 The suite is fully offline — every forge and LLM call is stubbed. If a change
 you make needs the network to test, that is a design smell worth raising in the
-issue first.
+issue first. `pytest --collect-only -q | tail -1` prints the current test count
+if you want one; this file deliberately does not, because a hard number here
+goes stale on the next PR and nobody notices.
+
+Note that `pyproject.toml` sets no `addopts`. That is deliberate: pytest appends
+your flags to whatever lives there, so a `-q` in the config turned every
+`pytest -q` into `-qq` and silently swallowed the pass/fail summary line.
 
 To check that packaging still works:
 

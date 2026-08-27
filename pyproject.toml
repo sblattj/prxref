@@ -64,7 +64,10 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# No addopts. `-q` lived here and was a trap: pytest ADDS the caller's flags to
+# these, so anyone running `pytest -q` (CI does, and so does most muscle memory)
+# got `-qq`, which suppresses the "N passed" summary line entirely — a green run
+# and a collection-error run look identical. Callers that want quiet pass -q.
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "BLE"]
