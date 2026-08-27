@@ -148,6 +148,40 @@ class TestReviewSubcommand:
         assert calls[0]["post"] is True
         assert calls[0]["forge"].name == "github"
 
+    def test_configured_max_tokens_reaches_the_orchestrator(
+        self, fake_runtime, monkeypatch
+    ):
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=7,
+            url="https://github.com/org/repo/pull/7",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+        monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", "8192")
+
+        assert main(["review", "--pr-url", "https://github.com/org/repo/pull/7"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["max_tokens"] == 8192
+
+    def test_default_max_tokens_is_todays_hardcoded_budget(
+        self, fake_runtime, monkeypatch
+    ):
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=7,
+            url="https://github.com/org/repo/pull/7",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+        monkeypatch.delenv("PRXREF_LLM_MAX_TOKENS", raising=False)
+
+        assert main(["review", "--pr-url", "https://github.com/org/repo/pull/7"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["max_tokens"] == 4096
+
     def test_unknown_pr_url_exits_0_with_stderr_hint(self, fake_runtime, monkeypatch, capsys):
         monkeypatch.setattr("prxref.cli.detect_forge", lambda url: None)
 

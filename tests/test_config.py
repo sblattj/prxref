@@ -2,6 +2,7 @@
 import pytest
 import requests
 
+from prxref import llm_backends, reviewer
 from prxref.config import load_config, make_forge
 from prxref.forges import bitbucket, github, gitlab
 from prxref.forges.base import PRRef
@@ -12,6 +13,10 @@ _ALL_ENV_KEYS = [
     "PRXREF_LLM_BASE_URL",
     "PRXREF_LLM_API_KEY",
     "PRXREF_LLM_MODELS",
+    "PRXREF_LLM_REASONING_EFFORT",
+    "PRXREF_LLM_MAX_TOKENS",
+    "PRXREF_LLM_TIMEOUT",
+    "PRXREF_LLM_TEMPERATURE",
     "PRXREF_CONFIDENCE_FLOOR",
     "PRXREF_MAX_ERRORS",
     "PRXREF_MAX_ERROR_FINDINGS",
@@ -56,6 +61,9 @@ class TestLoadConfigDefaults:
         assert cfg["confidence_floor"] == 0.6
         assert cfg["max_error_findings"] == DEFAULT_MAX_ERRORS
         assert cfg["max_chunks"] == 8
+        assert cfg["llm_max_tokens"] == 4096
+        assert cfg["llm_timeout"] == 45.0
+        assert cfg["llm_temperature"] == ""
         assert cfg["bitbucket_token"] == ""
         assert cfg["github_token"] == ""
         assert cfg["gitlab_token"] == ""
@@ -120,6 +128,44 @@ class TestLoadConfigEnv:
         monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "high")
         with pytest.raises(ValueError, match="PRXREF_CONFIDENCE_FLOOR"):
             load_config()
+
+
+class TestLLMBudgetKnobs:
+    """PRXREF_LLM_MAX_TOKENS / _TIMEOUT / _TEMPERATURE: defaults, coercion, errors."""
+
+    def test_defaults_equal_todays_hardcoded_values(self):
+        cfg = load_config()
+        assert cfg["llm_max_tokens"] == reviewer.MAX_TOKENS == 4096
+        assert cfg["llm_timeout"] == llm_backends.DEFAULT_TIMEOUT == 45.0
+        assert cfg["llm_temperature"] == ""
+
+    def test_env_coercions(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", "8192")
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "90")
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "0.2")
+        cfg = load_config()
+        assert cfg["llm_max_tokens"] == 8192
+        assert isinstance(cfg["llm_max_tokens"], int)
+        assert cfg["llm_timeout"] == 90.0
+        assert isinstance(cfg["llm_timeout"], float)
+        # temperature stays a string here: "" must survive as "omit it".
+        assert cfg["llm_temperature"] == "0.2"
+
+    def test_invalid_max_tokens_names_the_variable(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", "lots")
+        with pytest.raises(ValueError, match="PRXREF_LLM_MAX_TOKENS"):
+            load_config()
+
+    def test_invalid_timeout_names_the_variable(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "soon")
+        with pytest.raises(ValueError, match="PRXREF_LLM_TIMEOUT"):
+            load_config()
+
+    def test_overrides_accept_the_new_keys(self):
+        cfg = load_config(llm_max_tokens=1024, llm_timeout=5.0, llm_temperature="0.9")
+        assert cfg["llm_max_tokens"] == 1024
+        assert cfg["llm_timeout"] == 5.0
+        assert cfg["llm_temperature"] == "0.9"
 
 
 class TestMaxErrorFindingsConfig:

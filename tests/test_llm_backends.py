@@ -69,7 +69,9 @@ class _PayloadCapturingSession:
         return _resp()
 
 
-def _client_capturing_payload(models=("m1",), reasoning_effort=None, fail_first=False):
+def _client_capturing_payload(
+    models=("m1",), reasoning_effort=None, fail_first=False, temperature=None
+):
     """Build an OpenAICompatClient whose session records posted payloads; returns (client, captured)."""
     captured: list[dict] = []
     client = OpenAICompatClient(
@@ -79,6 +81,7 @@ def _client_capturing_payload(models=("m1",), reasoning_effort=None, fail_first=
         session=_PayloadCapturingSession(captured, fail_first),
         default_timeout=45.0,
         reasoning_effort=reasoning_effort,
+        temperature=temperature,
     )
     return client, captured
 
@@ -199,6 +202,32 @@ class TestReasoningEffort:
         assert "reasoning_effort" not in captured[0]
 
 
+class TestTemperature:
+    """Unset temperature must leave the key out of the payload entirely."""
+
+    def test_absent_by_default(self):
+        client, captured = _client_capturing_payload()
+        client.invoke(system="s", user="u")
+        assert "temperature" not in captured[0]
+
+    def test_sent_when_configured(self):
+        client, captured = _client_capturing_payload(temperature=0.2)
+        client.invoke(system="s", user="u")
+        assert captured[0]["temperature"] == 0.2
+
+    def test_zero_is_a_real_value_not_an_omission(self):
+        client, captured = _client_capturing_payload(temperature=0.0)
+        client.invoke(system="s", user="u")
+        assert captured[0]["temperature"] == 0.0
+
+    def test_applies_to_every_model_in_the_chain(self):
+        client, captured = _client_capturing_payload(
+            models=["a", "b"], temperature=0.7, fail_first=True
+        )
+        client.invoke(system="s", user="u")
+        assert [c.get("temperature") for c in captured] == [0.7, 0.7]
+
+
 class TestNoShippedDefaults:
     def test_unset_endpoint_raises_config_error(self, monkeypatch):
         for v in ("PRXREF_LLM_BASE_URL", "PRXREF_LLM_MODELS", "PRXREF_LLM_API_KEY"):
@@ -286,6 +315,71 @@ class TestCreateLLMClient:
         assert c.reasoning_effort == "low"
 
 
+class TestBudgetKnobsFromConfig:
+    """PRXREF_LLM_TIMEOUT / _TEMPERATURE reach the built client and the wire."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        for v in ("PRXREF_LLM_TIMEOUT", "PRXREF_LLM_TEMPERATURE", "PRXREF_LLM_BACKEND"):
+            monkeypatch.delenv(v, raising=False)
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "a")
+
+    def test_timeout_defaults_to_45(self):
+        assert create_llm_client().default_timeout == 45.0
+
+    def test_timeout_from_env_reaches_session_post(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert s.calls[0]["timeout"] == 12.5
+
+    def test_timeout_from_cfg_beats_env(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
+        s = _ScriptedSession(_resp())
+        create_llm_client({"llm_timeout": 3.0}, session=s).invoke("sys", "usr")
+        assert s.calls[0]["timeout"] == 3.0
+
+    def test_temperature_unset_is_omitted_from_the_payload(self):
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert "temperature" not in s.calls[0]["json"]
+
+    def test_temperature_from_env_reaches_the_payload(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "0.35")
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert s.calls[0]["json"]["temperature"] == 0.35
+
+    def test_empty_temperature_string_is_still_an_omission(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "   ")
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert "temperature" not in s.calls[0]["json"]
+
+    def test_malformed_temperature_names_the_variable(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "hot")
+        with pytest.raises(ValueError, match="PRXREF_LLM_TEMPERATURE"):
+            create_llm_client()
+
+    def test_malformed_timeout_names_the_variable(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "soon")
+        with pytest.raises(ValueError, match="PRXREF_LLM_TIMEOUT"):
+            create_llm_client()
+
+    def test_litellm_client_receives_the_configured_timeout(self, monkeypatch):
+        """Regression: create_llm_client built LiteLLMClient without default_timeout."""
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "litellm")
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "7.5")
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "0.4")
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=lambda **kw: None)
+        )
+        c = create_llm_client()
+        assert c.default_timeout == 7.5
+        assert c.temperature == 0.4
+
+
 class TestLiteLLMClient:
     def test_import_error_points_at_extra(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "litellm", None)
@@ -332,3 +426,25 @@ class TestLiteLLMClient:
         client, captured = self._installed(monkeypatch)
         client.invoke("sys", "usr")
         assert captured[0]["timeout"] == 45.0
+
+    def test_temperature_omitted_when_unset(self, monkeypatch):
+        client, captured = self._installed(monkeypatch)
+        client.invoke("sys", "usr")
+        assert "temperature" not in captured[0]
+
+    def test_temperature_sent_when_configured(self, monkeypatch):
+        captured = []
+
+        def fake_completion(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="lit-ok"))],
+                usage=None,
+                model="m",
+            )
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        LiteLLMClient(models=["p"], temperature=0.25).invoke("sys", "usr")
+        assert captured[0]["temperature"] == 0.25

@@ -11,6 +11,12 @@ LLM / pipeline:
   PRXREF_LLM_REASONING_EFFORT   Reasoning effort for models that cannot
                                 disable reasoning; provider-specific string,
                                 passed through unvalidated; empty = omit
+  PRXREF_LLM_MAX_TOKENS         Completion-token budget per worker review
+                                call (default 4096)
+  PRXREF_LLM_TIMEOUT            Per-request LLM timeout in seconds
+                                (default 45.0)
+  PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; empty =
+                                omit from the request (provider default)
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped
                                 (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -52,6 +58,9 @@ _DEFAULTS: dict[str, object] = {
     "llm_api_key": "",
     "llm_models": [],
     "llm_reasoning_effort": "",
+    "llm_max_tokens": 4096,
+    "llm_timeout": 45.0,
+    "llm_temperature": "",
     "confidence_floor": 0.6,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
@@ -67,8 +76,8 @@ _DEFAULTS: dict[str, object] = {
     "allow_unsigned": False,
 }
 
-_INT_KEYS = frozenset({"max_error_findings", "max_chunks"})
-_FLOAT_KEYS = frozenset({"confidence_floor"})
+_INT_KEYS = frozenset({"max_error_findings", "max_chunks", "llm_max_tokens"})
+_FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned"})
 _LIST_KEYS = frozenset({"llm_models"})
 

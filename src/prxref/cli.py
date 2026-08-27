@@ -145,6 +145,7 @@ def _run_review(
         llm=llm,
         post=post,
         max_chunks=max_chunks if max_chunks is not None else cfg.get("MAX_CHUNKS", 8),
+        max_tokens=cfg.get("llm_max_tokens"),
     )
 
 

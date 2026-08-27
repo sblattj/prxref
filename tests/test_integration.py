@@ -170,6 +170,10 @@ def clean_prxref_env(monkeypatch):
         "PRXREF_LLM_BASE_URL",
         "PRXREF_LLM_API_KEY",
         "PRXREF_LLM_MODELS",
+        "PRXREF_LLM_REASONING_EFFORT",
+        "PRXREF_LLM_MAX_TOKENS",
+        "PRXREF_LLM_TIMEOUT",
+        "PRXREF_LLM_TEMPERATURE",
         "PRXREF_CONFIDENCE_FLOOR",
         "PRXREF_MAX_ERRORS",
         "PRXREF_MAX_ERROR_FINDINGS",
@@ -612,5 +616,68 @@ class TestScenario5CliEndToEnd:
             captured = capsys.readouterr()
             assert "verdict: Request-Changes" in captured.out
             assert [r["model"] for r in server.requests] == ["fast"]
+        finally:
+            server.stop()
+
+
+class TestLLMBudgetKnobsEndToEnd:
+    """Scenario: PRXREF_LLM_MAX_TOKENS / _TEMPERATURE from env to the wire.
+
+    Runs the documented CLI path (``cli._run_review`` -> ``load_config`` ->
+    ``create_llm_client`` -> ``orchestrate_review`` -> ``reviewer``) against the
+    mock OpenAI server, then reads the request the server actually received.
+    Only the forge is faked; every configuration hop is real.
+    """
+
+    PR_URL = "https://github.com/acme/prxref-test/pull/15"
+
+    def _run(self, monkeypatch, server_url, env: dict[str, str]) -> None:
+        ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="acme",
+            repo="prxref-test",
+            number=15,
+            url=self.PR_URL,
+        )
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "openai-compat")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", server_url)
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "fast")
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setattr(cli, "detect_forge", lambda url: ref)
+        monkeypatch.setattr(
+            cli, "make_forge", lambda r, session=None: FakeForge(diff=_make_diff("src/auth.py"))
+        )
+        cli._run_review(self.PR_URL, post=False)
+
+    def test_defaults_send_todays_budget_and_no_temperature(
+        self, clean_prxref_env, monkeypatch
+    ):
+        server = MockOpenAIServer()
+        base_url = server.start()
+        try:
+            self._run(monkeypatch, base_url, {})
+            assert len(server.requests) == 1
+            payload = server.requests[0]["payload"]
+            assert payload["max_tokens"] == 4096
+            assert "temperature" not in payload
+        finally:
+            server.stop()
+
+    def test_configured_budget_and_temperature_reach_the_request(
+        self, clean_prxref_env, monkeypatch
+    ):
+        server = MockOpenAIServer()
+        base_url = server.start()
+        try:
+            self._run(
+                monkeypatch,
+                base_url,
+                {"PRXREF_LLM_MAX_TOKENS": "8192", "PRXREF_LLM_TEMPERATURE": "0.3"},
+            )
+            payload = server.requests[0]["payload"]
+            assert payload["max_tokens"] == 8192
+            assert payload["temperature"] == 0.3
         finally:
             server.stop()
