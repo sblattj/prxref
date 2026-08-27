@@ -12,8 +12,15 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
-class ConfigError(Exception):
-    """Required LLM configuration is missing; a usage error, not a review failure."""
+class ConfigError(ValueError):
+    """Required configuration is missing, malformed, or out of range.
+
+    A usage error, not a review failure: the CLI turns it into exit 2 while
+    every review-time failure exits 0. It subclasses ``ValueError`` because a
+    malformed value IS a bad value — callers that already catch ``ValueError``
+    around config parsing keep working, and ``except ConfigError`` in
+    :mod:`prxref.cli` now sees malformed values as well as missing ones.
+    """
 
 
 @dataclass

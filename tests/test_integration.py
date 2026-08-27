@@ -16,7 +16,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-import pytest
 import requests
 
 from prxref import cli
@@ -162,34 +161,6 @@ class MockOpenAIServer:
             self.thread.join(timeout=2.0)
 
 
-@pytest.fixture
-def clean_prxref_env(monkeypatch):
-    """Ensure PRXREF_* environment variables do not leak into tests."""
-    vars_to_clear = [
-        "PRXREF_LLM_BACKEND",
-        "PRXREF_LLM_BASE_URL",
-        "PRXREF_LLM_API_KEY",
-        "PRXREF_LLM_MODELS",
-        "PRXREF_LLM_REASONING_EFFORT",
-        "PRXREF_LLM_MAX_TOKENS",
-        "PRXREF_LLM_TIMEOUT",
-        "PRXREF_LLM_TEMPERATURE",
-        "PRXREF_CONFIDENCE_FLOOR",
-        "PRXREF_MAX_ERRORS",
-        "PRXREF_MAX_ERROR_FINDINGS",
-        "PRXREF_MAX_CHUNKS",
-        "PRXREF_GITHUB_TOKEN",
-        "PRXREF_BITBUCKET_TOKEN",
-        "PRXREF_GITLAB_TOKEN",
-        "PRXREF_GITHUB_WEBHOOK_SECRET",
-        "PRXREF_BITBUCKET_WEBHOOK_SECRET",
-        "PRXREF_GITLAB_WEBHOOK_SECRET",
-        "PRXREF_ALLOW_UNSIGNED",
-    ]
-    for v in vars_to_clear:
-        monkeypatch.delenv(v, raising=False)
-
-
 def _make_diff(path: str = "src/auth.py") -> str:
     return (
         f"diff --git a/{path} b/{path}\n"
@@ -223,7 +194,7 @@ class TestScenario1HappyPath:
     create_llm_client() ignores — reported as a src bug, not patched here.
     """
 
-    def test_happy_path_end_to_end(self, clean_prxref_env, monkeypatch):
+    def test_happy_path_end_to_end(self, monkeypatch):
         llm_response_findings = {
             "findings": [
                 {
@@ -333,7 +304,7 @@ class TestScenario2ModelFallback:
     which model each request carried.
     """
 
-    def test_model_fallback_500_to_200(self, clean_prxref_env, monkeypatch):
+    def test_model_fallback_500_to_200(self, monkeypatch):
         llm_response = {
             "findings": [
                 {
@@ -529,7 +500,7 @@ class TestScenario5CliEndToEnd:
     monkeypatched (no network); Session.post stays real for the LLM client.
     """
 
-    def test_cli_review_command(self, clean_prxref_env, monkeypatch, capsys):
+    def test_cli_review_command(self, monkeypatch, capsys):
         llm_response = {
             "findings": [
                 {
@@ -652,7 +623,7 @@ class TestLLMBudgetKnobsEndToEnd:
         cli._run_review(self.PR_URL, post=False)
 
     def test_defaults_send_todays_budget_and_no_temperature(
-        self, clean_prxref_env, monkeypatch
+        self, monkeypatch
     ):
         server = MockOpenAIServer()
         base_url = server.start()
@@ -665,8 +636,36 @@ class TestLLMBudgetKnobsEndToEnd:
         finally:
             server.stop()
 
+    def test_malformed_temperature_exits_2_through_the_real_client(
+        self, monkeypatch, capsys
+    ):
+        """Temperature is parsed inside create_llm_client, so only the real
+        backend proves the exit-2 contract for it."""
+        ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="acme",
+            repo="prxref-test",
+            number=15,
+            url=self.PR_URL,
+        )
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.invalid/v1")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "fast")
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "hot")
+        monkeypatch.setattr(cli, "detect_forge", lambda url: ref)
+        monkeypatch.setattr(
+            cli, "make_forge", lambda r, session=None: FakeForge(diff=_make_diff())
+        )
+
+        rc = cli.main(["review", "--pr-url", self.PR_URL, "--no-post"])
+
+        assert rc == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert "PRXREF_LLM_TEMPERATURE" in err
+
     def test_configured_budget_and_temperature_reach_the_request(
-        self, clean_prxref_env, monkeypatch
+        self, monkeypatch
     ):
         server = MockOpenAIServer()
         base_url = server.start()

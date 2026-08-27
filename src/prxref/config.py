@@ -12,11 +12,12 @@ LLM / pipeline:
                                 disable reasoning; provider-specific string,
                                 passed through unvalidated; empty = omit
   PRXREF_LLM_MAX_TOKENS         Completion-token budget per worker review
-                                call (default 4096)
-  PRXREF_LLM_TIMEOUT            Per-request LLM timeout in seconds
-                                (default 45.0)
-  PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; empty =
-                                omit from the request (provider default)
+                                call; positive int (default 4096)
+  PRXREF_LLM_TIMEOUT            Per-request LLM timeout in seconds; must be
+                                greater than 0 (default 45.0)
+  PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
+                                >= 0, no upper bound (provider-specific);
+                                empty = omit from the request
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped
                                 (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -39,15 +40,22 @@ Webhooks:
                                   webhooks (default off; insecure)
 
 Precedence: built-in defaults < environment < ``overrides`` kwargs.
+An empty or whitespace-only environment value reads as unset, so a stray
+``PRXREF_LLM_TIMEOUT= `` in a .env file keeps the default instead of aborting.
 ``None``-valued overrides are ignored (callers may pass optional values).
 Unknown override keys raise ``ValueError`` so typos surface immediately.
+A malformed or out-of-range value raises :class:`~prxref.llm.ConfigError`,
+which the CLI reports as a configuration error and exits 2 for — never as a
+review failure.
 """
 from __future__ import annotations
 
+import math
 import os
 
 from prxref.forges.base import Forge, PRRef
 
+from .llm import ConfigError
 from .quality import DEFAULT_MAX_ERRORS
 
 _ENV_PREFIX = "PRXREF_"
@@ -81,6 +89,11 @@ _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned"})
 _LIST_KEYS = frozenset({"llm_models"})
 
+# Numbers that are meaningless at or below zero: a zero token budget asks the
+# model for an empty completion, a zero timeout fails every request instantly.
+# Checked after overrides, so no path into the config can smuggle one through.
+_POSITIVE_KEYS = frozenset({"llm_max_tokens", "llm_timeout"})
+
 _LEGACY_ENV_ALIASES: dict[str, str] = {
     "max_error_findings": _ENV_PREFIX + "MAX_ERRORS",
 }
@@ -98,34 +111,60 @@ def _truthy(raw: str) -> bool:
 
 
 def _coerce_env(key: str, raw: str) -> object:
+    """Type-coerce one env value; a malformed one is a usage error, not a crash."""
     try:
         if key in _INT_KEYS:
-            return int(raw)
+            return int(raw.strip())
         if key in _FLOAT_KEYS:
-            return float(raw)
+            return float(raw.strip())
         if key in _BOOL_KEYS:
             return _truthy(raw)
         if key in _LIST_KEYS:
             return [part.strip() for part in raw.split(",") if part.strip()]
         return raw
     except ValueError as exc:
-        raise ValueError(f"{_ENV_PREFIX}{key.upper()}: {exc}") from exc
+        raise ConfigError(f"{_ENV_PREFIX}{key.upper()}: {exc}") from exc
+
+
+def _check_ranges(cfg: dict[str, object]) -> None:
+    """Reject degenerate numbers before they reach the wire.
+
+    Runs after environment AND overrides, so every path into the config is
+    covered. Failures name the environment variable and are ``ConfigError``
+    (exit 2) rather than a mid-review error the operator has to decode from a
+    provider's rejection.
+    """
+    for key in sorted(_POSITIVE_KEYS):
+        value = cfg[key]
+        ok = (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value > 0
+        )
+        if not ok:
+            raise ConfigError(
+                f"{_ENV_PREFIX}{key.upper()}: must be a finite number greater "
+                f"than 0, got {value!r}"
+            )
 
 
 def load_config(**overrides: object) -> dict:
     """Build the runtime config dict from defaults, environment, then overrides.
 
     Keys mirror the env table above (lowercase, no prefix). Env values are
-    type-coerced per key (int / float / bool / comma-list / str); a malformed
-    env value raises ``ValueError`` naming the offending variable.
+    type-coerced per key (int / float / bool / comma-list / str); an empty or
+    whitespace-only value reads as unset. A malformed or out-of-range value
+    raises :class:`~prxref.llm.ConfigError` naming the offending variable,
+    which the CLI turns into exit 2.
     """
     cfg: dict[str, object] = dict(_DEFAULTS)
     for key in _DEFAULTS:
         raw = os.environ.get(_ENV_PREFIX + key.upper())
-        if raw is None or raw == "":
+        if raw is None or not raw.strip():
             legacy = _LEGACY_ENV_ALIASES.get(key)
             raw = os.environ.get(legacy) if legacy else None
-        if raw is None or raw == "":
+        if raw is None or not raw.strip():
             continue
         cfg[key] = _coerce_env(key, raw)
     for key, value in overrides.items():
@@ -134,6 +173,7 @@ def load_config(**overrides: object) -> dict:
         if value is None:
             continue
         cfg[key] = value
+    _check_ranges(cfg)
     return cfg
 
 
