@@ -37,6 +37,16 @@ LLM / pipeline:
                                 (default off). Applies to the webhook daemon
                                 as well as the CLI; ``--no-post`` is the
                                 per-invocation equivalent and still wins.
+  PRXREF_POST_MODE              What gets posted to the forge:
+                                "summary+inline" (default) | "summary" |
+                                "inline". Any other value is a
+                                configuration error. Superseded entirely by
+                                PRXREF_DRY_RUN / ``--no-post``, which post
+                                nothing in any mode.
+  PRXREF_POST_VERDICT           literal "1" keeps the verdict stamp in the
+                                posted summary; any other value renders the
+                                summary without it (default on). The
+                                total-failure notice always names its status.
 
 Per-forge auth:
   PRXREF_BITBUCKET_TOKEN        Bitbucket bearer token
@@ -100,6 +110,8 @@ _DEFAULTS: dict[str, object] = {
     "max_workers": 4,
     "max_inline_comments": 15,
     "dry_run": False,
+    "post_mode": "summary+inline",
+    "post_verdict": True,
     "bitbucket_token": "",
     "bitbucket_user": "",
     "bitbucket_app_password": "",
@@ -117,8 +129,13 @@ _INT_KEYS = frozenset({
     "chunk_token_budget", "max_workers", "max_inline_comments",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
-_BOOL_KEYS = frozenset({"allow_unsigned", "dry_run"})
+_BOOL_KEYS = frozenset({"allow_unsigned", "dry_run", "post_verdict"})
 _LIST_KEYS = frozenset({"llm_models"})
+
+# The posting-behaviour vocabulary, validated rather than trusted. Restated in
+# prxref.orchestrator (config stays a leaf module); pinned together by
+# TestPostMode::test_the_vocabulary_matches_the_orchestrator.
+_POST_MODES = ("summary+inline", "summary", "inline")
 
 
 class _Range(NamedTuple):
@@ -236,6 +253,22 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
             raise ConfigError(f"{sources[key]}: {rng.describe()}, got {value!r}")
 
 
+def _check_post_mode(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Reject a ``post_mode`` outside the documented vocabulary.
+
+    Same doctrine as :func:`_check_ranges`: it runs after environment AND
+    overrides, and a failure is a ``ConfigError`` naming whichever input
+    supplied the value — exit 2 before anything is reviewed, never a silent
+    fall-back to the default mode that would post findings nobody asked for.
+    """
+    value = cfg["post_mode"]
+    if value not in _POST_MODES:
+        raise ConfigError(
+            f"{sources['post_mode']}: must be one of "
+            f"{' | '.join(_POST_MODES)}, got {value!r}"
+        )
+
+
 def load_config(
     *, source_labels: dict[str, str] | None = None, **overrides: object
 ) -> dict:
@@ -280,6 +313,7 @@ def load_config(
         cfg[key] = value
         sources[key] = labels.get(key, key)
     _check_ranges(cfg, sources)
+    _check_post_mode(cfg, sources)
     return cfg
 
 

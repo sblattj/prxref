@@ -586,6 +586,102 @@ class TestDryRun:
         assert "PRXREF_DRY_RUN" in prxref_env_names()
 
 
+class TestPostMode:
+    """PRXREF_POST_MODE picks what gets written; the vocabulary is validated."""
+
+    def test_defaults_to_summary_plus_inline_so_behaviour_is_unchanged(self):
+        assert load_config()["post_mode"] == "summary+inline"
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("summary+inline", "summary+inline"),
+        ("summary", "summary"),
+        ("inline", "inline"),
+    ])
+    def test_each_documented_value_loads(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("PRXREF_POST_MODE", raw)
+        assert load_config()["post_mode"] == expected
+
+    @pytest.mark.parametrize("raw", [
+        "Summary", "SUMMARY", "comments", "both", "neither", "inline-only",
+        "summary ", " summary", "summary+inline ",
+    ])
+    def test_an_unknown_value_is_a_config_error_naming_the_variable(
+        self, monkeypatch, raw
+    ):
+        """Values are matched exactly, whitespace included, so a misspelling
+        cannot fall back to the default and post what nobody asked for."""
+        monkeypatch.setenv("PRXREF_POST_MODE", raw)
+        with pytest.raises(ConfigError, match="PRXREF_POST_MODE"):
+            load_config()
+
+    def test_an_override_is_validated_too_and_named_as_itself(self):
+        with pytest.raises(ConfigError, match="post_mode") as exc:
+            load_config(post_mode="everything")
+        assert "PRXREF_POST_MODE" not in str(exc.value)
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_MODE", "   ")
+        assert load_config()["post_mode"] == "summary+inline"
+
+    def test_the_vocabulary_matches_the_orchestrator(self):
+        """Config stays a leaf module, so the two lists are restated, not
+        shared — this pin keeps a one-sided edit from splitting the contract."""
+        from prxref import orchestrator
+
+        assert set(config._POST_MODES) == set(orchestrator.POST_MODES)
+        assert config._DEFAULTS["post_mode"] == "summary+inline"
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_MODE", "summary")
+        assert load_config(post_mode="inline")["post_mode"] == "inline"
+
+    def test_the_env_name_is_derived_for_the_suite_wide_clear(self):
+        assert "PRXREF_POST_MODE" in prxref_env_names()
+
+
+class TestPostVerdict:
+    """PRXREF_POST_VERDICT is a boolean, and ``_truthy`` is the only parser.
+
+    Unlike the other bool keys it defaults ON: the verdict has always been
+    posted, so the default must preserve that. The way to turn it off is any
+    value other than the literal "1".
+    """
+
+    def test_defaults_to_on_so_behaviour_is_unchanged(self):
+        assert load_config()["post_verdict"] is True
+
+    def test_literal_one_enables_it(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_VERDICT", "1")
+        assert load_config()["post_verdict"] is True
+
+    @pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "0", "y"])
+    def test_anything_but_the_literal_one_disables_it(self, monkeypatch, raw):
+        """An empty value reads as UNSET and keeps the default; the dedicated
+        whitespace test covers that direction."""
+        monkeypatch.setenv("PRXREF_POST_VERDICT", raw)
+        assert load_config()["post_verdict"] is False
+
+    def test_it_uses_the_one_boolean_parser(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_VERDICT", " 0 ")
+        assert load_config()["post_verdict"] is config._truthy(" 0 ")
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_VERDICT", "   ")
+        assert load_config()["post_verdict"] is True
+
+    def test_it_is_a_bool_key_not_a_numeric_one(self):
+        assert "post_verdict" in config._BOOL_KEYS
+        assert "post_verdict" not in config._INT_KEYS | config._FLOAT_KEYS
+        assert "post_verdict" not in config._RANGES
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_VERDICT", "0")
+        assert load_config(post_verdict=True)["post_verdict"] is True
+
+    def test_the_env_name_is_derived_for_the_suite_wide_clear(self):
+        assert "PRXREF_POST_VERDICT" in prxref_env_names()
+
+
 class TestErrorsNameTheirSource:
     """One rule: the message names whichever input supplied the bad value."""
 

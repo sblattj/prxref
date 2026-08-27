@@ -419,6 +419,14 @@ class TestConfiguredKnobsReachTheOrchestrator:
         assert call["max_workers"] == 2
         assert call["max_inline_comments"] == 5
 
+    def test_posting_knobs_reach_the_orchestrator(self, fake_runtime, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_MODE", "summary")
+        monkeypatch.setenv("PRXREF_POST_VERDICT", "0")
+        assert self._review(monkeypatch) == 0
+        call = fake_runtime["orchestrate_calls"][0]
+        assert call["post_mode"] == "summary"
+        assert call["post_verdict"] is False
+
     def test_defaults_are_todays_hardcoded_values(self, fake_runtime, monkeypatch):
         """Zero behaviour change when nothing is configured."""
         assert self._review(monkeypatch) == 0
@@ -429,6 +437,8 @@ class TestConfiguredKnobsReachTheOrchestrator:
         assert call["max_inline_comments"] == 15
         assert call["confidence_floor"] == 0.6
         assert call["max_errors"] == 10
+        assert call["post_mode"] == "summary+inline"
+        assert call["post_verdict"] is True
 
     @pytest.mark.parametrize("name,raw", [
         ("PRXREF_CHUNK_TOKEN_BUDGET", "lots"),
@@ -438,6 +448,7 @@ class TestConfiguredKnobsReachTheOrchestrator:
         ("PRXREF_MAX_WORKERS", "0"),
         ("PRXREF_MAX_INLINE_COMMENTS", "all"),
         ("PRXREF_MAX_INLINE_COMMENTS", "0"),
+        ("PRXREF_POST_MODE", "everything"),
     ])
     def test_bad_value_exits_2_and_names_the_variable(
         self, fake_runtime, monkeypatch, capsys, name, raw
@@ -598,6 +609,16 @@ class TestDryRun:
         monkeypatch.setenv("PRXREF_DRY_RUN", "1")
         assert self._review(["--no-post"]) == 0
         assert fake_runtime["orchestrate_calls"][0]["post"] is False
+
+    def test_dry_run_wins_over_post_mode(self, fake_runtime, monkeypatch):
+        """A dry run removes every write; post_mode only ever selects among
+        writes, so the two compose by post_mode losing entirely."""
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        monkeypatch.setenv("PRXREF_POST_MODE", "inline")
+        assert self._review() == 0
+        call = fake_runtime["orchestrate_calls"][0]
+        assert call["post"] is False
+        assert call["post_mode"] == "inline"
 
     @pytest.mark.parametrize("raw", ["true", "yes", "0"])
     def test_a_non_literal_one_does_not_silently_disable_posting(
