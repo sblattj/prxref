@@ -28,9 +28,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    {warning_count} {note_count} {findings} {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
 
-No stage failure raises out of ``orchestrate_review``: a forge failure or
-a total LLM failure degrades to verdict ``"Error"`` with a posted notice
-(when ``post`` is true). Exit-code posture lives in the CLI.
+No stage failure raises out of ``orchestrate_review``: a forge failure, an
+unparseable or unchunkable diff, or a total LLM failure degrades to verdict
+``"Error"`` with a posted notice (when ``post`` is true). Exit-code posture
+lives in the CLI. The guarantee holds for a library caller too, who has no
+config-level range check in front of these arguments.
 """
 from __future__ import annotations
 
@@ -84,8 +86,10 @@ def orchestrate_review(
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
-    posted}``. Never raises on forge or LLM stage failure — the run degrades
-    to verdict ``"Error"`` with a posted notice when ``post`` is true.
+    posted}``. Never raises on ANY stage failure — forge, diff parsing,
+    chunking, or LLM — the run degrades to verdict ``"Error"`` with a posted
+    notice when ``post`` is true. Degenerate arguments are part of that: a
+    caller passing ``max_chunks=0`` gets an error run, not a ``ValueError``.
 
     ``max_tokens`` is the per-chunk completion budget handed to every worker;
     ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. ``token_budget`` sizes
@@ -109,8 +113,23 @@ def orchestrate_review(
         logger.error("get_diff failed: %s", e)
         return _error_run(forge, ref, post, 0, f"get_diff failed: {e}", t0)
 
-    files = parse_unified_diff(raw)
-    chunks = build_chunks(files, max_chunks=max_chunks, token_budget=token_budget)
+    # Wrapped like every neighbouring stage. These two were the only ones that
+    # could raise out of orchestrate_review, which made the never-raise contract
+    # in the module docstring false: a library caller passing max_chunks=0 got
+    # ``ValueError: min() iterable argument is empty`` instead of a review.
+    # The CLI is fenced off earlier by config's range check; this closes the
+    # library route and covers every other malformed-diff crash besides.
+    try:
+        files = parse_unified_diff(raw)
+    except Exception as e:  # noqa: BLE001
+        logger.error("parse_unified_diff failed: %s", e)
+        return _error_run(forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0)
+
+    try:
+        chunks = build_chunks(files, max_chunks=max_chunks, token_budget=token_budget)
+    except Exception as e:  # noqa: BLE001
+        logger.error("build_chunks failed: %s", e)
+        return _error_run(forge, ref, post, 0, f"build_chunks failed: {e}", t0)
 
     if not chunks:
         return _summary_only_run(forge, ref, pr, files, post, t0)

@@ -176,11 +176,18 @@ class TestBudgetKnobRanges:
 
     @pytest.mark.parametrize("value", [0, -1])
     def test_overrides_cannot_smuggle_a_degenerate_budget(self, value):
-        with pytest.raises(ConfigError, match="PRXREF_LLM_MAX_TOKENS"):
+        """Rejected, and reported under the source that supplied it.
+
+        An unlabelled override is the caller's own keyword, so the message
+        names ``llm_max_tokens`` rather than sending a library caller off to
+        look for an environment variable they never set.
+        """
+        with pytest.raises(ConfigError, match="llm_max_tokens") as exc:
             load_config(llm_max_tokens=value)
+        assert "PRXREF_LLM_MAX_TOKENS" not in str(exc.value)
 
     def test_overrides_cannot_smuggle_a_degenerate_timeout(self):
-        with pytest.raises(ConfigError, match="PRXREF_LLM_TIMEOUT"):
+        with pytest.raises(ConfigError, match="llm_timeout"):
             load_config(llm_timeout=0.0)
 
     def test_smallest_legal_values_are_accepted(self, monkeypatch):
@@ -347,8 +354,10 @@ class TestChunkingAndFanoutKnobs:
         ("max_inline_comments", "PRXREF_MAX_INLINE_COMMENTS"),
     ])
     def test_overrides_cannot_smuggle_a_degenerate_value(self, key, env):
-        with pytest.raises(ConfigError, match=env):
+        """Still rejected; now reported as the override it came from."""
+        with pytest.raises(ConfigError, match=key) as exc:
             load_config(**{key: 0})
+        assert env not in str(exc.value)
 
     def test_overrides_accept_the_new_keys(self):
         cfg = load_config(chunk_token_budget=1, max_workers=1, max_inline_comments=1)
@@ -390,7 +399,7 @@ class TestPreExistingNumericRanges:
 
     def test_max_chunks_override_cannot_smuggle_zero(self):
         """The --max-chunks flag arrives as an override, so it is checked too."""
-        with pytest.raises(ConfigError, match="PRXREF_MAX_CHUNKS"):
+        with pytest.raises(ConfigError, match="max_chunks"):
             load_config(max_chunks=0)
 
     def test_smallest_legal_max_chunks_accepted(self, monkeypatch):
@@ -411,9 +420,22 @@ class TestPreExistingNumericRanges:
         assert load_config()["max_error_findings"] == 0
 
     def test_legacy_alias_is_range_checked_too(self, monkeypatch):
+        """Checked, and named as the variable that is actually set.
+
+        Reporting the canonical ``PRXREF_MAX_ERROR_FINDINGS`` here would point
+        an operator at a variable absent from their environment.
+        """
         monkeypatch.setenv("PRXREF_MAX_ERRORS", "-5")
-        with pytest.raises(ConfigError, match="PRXREF_MAX_ERROR_FINDINGS"):
+        with pytest.raises(ConfigError, match="PRXREF_MAX_ERRORS") as exc:
             load_config()
+        assert "PRXREF_MAX_ERROR_FINDINGS" not in str(exc.value)
+
+    def test_legacy_alias_is_named_when_its_value_is_malformed(self, monkeypatch):
+        """The coercion error names the source too, not only the range error."""
+        monkeypatch.setenv("PRXREF_MAX_ERRORS", "several")
+        with pytest.raises(ConfigError, match="PRXREF_MAX_ERRORS") as exc:
+            load_config()
+        assert "PRXREF_MAX_ERROR_FINDINGS" not in str(exc.value)
 
     @pytest.mark.parametrize("raw", ["1.5", "95", "-0.1", "nan", "inf", "-inf"])
     def test_out_of_band_confidence_floor_rejected(self, monkeypatch, raw):
@@ -445,7 +467,7 @@ class TestPreExistingNumericRanges:
 
     @pytest.mark.parametrize("value", [1.5, -0.1, float("nan"), float("inf")])
     def test_confidence_floor_override_cannot_smuggle_an_out_of_band_value(self, value):
-        with pytest.raises(ConfigError, match="PRXREF_CONFIDENCE_FLOOR"):
+        with pytest.raises(ConfigError, match="confidence_floor"):
             load_config(confidence_floor=value)
 
     def test_message_states_the_bound_it_broke(self, monkeypatch):
@@ -468,3 +490,80 @@ class TestPreExistingNumericRanges:
         assert cfg["chunk_token_budget"] == 10_000_000
         assert cfg["max_chunks"] == 9999
         assert cfg["llm_timeout"] == 86400.0
+
+
+class TestDryRun:
+    """PRXREF_DRY_RUN is a boolean, and ``_truthy`` is the only boolean parser."""
+
+    def test_defaults_to_off_so_behaviour_is_unchanged(self):
+        assert load_config()["dry_run"] is False
+
+    def test_literal_one_enables_it(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        assert load_config()["dry_run"] is True
+
+    @pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "0", "y"])
+    def test_only_the_literal_one_enables_it(self, monkeypatch, raw):
+        """Same parser as PRXREF_ALLOW_UNSIGNED: a second boolean dialect in the
+        config surface is how "yes" ends up meaning False in one key and True in
+        another."""
+        monkeypatch.setenv("PRXREF_DRY_RUN", raw)
+        assert load_config()["dry_run"] is False
+
+    def test_it_uses_the_one_boolean_parser(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_DRY_RUN", " 1 ")
+        assert load_config()["dry_run"] is config._truthy(" 1 ")
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_DRY_RUN", "   ")
+        assert load_config()["dry_run"] is False
+
+    def test_it_is_a_bool_key_not_a_numeric_one(self):
+        """A bool needs no range, and must not be swept into the numeric check
+        (``_check_ranges`` would read ``True`` as the number 1)."""
+        assert "dry_run" in config._BOOL_KEYS
+        assert "dry_run" not in config._INT_KEYS | config._FLOAT_KEYS
+        assert "dry_run" not in config._RANGES
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        assert load_config(dry_run=False)["dry_run"] is False
+
+    def test_the_env_name_is_derived_for_the_suite_wide_clear(self):
+        assert "PRXREF_DRY_RUN" in prxref_env_names()
+
+
+class TestErrorsNameTheirSource:
+    """One rule: the message names whichever input supplied the bad value."""
+
+    def test_the_environment_is_named_when_the_environment_supplied_it(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "0")
+        with pytest.raises(ConfigError, match="PRXREF_MAX_CHUNKS"):
+            load_config()
+
+    def test_a_caller_label_is_used_when_one_is_given(self):
+        with pytest.raises(ConfigError, match="--max-chunks") as exc:
+            load_config(max_chunks=0, source_labels={"max_chunks": "--max-chunks"})
+        assert "PRXREF_MAX_CHUNKS" not in str(exc.value)
+
+    def test_a_label_only_covers_the_key_it_names(self):
+        """The label is per-key, so an unrelated override keeps its own name."""
+        with pytest.raises(ConfigError, match="max_workers") as exc:
+            load_config(max_workers=0, source_labels={"max_chunks": "--max-chunks"})
+        assert "--max-chunks" not in str(exc.value)
+
+    def test_a_label_for_a_key_that_was_not_overridden_is_inert(self, monkeypatch):
+        """The env var supplied the value, so the env var is named — a label for
+        an override that never happened must not hijack the message."""
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "0")
+        with pytest.raises(ConfigError, match="PRXREF_MAX_CHUNKS") as exc:
+            load_config(source_labels={"max_chunks": "--max-chunks"})
+        assert "--max-chunks" not in str(exc.value)
+
+    def test_labels_are_not_config_keys(self):
+        """``source_labels`` is keyword-only and never lands in the result."""
+        cfg = load_config(source_labels={"max_chunks": "--max-chunks"})
+        assert "source_labels" not in cfg
+        assert cfg["max_chunks"] == 8

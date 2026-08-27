@@ -9,7 +9,12 @@ network failures, LLM timeouts, bad credentials), printing diagnostic notes to
 stderr so a pipeline step never fails the build over an advisor's error. The one
 exception is a configuration error — a required value missing, or one that is
 malformed or out of range — which is a usage error rather than a review outcome
-and exits 2. Both kinds raise ``ConfigError`` and name the offending variable.
+and exits 2. Both kinds raise ``ConfigError`` and name whichever input supplied
+the offending value (``--max-chunks`` when the flag was the source).
+
+``PRXREF_DRY_RUN=1`` suppresses every write to the forge on both paths — the
+one-shot review and the webhook daemon — and ``--no-post`` does the same for a
+single invocation.
 """
 from __future__ import annotations
 
@@ -49,7 +54,10 @@ def _build_parser() -> argparse.ArgumentParser:
     rev.add_argument(
         "--no-post",
         action="store_true",
-        help="dry run: do not post comments to the forge",
+        help=(
+            "dry run: do not post comments to the forge "
+            "(PRXREF_DRY_RUN=1 does the same for every run, daemon included)"
+        ),
     )
     rev.add_argument(
         "--max-chunks",
@@ -140,7 +148,21 @@ def _run_review(
     # its precedence is derived once, here. There is deliberately no way to
     # inject a pre-built config dict: that would bypass _check_ranges and make
     # every range guarantee conditional on nobody using the bypass.
-    cfg = load_config(max_chunks=max_chunks)
+    cfg = load_config(
+        max_chunks=max_chunks,
+        # The operator typed a flag, so a rejection has to name the flag. Only
+        # the CLI knows that spelling; config takes the label and reports it.
+        source_labels={"max_chunks": "--max-chunks"},
+    )
+    # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
+    # --no-post is the per-invocation one; either alone suppresses posting, so
+    # the flag still wins when the environment says nothing. This sits inside
+    # _run_review rather than in _cmd_review because the webhook daemon calls
+    # _run_review directly with post=True, and the daemon is precisely the
+    # thing an operator wants to watch before pointing it at a busy repo.
+    if post and cfg["dry_run"]:
+        logger.info("PRXREF_DRY_RUN=1: reviewing %s without posting to the forge", ref.url)
+        post = False
     forge = make_forge(ref)
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
@@ -167,6 +189,12 @@ def _run_review(
 
 
 def _webhook_handler(url: str) -> None:
+    """Review one webhook-delivered PR, posting unless PRXREF_DRY_RUN is set.
+
+    ``post=True`` is the daemon's intent, not its last word: ``_run_review``
+    downgrades it when the configured dry run says so, which is the only way to
+    observe the daemon against a real repo without writing to it.
+    """
     try:
         _run_review(url, post=True)
     except Exception:
@@ -230,3 +258,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help(sys.stderr)
     return 2
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    # Without this, ``python -m prxref.cli review ...`` imports the module,
+    # runs nothing, and exits 0 — indistinguishable from a review that
+    # succeeded silently. The console script (``prxref``) always called main();
+    # the module path now agrees with it, exit code included.
+    sys.exit(main())
