@@ -27,7 +27,11 @@ class InvokeResult:
 
 
 class LLMClient(Protocol):
-    """One-shot invoke; the pipeline never holds conversations."""
+    """One-shot invoke; the pipeline never holds conversations.
+
+    ``timeout_s=None`` means "use the backend's configured default"
+    (``PRXREF_LLM_TIMEOUT``); the protocol names no timeout of its own.
+    """
 
     def invoke(
         self,
@@ -36,6 +40,6 @@ class LLMClient(Protocol):
         *,
         max_tokens: int = 4096,
         json_mode: bool = False,
-        timeout_s: float = 60.0,
+        timeout_s: float | None = None,
     ) -> InvokeResult:
         ...
