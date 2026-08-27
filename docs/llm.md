@@ -20,7 +20,7 @@ The primary and default backend communicates via plain HTTP requests with any Op
 
 ### Request Budget
 
-Three variables shape the request itself. All are optional, all are validated at load time, and a bad value exits `2` naming the variable rather than degrading the review.
+Three variables shape the request itself. All are optional, and a bad value exits `2` naming the variable rather than degrading the review. `PRXREF_LLM_MAX_TOKENS` and `PRXREF_LLM_TIMEOUT` are range-checked when the config loads; `PRXREF_LLM_TEMPERATURE` is validated later, when the LLM client is constructed (`create_llm_client`) — same operator-visible outcome, just a later checkpoint.
 
 | Variable | Default | Effect on the request |
 |---|---|---|

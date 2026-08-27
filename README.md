@@ -145,7 +145,7 @@ The service exposes:
 | Code | Meaning |
 |---|---|
 | `0` | The run finished — **including every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. |
-| `2` | **Configuration error only** — a required value missing, or a value that is malformed or outside its valid range. The message names the source that supplied it: the environment variable, or the CLI flag when a flag is what you typed. |
+| `2` | **Usage or configuration error** — no subcommand, invalid command-line arguments, or a required value missing, malformed, or outside its valid range. The message names the source that supplied it: the environment variable, or the CLI flag when a flag is what you typed. |
 
 ```
 $ prxref review --pr-url https://github.com/org/repo/pull/1 --max-chunks 0
