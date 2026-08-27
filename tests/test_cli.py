@@ -620,8 +620,16 @@ class TestDryRun:
         assert len(fake_runtime["orchestrate_calls"]) == 1
         assert fake_runtime["orchestrate_calls"][0]["post"] is False
 
-    def test_a_dry_run_says_so_on_stderr(self, fake_runtime, monkeypatch, caplog):
-        """Silence would be indistinguishable from a review that posted."""
+    def test_a_dry_run_says_so_in_the_log(self, fake_runtime, monkeypatch, caplog):
+        """Silence would be indistinguishable from a review that posted.
+
+        Asserted through caplog rather than captured stderr: the handler is
+        installed by ``logging.basicConfig`` inside ``main()``, which is a
+        no-op once any earlier test has configured the root logger, so a
+        stderr assertion would pass or fail on test ORDER rather than on
+        behaviour. The stream itself is pinned by ``main()``'s
+        ``stream=sys.stderr``.
+        """
         monkeypatch.setenv("PRXREF_DRY_RUN", "1")
         with caplog.at_level(logging.INFO, logger="prxref"):
             assert self._review() == 0

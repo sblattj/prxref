@@ -832,3 +832,91 @@ class TestDryRunEndToEnd:
             assert len(harness.forge.inline_batches) == 1
         finally:
             server.stop()
+
+
+class TestPartialFailureIsExplainedOnThePR:
+    """Scenario: 2 chunks, 1 truncated, through the whole real chain.
+
+    A partial review is the dangerous case — it looks like a working review
+    with a footnote, so a reason that only reaches the daemon's stderr reaches
+    nobody. Asserted on the posted comment, which is the artifact the person
+    who can act on it actually reads.
+    """
+
+    def _two_chunk_diff(self) -> str:
+        def big(path: str) -> str:
+            body = "\n".join(f"+line {i}" for i in range(1, 401))
+            return (
+                f"diff --git a/{path} b/{path}\n"
+                "new file mode 100644\n"
+                f"--- /dev/null\n+++ b/{path}\n"
+                f"@@ -0,0 +1,400 @@\n{body}\n"
+            )
+
+        return big("src/one.py") + big("src/two.py")
+
+    def _run(self, monkeypatch, second_finish_reason: str):
+        """First chunk answers cleanly, second stops with the given reason."""
+        state = {"n": 0}
+
+        def route(payload):
+            state["n"] += 1
+            if state["n"] == 1:
+                return 200, _completion(_GOOD_CONTENT, "stop")
+            return 200, _completion(_TRUNCATED_CONTENT, second_finish_reason)
+
+        server = MockOpenAIServer(routes={"fast": route})
+        base_url = server.start()
+        try:
+            monkeypatch.setenv("PRXREF_LLM_BACKEND", "openai-compat")
+            monkeypatch.setenv("PRXREF_LLM_BASE_URL", base_url)
+            monkeypatch.setenv("PRXREF_LLM_MODELS", "fast")
+            monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", "256")
+            cfg = load_config()
+            forge = FakeForge(diff=self._two_chunk_diff())
+            ref = PRRef(
+                forge="fake", host="fake.test", owner="acme",
+                repo="auth-service", number=42,
+                url="https://fake.test/acme/auth-service/pull/42",
+            )
+            result = orchestrate_review(
+                forge=forge, ref=ref, llm=create_llm_client(cfg), post=True,
+                max_chunks=2, token_budget=1000, max_workers=1,
+                max_tokens=cfg["llm_max_tokens"],
+            )
+            return forge, result, server
+        finally:
+            server.stop()
+
+    def test_the_truncation_reason_lands_on_the_pr(self, monkeypatch):
+        forge, result, server = self._run(monkeypatch, "length")
+
+        assert len(server.requests) == 2
+        assert result["chunks_reviewed"] == 1
+        assert result["chunks_failed"] == 1
+        summary = forge.summaries[0]
+        assert "⚠️ Partial review: 1 of 2 chunks were reviewed" in summary
+        assert (
+            "> - response truncated at max_tokens=256 (finish_reason=length); "
+            "raise PRXREF_LLM_MAX_TOKENS" in summary
+        )
+
+    def test_a_non_budget_failure_reports_its_own_reason(self, monkeypatch):
+        """Control: identical response bytes, honest stop reason. The banner
+        still explains itself, but must not blame the budget."""
+        forge, result, _server = self._run(monkeypatch, "stop")
+
+        assert result["chunks_failed"] == 1
+        summary = forge.summaries[0]
+        assert "⚠️ Partial review: 1 of 2 chunks were reviewed" in summary
+        assert "PRXREF_LLM_MAX_TOKENS" not in summary
+        assert "JSONDecodeError" in summary
+
+    def test_the_surviving_chunk_still_reports_its_findings(self, monkeypatch):
+        """The banner is an addition, not a replacement: a partial review is
+        still a review."""
+        forge, result, _server = self._run(monkeypatch, "length")
+
+        assert result["verdict"] == "Request-Changes"
+        assert len(result["findings_active"]) == 1
+        assert "Uncaught token decode exception" in forge.summaries[0]

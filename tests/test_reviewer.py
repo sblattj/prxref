@@ -396,3 +396,61 @@ class TestTruncatedButParseableStillWarns:
         with caplog.at_level(logging.WARNING, logger="prxref"):
             review_chunk(llm, self._chunk(), max_tokens=8192)
         assert "PRXREF_LLM_MAX_TOKENS" not in caplog.text
+
+
+class TestOtherProviderTruncationSpellings:
+    """A plain OpenAI-compatible proxy may pass an upstream provider's own word
+    through untouched; litellm normalises, a bare gateway need not."""
+
+    def _chunk(self):
+        return parse_unified_diff(MINI_DIFF)
+
+    @pytest.mark.parametrize("raw", ["max_tokens", "MAX_TOKENS", " Max_Tokens "])
+    def test_the_native_budget_spellings_are_recognised(self, raw):
+        llm = FakeLLM("", finish_reason=raw)
+        _findings, meta = review_chunk(llm, self._chunk(), max_tokens=64)
+        assert "response truncated at max_tokens=64" in meta["error"]
+        assert "PRXREF_LLM_MAX_TOKENS" in meta["error"]
+
+    def test_the_message_quotes_what_the_provider_actually_said(self):
+        """Reporting ``finish_reason=length`` for a provider that said
+        ``max_tokens`` would send someone grepping for a string not in the log."""
+        llm = FakeLLM("", finish_reason="max_tokens")
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert "(finish_reason=max_tokens)" in meta["error"]
+
+    @pytest.mark.parametrize("raw", ["length_finish", "max_tokens_reached", "lengthy"])
+    def test_a_neighbouring_spelling_is_not_a_false_positive(self, raw):
+        """Matching is exact against the accepted set, never a substring test."""
+        llm = FakeLLM("", finish_reason=raw)
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert "truncated" not in meta["error"]
+        assert "JSONDecodeError" in meta["error"]
+
+
+class TestTruncationSurvivesAWrongShapedResponse:
+    """Valid JSON of the wrong shape is as unusable as none, and the budget can
+    be why it came out that way."""
+
+    def _chunk(self):
+        return parse_unified_diff(MINI_DIFF)
+
+    def test_a_truncated_non_object_still_names_the_budget(self):
+        llm = FakeLLM("[1, 2, 3]", finish_reason="length")
+        findings, meta = review_chunk(llm, self._chunk(), max_tokens=128)
+        assert findings == []
+        assert "response truncated at max_tokens=128" in meta["error"]
+
+    def test_a_clean_non_object_keeps_the_shape_message(self):
+        """The discriminating control: same bytes, honest stop reason."""
+        llm = FakeLLM("[1, 2, 3]", finish_reason="stop")
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert meta["error"] == "worker review JSON is not an object: list"
+
+    def test_the_budget_warning_does_not_fire_for_an_unusable_response(self, caplog):
+        """"findings may be incomplete" would be wrong here — there are none at
+        all, and the error already says why."""
+        llm = FakeLLM("[1, 2, 3]", finish_reason="length")
+        with caplog.at_level(logging.WARNING, logger="prxref"):
+            review_chunk(llm, self._chunk())
+        assert "findings may be incomplete" not in caplog.text
