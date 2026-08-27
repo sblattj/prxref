@@ -17,6 +17,7 @@ never here.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -201,20 +202,32 @@ class LiteLLMClient(LLMClient):
         )
 
 
-def _numeric(raw: str | None, env: str, cast):
-    """Cast a cfg/env string to a number, naming the variable when it is malformed.
+def _float_setting(
+    raw: str | None, env: str, *, minimum: float, exclusive: bool = False
+) -> float | None:
+    """Parse one numeric setting from cfg-or-env, or ``None`` when unset.
 
-    ``None`` or an all-whitespace string means "unset" and yields ``None``, so
-    the caller keeps the built-in default (timeout) or omits the field from the
-    payload entirely (temperature). A malformed value raises ``ValueError``
-    naming the environment variable, mirroring ``config._coerce_env``.
+    ``None``, empty, or whitespace-only means "unset" and yields ``None`` — the
+    same reading ``config.load_config`` gives those values — so the caller keeps
+    its built-in default (timeout) or omits the field from the payload entirely
+    (temperature). A malformed, non-finite, or out-of-range value raises
+    :class:`~prxref.llm.ConfigError` naming the variable, so the CLI reports it
+    as a configuration error (exit 2) instead of a mid-review failure.
     """
     if raw is None or not str(raw).strip():
         return None
+    text = str(raw).strip()
     try:
-        return cast(str(raw).strip())
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{env}: {exc}") from exc
+        value = float(text)
+    except ValueError as exc:
+        raise ConfigError(f"{env}: {exc}") from exc
+    floor_ok = value > minimum if exclusive else value >= minimum
+    if not math.isfinite(value) or not floor_ok:
+        bound = "greater than" if exclusive else "at least"
+        raise ConfigError(
+            f"{env}: must be a finite number {bound} {minimum}, got {text!r}"
+        )
+    return value
 
 
 def create_llm_client(
@@ -233,10 +246,13 @@ def create_llm_client(
     PRXREF_LLM_REASONING_EFFORT is passed through unvalidated to the
     openai-compat client for models that cannot disable reasoning
     (e.g. GLM-5.3-Flash's ``low``/``high``/``max``); empty omits it.
-    PRXREF_LLM_TIMEOUT (seconds, default 45.0) becomes the client's
-    ``default_timeout``; PRXREF_LLM_TEMPERATURE is parsed to a float and
-    omitted from the request entirely when unset. A malformed value for
-    either raises ``ValueError`` naming the variable.
+    PRXREF_LLM_TIMEOUT (seconds, default 45.0, must be > 0) becomes the
+    client's ``default_timeout``; PRXREF_LLM_TEMPERATURE is parsed to a float
+    (finite, >= 0 — no upper bound, since the maximum is provider-specific)
+    and omitted from the request entirely when unset, which keeps 0.0 usable
+    as a real temperature. A malformed or out-of-range value for either
+    raises :class:`~prxref.llm.ConfigError` naming the variable, so the CLI
+    exits 2 rather than degrading the review.
     ``PRXREF_LLM_MAX_TOKENS`` is deliberately NOT read here: it is a
     per-call budget threaded cfg -> orchestrator -> reviewer -> ``invoke``,
     so a client-level copy could never win and would be dead config.
@@ -268,11 +284,18 @@ def create_llm_client(
             "comma-separated list, cheapest first "
             "(see README > LLM Configuration)."
         )
-    timeout = _numeric(_get("LLM_TIMEOUT", "PRXREF_LLM_TIMEOUT"), "PRXREF_LLM_TIMEOUT", float)
+    timeout = _float_setting(
+        _get("LLM_TIMEOUT", "PRXREF_LLM_TIMEOUT"),
+        "PRXREF_LLM_TIMEOUT",
+        minimum=0.0,
+        exclusive=True,
+    )
     if timeout is None:
         timeout = DEFAULT_TIMEOUT
-    temperature = _numeric(
-        _get("LLM_TEMPERATURE", "PRXREF_LLM_TEMPERATURE"), "PRXREF_LLM_TEMPERATURE", float
+    temperature = _float_setting(
+        _get("LLM_TEMPERATURE", "PRXREF_LLM_TEMPERATURE"),
+        "PRXREF_LLM_TEMPERATURE",
+        minimum=0.0,
     )
     if backend in ("openai-compat", "ferry", "http"):
         return OpenAICompatClient(

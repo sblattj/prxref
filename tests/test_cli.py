@@ -182,6 +182,38 @@ class TestReviewSubcommand:
         assert main(["review", "--pr-url", "https://github.com/org/repo/pull/7"]) == 0
         assert fake_runtime["orchestrate_calls"][0]["max_tokens"] == 4096
 
+    @pytest.mark.parametrize("name,raw", [
+        ("PRXREF_LLM_MAX_TOKENS", "lots"),   # malformed int
+        ("PRXREF_LLM_MAX_TOKENS", "0"),      # out of range
+        ("PRXREF_LLM_TIMEOUT", "soon"),      # malformed float
+        ("PRXREF_LLM_TIMEOUT", "0"),         # out of range
+        ("PRXREF_MAX_CHUNKS", "lots"),       # pre-existing knob, same contract
+        ("PRXREF_CONFIDENCE_FLOOR", "high"),
+    ])
+    def test_bad_config_value_exits_2_and_names_the_variable(
+        self, fake_runtime, monkeypatch, capsys, name, raw
+    ):
+        """A malformed value is a usage error (exit 2), like a missing one — not
+        a review outcome (exit 0). cli.py's module docstring promises this."""
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=7,
+            url="https://github.com/org/repo/pull/7",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+        monkeypatch.setenv(name, raw)
+
+        rc = main(["review", "--pr-url", "https://github.com/org/repo/pull/7"])
+
+        assert rc == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert name in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
     def test_unknown_pr_url_exits_0_with_stderr_hint(self, fake_runtime, monkeypatch, capsys):
         monkeypatch.setattr("prxref.cli.detect_forge", lambda url: None)
 

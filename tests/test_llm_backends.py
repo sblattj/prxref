@@ -319,9 +319,8 @@ class TestBudgetKnobsFromConfig:
     """PRXREF_LLM_TIMEOUT / _TEMPERATURE reach the built client and the wire."""
 
     @pytest.fixture(autouse=True)
-    def _clean(self, monkeypatch):
-        for v in ("PRXREF_LLM_TIMEOUT", "PRXREF_LLM_TEMPERATURE", "PRXREF_LLM_BACKEND"):
-            monkeypatch.delenv(v, raising=False)
+    def _endpoint(self, monkeypatch):
+        """A reachable endpoint for every test here. Env clearing: tests/conftest.py."""
         monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
         monkeypatch.setenv("PRXREF_LLM_MODELS", "a")
 
@@ -359,25 +358,62 @@ class TestBudgetKnobsFromConfig:
 
     def test_malformed_temperature_names_the_variable(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "hot")
-        with pytest.raises(ValueError, match="PRXREF_LLM_TEMPERATURE"):
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TEMPERATURE"):
             create_llm_client()
 
     def test_malformed_timeout_names_the_variable(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "soon")
-        with pytest.raises(ValueError, match="PRXREF_LLM_TIMEOUT"):
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TIMEOUT"):
             create_llm_client()
 
-    def test_litellm_client_receives_the_configured_timeout(self, monkeypatch):
-        """Regression: create_llm_client built LiteLLMClient without default_timeout."""
+    @pytest.mark.parametrize("raw", ["-0.1", "nan", "inf", "-inf"])
+    def test_out_of_range_temperature_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", raw)
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TEMPERATURE"):
+            create_llm_client()
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf"])
+    def test_out_of_range_timeout_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", raw)
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TIMEOUT"):
+            create_llm_client()
+
+    @pytest.mark.parametrize("raw", ["0", "0.0"])
+    def test_zero_temperature_is_legal_and_reaches_the_payload(self, monkeypatch, raw):
+        """0 is a real temperature; only an absent value means "omit the key"."""
+        monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", raw)
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert s.calls[0]["json"]["temperature"] == 0.0
+
+    def test_litellm_call_kwargs_carry_the_configured_timeout_and_temperature(
+        self, monkeypatch
+    ):
+        """Regression: create_llm_client built LiteLLMClient without default_timeout.
+
+        Asserted at the wire (the kwargs litellm.completion actually receives),
+        not at the constructor attribute, so a break anywhere between the two
+        fails this test.
+        """
+        captured: list[dict] = []
+
+        def fake_completion(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=None,
+                model="m",
+            )
+
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "litellm")
         monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "7.5")
         monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "0.4")
         monkeypatch.setitem(
-            sys.modules, "litellm", types.SimpleNamespace(completion=lambda **kw: None)
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
         )
-        c = create_llm_client()
-        assert c.default_timeout == 7.5
-        assert c.temperature == 0.4
+        create_llm_client().invoke("sys", "usr")
+        assert captured[0]["timeout"] == 7.5
+        assert captured[0]["temperature"] == 0.4
 
 
 class TestLiteLLMClient:

@@ -1,43 +1,16 @@
 """Tests for prxref.config: env loading, type coercion, overrides, and forge factory."""
+import os
+
 import pytest
 import requests
 
-from prxref import llm_backends, reviewer
+from prxref import config, llm_backends, reviewer
 from prxref.config import load_config, make_forge
 from prxref.forges import bitbucket, github, gitlab
 from prxref.forges.base import PRRef
+from prxref.llm import ConfigError
 from prxref.quality import DEFAULT_MAX_ERRORS
-
-_ALL_ENV_KEYS = [
-    "PRXREF_LLM_BACKEND",
-    "PRXREF_LLM_BASE_URL",
-    "PRXREF_LLM_API_KEY",
-    "PRXREF_LLM_MODELS",
-    "PRXREF_LLM_REASONING_EFFORT",
-    "PRXREF_LLM_MAX_TOKENS",
-    "PRXREF_LLM_TIMEOUT",
-    "PRXREF_LLM_TEMPERATURE",
-    "PRXREF_CONFIDENCE_FLOOR",
-    "PRXREF_MAX_ERRORS",
-    "PRXREF_MAX_ERROR_FINDINGS",
-    "PRXREF_MAX_CHUNKS",
-    "PRXREF_BITBUCKET_TOKEN",
-    "PRXREF_BITBUCKET_USER",
-    "PRXREF_BITBUCKET_APP_PASSWORD",
-    "PRXREF_GITHUB_TOKEN",
-    "PRXREF_GITHUB_ENTERPRISE_TOKEN",
-    "PRXREF_GITLAB_TOKEN",
-    "PRXREF_BITBUCKET_WEBHOOK_SECRET",
-    "PRXREF_GITHUB_WEBHOOK_SECRET",
-    "PRXREF_GITLAB_WEBHOOK_SECRET",
-    "PRXREF_ALLOW_UNSIGNED",
-]
-
-
-@pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    for key in _ALL_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
+from tests.conftest import clear_prxref_env, prxref_env_names
 
 
 def _make_ref(forge: str) -> PRRef:
@@ -119,15 +92,33 @@ class TestLoadConfigEnv:
         cfg = load_config()
         assert cfg["allow_unsigned"] is expected
 
-    def test_invalid_int_raises_value_error(self, monkeypatch):
+    def test_invalid_int_raises_config_error(self, monkeypatch):
         monkeypatch.setenv("PRXREF_MAX_CHUNKS", "not-a-number")
-        with pytest.raises(ValueError, match="PRXREF_MAX_CHUNKS"):
+        with pytest.raises(ConfigError, match="PRXREF_MAX_CHUNKS"):
             load_config()
 
-    def test_invalid_float_raises_value_error(self, monkeypatch):
+    def test_invalid_float_raises_config_error(self, monkeypatch):
         monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "high")
-        with pytest.raises(ValueError, match="PRXREF_CONFIDENCE_FLOOR"):
+        with pytest.raises(ConfigError, match="PRXREF_CONFIDENCE_FLOOR"):
             load_config()
+
+    def test_config_error_is_still_a_value_error(self, monkeypatch):
+        """Subclassing keeps every existing ``except ValueError`` caller working."""
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "not-a-number")
+        with pytest.raises(ValueError):
+            load_config()
+
+    @pytest.mark.parametrize("name,key,expected", [
+        ("PRXREF_LLM_TIMEOUT", "llm_timeout", 45.0),
+        ("PRXREF_LLM_MAX_TOKENS", "llm_max_tokens", 4096),
+        ("PRXREF_LLM_TEMPERATURE", "llm_temperature", ""),
+        ("PRXREF_MAX_CHUNKS", "max_chunks", 8),
+        ("PRXREF_LLM_BASE_URL", "llm_base_url", ""),
+    ])
+    def test_whitespace_only_env_reads_as_unset(self, monkeypatch, name, key, expected):
+        """A .env line like ``PRXREF_LLM_TIMEOUT= `` must not abort the review."""
+        monkeypatch.setenv(name, "   ")
+        assert load_config()[key] == expected
 
 
 class TestLLMBudgetKnobs:
@@ -166,6 +157,62 @@ class TestLLMBudgetKnobs:
         assert cfg["llm_max_tokens"] == 1024
         assert cfg["llm_timeout"] == 5.0
         assert cfg["llm_temperature"] == "0.9"
+
+
+class TestBudgetKnobRanges:
+    """Degenerate numbers are a usage error, not something that reaches the wire."""
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "-4096"])
+    def test_non_positive_max_tokens_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", raw)
+        with pytest.raises(ConfigError, match="PRXREF_LLM_MAX_TOKENS"):
+            load_config()
+
+    @pytest.mark.parametrize("raw", ["0", "0.0", "-0.5", "nan", "inf", "-inf"])
+    def test_non_positive_or_non_finite_timeout_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", raw)
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TIMEOUT"):
+            load_config()
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_overrides_cannot_smuggle_a_degenerate_budget(self, value):
+        with pytest.raises(ConfigError, match="PRXREF_LLM_MAX_TOKENS"):
+            load_config(llm_max_tokens=value)
+
+    def test_overrides_cannot_smuggle_a_degenerate_timeout(self):
+        with pytest.raises(ConfigError, match="PRXREF_LLM_TIMEOUT"):
+            load_config(llm_timeout=0.0)
+
+    def test_smallest_legal_values_are_accepted(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_MAX_TOKENS", "1")
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "0.001")
+        cfg = load_config()
+        assert cfg["llm_max_tokens"] == 1
+        assert cfg["llm_timeout"] == 0.001
+
+
+class TestEnvHygiene:
+    """The suite's env-clear surface is derived from the schema, never hand-listed."""
+
+    def test_every_defaults_key_yields_an_env_name(self):
+        names = set(prxref_env_names())
+        missing = [k for k in config._DEFAULTS if f"PRXREF_{k.upper()}" not in names]
+        assert missing == []
+
+    def test_legacy_aliases_are_covered(self):
+        assert "PRXREF_MAX_ERRORS" in prxref_env_names()
+
+    def test_a_new_defaults_key_is_cleared_without_touching_any_list(self, monkeypatch):
+        """Adding a config key must not require editing a test-side list."""
+        monkeypatch.setitem(config._DEFAULTS, "brand_new_knob", "")
+        monkeypatch.setenv("PRXREF_BRAND_NEW_KNOB", "leaked")
+        assert "PRXREF_BRAND_NEW_KNOB" in prxref_env_names()
+
+        clear_prxref_env(monkeypatch)
+        assert "PRXREF_BRAND_NEW_KNOB" not in os.environ
+
+    def test_no_ambient_prxref_value_survives_into_a_test_body(self):
+        assert [n for n in prxref_env_names() if n in os.environ] == []
 
 
 class TestMaxErrorFindingsConfig:

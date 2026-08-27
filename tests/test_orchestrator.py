@@ -182,13 +182,8 @@ class FakeForge:
 
 
 @pytest.fixture(autouse=True)
-def _contract_and_clean_env(monkeypatch):
-    monkeypatch.delenv("PRXREF_CONFIDENCE_FLOOR", raising=False)
-    monkeypatch.delenv("PRXREF_MAX_ERRORS", raising=False)
-    monkeypatch.delenv("PRXREF_MAX_ERROR_FINDINGS", raising=False)
-    monkeypatch.delenv("PRXREF_LLM_MAX_TOKENS", raising=False)
-    monkeypatch.delenv("PRXREF_LLM_TIMEOUT", raising=False)
-    monkeypatch.delenv("PRXREF_LLM_TEMPERATURE", raising=False)
+def _contract_stubs(monkeypatch):
+    """Pin the reviewer contract. Env clearing lives in tests/conftest.py."""
     monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _contract_review_chunk)
     monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _contract_load_prompt)
 
