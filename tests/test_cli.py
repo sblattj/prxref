@@ -445,3 +445,80 @@ class TestConfiguredKnobsReachTheOrchestrator:
         assert "configuration error" in err
         assert name in err
         assert len(fake_runtime["orchestrate_calls"]) == 0
+
+
+class TestDegenerateValuesNeverReachTheOrchestrator:
+    """End-to-end exit codes for the numeric keys that predate the range check.
+
+    Asserting on the loader alone would not have caught these: the damage
+    happened downstream of ``load_config``, inside the pipeline the CLI is
+    supposed to protect. Every case here also asserts the orchestrator was
+    never entered.
+    """
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+
+    def _review(self, monkeypatch, argv_extra=()):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+        return main([
+            "review", "--pr-url", "https://github.com/org/repo/pull/7", *argv_extra,
+        ])
+
+    @pytest.mark.parametrize("name,raw", [
+        # Was: uncaught ValueError("min() iterable argument is empty") out of
+        # orchestrate_review -> "review failed: ..." on stderr and exit 0, with
+        # nothing reviewed and nothing posted. A CI job reads that as green.
+        ("PRXREF_MAX_CHUNKS", "0"),
+        ("PRXREF_MAX_CHUNKS", "-2"),
+        # Was: every finding dropped and a confident "Approved" posted, or (nan)
+        # the gate silently disabled. Both fail as success.
+        ("PRXREF_CONFIDENCE_FLOOR", "1.5"),
+        ("PRXREF_CONFIDENCE_FLOOR", "95"),
+        ("PRXREF_CONFIDENCE_FLOOR", "-0.1"),
+        ("PRXREF_CONFIDENCE_FLOOR", "nan"),
+        ("PRXREF_CONFIDENCE_FLOOR", "inf"),
+        # Was: a negative slice silently dropping the lowest-confidence errors.
+        ("PRXREF_MAX_ERROR_FINDINGS", "-5"),
+    ])
+    def test_exits_2_and_names_the_variable(
+        self, fake_runtime, monkeypatch, capsys, name, raw
+    ):
+        monkeypatch.setenv(name, raw)
+        assert self._review(monkeypatch) == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert name in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    @pytest.mark.parametrize("flag_value", ["0", "-2"])
+    def test_degenerate_max_chunks_flag_exits_2(
+        self, fake_runtime, monkeypatch, capsys, flag_value
+    ):
+        """The flag is applied as a ``load_config`` override, so it is checked
+        on the same path as the environment variable."""
+        assert self._review(monkeypatch, ["--max-chunks", flag_value]) == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert "PRXREF_MAX_CHUNKS" in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    @pytest.mark.parametrize("name,raw,key", [
+        ("PRXREF_MAX_CHUNKS", "1", "max_chunks"),
+        ("PRXREF_CONFIDENCE_FLOOR", "0", "confidence_floor"),
+        ("PRXREF_CONFIDENCE_FLOOR", "1", "confidence_floor"),
+        ("PRXREF_MAX_ERROR_FINDINGS", "0", "max_error_findings"),
+    ])
+    def test_legal_edge_values_still_run(
+        self, fake_runtime, monkeypatch, name, raw, key
+    ):
+        """The bounds reject only what is semantically impossible."""
+        monkeypatch.setenv(name, raw)
+        assert self._review(monkeypatch) == 0
+        assert len(fake_runtime["orchestrate_calls"]) == 1
