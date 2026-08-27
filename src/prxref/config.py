@@ -32,6 +32,11 @@ LLM / pipeline:
                                 (default 4)
   PRXREF_MAX_INLINE_COMMENTS    Max inline comments posted per review, after
                                 the quality gate; positive int (default 15)
+  PRXREF_DRY_RUN                literal "1" reviews without writing anything
+                                to the forge — no summary, no inline comments
+                                (default off). Applies to the webhook daemon
+                                as well as the CLI; ``--no-post`` is the
+                                per-invocation equivalent and still wins.
 
 Per-forge auth:
   PRXREF_BITBUCKET_TOKEN        Bitbucket bearer token
@@ -49,6 +54,10 @@ Webhooks:
                                   webhooks (default off; insecure)
 
 Precedence: built-in defaults < environment < ``overrides`` kwargs.
+An error names the source that actually supplied the offending value — the
+environment variable that was read (including a legacy alias), or the caller's
+own name for an override (``--max-chunks`` rather than ``PRXREF_MAX_CHUNKS``
+when the flag is what the operator typed).
 An empty or whitespace-only environment value reads as unset, so a stray
 ``PRXREF_LLM_TIMEOUT= `` in a .env file keeps the default instead of aborting.
 ``None``-valued overrides are ignored (callers may pass optional values).
@@ -90,6 +99,7 @@ _DEFAULTS: dict[str, object] = {
     # TestChunkingAndFanoutKnobs pins the three literals together.
     "max_workers": 4,
     "max_inline_comments": 15,
+    "dry_run": False,
     "bitbucket_token": "",
     "bitbucket_user": "",
     "bitbucket_app_password": "",
@@ -107,7 +117,7 @@ _INT_KEYS = frozenset({
     "chunk_token_budget", "max_workers", "max_inline_comments",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
-_BOOL_KEYS = frozenset({"allow_unsigned"})
+_BOOL_KEYS = frozenset({"allow_unsigned", "dry_run"})
 _LIST_KEYS = frozenset({"llm_models"})
 
 
@@ -182,8 +192,12 @@ def _truthy(raw: str) -> bool:
     return raw.strip() == "1"
 
 
-def _coerce_env(key: str, raw: str) -> object:
-    """Type-coerce one env value; a malformed one is a usage error, not a crash."""
+def _coerce_env(key: str, raw: str, source: str) -> object:
+    """Type-coerce one env value; a malformed one is a usage error, not a crash.
+
+    ``source`` is the variable the value was actually read from, so a value set
+    through a legacy alias is reported under the name the operator typed.
+    """
     try:
         if key in _INT_KEYS:
             return int(raw.strip())
@@ -195,16 +209,21 @@ def _coerce_env(key: str, raw: str) -> object:
             return [part.strip() for part in raw.split(",") if part.strip()]
         return raw
     except ValueError as exc:
-        raise ConfigError(f"{_ENV_PREFIX}{key.upper()}: {exc}") from exc
+        raise ConfigError(f"{source}: {exc}") from exc
 
 
-def _check_ranges(cfg: dict[str, object]) -> None:
+def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """Reject out-of-range numbers before they reach the wire.
 
     Runs after environment AND overrides, so every path into the config is
-    covered. Failures name the environment variable and are ``ConfigError``
-    (exit 2) rather than a mid-review error the operator has to decode from a
-    provider's rejection — or, worse, a review that looks like it succeeded.
+    covered. Failures are ``ConfigError`` (exit 2) rather than a mid-review
+    error the operator has to decode from a provider's rejection — or, worse, a
+    review that looks like it succeeded.
+
+    The message names ``sources[key]``: whichever input actually supplied the
+    offending value. Naming the environment variable unconditionally sent an
+    operator who typed ``--max-chunks 0`` to hunt for a ``PRXREF_MAX_CHUNKS``
+    they had never set.
     """
     for key, rng in sorted(_RANGES.items()):
         value = cfg[key]
@@ -214,36 +233,53 @@ def _check_ranges(cfg: dict[str, object]) -> None:
             and math.isfinite(value)
         )
         if not finite or not rng.accepts(value):
-            raise ConfigError(
-                f"{_ENV_PREFIX}{key.upper()}: {rng.describe()}, got {value!r}"
-            )
+            raise ConfigError(f"{sources[key]}: {rng.describe()}, got {value!r}")
 
 
-def load_config(**overrides: object) -> dict:
+def load_config(
+    *, source_labels: dict[str, str] | None = None, **overrides: object
+) -> dict:
     """Build the runtime config dict from defaults, environment, then overrides.
 
     Keys mirror the env table above (lowercase, no prefix). Env values are
     type-coerced per key (int / float / bool / comma-list / str); an empty or
     whitespace-only value reads as unset. A malformed or out-of-range value
-    raises :class:`~prxref.llm.ConfigError` naming the offending variable,
+    raises :class:`~prxref.llm.ConfigError` naming the input that supplied it,
     which the CLI turns into exit 2.
+
+    ``source_labels`` lets a caller say what its user calls an override — the
+    CLI passes ``{"max_chunks": "--max-chunks"}`` so a bad flag is reported as
+    the flag. It is used for error messages only, and only for keys the caller
+    actually overrode; an unlabelled override is reported under its config key.
+    Config itself knows no flag names: the caller that owns the surface names
+    it.
     """
     cfg: dict[str, object] = dict(_DEFAULTS)
+    # What supplied each value, for error messages. Defaults start out attributed
+    # to their environment variable: that is the name an operator would set to
+    # change one, and a built-in default is never out of range anyway.
+    sources: dict[str, str] = {key: _ENV_PREFIX + key.upper() for key in _DEFAULTS}
+    labels = source_labels or {}
     for key in _DEFAULTS:
-        raw = os.environ.get(_ENV_PREFIX + key.upper())
+        name = _ENV_PREFIX + key.upper()
+        raw = os.environ.get(name)
         if raw is None or not raw.strip():
             legacy = _LEGACY_ENV_ALIASES.get(key)
-            raw = os.environ.get(legacy) if legacy else None
+            if legacy:
+                raw = os.environ.get(legacy)
+                name = legacy
         if raw is None or not raw.strip():
             continue
-        cfg[key] = _coerce_env(key, raw)
+        cfg[key] = _coerce_env(key, raw, name)
+        sources[key] = name
     for key, value in overrides.items():
         if key not in _DEFAULTS:
             raise ValueError(f"unknown config key: {key!r}")
         if value is None:
             continue
         cfg[key] = value
-    _check_ranges(cfg)
+        sources[key] = labels.get(key, key)
+    _check_ranges(cfg, sources)
     return cfg
 
 

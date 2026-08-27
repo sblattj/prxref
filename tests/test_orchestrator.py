@@ -743,3 +743,90 @@ class TestQualityGateKnobsAreThreaded:
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
         }
+
+
+RESULT_KEYS = {
+    "verdict", "findings_active", "findings_dropped", "chunk_count",
+    "chunks_reviewed", "chunks_failed",
+    "elapsed_ms", "input_tokens", "output_tokens", "posted",
+}
+
+
+class TestNoStageRaisesOutOfOrchestrateReview:
+    """The module docstring's never-raise contract, made true.
+
+    ``parse_unified_diff`` and ``build_chunks`` were the only two stages not
+    wrapped: ``get_pr``, ``get_diff``, ``list_threads``, ``post_summary``,
+    ``post_inline_comments`` and the worker pool all were. A library caller
+    passing ``max_chunks=0`` therefore got ``ValueError: min() iterable
+    argument is empty`` out of a function documented never to raise. The CLI is
+    fenced off earlier by the config range check; this is the library route.
+    """
+
+    def test_zero_max_chunks_degrades_instead_of_raising(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=False, max_chunks=0,
+        )
+        assert res["verdict"] == "Error"
+        assert res["findings_active"] == []
+
+    def test_the_result_is_still_a_well_formed_result(self):
+        """A caller reading the dict must not have to special-case this path."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=False, max_chunks=0,
+        )
+        assert set(res) == RESULT_KEYS
+
+    def test_the_posted_notice_names_the_stage_that_failed(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=True, max_chunks=0,
+        )
+        assert res["posted"] is True
+        assert len(forge.summaries) == 1
+        assert "build_chunks failed" in forge.summaries[0]
+
+    def test_no_chunk_is_counted_as_reviewed_or_failed(self):
+        """Nothing was chunked, so the partial-coverage banner has nothing to
+        report — this is a total failure, not a 0-of-N partial one."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=False, max_chunks=0,
+        )
+        assert res["chunk_count"] == 0
+        assert res["chunks_reviewed"] == 0
+        assert res["chunks_failed"] == 0
+
+    def test_a_parser_explosion_degrades_too(self, monkeypatch):
+        """The wrap covers the parse stage, not only the chunking one."""
+        def _boom(_raw):
+            raise ValueError("unparseable diff")
+
+        monkeypatch.setattr(orchestrator, "parse_unified_diff", _boom)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=True)
+        assert res["verdict"] == "Error"
+        assert "parse_unified_diff failed: unparseable diff" in forge.summaries[0]
+
+    def test_the_llm_is_never_called_when_chunking_fails(self):
+        """Failing before the fan-out must not spend tokens on the way out."""
+        llm = FakeLLM(findings_by_path=HAPPY_FINDINGS)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, llm, post=False, max_chunks=0)
+        assert llm.calls == 0
+
+    def test_a_legal_max_chunks_is_untouched_by_the_wrap(self):
+        """Control: the guard must not swallow a run that works."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=False, max_chunks=1,
+        )
+        assert res["verdict"] == "Request-Changes"
+        assert res["chunk_count"] == 1

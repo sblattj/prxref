@@ -25,12 +25,23 @@ class ConfigError(ValueError):
 
 @dataclass
 class InvokeResult:
+    """One completion plus the telemetry the pipeline reasons about.
+
+    ``finish_reason`` is the provider's own word for why generation stopped
+    (``"stop"``, ``"length"``, ...). It is the only signal that distinguishes a
+    model that answered briefly from one that was cut off mid-JSON, so the
+    reviewer can tell an operator to raise ``PRXREF_LLM_MAX_TOKENS`` instead of
+    handing them a bare ``JSONDecodeError``. A backend that does not report one
+    leaves it ``""`` — absent, never guessed.
+    """
+
     text: str
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
     backend: str = ""
     elapsed_ms: int = 0
+    finish_reason: str = ""
 
 
 class LLMClient(Protocol):

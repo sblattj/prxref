@@ -484,3 +484,99 @@ class TestLiteLLMClient:
         )
         LiteLLMClient(models=["p"], temperature=0.25).invoke("sys", "usr")
         assert captured[0]["temperature"] == 0.25
+
+
+def _resp_with_finish(finish_reason, text="ok", status_code=200):
+    """A well-formed success body whose choice carries ``finish_reason``.
+
+    ``_resp`` puts its ``**extra`` at the top level of the body; the stop
+    reason lives on the CHOICE, so it needs its own builder.
+    """
+    choice: dict = {"message": {"role": "assistant", "content": text}}
+    if finish_reason is not _ABSENT:
+        choice["finish_reason"] = finish_reason
+    payload = {
+        "choices": [choice],
+        "model": "m1-resolved",
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+    }
+    return SimpleNamespace(status_code=status_code, payload=payload, json=lambda: payload)
+
+
+_ABSENT = object()
+
+
+class TestFinishReasonOpenAICompat:
+    """The provider's stop reason is the only signal that a chunk was truncated.
+
+    Without it, a response cut off mid-JSON and a model that simply declined to
+    emit JSON are the same ``JSONDecodeError`` to everyone downstream.
+    """
+
+    def test_length_is_carried_through(self):
+        s = _ScriptedSession(_resp_with_finish("length"))
+        assert _client(s).invoke("sys", "usr").finish_reason == "length"
+
+    def test_stop_is_carried_through_not_normalised_away(self):
+        """Control for the test above: a clean stop must NOT read as 'length'."""
+        s = _ScriptedSession(_resp_with_finish("stop"))
+        assert _client(s).invoke("sys", "usr").finish_reason == "stop"
+
+    def test_absent_finish_reason_is_empty_string(self):
+        s = _ScriptedSession(_resp_with_finish(_ABSENT))
+        assert _client(s).invoke("sys", "usr").finish_reason == ""
+
+    def test_null_finish_reason_is_empty_string(self):
+        """A streamed-then-collapsed body can carry an explicit null."""
+        s = _ScriptedSession(_resp_with_finish(None))
+        assert _client(s).invoke("sys", "usr").finish_reason == ""
+
+    def test_non_string_finish_reason_is_stringified_not_crashed(self):
+        s = _ScriptedSession(_resp_with_finish(7))
+        assert _client(s).invoke("sys", "usr").finish_reason == "7"
+
+    def test_a_choice_that_is_not_a_mapping_still_advances_the_chain(self):
+        """Regression guard: reading the choice's finish_reason must not turn a
+        malformed body into an uncaught AttributeError instead of a failover."""
+        bad = SimpleNamespace(status_code=200, json=lambda: {"choices": [["nope"]]})
+        s = _ScriptedSession(bad, _resp())
+        assert _client(s).invoke("sys", "usr").text == "ok"
+        assert len(s.calls) == 2
+
+    def test_the_pre_existing_response_shape_still_reports_nothing(self):
+        """``_resp`` has no finish_reason; the field must default, not guess."""
+        s = _ScriptedSession(_resp())
+        assert _client(s).invoke("sys", "usr").finish_reason == ""
+
+
+class TestFinishReasonLiteLLM:
+    def _client_with(self, monkeypatch, choice):
+        def fake_completion(**kwargs):
+            return SimpleNamespace(choices=[choice], usage=None, model="m")
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        return LiteLLMClient(models=["p"])
+
+    def test_length_is_carried_through(self, monkeypatch):
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content="{"), finish_reason="length"
+        )
+        assert self._client_with(monkeypatch, choice).invoke("s", "u").finish_reason == "length"
+
+    def test_stop_is_carried_through(self, monkeypatch):
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content="ok"), finish_reason="stop"
+        )
+        assert self._client_with(monkeypatch, choice).invoke("s", "u").finish_reason == "stop"
+
+    def test_a_response_object_without_the_attribute_reports_nothing(self, monkeypatch):
+        choice = SimpleNamespace(message=SimpleNamespace(content="ok"))
+        assert self._client_with(monkeypatch, choice).invoke("s", "u").finish_reason == ""
+
+    def test_none_finish_reason_reports_nothing(self, monkeypatch):
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content="ok"), finish_reason=None
+        )
+        assert self._client_with(monkeypatch, choice).invoke("s", "u").finish_reason == ""

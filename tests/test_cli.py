@@ -1,11 +1,14 @@
 """Tests for prxref.cli: review subcommand, serve daemon, --version, and non-blocking exits."""
+import logging
+import os
+import subprocess
 import sys
 import types
 from unittest.mock import MagicMock
 
 import pytest
 
-from prxref import __version__
+from prxref import __version__, cli
 from prxref.cli import main
 from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
@@ -502,12 +505,28 @@ class TestDegenerateValuesNeverReachTheOrchestrator:
         self, fake_runtime, monkeypatch, capsys, flag_value
     ):
         """The flag is applied as a ``load_config`` override, so it is checked
-        on the same path as the environment variable."""
+        on the same path as the environment variable — and reported as the flag.
+
+        Naming ``PRXREF_MAX_CHUNKS`` here sent an operator who had typed
+        ``--max-chunks 0`` hunting through an environment that never set it.
+        """
         assert self._review(monkeypatch, ["--max-chunks", flag_value]) == 2
         _, err = capsys.readouterr()
         assert "configuration error" in err
-        assert "PRXREF_MAX_CHUNKS" in err
+        assert "--max-chunks" in err
+        assert "PRXREF_MAX_CHUNKS" not in err
         assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    def test_the_environment_is_still_reported_as_the_environment(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """Control for the test above: the flag spelling appears only when the
+        flag is what supplied the value."""
+        monkeypatch.setenv("PRXREF_MAX_CHUNKS", "0")
+        assert self._review(monkeypatch) == 2
+        _, err = capsys.readouterr()
+        assert "PRXREF_MAX_CHUNKS" in err
+        assert "--max-chunks" not in err
 
     @pytest.mark.parametrize("name,raw,key", [
         ("PRXREF_MAX_CHUNKS", "1", "max_chunks"),
@@ -522,3 +541,124 @@ class TestDegenerateValuesNeverReachTheOrchestrator:
         monkeypatch.setenv(name, raw)
         assert self._review(monkeypatch) == 0
         assert len(fake_runtime["orchestrate_calls"]) == 1
+
+
+class TestDryRun:
+    """PRXREF_DRY_RUN must reach BOTH review paths, daemon included.
+
+    ``_webhook_handler`` hardcoded ``post=True``, so the one component that runs
+    unattended against a live repo was the one component that could not be told
+    to keep its hands off it.
+    """
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+    URL = "https://github.com/org/repo/pull/7"
+
+    @pytest.fixture(autouse=True)
+    def _detect(self, monkeypatch):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+
+    def _review(self, argv_extra=()):
+        return main(["review", "--pr-url", self.URL, *argv_extra])
+
+    def test_cli_review_posts_by_default(self, fake_runtime):
+        """Control: without the variable, today's behaviour is unchanged."""
+        assert self._review() == 0
+        assert fake_runtime["orchestrate_calls"][0]["post"] is True
+
+    def test_cli_review_stops_posting_when_dry_run_is_set(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        assert self._review() == 0
+        assert fake_runtime["orchestrate_calls"][0]["post"] is False
+
+    def test_the_review_still_runs_it_just_does_not_post(
+        self, fake_runtime, monkeypatch
+    ):
+        """A dry run is a full review with the writes removed, not a no-op."""
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        assert self._review() == 0
+        assert len(fake_runtime["orchestrate_calls"]) == 1
+
+    def test_no_post_still_wins_with_no_variable_set(self, fake_runtime):
+        assert self._review(["--no-post"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["post"] is False
+
+    def test_no_post_and_dry_run_together_still_suppress(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        assert self._review(["--no-post"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["post"] is False
+
+    @pytest.mark.parametrize("raw", ["true", "yes", "0"])
+    def test_a_non_literal_one_does_not_silently_disable_posting(
+        self, fake_runtime, monkeypatch, raw
+    ):
+        """Fail-safe direction: an unrecognised value leaves posting ON, so a
+        typo cannot quietly turn the reviewer into a no-op nobody notices."""
+        monkeypatch.setenv("PRXREF_DRY_RUN", raw)
+        assert self._review() == 0
+        assert fake_runtime["orchestrate_calls"][0]["post"] is True
+
+    def test_the_webhook_daemon_posts_by_default(self, fake_runtime):
+        """Control for the test below."""
+        cli._webhook_handler(self.URL)
+        assert fake_runtime["orchestrate_calls"][0]["post"] is True
+
+    def test_the_webhook_daemon_honours_dry_run(self, fake_runtime, monkeypatch):
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        cli._webhook_handler(self.URL)
+        assert len(fake_runtime["orchestrate_calls"]) == 1
+        assert fake_runtime["orchestrate_calls"][0]["post"] is False
+
+    def test_a_dry_run_says_so_on_stderr(self, fake_runtime, monkeypatch, caplog):
+        """Silence would be indistinguishable from a review that posted."""
+        monkeypatch.setenv("PRXREF_DRY_RUN", "1")
+        with caplog.at_level(logging.INFO, logger="prxref"):
+            assert self._review() == 0
+        assert "PRXREF_DRY_RUN" in caplog.text
+
+
+class TestModuleEntryPoint:
+    """``python -m prxref.cli`` must actually run main().
+
+    Without the ``__main__`` guard the module imported, executed nothing, and
+    exited 0 — a silent success indistinguishable from a review that worked,
+    and the exact opposite of the console script's behaviour on the same input.
+    """
+
+    def _run(self, *args, env_extra=None):
+        env = dict(os.environ)
+        env.update(env_extra or {})
+        return subprocess.run(
+            [sys.executable, "-m", "prxref.cli", *args],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_it_runs_and_prints_the_version(self):
+        proc = self._run("--version")
+        assert proc.returncode == 0
+        assert proc.stdout.strip() == __version__
+
+    def test_a_config_error_exits_2_through_the_module_path(self):
+        """This invocation used to exit 0 with no output at all."""
+        proc = self._run(
+            "review", "--pr-url", "https://github.com/org/repo/pull/42", "--no-post"
+        )
+        assert proc.returncode == 2
+        assert "configuration error" in proc.stderr
+        assert "PRXREF_LLM_BASE_URL" in proc.stderr
+
+    def test_no_subcommand_exits_2_with_usage(self):
+        proc = self._run()
+        assert proc.returncode == 2
+        assert "usage:" in proc.stderr.lower()

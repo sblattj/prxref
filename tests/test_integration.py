@@ -680,3 +680,155 @@ class TestLLMBudgetKnobsEndToEnd:
             assert payload["temperature"] == 0.3
         finally:
             server.stop()
+
+
+def _completion(content: str, finish_reason: str, model: str = "fast") -> dict:
+    """One OpenAI-shaped completion body with an explicit stop reason."""
+    return {
+        "id": "cmpl-1",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {"prompt_tokens": 200, "completion_tokens": 80},
+    }
+
+
+_TRUNCATED_CONTENT = '{"findings": [{"file": "src/auth.py", "line": 4, "sev'
+
+_GOOD_CONTENT = json.dumps({
+    "findings": [
+        {
+            "file": "src/auth.py",
+            "line": 4,
+            "severity": "error",
+            "confidence": 0.95,
+            "title": "Uncaught token decode exception",
+            "body": "decode(token) can raise JWTError if malformed.",
+        }
+    ],
+    "escalations": [],
+})
+
+
+class _CLIHarness:
+    """Runs the real CLI review path against a mock LLM, keeping the forge."""
+
+    PR_URL = "https://github.com/acme/prxref-test/pull/15"
+    REF = PRRef(
+        forge="github", host="github.com", owner="acme",
+        repo="prxref-test", number=15,
+        url="https://github.com/acme/prxref-test/pull/15",
+    )
+
+    def __init__(self, monkeypatch, server_url: str, env: dict[str, str]):
+        self.forge = FakeForge(diff=_make_diff("src/auth.py"))
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "openai-compat")
+        monkeypatch.setenv("PRXREF_LLM_BASE_URL", server_url)
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "fast")
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setattr(cli, "detect_forge", lambda url: self.REF)
+        monkeypatch.setattr(cli, "make_forge", lambda r, session=None: self.forge)
+
+    def review(self, *, post: bool = True):
+        return cli._run_review(self.PR_URL, post=post)
+
+
+class TestTruncationIsLegibleEndToEnd:
+    """Scenario: a starved PRXREF_LLM_MAX_TOKENS explains itself.
+
+    Every hop is real — HTTP client, reviewer, orchestrator, summary rendering —
+    and only the forge is faked. The operator-visible artifact is the posted
+    notice, so that is what is asserted: it has to name the budget and the
+    variable rather than the ``JSONDecodeError`` the truncation surfaces as.
+    """
+
+    def test_the_posted_notice_names_the_budget_and_the_lever(self, monkeypatch):
+        server = MockOpenAIServer(
+            routes={"fast": _completion(_TRUNCATED_CONTENT, "length")}
+        )
+        base_url = server.start()
+        try:
+            harness = _CLIHarness(
+                monkeypatch, base_url, {"PRXREF_LLM_MAX_TOKENS": "256"}
+            )
+            result = harness.review(post=True)
+
+            assert server.requests[0]["payload"]["max_tokens"] == 256
+            assert result["verdict"] == "Error"
+            assert len(harness.forge.summaries) == 1
+            notice = harness.forge.summaries[0]
+            assert "response truncated at max_tokens=256" in notice
+            assert "finish_reason=length" in notice
+            assert "PRXREF_LLM_MAX_TOKENS" in notice
+        finally:
+            server.stop()
+
+    def test_the_same_unparseable_body_without_the_stop_reason_is_not_blamed_on_the_budget(
+        self, monkeypatch
+    ):
+        """The discriminating control: identical bytes, honest stop reason.
+
+        Blaming the budget for every unparseable response would send operators
+        to raise a limit that was never the problem.
+        """
+        server = MockOpenAIServer(
+            routes={"fast": _completion(_TRUNCATED_CONTENT, "stop")}
+        )
+        base_url = server.start()
+        try:
+            harness = _CLIHarness(
+                monkeypatch, base_url, {"PRXREF_LLM_MAX_TOKENS": "256"}
+            )
+            result = harness.review(post=True)
+
+            assert result["verdict"] == "Error"
+            notice = harness.forge.summaries[0]
+            assert "PRXREF_LLM_MAX_TOKENS" not in notice
+            assert "JSONDecodeError" in notice
+        finally:
+            server.stop()
+
+
+class TestDryRunEndToEnd:
+    """Scenario: PRXREF_DRY_RUN reviews for real and writes nothing.
+
+    Asserted at the forge, which is the only place a write could show up.
+    """
+
+    def test_nothing_is_posted_when_dry_run_is_set(self, monkeypatch):
+        server = MockOpenAIServer(routes={"fast": _completion(_GOOD_CONTENT, "stop")})
+        base_url = server.start()
+        try:
+            harness = _CLIHarness(monkeypatch, base_url, {"PRXREF_DRY_RUN": "1"})
+            result = harness.review(post=True)
+
+            assert result["posted"] is False
+            assert harness.forge.summaries == []
+            assert harness.forge.inline_batches == []
+            # The review itself still ran: the model was called and the finding
+            # survived the quality gate.
+            assert len(server.requests) == 1
+            assert len(result["findings_active"]) == 1
+        finally:
+            server.stop()
+
+    def test_the_same_run_posts_when_dry_run_is_unset(self, monkeypatch):
+        """Control: proves the assertions above are about the variable."""
+        server = MockOpenAIServer(routes={"fast": _completion(_GOOD_CONTENT, "stop")})
+        base_url = server.start()
+        try:
+            harness = _CLIHarness(monkeypatch, base_url, {})
+            result = harness.review(post=True)
+
+            assert result["posted"] is True
+            assert len(harness.forge.summaries) == 1
+            assert len(harness.forge.inline_batches) == 1
+        finally:
+            server.stop()
