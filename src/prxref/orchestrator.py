@@ -29,6 +29,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {note_count} {findings} {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
+   ``post_mode`` narrows what is written: ``"summary+inline"`` (default) is
+   that full behaviour, ``"summary"`` skips the inline batch, ``"inline"``
+   skips every summary post including the error notices. ``post_verdict``
+   renders the summary without the verdict stamp while keeping the rest of
+   the template.
 
 Every failure reason that reaches a POSTED comment goes through
 :func:`redact_for_post` first — on both posting paths, the partial-review
@@ -64,6 +69,13 @@ logger = logging.getLogger("prxref")
 
 MAX_WORKERS = 4
 MAX_INLINE_COMMENTS = 15
+
+# The posting-behaviour vocabulary. Restated in config._POST_MODES (config is
+# a leaf module and must not import this pipeline); the two are pinned
+# together by TestPostMode::test_the_vocabulary_matches_the_orchestrator.
+POST_MODES = frozenset({"summary+inline", "summary", "inline"})
+POST_SUMMARY_MODES = frozenset({"summary+inline", "summary"})
+POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 
 # How many DISTINCT chunk-failure reasons the partial-review banner names before
 # it starts counting the rest. Three is enough to show a mixed failure (say, a
@@ -187,6 +199,22 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "{findings}\n\n{attribution}"
 )
 
+# A {verdict} placeholder together with the separator joining it to the rest
+# of its line — ": {verdict}", " — {verdict}", " - {verdict}" — so removing it
+# leaves a clean header instead of a dangling colon or dash. A bare
+# placeholder is removed too; whitespace runs around it are collapsed.
+_VERDICT_STAMP_RE = re.compile(r"[ \t]*[:—–-]?[ \t]*\{verdict\}[ \t]*")
+
+
+def _strip_verdict_stamp(template: str) -> str:
+    """Remove the ``{verdict}`` stamp from a summary template.
+
+    Applied to the template BEFORE the placeholders are filled, so the
+    shipped templates render as ``**prxref review**`` and
+    ``## prxref automated review`` with the rest of the comment untouched.
+    """
+    return _VERDICT_STAMP_RE.sub("", template)
+
 
 def orchestrate_review(
     forge: Forge,
@@ -201,6 +229,8 @@ def orchestrate_review(
     max_inline_comments: int = MAX_INLINE_COMMENTS,
     confidence_floor: float | None = None,
     max_errors: int | None = None,
+    post_mode: str = "summary+inline",
+    post_verdict: bool = True,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -216,8 +246,21 @@ def orchestrate_review(
     each diff chunk, ``max_workers`` the fan-out, ``max_inline_comments`` the
     posted batch. ``confidence_floor`` and ``max_errors`` are forwarded to
     ``apply_quality_gate``; ``None`` leaves that pass reading the environment
-    itself, which is what a library caller with no config dict wants. All of
-    these are request knobs and are deliberately absent from the returned dict.
+    itself, which is what a library caller with no config dict wants.
+
+    ``post_mode`` selects what is written to the forge: ``"summary+inline"``
+    (default) keeps today's behaviour — the summary first, then the inline
+    batch only if the summary landed — ``"summary"`` never calls
+    ``post_inline_comments``, and ``"inline"`` never calls ``post_summary``,
+    on any path, empty-diff and total-failure notices included, so its
+    ``posted`` flag tracks the inline batch alone. ``post_verdict=False``
+    renders the summary without the verdict stamp; the computed verdict in
+    the result dict and the total-failure notice (whose job is to say the
+    review failed) are unaffected. All of these are request knobs and are
+    deliberately absent from the returned dict. The vocabulary is not
+    re-validated here: ``load_config`` already gates it, and a library
+    caller passing an unknown mode degrades to the plain no-op that mode's
+    membership tests produce.
     """
     t0 = time.perf_counter()
 
@@ -225,13 +268,13 @@ def orchestrate_review(
         pr = forge.get_pr(ref)
     except Exception as e:  # noqa: BLE001
         logger.error("get_pr failed: %s", e)
-        return _error_run(forge, ref, post, 0, f"get_pr failed: {e}", t0)
+        return _error_run(forge, ref, post, 0, f"get_pr failed: {e}", t0, post_mode=post_mode)
 
     try:
         raw = forge.get_diff(ref)
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
-        return _error_run(forge, ref, post, 0, f"get_diff failed: {e}", t0)
+        return _error_run(forge, ref, post, 0, f"get_diff failed: {e}", t0, post_mode=post_mode)
 
     # Wrapped like every neighbouring stage. These two were the only ones that
     # could raise out of orchestrate_review, which made the never-raise contract
@@ -243,16 +286,25 @@ def orchestrate_review(
         files = parse_unified_diff(raw)
     except Exception as e:  # noqa: BLE001
         logger.error("parse_unified_diff failed: %s", e)
-        return _error_run(forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0)
+        return _error_run(
+            forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0,
+            post_mode=post_mode,
+        )
 
     try:
         chunks = build_chunks(files, max_chunks=max_chunks, token_budget=token_budget)
     except Exception as e:  # noqa: BLE001
         logger.error("build_chunks failed: %s", e)
-        return _error_run(forge, ref, post, 0, f"build_chunks failed: {e}", t0)
+        return _error_run(
+            forge, ref, post, 0, f"build_chunks failed: {e}", t0,
+            post_mode=post_mode,
+        )
 
     if not chunks:
-        return _summary_only_run(forge, ref, pr, files, post, t0)
+        return _summary_only_run(
+            forge, ref, pr, files, post, t0,
+            post_mode=post_mode, post_verdict=post_verdict,
+        )
 
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
@@ -268,6 +320,7 @@ def orchestrate_review(
         return _error_run(
             forge, ref, post, len(chunks), reason, t0,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
+            post_mode=post_mode,
         )
 
     chunks_failed = sum(1 for r in results if r["error"])
@@ -298,7 +351,9 @@ def orchestrate_review(
 
     elapsed_ms = _elapsed_ms(t0)
     posted = False
-    if post:
+    post_summary_wanted = post and post_mode in POST_SUMMARY_MODES
+    post_inline_wanted = post and post_mode in POST_INLINE_MODES
+    if post_summary_wanted:
         summary = _render_summary(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
@@ -307,25 +362,29 @@ def orchestrate_review(
             # left the one person able to act on "raise PRXREF_LLM_MAX_TOKENS"
             # reading a banner that said only "findings may be incomplete".
             failure_reasons=[r["error"] for r in results if r["error"]],
+            include_verdict=post_verdict,
         )
         try:
             forge.post_summary(ref, summary)
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary failed: %s", e)
-        if posted and findings_active:
-            comments = [
-                InlineComment(
-                    path=f.file,
-                    line=f.line,
-                    body=_format_finding(f, model),
-                )
-                for f in findings_active[:max_inline_comments]
-            ]
-            try:
-                forge.post_inline_comments(ref, comments)
-            except Exception as e:  # noqa: BLE001
-                logger.error("post_inline_comments failed: %s", e)
+    # A summary-mode run still requires the summary to have landed before the
+    # inline batch rides on it; an inline-mode run has no summary to gate on.
+    if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
+        comments = [
+            InlineComment(
+                path=f.file,
+                line=f.line,
+                body=_format_finding(f, model),
+            )
+            for f in findings_active[:max_inline_comments]
+        ]
+        try:
+            forge.post_inline_comments(ref, comments)
+            posted = True
+        except Exception as e:  # noqa: BLE001
+            logger.error("post_inline_comments failed: %s", e)
 
     return {
         "verdict": verdict,
@@ -461,12 +520,15 @@ def _render_summary(
     chunks_reviewed: int = 0,
     chunks_failed: int = 0,
     failure_reasons: Sequence[str] = (),
+    include_verdict: bool = True,
 ) -> str:
     try:
         template = reviewer.load_prompt("summary")
     except Exception as e:  # noqa: BLE001
         logger.warning("load_prompt('summary') failed, using fallback: %s", e)
         template = _FALLBACK_SUMMARY_TEMPLATE
+    if not include_verdict:
+        template = _strip_verdict_stamp(template)
 
     counts = {"error": 0, "warning": 0, "note": 0}
     for f in findings_active:
@@ -555,13 +617,17 @@ def _format_finding(f: Finding, model: str) -> str:
     )
 
 
-def _summary_only_run(forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float) -> dict:
+def _summary_only_run(
+    forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
+    *, post_mode: str = "summary+inline", post_verdict: bool = True,
+) -> dict:
     elapsed_ms = _elapsed_ms(t0)
     posted = False
-    if post:
+    if post and post_mode in POST_SUMMARY_MODES:
         summary = _render_summary(
             pr, files, "Approved", [], "unknown", 0, 0, elapsed_ms,
             chunks_reviewed=0, chunks_failed=0,
+            include_verdict=post_verdict,
         )
         try:
             forge.post_summary(ref, summary)
@@ -592,10 +658,11 @@ def _error_run(
     model: str = "unknown",
     input_tokens: int = 0,
     output_tokens: int = 0,
+    post_mode: str = "summary+inline",
 ) -> dict:
     elapsed_ms = _elapsed_ms(t0)
     posted = False
-    if post:
+    if post and post_mode in POST_SUMMARY_MODES:
         attribution = _attribution(
             model, input_tokens + output_tokens, elapsed_ms,
         )

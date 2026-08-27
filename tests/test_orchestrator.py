@@ -1303,3 +1303,224 @@ class TestMultiLineReasonsStayInTheBlockquote:
     def test_the_continuation_text_is_still_reported(self, monkeypatch):
         forge, _res = self._run(monkeypatch, self.MULTILINE)
         assert "second line of the reason" in forge.summaries[0]
+
+
+class TestPostModeKnobs:
+    """post_mode narrows which forge writes happen; the two lists of calls are
+    exclusive by construction, not by accident.
+
+    ``summary`` must never reach ``post_inline_comments`` and ``inline`` must
+    never reach ``post_summary`` — on any path, the empty-diff and error
+    notices included, or a mode meant to quiet the reviewer would still shout
+    on the days it fails.
+    """
+
+    def _forge(self) -> FakeForge:
+        return FakeForge(diff=_added_file_diff("src/app.py", 20))
+
+    def test_the_default_posts_summary_then_inline(self):
+        forge = self._forge()
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert len(forge.summaries) == 1
+        assert len(forge.inline_batches) == 1
+        assert res["posted"] is True
+
+    def test_summary_mode_never_calls_post_inline_comments(self):
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_mode="summary",
+        )
+        assert len(forge.summaries) == 1
+        assert forge.inline_batches == []
+        assert res["posted"] is True
+
+    def test_inline_mode_never_calls_post_summary(self):
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_mode="inline",
+        )
+        assert forge.summaries == []
+        assert len(forge.inline_batches) == 1
+        assert [c.line for c in forge.inline_batches[0]] == [3, 7]
+        assert res["posted"] is True
+
+    def test_inline_mode_does_not_gate_on_a_summary_that_never_happens(self):
+        """Combined mode lets the inline batch ride on the summary landing;
+        inline mode has no summary, so nothing may gate the batch away."""
+        forge = self._forge()
+        forge.fail = {"post_summary"}
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post_mode="summary+inline",
+        )
+        assert res["posted"] is False
+        assert forge.inline_batches == []
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_mode="inline",
+        )
+        assert res["posted"] is True
+
+    def test_inline_mode_with_no_surviving_findings_posts_nothing(self):
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=_findings((3, "error", 0.1))),
+            post_mode="inline",
+        )
+        assert res["findings_active"] == []
+        assert forge.summaries == []
+        assert forge.inline_batches == []
+        assert res["posted"] is False
+
+    def test_summary_mode_on_an_empty_diff_still_posts_the_summary(self):
+        forge = FakeForge(diff="")
+        res = orchestrate_review(forge, REF, FakeLLM(), post_mode="summary")
+        assert len(forge.summaries) == 1
+        assert forge.inline_batches == []
+        assert res["posted"] is True
+
+    def test_inline_mode_posts_nothing_on_an_empty_diff(self):
+        forge = FakeForge(diff="")
+        res = orchestrate_review(forge, REF, FakeLLM(), post_mode="inline")
+        assert forge.summaries == []
+        assert forge.inline_batches == []
+        assert res["posted"] is False
+
+    def test_inline_mode_skips_the_total_failure_notice(self, monkeypatch):
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing({"src/one.py": "reason A", "other/two.py": "reason B"}),
+        )
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), max_chunks=2, token_budget=1000,
+            post_mode="inline",
+        )
+        assert res["verdict"] == "Error"
+        assert forge.summaries == []
+        assert res["posted"] is False
+
+    def test_summary_mode_keeps_the_total_failure_notice(self, monkeypatch):
+        """The notice is a summary post; a summary-only operator still gets it."""
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing({"src/one.py": "reason A", "other/two.py": "reason B"}),
+        )
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), max_chunks=2, token_budget=1000,
+            post_mode="summary",
+        )
+        assert res["verdict"] == "Error"
+        assert len(forge.summaries) == 1
+        assert "could not complete" in forge.summaries[0]
+
+    def test_inline_mode_skips_the_stage_failure_notice(self):
+        forge = self._forge()
+        forge.fail = {"get_pr"}
+        res = orchestrate_review(forge, REF, FakeLLM(), post_mode="inline")
+        assert res["verdict"] == "Error"
+        assert forge.summaries == []
+        assert res["posted"] is False
+
+    def test_an_inline_post_failure_keeps_posted_false(self):
+        forge = self._forge()
+        forge.fail = {"post_inline"}
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_mode="inline",
+        )
+        assert res["posted"] is False
+
+    def test_post_false_beats_any_post_mode(self):
+        """``post`` is the master switch; a mode selects among writes that
+        ``post=False`` has already removed."""
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=False, post_mode="summary",
+        )
+        assert forge.summaries == []
+        assert forge.inline_batches == []
+        assert res["posted"] is False
+
+    def test_an_unknown_library_mode_posts_nothing(self):
+        """``load_config`` rejects the vocabulary with exit 2; a library caller
+        bypassing it gets the plain no-op the membership tests produce."""
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_mode="everything",
+        )
+        assert forge.summaries == []
+        assert forge.inline_batches == []
+        assert res["posted"] is False
+
+    def test_result_key_set_is_unchanged_by_the_new_knobs(self):
+        forge = self._forge()
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post_mode="inline", post_verdict=False,
+        )
+        assert set(res) == RESULT_KEYS
+
+
+class TestPostVerdictKnobs:
+    """post_verdict=False renders the summary without the verdict stamp,
+    keeping the findings, the counts, and the attribution."""
+
+    def test_the_default_keeps_the_verdict_in_the_posted_summary(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert res["verdict"] == "Request-Changes"
+        assert "Request-Changes" in forge.summaries[0]
+
+    def test_post_verdict_false_omits_the_verdict_and_keeps_the_rest(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_verdict=False,
+        )
+        summary = forge.summaries[0]
+        assert "Request-Changes" not in summary
+        assert "**prxref review**" in summary
+        assert "Add widget" in summary
+        assert "Files reviewed: 1" in summary
+        assert "errors: 1" in summary
+        assert "Null deref" in summary
+        assert "Reviewed by prxref · model=test-model-1 · 150 tok" in summary
+
+    def test_the_computed_verdict_is_still_returned(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_verdict=False,
+        )
+        assert res["verdict"] == "Request-Changes"
+
+    def test_the_empty_diff_summary_omits_approved_too(self):
+        forge = FakeForge(diff="")
+        orchestrate_review(forge, REF, FakeLLM(), post_verdict=False)
+        summary = forge.summaries[0]
+        assert "Approved" not in summary
+        assert "No findings — nice work." in summary
+
+    def test_the_total_failure_notice_still_names_its_status(self):
+        """The notice's job is to say the review failed; the knob governs the
+        review summary's verdict stamp, not the failure announcement."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail = {"get_pr"}
+        res = orchestrate_review(forge, REF, FakeLLM(), post_verdict=False)
+        assert res["verdict"] == "Error"
+        assert "Error" in forge.summaries[0]
+
+    def test_the_fallback_template_renders_a_clean_header(self, monkeypatch):
+        def _boom(name):
+            raise RuntimeError("no prompts")
+
+        monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _boom)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS), post_verdict=False,
+        )
+        assert forge.summaries[0].splitlines()[0] == "🤖 **prxref review**"
+
+    def test_the_shipped_template_style_strips_to_a_clean_header(self):
+        out = orchestrator._strip_verdict_stamp("## prxref automated review: {verdict}\n")
+        assert out == "## prxref automated review\n"
