@@ -486,6 +486,9 @@ class TestLiteLLMClient:
         assert captured[0]["temperature"] == 0.25
 
 
+_ABSENT = object()
+
+
 def _resp_with_finish(finish_reason, text="ok", status_code=200):
     """A well-formed success body whose choice carries ``finish_reason``.
 
@@ -501,9 +504,6 @@ def _resp_with_finish(finish_reason, text="ok", status_code=200):
         "usage": {"prompt_tokens": 3, "completion_tokens": 2},
     }
     return SimpleNamespace(status_code=status_code, payload=payload, json=lambda: payload)
-
-
-_ABSENT = object()
 
 
 class TestFinishReasonOpenAICompat:
@@ -547,6 +547,43 @@ class TestFinishReasonOpenAICompat:
         """``_resp`` has no finish_reason; the field must default, not guess."""
         s = _ScriptedSession(_resp())
         assert _client(s).invoke("sys", "usr").finish_reason == ""
+
+
+class TestMalformedBodiesAdvanceTheChain:
+    """The class docstring promises "a malformed body — the next model is tried
+    at once". Two shapes used to break that promise by raising out of invoke().
+    """
+
+    @pytest.mark.parametrize("message", ["oops", ["a"], 7, None])
+    def test_a_non_mapping_message_advances_instead_of_raising(self, message):
+        """``"oops".get(...)`` raises AttributeError, which is outside the
+        caught tuple, so it escaped invoke() and killed the failover."""
+        bad = SimpleNamespace(
+            status_code=200, json=lambda: {"choices": [{"message": message}]}
+        )
+        s = _ScriptedSession(bad, _resp())
+        assert _client(s).invoke("sys", "usr").text == "ok"
+        assert len(s.calls) == 2
+
+    def test_it_is_reported_as_a_malformed_response_not_a_new_failure_class(self):
+        bad = SimpleNamespace(
+            status_code=200, json=lambda: {"choices": [{"message": "oops"}]}
+        )
+        s = _ScriptedSession(bad)
+        with pytest.raises(LLMError, match="malformed response"):
+            _client(s, models=("only",)).invoke("sys", "usr")
+
+    def test_a_mapping_message_with_no_content_is_still_a_success(self):
+        """Control: an EMPTY message is a valid answer of nothing, and must not
+        be swept into the malformed branch by the new check."""
+        ok = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"role": "assistant"}}]},
+        )
+        s = _ScriptedSession(ok)
+        result = _client(s, models=("only",)).invoke("sys", "usr")
+        assert result.text == ""
+        assert len(s.calls) == 1
 
 
 class TestFinishReasonLiteLLM:

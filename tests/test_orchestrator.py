@@ -830,3 +830,199 @@ class TestNoStageRaisesOutOfOrchestrateReview:
         )
         assert res["verdict"] == "Request-Changes"
         assert res["chunk_count"] == 1
+
+
+TRUNCATED_REASON = (
+    "response truncated at max_tokens=256 (finish_reason=length); "
+    "raise PRXREF_LLM_MAX_TOKENS"
+)
+
+
+def _review_chunk_failing(errors_by_path: dict[str, str], *, tokens: int = 0):
+    """A ``review_chunk`` double whose outcome depends on the chunk's first file.
+
+    Keyed by path rather than by call order, so the result is identical however
+    the thread pool interleaves the chunks.
+    """
+    def _rc(llm, files, **kwargs):
+        error = errors_by_path.get(files[0].path, "")
+        findings = [] if error else [
+            Finding(
+                file=files[0].path, line=1, severity="note", confidence=0.9,
+                title="ok", body="b",
+            )
+        ]
+        return findings, {
+            "escalations": [],
+            "input_tokens": tokens, "output_tokens": tokens,
+            "model": "test-model-1", "elapsed_ms": 1, "error": error,
+        }
+    return _rc
+
+
+class TestPartialBannerNamesTheReasons:
+    """A partial review READS like a successful one, so a reason left in the
+    logs reaches nobody.
+
+    The total-failure notice has always interpolated its reason verbatim into
+    the posted comment; the partial path staying silent was the inconsistency.
+    It is also the path that needs it more — a total failure announces itself,
+    while "Findings may be incomplete" looks like a footnote.
+    """
+
+    def _run(self, errors_by_path, *, diff=None, max_chunks=4):
+        forge = FakeForge(diff=diff if diff is not None else FOUR_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True,
+            max_chunks=max_chunks, token_budget=1000,
+        )
+        return forge, res
+
+    def _banner(self, forge):
+        return forge.summaries[0].split("> ⚠️ Partial review:")[1]
+
+    @pytest.fixture(autouse=True)
+    def _stub(self, monkeypatch):
+        self.monkeypatch = monkeypatch
+
+    def _with(self, errors_by_path, **kwargs):
+        self.monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing(errors_by_path),
+        )
+        return self._run(errors_by_path, **kwargs)
+
+    def test_the_truncation_reason_reaches_the_posted_comment(self):
+        forge, res = self._with({"a/one.py": TRUNCATED_REASON})
+        assert res["chunks_failed"] == 1
+        assert res["chunks_reviewed"] == 3
+        assert TRUNCATED_REASON in forge.summaries[0]
+
+    def test_it_stays_inside_the_existing_blockquote(self):
+        """Subordinate to the findings, not a second block competing with them."""
+        forge, _res = self._with({"a/one.py": TRUNCATED_REASON})
+        tail = self._banner(forge)
+        assert f"> - {TRUNCATED_REASON}" in tail
+        # Line 0 is the rest of the "Partial review:" sentence itself; every
+        # line after it must still carry the blockquote marker, or the reasons
+        # have escaped into a block of their own.
+        assert [
+            line for line in tail.splitlines()[1:]
+            if line.strip() and not line.startswith(">")
+        ] == []
+
+    def test_the_existing_coverage_sentence_is_untouched(self):
+        forge, _res = self._with({"a/one.py": TRUNCATED_REASON})
+        assert (
+            "> ⚠️ Partial review: 3 of 4 chunks were reviewed; 1 failed. "
+            "Findings may be incomplete." in forge.summaries[0]
+        )
+
+    def test_identical_reasons_are_reported_once(self):
+        """Three chunks starved by the same budget is one fact, not three."""
+        forge, res = self._with({
+            "a/one.py": TRUNCATED_REASON,
+            "b/two.py": TRUNCATED_REASON,
+            "c/three.py": TRUNCATED_REASON,
+        })
+        assert res["chunks_failed"] == 3
+        assert forge.summaries[0].count(TRUNCATED_REASON) == 1
+
+    def test_distinct_reasons_are_all_reported(self):
+        forge, _res = self._with({
+            "a/one.py": TRUNCATED_REASON,
+            "b/two.py": "RuntimeError: connection reset",
+        })
+        tail = self._banner(forge)
+        assert TRUNCATED_REASON in tail
+        assert "RuntimeError: connection reset" in tail
+
+    def test_every_chunk_failing_is_a_total_failure_not_a_partial_one(self):
+        """Boundary: the partial banner belongs to runs that produced something.
+        With nothing reviewed the run takes the error path, whose notice has
+        always carried the reason verbatim."""
+        forge, res = self._with({
+            "a/one.py": "reason A", "b/two.py": "reason B",
+            "c/three.py": "reason C", "d/four.py": "reason D",
+        })
+        assert res["verdict"] == "Error"
+        assert "Partial review" not in forge.summaries[0]
+        assert "reason A" in forge.summaries[0]
+
+    def test_the_overflow_is_counted_out_loud(self, monkeypatch):
+        """Capped so a pathological run cannot bury the findings — and counted,
+        because silently dropping the overflow would repeat the very failure
+        this banner exists to fix."""
+        five = "".join(
+            _added_file_diff(path, 400)
+            for path in ("a/1.py", "b/2.py", "c/3.py", "d/4.py", "e/5.py")
+        )
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing({
+                "a/1.py": "reason A", "b/2.py": "reason B",
+                "c/3.py": "reason C", "d/4.py": "reason D",
+            }),
+        )
+        forge = FakeForge(diff=five)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, max_chunks=5, token_budget=1000,
+        )
+        assert res["chunks_failed"] == 4
+        tail = self._banner(forge)
+        assert "…and 1 more distinct reason (see logs)" in tail
+        assert tail.count("\n> - ") == orchestrator.MAX_REPORTED_REASONS + 1
+
+    def test_a_clean_full_review_adds_nothing(self):
+        """The discriminating control: no failures, no banner at all."""
+        forge, res = self._with({})
+        assert res["chunks_failed"] == 0
+        assert "Partial review" not in forge.summaries[0]
+        assert "…and" not in forge.summaries[0]
+
+    def test_a_summary_only_run_adds_nothing(self):
+        forge = FakeForge(diff="")
+        orchestrate_review(forge, REF, FakeLLM("{}"), post=True)
+        assert "Partial review" not in forge.summaries[0]
+
+
+class TestFailedChunkTelemetryIsCounted:
+    """A chunk whose response ARRIVED and then failed to parse still spent tokens.
+
+    Telemetry is populated before the parse, so those tokens now reach the
+    totals and the PR's cost line, and the attribution names the real model
+    instead of "unknown". Pinned because it is a deliberate, visible change to
+    the numbers anything downstream would do cost accounting on.
+    """
+
+    def test_the_tokens_of_a_failed_chunk_reach_the_totals(self, monkeypatch):
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing({"a/one.py": TRUNCATED_REASON}, tokens=100),
+        )
+        forge = FakeForge(diff=FOUR_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, max_chunks=4, token_budget=1000,
+        )
+        # 4 chunks x 100 in + 100 out, the failed one included.
+        assert res["input_tokens"] == 400
+        assert res["output_tokens"] == 400
+        assert "800 tok" in forge.summaries[0]
+
+    def test_the_attribution_names_the_model_that_answered(self, monkeypatch):
+        """Even when every chunk failed, a model DID answer, and saying
+        ``model=unknown`` there hid which one."""
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing(
+                {"src/one.py": TRUNCATED_REASON, "other/two.py": TRUNCATED_REASON},
+                tokens=100,
+            ),
+        )
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, max_chunks=2, token_budget=1000,
+        )
+        assert res["verdict"] == "Error"
+        assert "model=test-model-1" in forge.summaries[0]
+        assert TRUNCATED_REASON in forge.summaries[0]

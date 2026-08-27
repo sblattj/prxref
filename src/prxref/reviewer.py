@@ -32,26 +32,39 @@ DEFAULT_CONFIDENCE = 0.5
 _CONTEXT_MARKER = "## Review Context"
 
 _MAX_TOKENS_ENV = "PRXREF_LLM_MAX_TOKENS"
-_LENGTH_FINISH_REASON = "length"
+
+# Every spelling that means "I stopped because I ran out of output budget".
+# ``length`` is the OpenAI vocabulary that litellm normalises to; a plain
+# OpenAI-compatible proxy in front of another provider may pass that provider's
+# own word through untouched, and ``max_tokens`` is what those use. Matching is
+# exact against this set after casefolding, never a substring test, so a
+# neighbouring reason like ``length_finish`` cannot be mistaken for truncation.
+_TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
 
 # Written for whoever reads the failing chunk's error, not for a stack trace:
 # it names the budget that was in force and the one variable that changes it.
 _TRUNCATED_ERROR = (
-    "response truncated at max_tokens={budget} (finish_reason=length); "
+    "response truncated at max_tokens={budget} (finish_reason={reason}); "
     "raise " + _MAX_TOKENS_ENV
 )
 
 
-def _hit_the_budget(result: Any) -> bool:
-    """True when the provider says generation stopped at the token budget.
+def _budget_stop_reason(result: Any) -> str:
+    """The provider's stop reason, when it says generation hit the token budget.
 
-    Tolerant of a backend or test double whose result predates
+    Returns the normalised reason (``"length"``, ``"max_tokens"``) so the error
+    can quote what the provider actually said, or ``""`` when the response was
+    not truncated. Tolerant of a backend or test double whose result predates
     ``InvokeResult.finish_reason``: an absent or non-string attribute reads as
-    "not reported", never as truncation. Comparison is case-insensitive because
-    the string is a provider's, not ours.
+    "not reported", never as truncation. Casefolded because the string is a
+    provider's, not ours; an unrecognised spelling falls back to the plain parse
+    error, which is the safe direction — a missed hint, never a false claim.
     """
     reason = getattr(result, "finish_reason", "")
-    return isinstance(reason, str) and reason.strip().lower() == _LENGTH_FINISH_REASON
+    if not isinstance(reason, str):
+        return ""
+    normalised = reason.strip().lower()
+    return normalised if normalised in _TRUNCATION_FINISH_REASONS else ""
 
 
 def load_prompt(name: str) -> str:
@@ -165,7 +178,9 @@ def review_chunk(
     in force and the variable that raises it — the operator's lever — instead
     of a ``JSONDecodeError`` that looks like a model-quality problem. A clean
     empty response (any other finish reason) keeps the parse error verbatim
-    and is never mislabelled as truncation.
+    and is never mislabelled as truncation. A response that parses to the wrong
+    SHAPE is treated the same way: unusable is unusable, and the budget is named
+    when the budget is why.
 
     ``max_tokens`` is the completion budget for the call; ``None`` keeps the
     module default :data:`MAX_TOKENS`, so direct callers are unaffected. The
@@ -211,7 +226,8 @@ def review_chunk(
     meta["output_tokens"] = result.output_tokens
     meta["model"] = result.model
 
-    truncated = _hit_the_budget(result)
+    stop_reason = _budget_stop_reason(result)
+    truncated_error = _TRUNCATED_ERROR.format(budget=budget, reason=stop_reason)
 
     try:
         parsed = loads_lenient(result.text)
@@ -219,7 +235,7 @@ def review_chunk(
         # A truncated completion and a model that simply refused to emit JSON
         # produce the same JSONDecodeError, and only one of them has a lever
         # the operator can pull. Say which one this is.
-        reason = _TRUNCATED_ERROR.format(budget=budget) if truncated else f"{type(e).__name__}: {e}"
+        reason = truncated_error if stop_reason else f"{type(e).__name__}: {e}"
         logger.warning("worker review failed for chunk of %d files: %s", len(chunk), reason)
         meta["error"] = reason
         meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
@@ -227,20 +243,25 @@ def review_chunk(
 
     meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
 
-    if truncated:
-        # Parseable, so the review still counts — but the model was cut off
-        # mid-answer and the tail of its findings is gone. Loud, not fatal.
+    if not isinstance(parsed, dict):
+        # Valid JSON of the wrong shape is just as unusable as none, so it gets
+        # the same treatment: if the budget is why it came out that way, say so
+        # rather than reporting the shape and leaving the cause unspoken.
+        detail = f"worker review JSON is not an object: {type(parsed).__name__}"
+        logger.warning(detail)
+        meta["error"] = truncated_error if stop_reason else detail
+        return [], meta
+
+    if stop_reason:
+        # Parseable and usable, so the review still counts — but the model was
+        # cut off mid-answer and the tail of its findings is gone. Loud, not
+        # fatal. Logged only from here, where the response was actually used.
         logger.warning(
             "worker review for chunk of %d files hit the completion budget "
-            "(max_tokens=%d, finish_reason=length); findings may be incomplete — "
+            "(max_tokens=%d, finish_reason=%s); findings may be incomplete — "
             "raise %s",
-            len(chunk), budget, _MAX_TOKENS_ENV,
+            len(chunk), budget, stop_reason, _MAX_TOKENS_ENV,
         )
-
-    if not isinstance(parsed, dict):
-        logger.warning("worker review JSON is not an object: %s", type(parsed).__name__)
-        meta["error"] = f"worker review JSON is not an object: {type(parsed).__name__}"
-        return [], meta
 
     raw_findings = parsed.get("findings")
     if not isinstance(raw_findings, list):
