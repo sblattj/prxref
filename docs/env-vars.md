@@ -25,6 +25,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_MAX_WORKERS` | `4` | Parallel chunk-review workers. Must be **greater than 0**. The cap that matters is usually the endpoint's rate limit, not the machine. |
 | `PRXREF_MAX_INLINE_COMMENTS` | `15` | Maximum inline comments posted per review, applied **after** the quality gate. Must be **greater than 0**. Findings past the cap are still listed in the summary comment; only the inline posting is trimmed. |
 | `PRXREF_DRY_RUN` | `False` | Set to the literal `1` to run the full review and write nothing to the forge — no summary, no inline comments. Applies to the webhook daemon as well as the CLI, which is the only way to watch the daemon against a real repository before letting it comment. `--no-post` is the per-invocation equivalent and still wins when the environment says nothing. Only the literal `1` enables it. |
+| `PRXREF_FAIL_ON` | `never` | Exit-code policy for `prxref review`. `never` (the default) keeps the advisory contract — the exit code never reflects findings. `error` exits `1` when the completed review carries an active error-severity finding; `any` exits `1` on any active finding. Under either value a review that fails to complete also exits `1`, so a gating lane cannot read a broken run as green. The webhook daemon has no exit code and is unaffected. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build). |
 
 ### Per-Forge Authentication
 
@@ -50,7 +51,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 
 `prxref review` exits **0** on every review error — an empty diff, a network failure, an LLM timeout, bad forge credentials, even a review in which every chunk failed. prxref is an advisor, not a merge gate.
 
-It exits **2** on exactly one class of problem: a **configuration error**. That is a required value missing, a value that will not parse, or a value outside its valid range. The check runs after the environment *and* any programmatic override, so no path into the config can smuggle a degenerate value through to the wire.
+It exits **2** on exactly one class of problem: a **configuration error**. That is a required value missing, a value that will not parse, a value outside its valid range, or one outside its key's allowed vocabulary (`PRXREF_FAIL_ON` accepts only `never`, `error`, or `any`). The check runs after the environment *and* any programmatic override, so no path into the config can smuggle a degenerate value through to the wire.
 
 The message names whichever input actually supplied the offending value:
 
@@ -63,7 +64,9 @@ configuration error: --max-chunks: must be a finite number greater than 0, got 0
 
 The second form exists because naming the environment variable unconditionally sent operators hunting for a `PRXREF_MAX_CHUNKS` they had never set.
 
-There is deliberately no `PRXREF_FAIL_ON`. Failing a build on a finding would make the review a gate, and a probabilistic gate is worse than none: the first false positive teaches the team to bypass it. Read the verdict from the posted summary instead.
+One knob can move the exit code beyond that: `PRXREF_FAIL_ON`. Its default `never` is everything above, unchanged. Setting it to `error` exits **1** when the completed review carries an active error-severity finding; `any` exits **1** on any active finding; and under either value a review that fails to complete also exits **1** — a gate that silently passes on a broken run is worse than none. An unrecognized PR URL still exits **0** under every value: nothing was reviewed, so there is no outcome to gate on. The webhook daemon has no exit code and is unaffected.
+
+Think hard before reaching for it. Failing a build on a finding turns a probabilistic reviewer into a merge gate, and the first false positive teaches the team to bypass the gate. Read the verdict from the posted summary instead — and do not build a security control on the exit code.
 
 ## Reasoning Models and the Token Budget
 
@@ -103,14 +106,14 @@ export PRXREF_MAX_ERROR_FINDINGS=10
 
 The trade-off is the whole difference: the advisory profile gives you the three findings most likely to be real, and the thorough profile gives you ten that might be. Raising the floor does not make the reviewer smarter — it just moves where the cut falls, and everything below the cut is dropped unseen. A team that ignores prxref's comments should raise the floor before turning it off; a team reviewing machine-written code should leave it where it ships.
 
-Neither knob affects the exit code. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build).
+Neither knob affects the exit code — `PRXREF_FAIL_ON` is the only one that can. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build).
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **25** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **26** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
-- **LLM / Pipeline (15):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`
+- **LLM / Pipeline (16):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`, `PRXREF_FAIL_ON`
 - **Per-Forge Auth (6):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
 - **Webhooks (4):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(25 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 26 accepted variable names.)*
+*(26 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 27 accepted variable names.)*

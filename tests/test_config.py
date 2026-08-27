@@ -586,6 +586,80 @@ class TestDryRun:
         assert "PRXREF_DRY_RUN" in prxref_env_names()
 
 
+class TestFailOnPolicy:
+    """PRXREF_FAIL_ON: the review command's exit-code policy enum.
+
+    The default is the standing advisory contract, so every value other than
+    ``never`` is an opt-in — and a value outside the vocabulary must fail as a
+    configuration error rather than fall back to the default, which would turn
+    a typo into an undetected "never".
+    """
+
+    def test_defaults_to_never_so_behaviour_is_unchanged(self):
+        assert load_config()["fail_on"] == "never"
+
+    @pytest.mark.parametrize("raw", ["never", "error", "any"])
+    def test_each_legal_value_loads(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_FAIL_ON", raw)
+        assert load_config()["fail_on"] == raw
+
+    @pytest.mark.parametrize("raw", [
+        "sometimes", "ERROR", "Never", "ANY", "1", "on-error", "errors",
+    ])
+    def test_a_value_outside_the_vocabulary_is_a_config_error(
+        self, monkeypatch, raw
+    ):
+        """Matching is exact, so it is case-sensitive too: an operator who
+        wants the gate types it exactly as documented, and anything else is
+        rejected rather than guessed at."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", raw)
+        with pytest.raises(ConfigError, match="PRXREF_FAIL_ON"):
+            load_config()
+
+    def test_the_error_names_the_legal_values(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "sometimes")
+        with pytest.raises(ConfigError) as exc:
+            load_config()
+        for word in ("never", "error", "any"):
+            assert word in str(exc.value)
+
+    def test_an_empty_value_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "")
+        assert load_config()["fail_on"] == "never"
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "   ")
+        assert load_config()["fail_on"] == "never"
+
+    def test_it_is_a_string_key_outside_the_numeric_surface(self):
+        """A choice key has no interval; it must not be swept into the range
+        check, which would read any truthy string as a non-finite number."""
+        assert config._DEFAULTS["fail_on"] == "never"
+        assert "fail_on" not in config._INT_KEYS | config._FLOAT_KEYS
+        assert "fail_on" not in config._RANGES
+
+    def test_the_vocabulary_is_declared_in_the_choice_table(self):
+        assert config._CHOICE_KEYS["fail_on"] == frozenset(
+            {"never", "error", "any"}
+        )
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "never")
+        assert load_config(fail_on="any")["fail_on"] == "any"
+
+    def test_an_override_cannot_smuggle_a_value_outside_the_vocabulary(self):
+        """Same rule as the ranges: the check runs after overrides too, and
+        the message names the override's own key, not the environment."""
+        with pytest.raises(ConfigError, match="fail_on") as exc:
+            load_config(fail_on="sometimes")
+        assert "PRXREF_FAIL_ON" not in str(exc.value)
+
+    def test_every_choice_key_is_a_real_config_key(self):
+        """Mirror of the coercion-set guard: a typo in ``_CHOICE_KEYS`` would
+        validate a key nothing reads."""
+        assert set(config._CHOICE_KEYS) - set(config._DEFAULTS) == set()
+
+
 class TestErrorsNameTheirSource:
     """One rule: the message names whichever input supplied the bad value."""
 

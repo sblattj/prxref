@@ -636,6 +636,182 @@ class TestDryRun:
         assert "PRXREF_DRY_RUN" in caplog.text
 
 
+class TestFailOnExitPolicy:
+    """PRXREF_FAIL_ON decides when a review outcome moves the exit code.
+
+    The default ``never`` must leave every exit code in this file exactly as
+    it was, so the first test pins that. ``error`` and ``any`` opt into a
+    failing exit on findings AND on a review that fails to complete — a gate
+    that silently passes on a broken run is worse than none. Severity is
+    compared the way the orchestrator builds its verdict: exact ``error``,
+    never a substring.
+    """
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+    URL = "https://github.com/org/repo/pull/7"
+
+    class _F:
+        def __init__(self, severity):
+            self.severity = severity
+
+    @pytest.fixture(autouse=True)
+    def _detect(self, monkeypatch):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+
+    def _review(self, argv_extra=()):
+        return main(["review", "--pr-url", self.URL, *argv_extra])
+
+    def _install_result(self, fake_runtime, severities):
+        result = {
+            "verdict": "Request-Changes" if "error" in severities else "Approved",
+            "findings_active": [self._F(s) for s in severities],
+            "findings_dropped": [],
+        }
+
+        def _orchestrate(**kwargs):
+            fake_runtime["orchestrate_calls"].append(kwargs)
+            return result
+
+        fake_runtime["set_orchestrate_side_effect"](_orchestrate)
+        return result
+
+    def test_the_default_keeps_every_exit_code_where_it_was(
+        self, fake_runtime, monkeypatch
+    ):
+        """Control: an error-severity review still exits 0 with no variable set."""
+        self._install_result(fake_runtime, ["error", "warning"])
+        assert self._review() == 0
+
+    def test_error_policy_exits_1_on_an_error_finding(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        self._install_result(fake_runtime, ["error", "note"])
+        code = self._review()
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert "verdict: Request-Changes" in out
+        assert "PRXREF_FAIL_ON=error" in err
+        assert "exiting 1" in err
+
+    def test_error_policy_tolerates_warning_and_note_findings(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        self._install_result(fake_runtime, ["warning", "note"])
+        assert self._review() == 0
+
+    def test_error_policy_matches_severity_exactly(
+        self, fake_runtime, monkeypatch
+    ):
+        """"critical" is not "error". The quality gate would have dropped such
+        a finding as an invalid severity, so this pins the comparison against
+        a substring or prefix accident rather than against real traffic."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        self._install_result(fake_runtime, ["critical"])
+        assert self._review() == 0
+
+    def test_any_policy_exits_1_on_a_warning_only_review(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "any")
+        self._install_result(fake_runtime, ["warning"])
+        assert self._review() == 1
+
+    def test_any_policy_also_covers_error_findings(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "any")
+        self._install_result(fake_runtime, ["error"])
+        assert self._review() == 1
+
+    def test_any_policy_exits_0_when_nothing_was_found(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "any")
+        self._install_result(fake_runtime, [])
+        assert self._review() == 0
+
+    def test_never_policy_ignores_findings_when_set_explicitly(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "never")
+        self._install_result(fake_runtime, ["error", "error", "warning"])
+        assert self._review() == 0
+
+    def test_a_result_without_countable_findings_is_not_gated(
+        self, fake_runtime, monkeypatch
+    ):
+        """A total-LLM-failure run degrades to verdict ``Error`` with no
+        findings list; there is nothing countable, so nothing fires."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        result = {"verdict": "Error", "chunks_failed": 3}
+        fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
+        assert self._review() == 0
+
+    @pytest.mark.parametrize("policy", ["error", "any"])
+    def test_a_failed_review_exits_1_when_gating(
+        self, fake_runtime, monkeypatch, capsys, policy
+    ):
+        """The failure path is exactly the outcome a gating lane must not
+        read as green, so the policy is resolved before the run — not from a
+        config that a failed run never produced."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", policy)
+
+        def _exploding(**kwargs):
+            raise RuntimeError("Bedrock throttled: 429 Too Many Requests")
+
+        fake_runtime["set_orchestrate_side_effect"](_exploding)
+        assert self._review() == 1
+        _, err = capsys.readouterr()
+        assert "review failed: Bedrock throttled" in err
+        assert f"PRXREF_FAIL_ON={policy}" in err
+
+    def test_a_failed_review_still_exits_0_under_never(
+        self, fake_runtime, monkeypatch
+    ):
+        def _exploding(**kwargs):
+            raise ConnectionError("Bitbucket unreachable")
+
+        fake_runtime["set_orchestrate_side_effect"](_exploding)
+        assert self._review() == 0
+
+    def test_an_invalid_policy_exits_2_before_anything_runs(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", "sometimes")
+        assert self._review() == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert "PRXREF_FAIL_ON" in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    def test_an_unrecognized_url_still_exits_0_under_gating(
+        self, fake_runtime, monkeypatch
+    ):
+        """Nothing was reviewed, so there is no outcome to gate on."""
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: None)
+        monkeypatch.setenv("PRXREF_FAIL_ON", "any")
+        assert main(["review", "--pr-url", "https://example.com/not/a/pr"]) == 0
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    def test_the_webhook_daemon_is_unaffected_by_the_policy(
+        self, fake_runtime, monkeypatch
+    ):
+        """The daemon has no exit code; the knob must not change what it does."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        self._install_result(fake_runtime, ["error"])
+        cli._webhook_handler(self.URL)
+        assert len(fake_runtime["orchestrate_calls"]) == 1
+
+
 class TestModuleEntryPoint:
     """``python -m prxref.cli`` must actually run main().
 

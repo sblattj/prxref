@@ -144,12 +144,13 @@ The service exposes:
 
 | Code | Meaning |
 |---|---|
-| `0` | The run finished — **including every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. |
-| `2` | **Usage or configuration error** — no subcommand, invalid command-line arguments, or a required value missing, malformed, or outside its valid range. The message names the source that supplied it: the environment variable, or the CLI flag when a flag is what you typed. |
+| `0` | The run finished — **including every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. With `PRXREF_FAIL_ON` set (see below) a finding or a failed review can turn this into `1`. |
+| `1` | **Gated review outcome** — only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that fails to complete also exits `1`. The reason is printed to stderr. |
+| `2` | **Usage or configuration error** — no subcommand, invalid command-line arguments, or a required value missing, malformed, outside its valid range, or outside its key's allowed vocabulary (`PRXREF_FAIL_ON` accepts only `never`, `error`, `any`). The message names the source that supplied it: the environment variable, or the CLI flag when a flag is what you typed. |
 
 ```
 $ prxref review --pr-url https://github.com/org/repo/pull/1 --max-chunks 0
 configuration error: --max-chunks: must be a finite number greater than 0, got 0
 ```
 
-There is deliberately no `PRXREF_FAIL_ON`. Failing a build on a finding would turn a probabilistic reviewer into a merge gate, and the first false positive teaches a team to bypass the gate. Read the verdict from the posted summary, which also carries a partial-review banner when some chunks did not make it. Do not build a security control on the exit code.
+`PRXREF_FAIL_ON` is the one opt-out of the advisory contract, and its default `never` is the doctrine above, unchanged. Setting it to `error` or `any` turns the reviewer into a merge gate — failing a build on a finding turns a probabilistic reviewer into a gate, and the first false positive teaches a team to bypass the gate, so think hard before you set it. Read the verdict from the posted summary, which also carries a partial-review banner when some chunks did not make it. Do not build a security control on the exit code. The webhook daemon has no exit code and is unaffected.
