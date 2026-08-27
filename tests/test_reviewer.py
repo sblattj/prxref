@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import logging
+
+import pytest
 
 from prxref.llm import InvokeResult
 from prxref.reviewer import MAX_TOKENS, load_prompt, render_chunk, review_chunk
@@ -45,8 +48,9 @@ CLEAN_RESPONSE = json.dumps({
 
 
 class FakeLLM:
-    def __init__(self, text: str):
+    def __init__(self, text: str, finish_reason: str = ""):
         self.text = text
+        self.finish_reason = finish_reason
         self.calls: list[dict] = []
 
     def invoke(
@@ -72,6 +76,7 @@ class FakeLLM:
             model="fake-model",
             backend="fake",
             elapsed_ms=12,
+            finish_reason=self.finish_reason,
         )
 
 
@@ -254,3 +259,140 @@ class TestReviewChunk:
         findings, meta = review_chunk(llm, self._chunk())
         assert findings == []
         assert meta["escalations"] == []
+
+
+TRUNCATED_RESPONSE = '{"findings": [{"file": "src/app.py", "line": 3, "sev'
+
+
+class TestTruncationIsNamedInsteadOfDecoded:
+    """A starved completion budget must read as a budget problem, not a model one.
+
+    Both failures arrive as the same ``JSONDecodeError``; only ``finish_reason``
+    separates them, and only one of the two has a lever the operator can pull.
+    The reported error has to name that lever, because ``JSONDecodeError: no
+    parseable content`` sends an operator looking at prompts and models instead
+    of at ``PRXREF_LLM_MAX_TOKENS``.
+    """
+
+    def _chunk(self):
+        return parse_unified_diff(MINI_DIFF)
+
+    def test_cut_off_json_names_the_budget_and_the_lever(self):
+        llm = FakeLLM(TRUNCATED_RESPONSE, finish_reason="length")
+        findings, meta = review_chunk(llm, self._chunk(), max_tokens=512)
+        assert findings == []
+        assert meta["error"] == (
+            "response truncated at max_tokens=512 (finish_reason=length); "
+            "raise PRXREF_LLM_MAX_TOKENS"
+        )
+
+    def test_empty_response_at_the_budget_is_truncation_too(self):
+        """Reasoning models routinely spend the whole budget before the answer,
+        which arrives as an EMPTY completion, not a partial one."""
+        llm = FakeLLM("", finish_reason="length")
+        findings, meta = review_chunk(llm, self._chunk(), max_tokens=4096)
+        assert findings == []
+        assert "max_tokens=4096" in meta["error"]
+        assert "PRXREF_LLM_MAX_TOKENS" in meta["error"]
+
+    def test_a_clean_empty_response_is_not_mislabelled_as_truncated(self):
+        """The discriminating control: same empty text, different stop reason."""
+        llm = FakeLLM("", finish_reason="stop")
+        findings, meta = review_chunk(llm, self._chunk(), max_tokens=4096)
+        assert findings == []
+        assert "truncated" not in meta["error"]
+        assert "PRXREF_LLM_MAX_TOKENS" not in meta["error"]
+        assert "JSONDecodeError" in meta["error"]
+
+    def test_an_unreported_stop_reason_is_not_treated_as_truncation(self):
+        """A backend that reports nothing must not have truncation invented for it."""
+        llm = FakeLLM("I am not returning JSON.")
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert "truncated" not in meta["error"]
+        assert "JSONDecodeError" in meta["error"]
+
+    def test_the_budget_named_is_the_one_actually_sent(self):
+        llm = FakeLLM("", finish_reason="length")
+        _findings, meta = review_chunk(llm, self._chunk(), max_tokens=777)
+        assert llm.calls[0]["max_tokens"] == 777
+        assert "max_tokens=777" in meta["error"]
+
+    def test_the_module_default_is_named_when_no_budget_was_passed(self):
+        llm = FakeLLM("", finish_reason="length")
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert f"max_tokens={MAX_TOKENS}" in meta["error"]
+
+    @pytest.mark.parametrize("raw", ["length", "LENGTH", " Length "])
+    def test_the_stop_reason_is_matched_case_and_space_insensitively(self, raw):
+        """The string is the provider's, not ours; casing varies by gateway."""
+        llm = FakeLLM("", finish_reason=raw)
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert "truncated" in meta["error"]
+
+    @pytest.mark.parametrize("raw", ["stop", "content_filter", "tool_calls", ""])
+    def test_every_other_stop_reason_keeps_the_parse_error(self, raw):
+        llm = FakeLLM("", finish_reason=raw)
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert "truncated" not in meta["error"]
+
+    def test_an_invoke_failure_still_reports_the_exception(self):
+        """Control: not every empty-handed chunk is a truncation."""
+        class ExplodingLLM:
+            def invoke(self, *args, **kwargs):
+                raise RuntimeError("upstream timeout")
+
+        _findings, meta = review_chunk(ExplodingLLM(), self._chunk())
+        assert meta["error"] == "RuntimeError: upstream timeout"
+
+    def test_a_result_without_a_finish_reason_attribute_never_raises(self):
+        """The never-raise contract covers a test double or backend that
+        predates ``InvokeResult.finish_reason``."""
+        class LegacyResult:
+            text = "not json"
+            input_tokens = 1
+            output_tokens = 2
+            model = "legacy"
+
+        class LegacyLLM:
+            def invoke(self, *args, **kwargs):
+                return LegacyResult()
+
+        findings, meta = review_chunk(LegacyLLM(), self._chunk())
+        assert findings == []
+        assert "JSONDecodeError" in meta["error"]
+
+    def test_telemetry_survives_the_truncation_branch(self):
+        """The response arrived, so its token counts are real and must be kept:
+        they are how an operator sees the budget being consumed."""
+        llm = FakeLLM("", finish_reason="length")
+        _findings, meta = review_chunk(llm, self._chunk())
+        assert meta["input_tokens"] == 100
+        assert meta["output_tokens"] == 50
+        assert meta["model"] == "fake-model"
+
+
+class TestTruncatedButParseableStillWarns:
+    """A response that hit the cap and still parsed is a success with a hole in it."""
+
+    def _chunk(self):
+        return parse_unified_diff(MINI_DIFF)
+
+    def test_findings_are_kept_and_the_chunk_counts_as_reviewed(self):
+        llm = FakeLLM(CLEAN_RESPONSE, finish_reason="length")
+        findings, meta = review_chunk(llm, self._chunk())
+        assert len(findings) == 2
+        assert meta["error"] == ""
+
+    def test_the_budget_and_the_lever_are_logged(self, caplog):
+        llm = FakeLLM(CLEAN_RESPONSE, finish_reason="length")
+        with caplog.at_level(logging.WARNING, logger="prxref"):
+            review_chunk(llm, self._chunk(), max_tokens=8192)
+        assert "max_tokens=8192" in caplog.text
+        assert "PRXREF_LLM_MAX_TOKENS" in caplog.text
+
+    def test_a_clean_response_logs_no_such_warning(self, caplog):
+        """Control: the warning must not fire on every successful review."""
+        llm = FakeLLM(CLEAN_RESPONSE, finish_reason="stop")
+        with caplog.at_level(logging.WARNING, logger="prxref"):
+            review_chunk(llm, self._chunk(), max_tokens=8192)
+        assert "PRXREF_LLM_MAX_TOKENS" not in caplog.text

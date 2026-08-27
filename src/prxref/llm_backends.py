@@ -44,7 +44,9 @@ class OpenAICompatClient(LLMClient):
     and exhausting the chain raises :class:`LLMError` with per-model reasons.
     ``temperature`` is omitted from the payload entirely when unset (like
     ``reasoning_effort``), never sent as a numeric default: some endpoints
-    reject it alongside reasoning parameters.
+    reject it alongside reasoning parameters. The choice's ``finish_reason``
+    is carried through verbatim so the reviewer can name truncation as the
+    cause of an unparseable response.
     """
 
     def __init__(
@@ -115,7 +117,12 @@ class OpenAICompatClient(LLMClient):
                 continue
             try:
                 body = resp.json()
-                text = body["choices"][0]["message"].get("content") or ""
+                choice = body["choices"][0]
+                text = choice["message"].get("content") or ""
+                # Read after ``choice["message"]`` has already proved ``choice``
+                # is a mapping, so a malformed body still lands in the
+                # advance-to-the-next-model branch below rather than raising.
+                finish_reason = str(choice.get("finish_reason") or "")
                 usage = body.get("usage") or {}
                 resp_model = body.get("model") or model
             except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -128,6 +135,7 @@ class OpenAICompatClient(LLMClient):
                 model=resp_model,
                 backend="openai-compat",
                 elapsed_ms=elapsed_ms,
+                finish_reason=finish_reason,
             )
         raise LLMError("all models failed: " + "; ".join(failures))
 
@@ -137,8 +145,9 @@ class LiteLLMClient(LLMClient):
 
     Requires the optional extra (``pip install 'prxref[litellm]'``).
     ``num_retries=0`` keeps failover fast; the chain itself is delegated to
-    litellm via ``fallbacks=``. Only usage is mapped into InvokeResult.
-    ``temperature`` is omitted entirely when unset, never defaulted.
+    litellm via ``fallbacks=``. Usage and the choice's ``finish_reason`` are
+    mapped into InvokeResult; a response carrying neither yields zeros and
+    ``""``. ``temperature`` is omitted entirely when unset, never defaulted.
     """
 
     def __init__(
@@ -190,7 +199,8 @@ class LiteLLMClient(LLMClient):
         t0 = time.perf_counter()
         response = self._completion(**kwargs)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        text = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        text = choice.message.content or ""
         usage = getattr(response, "usage", None)
         return InvokeResult(
             text=text,
@@ -199,6 +209,8 @@ class LiteLLMClient(LLMClient):
             model=getattr(response, "model", "") or self.models[0],
             backend="litellm",
             elapsed_ms=elapsed_ms,
+            # Absent on a provider that does not report one; never guessed.
+            finish_reason=str(getattr(choice, "finish_reason", "") or ""),
         )
 
 
