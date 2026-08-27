@@ -22,7 +22,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 5. Verdict: ``"Error"`` when no chunk was reviewed successfully;
    ``"Request-Changes"`` iff any active error-severity finding survives;
    else ``"Approved"``. A partial failure keeps the verdict but the summary
-   declares reduced coverage.
+   declares reduced coverage AND names the distinct reasons (deduplicated,
+   capped, inside the same blockquote) — a partial review reads as a
+   successful one, so a reason left only in the logs reaches nobody.
 6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {note_count} {findings} {attribution}`` filled, plus
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from . import reviewer
@@ -56,6 +59,12 @@ logger = logging.getLogger("prxref")
 
 MAX_WORKERS = 4
 MAX_INLINE_COMMENTS = 15
+
+# How many DISTINCT chunk-failure reasons the partial-review banner names before
+# it starts counting the rest. Three is enough to show a mixed failure (say, a
+# starved budget plus a timeout) without letting a pathological run bury the
+# findings under its own diagnostics.
+MAX_REPORTED_REASONS = 3
 
 _SEVERITY_EMOJI = {"error": "🚨", "warning": "⚠️", "note": "📝"}
 
@@ -183,6 +192,10 @@ def orchestrate_review(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
+            # Every failed chunk already carries its reason here; withholding it
+            # left the one person able to act on "raise PRXREF_LLM_MAX_TOKENS"
+            # reading a banner that said only "findings may be incomplete".
+            failure_reasons=[r["error"] for r in results if r["error"]],
         )
         try:
             forge.post_summary(ref, summary)
@@ -336,6 +349,7 @@ def _render_summary(
     *,
     chunks_reviewed: int = 0,
     chunks_failed: int = 0,
+    failure_reasons: Sequence[str] = (),
 ) -> str:
     try:
         template = reviewer.load_prompt("summary")
@@ -378,7 +392,33 @@ def _render_summary(
             f"{rendered}\n\n> ⚠️ Partial review: {chunks_reviewed} of {total} "
             f"chunks were reviewed; {chunks_failed} failed. Findings may be incomplete."
         )
+        # Inside the same blockquote: subordinate to the findings, which is where
+        # a PR author's eye skips unless they are troubleshooting — but present,
+        # because a partial review looks like a successful one and nobody goes
+        # looking. The total-failure notice has always posted its reason
+        # verbatim; staying silent here was the inconsistency, not the safety.
+        reason_lines = _failure_reason_lines(failure_reasons)
+        if reason_lines:
+            rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
     return rendered
+
+
+def _failure_reason_lines(reasons: Sequence[str]) -> list[str]:
+    """Render distinct chunk-failure reasons as blockquote list items.
+
+    Deduplicated, because seven chunks starved by the same budget is one fact
+    and not seven; capped at :data:`MAX_REPORTED_REASONS`, because a
+    pathological run must not flood the comment. The overflow is counted out
+    loud rather than dropped — a silent truncation here would repeat the very
+    failure this banner exists to fix.
+    """
+    distinct = sorted({reason for reason in reasons if reason})
+    lines = [f"- {reason}" for reason in distinct[:MAX_REPORTED_REASONS]]
+    hidden = len(distinct) - len(lines)
+    if hidden:
+        plural = "s" if hidden > 1 else ""
+        lines.append(f"- …and {hidden} more distinct reason{plural} (see logs)")
+    return lines
 
 
 def _format_finding(f: Finding, model: str) -> str:

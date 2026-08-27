@@ -118,7 +118,16 @@ class OpenAICompatClient(LLMClient):
             try:
                 body = resp.json()
                 choice = body["choices"][0]
-                text = choice["message"].get("content") or ""
+                message = choice["message"]
+                if not isinstance(message, dict):
+                    # A non-mapping message is a malformed body like any other,
+                    # and the docstring promises the chain advances on one. Left
+                    # to itself, ``"oops".get`` raises AttributeError — outside
+                    # the tuple below — and escapes invoke(), losing the failover.
+                    raise TypeError(
+                        f"choices[0].message is {type(message).__name__}, expected an object"
+                    )
+                text = message.get("content") or ""
                 # Read after ``choice["message"]`` has already proved ``choice``
                 # is a mapping, so a malformed body still lands in the
                 # advance-to-the-next-model branch below rather than raising.
