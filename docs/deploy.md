@@ -53,7 +53,7 @@ Configure secret tokens and match the events accepted by `prxref`:
 
 *Note on Insecure Development Bypass:* Setting `PRXREF_ALLOW_UNSIGNED=1` allows unsigned payloads for local testing. Do not use in production.
 
-*First deployment:* set `PRXREF_DRY_RUN=1` before pointing webhooks at a busy repository. The daemon then runs every review in full — fetch, chunk, LLM calls, quality gate — and writes nothing back to the forge, so you can read the logs and confirm the review is sane before it starts commenting. Unset it when you are satisfied. This is the only way to observe the daemon against real traffic; `--no-post` covers a single CLI invocation but the daemon takes no flags.
+*First deployment:* set `PRXREF_DRY_RUN=1` before pointing webhooks at a busy repository. The daemon then runs every review in full — fetch, chunk, LLM calls, quality gate — and writes nothing back to the forge, so you can read the logs and confirm the review is sane before it starts commenting. Unset it when you are satisfied. This is the only way to observe the daemon against real traffic: `--no-post` covers a single CLI invocation, and `serve` takes only `--host`/`--port`, so the daemon has no flag-based equivalent.
 
 ---
 
@@ -129,7 +129,7 @@ The container includes a built-in curl-free health check using Python standard l
 | Code | Meaning | Pipeline effect |
 |---|---|---|
 | `0` | The run finished. This **includes every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized PR URL, or a review in which every chunk failed. Diagnostics are printed to stderr. | Step stays green. |
-| `2` | A **configuration error**: a required value missing, or one that is malformed or out of range. The message names the source that supplied it — the environment variable, or the CLI flag when a flag was what the operator typed. | Step fails. This is the intended failure: it means prxref itself is misconfigured, not that your code is bad. |
+| `2` | A **usage or configuration error**: no subcommand, invalid arguments, or a required value missing, malformed, or out of range. The message names the source that supplied it — the environment variable, or the CLI flag when a flag was what the operator typed. | Step fails. This is the intended failure: it means prxref was invoked wrong or is misconfigured, not that your code is bad. |
 
 ```bash
 # A URL prxref cannot review — still exit 0

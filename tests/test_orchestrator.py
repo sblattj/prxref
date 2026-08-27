@@ -20,7 +20,7 @@ import pytest
 import prxref
 from prxref.forges.base import InlineComment, PRData, PRRef, Thread
 from prxref.llm import InvokeResult
-from prxref.triage import Finding
+from prxref.triage import DEFAULT_TOKEN_BUDGET, Finding, build_chunks, parse_unified_diff
 
 SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
@@ -109,6 +109,23 @@ def _added_file_diff(path: str, n_lines: int) -> str:
 
 
 TWO_FILE_DIFF = _added_file_diff("src/one.py", 400) + _added_file_diff("other/two.py", 400)
+
+
+def multi_chunk_diff(n_files: int = 3) -> str:
+    """Build a diff guaranteed to chunk into exactly ``n_files`` pieces.
+
+    Each added file alone exceeds the default token budget (est_tokens is 40
+    per line), so ``build_chunks`` must open one chunk per file. The count is
+    asserted here so a budget change fails loudly instead of silently
+    producing a single chunk.
+    """
+    diff = (
+        "\n".join(_added_file_diff(f"src/big{i}.py", 650) for i in range(1, n_files + 1))
+        + "\n"
+    )
+    chunks = build_chunks(parse_unified_diff(diff), token_budget=DEFAULT_TOKEN_BUDGET)
+    assert len(chunks) == n_files, f"expected {n_files} chunks, got {len(chunks)}"
+    return diff
 
 
 class FakeLLM:
@@ -265,8 +282,8 @@ class TestHappyPath:
 
 class TestParallelFanOut:
     def test_three_chunks_run_concurrently_and_all_findings_collected(self, monkeypatch):
-        paths = ["src/big1.py", "src/big2.py", "src/big3.py"]
-        diff = "\n".join(_added_file_diff(p, 650) for p in paths) + "\n"
+        paths = [f"src/big{i}.py" for i in range(1, 4)]
+        diff = multi_chunk_diff(3)
         barrier = threading.Barrier(3, timeout=10)
 
         def barrier_review_chunk(
