@@ -47,6 +47,16 @@ LLM / pipeline:
                                 (default off). Applies to the webhook daemon
                                 as well as the CLI; ``--no-post`` is the
                                 per-invocation equivalent and still wins.
+  PRXREF_FAIL_ON                Exit-code policy for ``prxref review``:
+                                "never" (default) keeps the advisory
+                                contract — the exit code never reflects
+                                findings; "error" exits 1 when the
+                                completed review carries an active
+                                error-severity finding; "any" exits 1 on
+                                any active finding. Under "error" and
+                                "any", a review that fails to complete
+                                also exits 1. The webhook daemon has no
+                                exit code and is unaffected.
   PRXREF_POST_MODE              What gets posted to the forge:
                                 "summary+inline" (default) | "summary" |
                                 "inline". Any other value is a
@@ -82,9 +92,10 @@ An empty or whitespace-only environment value reads as unset, so a stray
 ``PRXREF_LLM_TIMEOUT= `` in a .env file keeps the default instead of aborting.
 ``None``-valued overrides are ignored (callers may pass optional values).
 Unknown override keys raise ``ValueError`` so typos surface immediately.
-A malformed or out-of-range value raises :class:`~prxref.llm.ConfigError`,
-which the CLI reports as a configuration error and exits 2 for — never as a
-review failure.
+A malformed value, one out of its numeric range, or one outside its key's
+allowed vocabulary (``PRXREF_FAIL_ON`` accepts only never | error | any)
+raises :class:`~prxref.llm.ConfigError`, which the CLI reports as a
+configuration error and exits 2 for — never as a review failure.
 """
 from __future__ import annotations
 
@@ -125,6 +136,7 @@ _DEFAULTS: dict[str, object] = {
     # TestChunkingAndFanoutKnobs pins the three literals together.
     "max_workers": 4,
     "max_inline_comments": 15,
+    "fail_on": "never",
     "dry_run": False,
     "post_mode": "summary+inline",
     "post_verdict": True,
@@ -148,6 +160,15 @@ _INT_KEYS = frozenset({
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned", "dry_run", "post_verdict"})
 _LIST_KEYS = frozenset({"llm_models"})
+
+# An enum-valued key has no numeric interval to check, so its legal vocabulary
+# is declared here instead and enforced on the same pass as the ranges. A
+# value outside the set is a ConfigError (exit 2) naming the legal values —
+# never a silent fall-back to the default, which would turn a typo'd
+# PRXREF_FAIL_ON=eror into an undetected "never".
+_CHOICE_KEYS: dict[str, frozenset[str]] = {
+    "fail_on": frozenset({"never", "error", "any"}),
+}
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
 # prxref.orchestrator (config stays a leaf module); pinned together by
@@ -273,6 +294,21 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
             raise ConfigError(f"{sources[key]}: {rng.describe()}, got {value!r}")
 
 
+def _check_choices(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Reject a value outside its key's allowed vocabulary.
+
+    Same pass, same failure mode as :func:`_check_ranges`: it runs after
+    environment AND overrides, and the message names ``sources[key]`` —
+    whichever input actually supplied the offending value.
+    """
+    for key, choices in sorted(_CHOICE_KEYS.items()):
+        value = cfg[key]
+        if isinstance(value, str) and value in choices:
+            continue
+        allowed = ", ".join(repr(c) for c in sorted(choices))
+        raise ConfigError(f"{sources[key]}: must be one of {allowed}, got {value!r}")
+
+
 def _check_post_mode(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """Reject a ``post_mode`` outside the documented vocabulary.
 
@@ -296,9 +332,10 @@ def load_config(
 
     Keys mirror the env table above (lowercase, no prefix). Env values are
     type-coerced per key (int / float / bool / comma-list / str); an empty or
-    whitespace-only value reads as unset. A malformed or out-of-range value
-    raises :class:`~prxref.llm.ConfigError` naming the input that supplied it,
-    which the CLI turns into exit 2.
+    whitespace-only value reads as unset. A malformed value, one out of its
+    numeric range, or one outside its key's allowed vocabulary raises
+    :class:`~prxref.llm.ConfigError` naming the input that supplied it, which
+    the CLI turns into exit 2.
 
     ``source_labels`` lets a caller say what its user calls an override — the
     CLI passes ``{"max_chunks": "--max-chunks"}`` so a bad flag is reported as
@@ -333,6 +370,7 @@ def load_config(
         cfg[key] = value
         sources[key] = labels.get(key, key)
     _check_ranges(cfg, sources)
+    _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
     return cfg
 

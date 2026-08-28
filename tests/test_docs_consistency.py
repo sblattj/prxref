@@ -13,11 +13,11 @@ silently:
 * forward — every key in ``_DEFAULTS`` is documented in all three places;
 * backward — no document advertises a ``PRXREF_`` name that is not a key.
 
-The backward check needs a small allowlist, and it is deliberately small: the
-legacy environment aliases (DERIVED from ``config._LEGACY_ENV_ALIASES``, so
-retiring one retires its exemption with it) and exactly one hand-written name,
-``PRXREF_FAIL_ON``, which the docs mention only in order to say it does not
-exist.
+The backward check needs a small allowlist, and it is deliberately small: only
+the legacy environment aliases (DERIVED from ``config._LEGACY_ENV_ALIASES``, so
+retiring one retires its exemption with it). There is no hand-written entry:
+``PRXREF_FAIL_ON`` held the only one while the docs documented its absence,
+and implementing it retired the exemption rather than inheriting it.
 
 Every failure message names the offending key AND the file to edit, because
 this test's whole audience is someone who has just added a key and does not yet
@@ -63,12 +63,11 @@ SURFACES: dict[str, str] = {
 
 _ENV_NAME_RE = re.compile(r"\bPRXREF_[A-Z0-9_]+\b")
 
-# The one hand-written exemption. docs/env-vars.md contains PRXREF_FAIL_ON in
-# the sentence "There is deliberately no `PRXREF_FAIL_ON`" — documenting the
-# ABSENCE is the point of that paragraph, so the backward check has to tolerate
-# it. test_the_exempt_name_is_documented_as_not_existing keeps the exemption
-# honest: it fails the day the docs stop saying "no".
-DOCUMENTED_NON_KEYS = frozenset({"PRXREF_FAIL_ON"})
+# The hand-written exemption list. It was exactly one name, ``PRXREF_FAIL_ON``,
+# back when docs/env-vars.md documented the variable's ABSENCE; the key now
+# exists, so the exemption was retired rather than inherited. Keep it empty:
+# an allowlist that grows quietly stops being a check.
+DOCUMENTED_NON_KEYS = frozenset()
 
 
 def env_name(key: str) -> str:
@@ -139,18 +138,11 @@ class TestNoDocumentAdvertisesAnUnknownName:
             f"or remove {'it' if len(strays) == 1 else 'them'} from {surface}"
         )
 
-    def test_the_allowlist_stays_one_hand_written_entry(self):
-        """An allowlist that grows quietly stops being a check. Growing it is
-        allowed — growing it without anyone noticing is not."""
-        assert DOCUMENTED_NON_KEYS == frozenset({"PRXREF_FAIL_ON"})
-
-    def test_the_exempt_name_is_documented_as_not_existing(self):
-        """The exemption is only legitimate while the docs really are saying
-        the variable does NOT exist. Implement it one day and this fails,
-        forcing the allowlist entry to be reconsidered rather than inherited.
-        """
-        assert "no `PRXREF_FAIL_ON`" in SURFACES["docs/env-vars.md"]
-        assert "PRXREF_FAIL_ON" not in expected_names()
+    def test_the_allowlist_stays_empty(self):
+        """The list held one entry, for a name the docs documented as not
+        existing. Implementing that name retired the exemption; a new one is
+        allowed only if someone deletes this assertion on purpose."""
+        assert DOCUMENTED_NON_KEYS == frozenset()
 
     def test_every_allowlisted_alias_belongs_to_a_real_key(self):
         """The aliases are derived, so this pins the derivation rather than the
