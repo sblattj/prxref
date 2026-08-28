@@ -178,6 +178,8 @@ def _run_review(
         max_chunks=cfg["max_chunks"],
         max_tokens=cfg["llm_max_tokens"],
         token_budget=cfg["chunk_token_budget"],
+        max_files_per_chunk=cfg["chunk_max_files"],
+        context_lines=cfg["chunk_context_lines"],
         max_workers=cfg["max_workers"],
         max_inline_comments=cfg["max_inline_comments"],
         # Passed explicitly so the resolved config wins: apply_quality_gate

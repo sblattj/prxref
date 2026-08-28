@@ -16,6 +16,17 @@ from pathlib import PurePosixPath
 # PRXREF_CHUNK_TOKEN_BUDGET overrides it.
 DEFAULT_TOKEN_BUDGET: int = 25_000
 
+# Cap on files placed in one review chunk, for the same shared-literal reason
+# as the budget above; PRXREF_CHUNK_MAX_FILES overrides it. The max_chunks
+# overflow branch may exceed the cap rather than drop a file from review.
+DEFAULT_MAX_FILES_PER_CHUNK: int = 5
+
+# Context lines kept around each change when a chunk's diff is re-rendered
+# for the worker prompt; PRXREF_CHUNK_CONTEXT_LINES overrides it. The forge's
+# diff is the only source of context: this trims what was received, never
+# adds what it did not.
+DEFAULT_CONTEXT_LINES: int = 3
+
 
 @dataclass
 class Finding:
@@ -316,19 +327,67 @@ def _shared_dir_depth(p1: str, p2: str) -> int:
     return depth
 
 
+def trim_hunk_context(hunk: Hunk, context_lines: int) -> Hunk:
+    """Rebuild ``hunk`` keeping at most ``context_lines`` around each change.
+
+    A context line survives iff it lies within ``context_lines`` of a ``+``
+    or ``-`` line — the same rule ``git diff -U<n>`` applies — so a short run
+    of context between two changes stays whole and a long one is cut back to
+    N on each side. ``0`` emits the changed lines only; a hunk with no
+    change lines is returned unchanged.
+
+    The result is a new Hunk whose ``old_start``/``new_start`` and counts
+    describe the kept lines, so rendering it yields a self-consistent
+    unified diff. The input is never mutated: chunking, quality, and line
+    alignment all keep working from the full parse.
+
+    Context can only be trimmed, never added — the forge's diff is the only
+    source — so a forge that sent -U3 through ``context_lines=3`` renders
+    byte-identical.
+    """
+    radius = max(0, context_lines)
+    change_at = [i for i, ln in enumerate(hunk.lines) if ln.kind != " "]
+    if not change_at:
+        return hunk
+    kept = [
+        (i, ln)
+        for i, ln in enumerate(hunk.lines)
+        if ln.kind != " " or any(abs(i - j) <= radius for j in change_at)
+    ]
+    cut = kept[0][0]
+    lines = [ln for _, ln in kept]
+    return Hunk(
+        old_start=hunk.old_start + sum(
+            1 for ln in hunk.lines[:cut] if ln.kind != "+"
+        ),
+        new_start=hunk.new_start + sum(
+            1 for ln in hunk.lines[:cut] if ln.kind != "-"
+        ),
+        old_count=sum(1 for ln in lines if ln.kind != "+"),
+        new_count=sum(1 for ln in lines if ln.kind != "-"),
+        lines=lines,
+    )
+
+
 def build_chunks(
     files: list[FileDiff],
     max_chunks: int = 8,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     churn_by_path: dict[str, int] | None = None,
+    max_files_per_chunk: int = DEFAULT_MAX_FILES_PER_CHUNK,
 ) -> list[list[FileDiff]]:
     """Group files into review chunks (~token_budget tokens, ≤max_chunks).
 
     Files are placed risk-first (score_file, descending) into the chunk
     with the highest directory-proximity affinity that still fits the
-    budget; otherwise a new chunk opens, and once max_chunks is reached
-    overflow goes to the smallest chunk. Binary files are skipped —
-    there is no reviewable text.
+    budget and holds fewer than max_files_per_chunk files; otherwise a new
+    chunk opens, and once max_chunks is reached overflow goes to the
+    smallest chunk. Binary files are skipped — there is no reviewable text.
+
+    The file cap shapes placement like the budget does. Once max_chunks is
+    reached and every chunk is at the cap, an overflow file joins the
+    smallest chunk past the cap rather than being dropped: review coverage
+    is the invariant, both caps are preferences.
     """
     candidates = [f for f in files if not f.is_binary]
     if not candidates:
@@ -352,6 +411,8 @@ def build_chunks(
 
         for idx, chunk in enumerate(chunks):
             if chunk_tokens[idx] + ftokens > token_budget:
+                continue
+            if len(chunk) >= max_files_per_chunk:
                 continue
             affinity = max(_shared_dir_depth(f.path, cf.path) for cf in chunk)
             if affinity > best_affinity:

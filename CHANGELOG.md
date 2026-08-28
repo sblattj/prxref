@@ -7,6 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **`PRXREF_CHUNK_MAX_FILES`** (default `5`) caps the number of files placed
+  in one review chunk, and **`PRXREF_CHUNK_CONTEXT_LINES`** (default `3`)
+  bounds the context lines rendered around each change in the worker prompt.
+  The file cap shapes placement like the token budget: once `PRXREF_MAX_CHUNKS`
+  is reached and every chunk is full, an overflow file joins the smallest chunk
+  past the cap rather than being dropped. Context can only be trimmed, never
+  added — the forge's diff is the source — and `0` emits the changed lines
+  only.
+
 ## [0.3.0] — 2026-08-27
 
 The configuration surface release. Driven by a field report from an on-prem

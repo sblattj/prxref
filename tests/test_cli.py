@@ -419,12 +419,24 @@ class TestConfiguredKnobsReachTheOrchestrator:
         assert call["max_workers"] == 2
         assert call["max_inline_comments"] == 5
 
+    def test_chunk_shape_knobs_reach_the_orchestrator(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_CHUNK_MAX_FILES", "7")
+        monkeypatch.setenv("PRXREF_CHUNK_CONTEXT_LINES", "1")
+        assert self._review(monkeypatch) == 0
+        call = fake_runtime["orchestrate_calls"][0]
+        assert call["max_files_per_chunk"] == 7
+        assert call["context_lines"] == 1
+
     def test_defaults_are_todays_hardcoded_values(self, fake_runtime, monkeypatch):
         """Zero behaviour change when nothing is configured."""
         assert self._review(monkeypatch) == 0
         call = fake_runtime["orchestrate_calls"][0]
         assert call["max_chunks"] == 8
         assert call["token_budget"] == 25_000
+        assert call["max_files_per_chunk"] == 5
+        assert call["context_lines"] == 3
         assert call["max_workers"] == 4
         assert call["max_inline_comments"] == 15
         assert call["confidence_floor"] == 0.6

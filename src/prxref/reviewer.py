@@ -22,7 +22,7 @@ from typing import Any
 
 from .llm import LLMClient
 from .parser import loads_lenient
-from .triage import FileDiff, Finding
+from .triage import FileDiff, Finding, trim_hunk_context
 
 logger = logging.getLogger("prxref")
 
@@ -78,7 +78,7 @@ def load_prompt(name: str) -> str:
     return resources.files("prxref").joinpath("prompts").joinpath(fname).read_text(encoding="utf-8")
 
 
-def _render_file(f: FileDiff) -> str:
+def _render_file(f: FileDiff, context_lines: int | None = None) -> str:
     old = f.old_path or f.new_path or f.path
     new = f.new_path or f.old_path or f.path
     out = [f"diff --git a/{old} b/{new}"]
@@ -95,16 +95,21 @@ def _render_file(f: FileDiff) -> str:
     out.append(f"--- {old_op}")
     out.append(f"+++ {new_op}")
     for h in f.hunks:
-        old_count = sum(1 for line in h.lines if line.kind != "+")
-        new_count = sum(1 for line in h.lines if line.kind != "-")
-        out.append(f"@@ -{h.old_start},{old_count} +{h.new_start},{new_count} @@")
-        out.extend(line.kind + line.text for line in h.lines)
+        shown = h if context_lines is None else trim_hunk_context(h, context_lines)
+        old_count = sum(1 for line in shown.lines if line.kind != "+")
+        new_count = sum(1 for line in shown.lines if line.kind != "-")
+        out.append(f"@@ -{shown.old_start},{old_count} +{shown.new_start},{new_count} @@")
+        out.extend(line.kind + line.text for line in shown.lines)
     return "\n".join(out)
 
 
-def render_chunk(chunk: list[FileDiff]) -> str:
-    """Render parsed files back to unified-diff text for the worker prompt."""
-    return "\n\n".join(_render_file(f) for f in chunk)
+def render_chunk(chunk: list[FileDiff], context_lines: int | None = None) -> str:
+    """Render parsed files back to unified-diff text for the worker prompt.
+
+    ``context_lines`` bounds the context lines kept around each change via
+    :func:`prxref.triage.trim_hunk_context`; ``None`` renders verbatim.
+    """
+    return "\n\n".join(_render_file(f, context_lines) for f in chunk)
 
 
 def _render_prompt(
@@ -112,6 +117,7 @@ def _render_prompt(
     pr_title: str,
     pr_description: str,
     repo_hint: str,
+    context_lines: int | None = None,
 ) -> tuple[str, str]:
     template = load_prompt("worker.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
@@ -126,7 +132,7 @@ def _render_prompt(
     ).replace(
         "{repo_hint}", repo_hint.strip() or "(unspecified)"
     ).replace(
-        "{diff}", render_chunk(chunk) or "(empty chunk)"
+        "{diff}", render_chunk(chunk, context_lines) or "(empty chunk)"
     )
     return head.strip(), user.strip()
 
@@ -166,6 +172,7 @@ def review_chunk(
     pr_description: str = "",
     repo_hint: str = "",
     max_tokens: int | None = None,
+    context_lines: int | None = None,
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -192,12 +199,19 @@ def review_chunk(
     orchestrator always passes the keyword (``None`` included), so any test
     double for this function must accept it. The CLI threads
     ``PRXREF_LLM_MAX_TOKENS`` down to here.
+
+    ``context_lines`` bounds the hunk context rendered into the prompt;
+    ``None`` renders the parsed hunks verbatim, so direct callers are
+    unaffected here too. The forge's diff is the only source of context —
+    rendering can trim what was received, never add what it did not. The
+    orchestrator always passes this keyword as well.
     """
     system, user = _render_prompt(
         chunk=chunk,
         pr_title=pr_title,
         pr_description=pr_description,
         repo_hint=repo_hint,
+        context_lines=context_lines,
     )
     t0 = time.perf_counter()
     meta = {
