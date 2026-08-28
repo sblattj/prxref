@@ -27,6 +27,8 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_MAX_WORKERS` | `4` | Parallel chunk-review workers. Must be **greater than 0**. The cap that matters is usually the endpoint's rate limit, not the machine. |
 | `PRXREF_MAX_INLINE_COMMENTS` | `15` | Maximum inline comments posted per review, applied **after** the quality gate. Must be **greater than 0**. Findings past the cap are still listed in the summary comment; only the inline posting is trimmed. |
 | `PRXREF_DRY_RUN` | `False` | Set to the literal `1` to run the full review and write nothing to the forge — no summary, no inline comments. Applies to the webhook daemon as well as the CLI, which is the only way to watch the daemon against a real repository before letting it comment. `--no-post` is the per-invocation equivalent and still wins when the environment says nothing. Only the literal `1` enables it. |
+| `PRXREF_POST_MODE` | `summary+inline` | What gets posted to the forge: `summary+inline` (the summary comment, then inline comments only if the summary landed), `summary` (the summary comment only — inline comments are never posted), or `inline` (inline comments only — no summary is posted on any path, including the error notice). Any other value raises `ConfigError` and `prxref review` exits `2`. A dry run posts nothing in any mode. |
+| `PRXREF_POST_VERDICT` | `True` | Set to the literal `1` to keep the verdict stamp in the posted summary; any other value renders the summary without it (no `Approved` / `Request-Changes` heading), keeping the findings, counts, and attribution. The computed verdict printed to stdout and the total-failure notice are unaffected. |
 
 ### Per-Forge Authentication
 
@@ -109,10 +111,10 @@ Neither knob affects the exit code. See [Bad Configuration Is the Only Thing Tha
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **27** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **29** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
-- **LLM / Pipeline (17):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`
+- **LLM / Pipeline (19):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`, `PRXREF_POST_MODE`, `PRXREF_POST_VERDICT`
 - **Per-Forge Auth (6):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
 - **Webhooks (4):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(27 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 28 accepted variable names.)*
+*(29 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 30 accepted variable names.)*
