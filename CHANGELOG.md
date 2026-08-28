@@ -7,6 +7,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-27
+
+The second half of the on-prem field report: posting controls, the exit-code
+policy, and chunk shaping.
+
 ### Added
 
 - **`PRXREF_FAIL_ON`** (default `never`) — the exit-code policy for
