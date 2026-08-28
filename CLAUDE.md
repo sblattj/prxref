@@ -38,12 +38,16 @@ auto-detects the forge.
 - stdlib + requests only in core; LLM backends are optional extras
 - docstrings on public API, no inline commentary
 - all LLM calls single-shot with pre-gathered context (no agent loops)
-- non-blocking: `review` exits 0 on every review error — empty diff, network
-  failure, LLM timeout, bad credentials, a totally failed review (advisor, not
-  gate). Exit 2 is reserved for a configuration error: a required value missing,
-  or one malformed or out of range, reported naming the env var or the CLI flag
-  that supplied it. No `PRXREF_FAIL_ON`, deliberately. Do not add an exit code.
+- non-blocking by default: `review` exits 0 on every review error — empty diff,
+  network failure, LLM timeout, bad credentials, a totally failed review
+  (advisor, not gate). Exit 2 is reserved for a configuration error: a required
+  value missing, one malformed or out of range, or one outside its allowed
+  vocabulary, reported naming the env var or the CLI flag that supplied it.
+  `PRXREF_FAIL_ON` is the one opt-in: `never` (the default) is the doctrine;
+  `error`/`any` exit 1 on findings and on a failed review, for CI lanes that
+  explicitly want the gate. Do not widen that knob by accident.
 - config lives in one place: `config._DEFAULTS` plus the `_INT_KEYS` /
-  `_FLOAT_KEYS` / `_RANGES` tables. A new key needs all four surfaces — those
-  tables, the `config.py` docstring, `.env.example`, and `docs/env-vars.md`.
+  `_FLOAT_KEYS` / `_RANGES` / `_CHOICE_KEYS` tables. A new key needs all four
+  surfaces — those tables, the `config.py` docstring, `.env.example`, and
+  `docs/env-vars.md`.
 - every posted comment carries model attribution

@@ -9,6 +9,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **`PRXREF_FAIL_ON`** (default `never`) — the exit-code policy for
+  `prxref review`, from a field report running prxref over human-authored PRs
+  where the review must stay advisory. `never` keeps the standing contract:
+  the exit code never reflects findings. `error` exits 1 when the completed
+  review carries an active error-severity finding; `any` exits 1 on any
+  active finding. Under either non-`never` value a review that fails to
+  complete also exits 1, so a gating lane cannot read a broken run as green.
+  A value outside the vocabulary is a configuration error (exit 2) naming the
+  legal values. The webhook daemon has no exit code and is unaffected.
 - **`PRXREF_CHUNK_MAX_FILES`** (default `5`) caps the number of files placed
   in one review chunk, and **`PRXREF_CHUNK_CONTEXT_LINES`** (default `3`)
   bounds the context lines rendered around each change in the worker prompt.
@@ -17,6 +26,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   past the cap rather than being dropped. Context can only be trimmed, never
   added — the forge's diff is the source — and `0` emits the changed lines
   only.
+- **`PRXREF_POST_MODE`** (default `summary+inline`) selects what is written to
+  the forge — `summary` never posts inline comments, `inline` never posts a
+  summary on any path — and **`PRXREF_POST_VERDICT`** (literal `1`, default
+  on) omits the verdict stamp from the posted summary when unset. Both flow
+  through `load_config` → `orchestrate_review` → the posting block, and a dry
+  run still posts nothing in any mode.
 
 ## [0.3.0] — 2026-08-27
 
