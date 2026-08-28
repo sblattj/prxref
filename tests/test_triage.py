@@ -10,6 +10,7 @@ from prxref.triage import (
     build_chunks,
     parse_unified_diff,
     score_file,
+    trim_hunk_context,
 )
 
 
@@ -247,6 +248,31 @@ class TestBuildChunks:
         # All non-binary files must still be partitioned
         assert sum(len(c) for c in chunks) == 20
 
+    def test_respects_max_files_per_chunk(self):
+        files = [self._make_file(f"src/f{i}.py", lines=2) for i in range(6)]
+        chunks = build_chunks(files, token_budget=1_000_000, max_files_per_chunk=2)
+        assert [len(c) for c in chunks] == [2, 2, 2]
+        assert sum(len(c) for c in chunks) == 6
+
+    def test_default_max_files_per_chunk_splits_a_wide_flat_set(self):
+        """Six same-directory files fit one chunk on budget alone; the default
+        cap of 5 is what opens the second chunk."""
+        files = [self._make_file(f"src/f{i}.py", lines=2) for i in range(6)]
+        chunks = build_chunks(files, token_budget=1_000_000)
+        assert len(chunks) == 2
+        assert max(len(c) for c in chunks) == 5
+
+    def test_file_cap_yields_in_overflow_like_the_budget(self):
+        """max_chunks reached with every chunk full: an overflow file joins the
+        smallest chunk past the cap — coverage is the invariant, the cap is a
+        preference, exactly like the token budget in the same branch."""
+        files = [self._make_file(f"src/f{i}.py", lines=2) for i in range(6)]
+        chunks = build_chunks(
+            files, max_chunks=2, token_budget=1_000_000, max_files_per_chunk=2,
+        )
+        assert len(chunks) == 2
+        assert sum(len(c) for c in chunks) == 6
+
     def test_groups_files_by_directory_proximity(self):
         # 4 files, 2 in pkg/auth and 2 in pkg/billing.
         # Budget fits exactly 2 files (each is 2 lines = 80 tokens, budget 170).
@@ -265,6 +291,93 @@ class TestBuildChunks:
                 assert "pkg/auth/tokens.py" in paths
             if "pkg/billing/invoice.py" in paths:
                 assert "pkg/billing/stripe.py" in paths
+
+
+class TestTrimHunkContext:
+    """trim_hunk_context is what PRXREF_CHUNK_CONTEXT_LINES controls."""
+
+    def _hunk(self, spec, old_start=10, new_start=10):
+        """Build a Hunk the way _parse_hunk_body would, numbering included."""
+        hunk = Hunk(old_start=old_start, old_count=0, new_start=new_start, new_count=0)
+        old_no, new_no = old_start, new_start
+        for kind, text in spec:
+            if kind == "+":
+                hunk.lines.append(DiffLine("+", text, new_line=new_no))
+                new_no += 1
+            elif kind == "-":
+                hunk.lines.append(DiffLine("-", text, old_line=old_no))
+                old_no += 1
+            else:
+                hunk.lines.append(DiffLine(" ", text, old_line=old_no, new_line=new_no))
+                old_no += 1
+                new_no += 1
+        hunk.old_count = old_no - old_start
+        hunk.new_count = new_no - new_start
+        return hunk
+
+    def test_keeps_changes_and_trims_a_long_context_run(self):
+        hunk = self._hunk(
+            [(" ", f"lead{i}") for i in range(1, 6)]
+            + [("-", "old"), ("+", "new")]
+            + [(" ", f"tail{i}") for i in range(1, 6)]
+        )
+        trimmed = trim_hunk_context(hunk, 2)
+        assert [(ln.kind, ln.text) for ln in trimmed.lines] == [
+            (" ", "lead4"), (" ", "lead5"),
+            ("-", "old"), ("+", "new"),
+            (" ", "tail1"), (" ", "tail2"),
+        ]
+        assert trimmed.old_start == 13
+        assert trimmed.new_start == 13
+        assert trimmed.old_count == 5
+        assert trimmed.new_count == 5
+
+    def test_short_context_between_changes_is_kept_whole(self):
+        """A run of 2 context lines with radius 2 sits within reach of both
+        changes, so nothing is cut and the numbering does not move."""
+        spec = [(" ", "a"), ("-", "b"), (" ", "c"), (" ", "d"), ("+", "e"), (" ", "f")]
+        hunk = self._hunk(spec)
+        trimmed = trim_hunk_context(hunk, 2)
+        assert [ln.text for ln in trimmed.lines] == ["a", "b", "c", "d", "e", "f"]
+        assert trimmed.old_start == 10
+        assert trimmed.new_start == 10
+
+    def test_zero_keeps_the_changed_lines_only(self):
+        hunk = self._hunk([(" ", "x"), ("-", "y"), ("+", "z"), (" ", "w")])
+        trimmed = trim_hunk_context(hunk, 0)
+        assert [(ln.kind, ln.text) for ln in trimmed.lines] == [("-", "y"), ("+", "z")]
+        assert trimmed.old_start == 11
+        assert trimmed.new_start == 11
+        assert trimmed.old_count == 1
+        assert trimmed.new_count == 1
+
+    def test_negative_radius_behaves_as_zero(self):
+        """The config range check rejects negatives; a library caller passing
+        one gets the -U0 rendering instead of a crash."""
+        hunk = self._hunk([(" ", "x"), ("-", "y"), ("+", "z"), (" ", "w")])
+        assert trim_hunk_context(hunk, -3).lines == trim_hunk_context(hunk, 0).lines
+
+    def test_a_wide_radius_keeps_everything(self):
+        spec = [(" ", "a"), ("-", "b"), (" ", "c")]
+        hunk = self._hunk(spec)
+        trimmed = trim_hunk_context(hunk, 100)
+        assert [ln.text for ln in trimmed.lines] == ["a", "b", "c"]
+        assert trimmed.old_start == 10
+        assert trimmed.old_count == 3
+
+    def test_a_hunk_without_change_lines_is_returned_unchanged(self):
+        hunk = self._hunk([(" ", "a"), (" ", "b")])
+        assert trim_hunk_context(hunk, 0) is hunk
+
+    def test_the_input_hunk_is_never_mutated(self):
+        """Chunking, quality, and line alignment all keep working from the
+        full parse — the trim result is a new Hunk."""
+        hunk = self._hunk([(" ", "a"), ("-", "b"), ("+", "c"), (" ", "d")])
+        before = list(hunk.lines)
+        trim_hunk_context(hunk, 0)
+        assert hunk.lines == before
+        assert hunk.old_start == 10
+        assert hunk.new_start == 10
 
 
 def test_finding_dataclass_shape():

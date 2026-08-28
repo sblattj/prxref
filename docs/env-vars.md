@@ -22,6 +22,8 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_MAX_ERROR_FINDINGS` | `10` | Maximum number of error-severity findings reported per review. Excess errors are dropped lowest-confidence-first. Must be **>= 0**; `0` is legal and caps every error. (Legacy alias: `PRXREF_MAX_ERRORS`.) |
 | `PRXREF_MAX_CHUNKS` | `8` | Maximum number of diff chunks reviewed per PR. Must be **greater than 0**. Overridable per run with `--max-chunks`. |
 | `PRXREF_CHUNK_TOKEN_BUDGET` | `25000` | Approximate token budget per diff chunk. Must be **greater than 0**. Lowering it splits a PR into more, smaller chunks: more LLM calls, but less diff per call. Chunk count is still capped by `PRXREF_MAX_CHUNKS`, and overflow past that cap lands in the smallest existing chunk rather than opening a new one. |
+| `PRXREF_CHUNK_MAX_FILES` | `5` | Maximum files placed in one review chunk. Must be **greater than 0**. Chunks stay under the cap while any chunk has room; once `PRXREF_MAX_CHUNKS` is reached and every chunk is full, overflow files join the smallest chunk past the cap rather than being dropped from review. |
+| `PRXREF_CHUNK_CONTEXT_LINES` | `3` | Context lines kept around each change when a chunk's diff is rendered into the worker prompt. Must be **>= 0**; `0` emits the changed lines only. The forge's diff is the only source of context — prxref trims what it received and never adds what it did not. |
 | `PRXREF_MAX_WORKERS` | `4` | Parallel chunk-review workers. Must be **greater than 0**. The cap that matters is usually the endpoint's rate limit, not the machine. |
 | `PRXREF_MAX_INLINE_COMMENTS` | `15` | Maximum inline comments posted per review, applied **after** the quality gate. Must be **greater than 0**. Findings past the cap are still listed in the summary comment; only the inline posting is trimmed. |
 | `PRXREF_DRY_RUN` | `False` | Set to the literal `1` to run the full review and write nothing to the forge — no summary, no inline comments. Applies to the webhook daemon as well as the CLI, which is the only way to watch the daemon against a real repository before letting it comment. `--no-post` is the per-invocation equivalent and still wins when the environment says nothing. Only the literal `1` enables it. |
@@ -107,10 +109,10 @@ Neither knob affects the exit code. See [Bad Configuration Is the Only Thing Tha
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **25** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **27** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
-- **LLM / Pipeline (15):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`
+- **LLM / Pipeline (17):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`
 - **Per-Forge Auth (6):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
 - **Webhooks (4):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(25 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 26 accepted variable names.)*
+*(27 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 28 accepted variable names.)*

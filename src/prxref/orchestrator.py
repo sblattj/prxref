@@ -6,7 +6,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``parse_unified_diff`` → files. An empty or unchunkable diff
    short-circuits to a summary-only run with verdict ``Approved``.
 2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``, each chunk
-   sized to ``token_budget``).
+   sized to ``token_budget`` and capped at ``max_files_per_chunk`` files).
 3. Parallel worker fan-out: one ``reviewer.review_chunk(llm, files, pr)``
    call per chunk on a ThreadPoolExecutor capped at ``max_workers``. The actual
    contract is ``(findings, meta) -> tuple[list[Finding | dict], dict]``,
@@ -53,6 +53,8 @@ from .forges.base import Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import active, apply_line_align, apply_quality_gate, apply_thread_dedup
 from .triage import (
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_MAX_FILES_PER_CHUNK,
     DEFAULT_TOKEN_BUDGET,
     Finding,
     added_lines_by_file,
@@ -197,6 +199,8 @@ def orchestrate_review(
     max_chunks: int = 8,
     max_tokens: int | None = None,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    max_files_per_chunk: int = DEFAULT_MAX_FILES_PER_CHUNK,
+    context_lines: int = DEFAULT_CONTEXT_LINES,
     max_workers: int = MAX_WORKERS,
     max_inline_comments: int = MAX_INLINE_COMMENTS,
     confidence_floor: float | None = None,
@@ -213,8 +217,10 @@ def orchestrate_review(
 
     ``max_tokens`` is the per-chunk completion budget handed to every worker;
     ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. ``token_budget`` sizes
-    each diff chunk, ``max_workers`` the fan-out, ``max_inline_comments`` the
-    posted batch. ``confidence_floor`` and ``max_errors`` are forwarded to
+    each diff chunk, ``max_files_per_chunk`` caps the files placed in one,
+    ``context_lines`` bounds the hunk context rendered into each worker
+    prompt, ``max_workers`` the fan-out, ``max_inline_comments`` the posted
+    batch. ``confidence_floor`` and ``max_errors`` are forwarded to
     ``apply_quality_gate``; ``None`` leaves that pass reading the environment
     itself, which is what a library caller with no config dict wants. All of
     these are request knobs and are deliberately absent from the returned dict.
@@ -246,7 +252,10 @@ def orchestrate_review(
         return _error_run(forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0)
 
     try:
-        chunks = build_chunks(files, max_chunks=max_chunks, token_budget=token_budget)
+        chunks = build_chunks(
+            files, max_chunks=max_chunks, token_budget=token_budget,
+            max_files_per_chunk=max_files_per_chunk,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error("build_chunks failed: %s", e)
         return _error_run(forge, ref, post, 0, f"build_chunks failed: {e}", t0)
@@ -256,6 +265,7 @@ def orchestrate_review(
 
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
+        context_lines=context_lines,
     )
 
     input_tokens = sum(r["input_tokens"] for r in results)
@@ -351,14 +361,17 @@ def _attribution(model: str, tokens: int, elapsed_ms: int) -> str:
 
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
-    max_workers: int = MAX_WORKERS,
+    max_workers: int = MAX_WORKERS, context_lines: int | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
     workers = max(1, min(max_workers, len(chunks)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
-            ex.submit(_run_worker, i + 1, len(chunks), llm, chunk, pr, max_tokens)
+            ex.submit(
+                _run_worker, i + 1, len(chunks), llm, chunk, pr,
+                max_tokens, context_lines,
+            )
             for i, chunk in enumerate(chunks)
         ]
         results = []
@@ -376,13 +389,13 @@ def _run_workers(
 
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
-    max_tokens: int | None = None,
+    max_tokens: int | None = None, context_lines: int | None = None,
 ) -> dict:
     t0 = time.perf_counter()
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens, context_lines=context_lines,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[chunk %d/%d] worker raised: %s", index, total, e)

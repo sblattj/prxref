@@ -14,6 +14,7 @@ import logging
 import sys
 import threading
 import types
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,7 +33,8 @@ SUMMARY_TEMPLATE = (
 
 
 def _contract_review_chunk(
-    llm, files, *, pr_title="", pr_description="", repo_hint="", max_tokens=None
+    llm, files, *, pr_title="", pr_description="", repo_hint="",
+    max_tokens=None, context_lines=None,
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -82,6 +84,12 @@ _install_reviewer_stub_if_missing()  # noqa: E402 (must run before orchestrator 
 from prxref import orchestrator  # noqa: E402
 from prxref.orchestrator import orchestrate_review  # noqa: E402
 
+# Captured at import, before the autouse ``_contract_stubs`` fixture can
+# overwrite the module attributes: tests that need the REAL renderer end to
+# end restore these instead of re-reading the (already patched) attributes.
+REAL_REVIEW_CHUNK = orchestrator.reviewer.review_chunk
+REAL_LOAD_PROMPT = orchestrator.reviewer.load_prompt
+
 REF = PRRef(
     forge="fake", host="fake.test", owner="acme", repo="widget",
     number=7, url="https://fake.test/acme/widget/pull/7",
@@ -109,6 +117,20 @@ def _added_file_diff(path: str, n_lines: int) -> str:
 
 
 TWO_FILE_DIFF = _added_file_diff("src/one.py", 400) + _added_file_diff("other/two.py", 400)
+
+# A modified file with six context lines on each side of one change — fatter
+# context than the default knob, so PRXREF_CHUNK_CONTEXT_LINES trimming is
+# observable in what the worker LLM is actually sent.
+FAT_CONTEXT_DIFF = (
+    "diff --git a/src/ctx.py b/src/ctx.py\n"
+    "--- a/src/ctx.py\n"
+    "+++ b/src/ctx.py\n"
+    "@@ -1,13 +1,13 @@\n"
+    + "".join(f" lead{i}\n" for i in range(1, 7))
+    + "-changed\n"
+    + "+fixed\n"
+    + "".join(f" tail{i}\n" for i in range(1, 7))
+)
 
 
 def multi_chunk_diff(n_files: int = 3) -> str:
@@ -287,7 +309,8 @@ class TestParallelFanOut:
         barrier = threading.Barrier(3, timeout=10)
 
         def barrier_review_chunk(
-            llm, files, *, pr_title="", pr_description="", repo_hint="", max_tokens=None
+            llm, files, *, pr_title="", pr_description="", repo_hint="",
+            max_tokens=None, context_lines=None,
         ):
             barrier.wait()
             return [Finding(
@@ -609,6 +632,87 @@ class TestChunkTokenBudget:
         )
         assert res["chunk_count"] == expected_chunks
         assert res["chunks_reviewed"] == expected_chunks
+
+
+class TestChunkFileCapAndContextKnobs:
+    """The per-chunk file cap and the prompt context bound are knobs too, and
+    both must survive the whole trip config → orchestrator → worker."""
+
+    def test_signature_defaults_are_the_triage_constants(self):
+        import inspect
+
+        from prxref import triage
+
+        assert triage.DEFAULT_MAX_FILES_PER_CHUNK == 5
+        assert triage.DEFAULT_CONTEXT_LINES == 3
+        for fn, param, constant in (
+            (orchestrate_review, "max_files_per_chunk",
+             triage.DEFAULT_MAX_FILES_PER_CHUNK),
+            (orchestrate_review, "context_lines", triage.DEFAULT_CONTEXT_LINES),
+            (build_chunks, "max_files_per_chunk",
+             triage.DEFAULT_MAX_FILES_PER_CHUNK),
+        ):
+            default = inspect.signature(fn).parameters[param].default
+            assert default is constant, (fn.__name__, param)
+
+    def test_max_files_per_chunk_reaches_build_chunks(self, monkeypatch):
+        spy = MagicMock(wraps=orchestrator.build_chunks)
+        monkeypatch.setattr(orchestrator, "build_chunks", spy)
+        orchestrate_review(
+            FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
+            max_files_per_chunk=3,
+        )
+        assert spy.call_args.kwargs["max_files_per_chunk"] == 3
+
+    def test_file_cap_splits_one_wide_chunk_end_to_end(self):
+        """Six same-directory files fit one chunk when the cap is wide enough;
+        the cap itself is what splits them, observable in the run result."""
+        six = "".join(_added_file_diff(f"src/small{i}.py", 2) for i in range(6))
+        wide = orchestrate_review(
+            FakeForge(diff=six), REF, FakeLLM("{}"), post=False,
+            max_files_per_chunk=6,
+        )
+        capped = orchestrate_review(
+            FakeForge(diff=six), REF, FakeLLM("{}"), post=False,
+            max_files_per_chunk=2,
+        )
+        assert wide["chunk_count"] == 1
+        assert capped["chunk_count"] == 3
+        assert capped["chunks_reviewed"] == 3
+
+    def test_context_lines_reach_the_worker_prompt(self, monkeypatch):
+        """The trim is observable in what the LLM is sent, the changed lines
+        themselves are never trimmed away, and the chunk still reviews."""
+        prompts: list[str] = []
+
+        class RecordingLLM:
+            def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
+                       timeout_s=60.0):
+                prompts.append(user)
+                return InvokeResult(
+                    text="{}", input_tokens=1, output_tokens=1,
+                    model="m", backend="b", elapsed_ms=1,
+                )
+
+        # Both REAL functions were captured at import, before the autouse
+        # contract stub replaced the module attributes.
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk", REAL_REVIEW_CHUNK,
+        )
+        monkeypatch.setattr(
+            orchestrator.reviewer, "load_prompt", REAL_LOAD_PROMPT,
+        )
+        res = orchestrate_review(
+            FakeForge(diff=FAT_CONTEXT_DIFF), REF, RecordingLLM(), post=False,
+            context_lines=1,
+        )
+        assert res["chunks_reviewed"] == 1
+        assert len(prompts) == 1
+        assert " lead1" not in prompts[0]
+        assert " lead6" in prompts[0]
+        assert " tail1" in prompts[0]
+        assert "-changed" in prompts[0]
+        assert "+fixed" in prompts[0]
 
 
 class TestMaxWorkers:
