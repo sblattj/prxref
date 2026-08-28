@@ -375,6 +375,87 @@ class TestChunkingAndFanoutKnobs:
         assert load_config()[key] == expected
 
 
+class TestChunkFileCapAndContextConfig:
+    """PRXREF_CHUNK_MAX_FILES / PRXREF_CHUNK_CONTEXT_LINES: the two knobs that
+    shape what one review chunk contains."""
+
+    def test_defaults_equal_the_triage_constants(self):
+        from prxref import triage
+
+        cfg = load_config()
+        assert cfg["chunk_max_files"] == triage.DEFAULT_MAX_FILES_PER_CHUNK == 5
+        assert cfg["chunk_context_lines"] == triage.DEFAULT_CONTEXT_LINES == 3
+
+    def test_env_coercions(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CHUNK_MAX_FILES", "9")
+        monkeypatch.setenv("PRXREF_CHUNK_CONTEXT_LINES", "1")
+        cfg = load_config()
+        assert cfg["chunk_max_files"] == 9
+        assert isinstance(cfg["chunk_max_files"], int)
+        assert cfg["chunk_context_lines"] == 1
+        assert isinstance(cfg["chunk_context_lines"], int)
+
+    @pytest.mark.parametrize("name", [
+        "PRXREF_CHUNK_MAX_FILES",
+        "PRXREF_CHUNK_CONTEXT_LINES",
+    ])
+    def test_malformed_value_names_the_variable(self, monkeypatch, name):
+        monkeypatch.setenv(name, "several")
+        with pytest.raises(ConfigError, match=name):
+            load_config()
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "-5"])
+    def test_non_positive_max_files_rejected(self, monkeypatch, raw):
+        """A zero-file cap makes every chunk full from birth, so nothing
+        could ever be placed — meaningless, unlike a zero context count."""
+        monkeypatch.setenv("PRXREF_CHUNK_MAX_FILES", raw)
+        with pytest.raises(ConfigError, match="PRXREF_CHUNK_MAX_FILES"):
+            load_config()
+
+    def test_zero_context_lines_is_legal(self, monkeypatch):
+        """0 is the -U0 reading — emit the changed lines only."""
+        monkeypatch.setenv("PRXREF_CHUNK_CONTEXT_LINES", "0")
+        assert load_config()["chunk_context_lines"] == 0
+
+    @pytest.mark.parametrize("raw", ["-1", "-3"])
+    def test_negative_context_lines_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_CHUNK_CONTEXT_LINES", raw)
+        with pytest.raises(ConfigError, match="PRXREF_CHUNK_CONTEXT_LINES"):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", [
+        ("chunk_max_files", "PRXREF_CHUNK_MAX_FILES"),
+        ("chunk_context_lines", "PRXREF_CHUNK_CONTEXT_LINES"),
+    ])
+    def test_overrides_cannot_smuggle_a_degenerate_value(self, key, env):
+        """Still rejected; reported as the override it came from."""
+        with pytest.raises(ConfigError, match=key) as exc:
+            load_config(**{key: -1})
+        assert env not in str(exc.value)
+
+    def test_overrides_accept_the_new_keys(self):
+        cfg = load_config(chunk_max_files=1, chunk_context_lines=0)
+        assert cfg["chunk_max_files"] == 1
+        assert cfg["chunk_context_lines"] == 0
+
+    @pytest.mark.parametrize("name,key,expected", [
+        ("PRXREF_CHUNK_MAX_FILES", "chunk_max_files", 5),
+        ("PRXREF_CHUNK_CONTEXT_LINES", "chunk_context_lines", 3),
+    ])
+    def test_whitespace_only_env_reads_as_unset(self, monkeypatch, name, key, expected):
+        monkeypatch.setenv(name, "   ")
+        assert load_config()[key] == expected
+
+    def test_no_upper_bound_is_invented(self, monkeypatch):
+        """A ceiling for either is deployment-specific; a huge context radius
+        simply means keep whatever the forge sent."""
+        monkeypatch.setenv("PRXREF_CHUNK_MAX_FILES", "100000")
+        monkeypatch.setenv("PRXREF_CHUNK_CONTEXT_LINES", "100000")
+        cfg = load_config()
+        assert cfg["chunk_max_files"] == 100_000
+        assert cfg["chunk_context_lines"] == 100_000
+
+
 class TestPreExistingNumericRanges:
     """The three numeric keys that predate the range check are now covered too.
 

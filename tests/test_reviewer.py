@@ -23,6 +23,29 @@ diff --git a/src/app.py b/src/app.py
 +    return 0
 """
 
+# A modified file carrying six context lines on each side of one change —
+# fatter context than the default knob, so trimming is observable.
+FAT_CONTEXT_DIFF = """\
+diff --git a/src/ctx.py b/src/ctx.py
+--- a/src/ctx.py
++++ b/src/ctx.py
+@@ -1,13 +1,13 @@
+ lead1
+ lead2
+ lead3
+ lead4
+ lead5
+ lead6
+-changed
++fixed
+ tail1
+ tail2
+ tail3
+ tail4
+ tail5
+ tail6
+"""
+
 CLEAN_RESPONSE = json.dumps({
     "findings": [
         {
@@ -463,3 +486,72 @@ class TestTruncationSurvivesAWrongShapedResponse:
         with caplog.at_level(logging.WARNING, logger="prxref"):
             review_chunk(llm, self._chunk())
         assert "findings may be incomplete" not in caplog.text
+
+
+class TestRenderChunkContextTrims:
+    """render_chunk's context_lines knob is what PRXREF_CHUNK_CONTEXT_LINES
+    drives, and the trimmed output is still a self-consistent diff."""
+
+    def _parsed(self):
+        return parse_unified_diff(FAT_CONTEXT_DIFF)
+
+    def test_default_render_is_verbatim(self):
+        rendered = render_chunk(self._parsed())
+        assert rendered == render_chunk(self._parsed(), context_lines=None)
+        assert " lead1" in rendered
+        assert "@@ -1,13 +1,13 @@" in rendered
+
+    def test_context_lines_trims_both_sides_of_the_change(self):
+        rendered = render_chunk(self._parsed(), context_lines=2)
+        assert "@@ -5,5 +5,5 @@" in rendered
+        assert " lead1" not in rendered
+        assert " lead5" in rendered
+        assert " tail1" in rendered
+        assert " tail6" not in rendered
+        assert "-changed" in rendered
+        assert "+fixed" in rendered
+
+    def test_zero_renders_the_changed_lines_only(self):
+        rendered = render_chunk(self._parsed(), context_lines=0)
+        assert "@@ -7,1 +7,1 @@" in rendered
+        assert "-changed" in rendered
+        assert "+fixed" in rendered
+        assert " lead6" not in rendered
+        assert " tail1" not in rendered
+
+    def test_a_trimmed_render_reparses_consistently(self):
+        """The trimmed prompt parses back to the same added lines — line
+        alignment downstream never sees a shifted number."""
+        original = self._parsed()
+        trimmed = parse_unified_diff(render_chunk(original, context_lines=2))
+        assert trimmed[0].path == original[0].path
+        assert trimmed[0].added_lines == original[0].added_lines
+        assert trimmed[0].hunks[0].old_start == 5
+        assert trimmed[0].hunks[0].old_count == 5
+
+
+class TestReviewChunkThreadsContextLines:
+    """review_chunk forwards the knob into the rendered prompt; findings and
+    telemetry are unaffected by a trimmed prompt."""
+
+    def test_default_prompt_is_verbatim(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, parse_unified_diff(FAT_CONTEXT_DIFF))
+        assert " lead1" in llm.calls[0]["user"]
+
+    def test_context_lines_reach_the_prompt(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, parse_unified_diff(FAT_CONTEXT_DIFF), context_lines=1)
+        user = llm.calls[0]["user"]
+        assert " lead1" not in user
+        assert " lead6" in user
+        assert "-changed" in user
+        assert "+fixed" in user
+
+    def test_a_trimmed_prompt_still_yields_findings(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        findings, meta = review_chunk(
+            llm, parse_unified_diff(FAT_CONTEXT_DIFF), context_lines=0,
+        )
+        assert len(findings) == 2
+        assert meta["error"] == ""

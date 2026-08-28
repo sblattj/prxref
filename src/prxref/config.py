@@ -28,6 +28,16 @@ LLM / pipeline:
   PRXREF_CHUNK_TOKEN_BUDGET     Approximate token budget per diff chunk;
                                 lowering it splits a PR into more, smaller
                                 chunks (positive int, default 25000)
+  PRXREF_CHUNK_MAX_FILES        Cap on files placed in one review chunk;
+                                chunks stay under it while any chunk has
+                                room, and the max_chunks overflow branch
+                                may exceed it rather than drop a file
+                                (positive int, default 5)
+  PRXREF_CHUNK_CONTEXT_LINES    Context lines kept around each change when a
+                                chunk's diff is rendered for the worker
+                                prompt; 0 emits the changed lines only.
+                                Trims the forge's diff, never adds
+                                (int >= 0, default 3)
   PRXREF_MAX_WORKERS            Parallel chunk-review workers; positive int
                                 (default 4)
   PRXREF_MAX_INLINE_COMMENTS    Max inline comments posted per review, after
@@ -76,7 +86,11 @@ from prxref.forges.base import Forge, PRRef
 
 from .llm import ConfigError
 from .quality import DEFAULT_CONFIDENCE_FLOOR, DEFAULT_MAX_ERRORS
-from .triage import DEFAULT_TOKEN_BUDGET
+from .triage import (
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_MAX_FILES_PER_CHUNK,
+    DEFAULT_TOKEN_BUDGET,
+)
 
 _ENV_PREFIX = "PRXREF_"
 
@@ -93,6 +107,8 @@ _DEFAULTS: dict[str, object] = {
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
     "chunk_token_budget": DEFAULT_TOKEN_BUDGET,
+    "chunk_max_files": DEFAULT_MAX_FILES_PER_CHUNK,
+    "chunk_context_lines": DEFAULT_CONTEXT_LINES,
     # Mirrors orchestrator.MAX_WORKERS / MAX_INLINE_COMMENTS. Restated rather
     # than imported: config is a leaf module and importing the orchestrator
     # here would pull the whole review pipeline into every config read.
@@ -114,7 +130,8 @@ _DEFAULTS: dict[str, object] = {
 
 _INT_KEYS = frozenset({
     "max_error_findings", "max_chunks", "llm_max_tokens",
-    "chunk_token_budget", "max_workers", "max_inline_comments",
+    "chunk_token_budget", "chunk_max_files", "chunk_context_lines",
+    "max_workers", "max_inline_comments",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned", "dry_run"})
@@ -136,7 +153,8 @@ class _Range(NamedTuple):
     empty completion), for a timeout (every request fails instantly), for a
     worker count (``ThreadPoolExecutor`` rejects it) and for a chunk count
     (``build_chunks`` raises on the overflow branch). Zero IS meaningful for the
-    error cap, where it means "report no errors".
+    error cap, where it means "report no errors", and for the context-line
+    count, where it means "emit the changed lines only".
     """
 
     low: float
@@ -172,6 +190,8 @@ _RANGES: dict[str, _Range] = {
     "max_workers": _Range(0),
     "max_inline_comments": _Range(0),
     "max_chunks": _Range(0),
+    "chunk_max_files": _Range(0),
+    "chunk_context_lines": _Range(0, low_inclusive=True),
     "max_error_findings": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
 }
