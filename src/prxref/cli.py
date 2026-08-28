@@ -8,9 +8,19 @@ Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
 stderr so a pipeline step never fails the build over an advisor's error. The one
 exception is a configuration error — a required value missing, or one that is
-malformed or out of range — which is a usage error rather than a review outcome
-and exits 2. Both kinds raise ``ConfigError`` and name whichever input supplied
-the offending value (``--max-chunks`` when the flag was the source).
+malformed, out of range, or outside its key's allowed vocabulary — which is a
+usage error rather than a review outcome and exits 2. Both kinds raise
+``ConfigError`` and name whichever input supplied the offending value
+(``--max-chunks`` when the flag was the source).
+
+``PRXREF_FAIL_ON`` is the one opt-out of that doctrine. The default ``never``
+is the doctrine itself: findings never move the exit code. ``error`` exits 1
+when the completed review carries an active error-severity finding; ``any``
+exits 1 on any active finding; and under either value a review that fails to
+complete also exits 1, because a gate that silently passes on a broken run is
+worse than none. An unrecognized PR URL still exits 0 under every value —
+nothing was reviewed, so there is no outcome to gate on. The webhook daemon
+has no exit code and is unaffected by the knob.
 
 ``PRXREF_DRY_RUN=1`` suppresses every write to the forge on both paths — the
 one-shot review and the webhook daemon — and ``--no-post`` does the same for a
@@ -205,8 +215,49 @@ def _webhook_handler(url: str) -> None:
         logger.exception("webhook review failed for %s", url)
 
 
+def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
+    """The exit code a completed review earns under the ``fail_on`` policy.
+
+    Severity is compared exactly as the verdict is built in the orchestrator
+    (``Request-Changes`` iff an active finding has severity ``error``), so the
+    gate and the posted verdict can never disagree about what counts. A result
+    without parseable findings is tolerated the way ``_fmt_counts`` tolerates
+    one: nothing countable means nothing to gate on.
+
+    Returns the exit code and, when the gate fires, the stderr line that says
+    why — silence would read as a crash rather than a decision.
+    """
+    if fail_on == "never":
+        return 0, None
+    findings = result.get("findings_active") if isinstance(result, dict) else None
+    if not isinstance(findings, list):
+        return 0, None
+    if fail_on == "error":
+        hits = [f for f in findings if getattr(f, "severity", None) == "error"]
+    else:
+        hits = findings
+    if not hits:
+        return 0, None
+    plural = "" if len(hits) == 1 else "s"
+    return 1, (
+        f"PRXREF_FAIL_ON={fail_on}: review found {len(hits)} "
+        f"active finding{plural}; exiting 1"
+    )
+
+
 def _cmd_review(args: argparse.Namespace) -> int:
     t0 = time.perf_counter()
+    # The policy is resolved before the run, not taken from _run_review's
+    # config: a review that fails to complete is precisely the outcome the
+    # knob must gate, so the value has to be known before orchestration can
+    # fail. load_config is a pure read of the same environment, and
+    # _run_review loads it again with the flag overrides — within one process
+    # the two cannot disagree.
+    try:
+        fail_on = load_config()["fail_on"]
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
     try:
         result = _run_review(
             args.pr_url,
@@ -219,6 +270,13 @@ def _cmd_review(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"review failed: {exc}", file=sys.stderr)
         logger.debug("review failed with traceback", exc_info=True)
+        if fail_on != "never":
+            print(
+                f"PRXREF_FAIL_ON={fail_on}: review failed before completing; "
+                "exiting 1",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     if result is None:
@@ -231,7 +289,10 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
     elapsed = time.perf_counter() - t0
     _print_summary(result, elapsed, verbose=args.verbose)
-    return 0
+    code, note = _fail_on_exit(result, fail_on)
+    if note:
+        print(note, file=sys.stderr)
+    return code
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
