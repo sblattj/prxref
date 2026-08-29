@@ -35,9 +35,12 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PRXREF_BITBUCKET_TOKEN` | *(empty)* | Bitbucket **Cloud** workspace/repository Bearer access token. Preferred over basic authentication. Bitbucket Server / Data Center is not supported — see [docs/forges.md](forges.md). |
+| `PRXREF_BITBUCKET_TOKEN` | *(empty)* | Bitbucket **Cloud** workspace/repository Bearer access token. Preferred over basic authentication. For Bitbucket Server / Data Center use `PRXREF_BITBUCKET_SERVER_TOKEN` below — see [docs/forges.md](forges.md). |
 | `PRXREF_BITBUCKET_USER` | *(empty)* | Bitbucket Cloud username for HTTP Basic authentication (used with `PRXREF_BITBUCKET_APP_PASSWORD`). |
 | `PRXREF_BITBUCKET_APP_PASSWORD` | *(empty)* | Bitbucket Cloud app password for HTTP Basic authentication. |
+| `PRXREF_BITBUCKET_SERVER_TOKEN` | *(empty)* | Bitbucket Server / Data Center HTTP access token (sent as `Bearer`). Falls back to `PRXREF_BITBUCKET_TOKEN` if unset. |
+| `PRXREF_BITBUCKET_SERVER_USER` | *(empty)* | Bitbucket Server / Data Center username for HTTP Basic authentication (used with `PRXREF_BITBUCKET_SERVER_PASSWORD`). |
+| `PRXREF_BITBUCKET_SERVER_PASSWORD` | *(empty)* | Bitbucket Server / Data Center password for HTTP Basic authentication. |
 | `PRXREF_GITHUB_TOKEN` | *(empty)* | GitHub Personal Access Token or GitHub App token for `github.com`. |
 | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | *(empty)* | GitHub Enterprise token for custom/self-hosted GitHub Enterprise Server domains. Falls back to `PRXREF_GITHUB_TOKEN` if unset. |
 | `PRXREF_GITLAB_TOKEN` | *(empty)* | GitLab Personal, Project, or Group Access Token (sent via `PRIVATE-TOKEN` header) for `gitlab.com` or self-hosted GitLab. |
@@ -46,7 +49,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PRXREF_BITBUCKET_WEBHOOK_SECRET` | *(empty)* | HMAC secret for Bitbucket webhooks (verified against `X-Hub-Signature` via HMAC-SHA256). |
+| `PRXREF_BITBUCKET_WEBHOOK_SECRET` | *(empty)* | HMAC secret for Bitbucket webhooks, Cloud and Server alike (verified against `X-Hub-Signature` via HMAC-SHA256). |
 | `PRXREF_GITHUB_WEBHOOK_SECRET` | *(empty)* | HMAC secret for GitHub webhooks (verified against `X-Hub-Signature-256` via HMAC-SHA256). |
 | `PRXREF_GITLAB_WEBHOOK_SECRET` | *(empty)* | Secret token for GitLab webhooks (verified against `X-Gitlab-Token`). |
 | `PRXREF_ALLOW_UNSIGNED` | `False` | Accepts webhooks without valid HMAC/token signatures (dev/testing only; logs a warning). Must be the literal string `1` — `true`/`yes`/`on` deliberately do **not** enable the bypass, so it cannot be switched on by a stray truthy value. |
@@ -114,10 +117,10 @@ Neither knob affects the exit code — `PRXREF_FAIL_ON` is the only one that can
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **30** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **33** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
 - **LLM / Pipeline (20):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_DRY_RUN`, `PRXREF_FAIL_ON`, `PRXREF_POST_MODE`, `PRXREF_POST_VERDICT`
-- **Per-Forge Auth (6):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
+- **Per-Forge Auth (9):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_BITBUCKET_SERVER_TOKEN`, `PRXREF_BITBUCKET_SERVER_USER`, `PRXREF_BITBUCKET_SERVER_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
 - **Webhooks (4):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(30 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 31 accepted variable names.)*
+*(33 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 34 accepted variable names.)*

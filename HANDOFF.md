@@ -1,107 +1,128 @@
-# HANDOFF — cut v0.5.0: release the Bitbucket Server / Data Center forge
+# HANDOFF — v0.5.0 shipped: the Bitbucket Server / Data Center forge
 
-**Repo:** `sblattj/prxref` (public) · **`main` tip:** `c02cfc4` (v0.4.0) · **Written:** 2026-08-28
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-08-28 · **Supersedes** the
+"cut v0.5.0" handoff written the same day.
 
-One capability is finished, proven in real use, and has never shipped: the **Bitbucket
-Server / Data Center forge**. It exists only on `origin/feat/bitbucket-server-forge`
-(`cc58915`, *"feat: Bitbucket Server / Data Center forge"*), so every deployment that needs it
-runs a copy of `bitbucket_server.py` overlaid onto a released tree by hand. That overlay is the
-thing to delete, and releasing is how you delete it.
+The Bitbucket Server / Data Center forge is released. It had been finished and
+proven in real use but lived only on `origin/feat/bitbucket-server-forge`
+(`cc58915`), so every deployment that needed it ran a hand-maintained overlay of
+`bitbucket_server.py` on top of a tagged release. **Delete that overlay** — v0.5.0
+carries the forge natively.
 
-## Why it isn't released yet
+## What landed
 
-Not a technical blocker — the work was done on a machine that had no write-scoped GitHub
-credential (read-only token, and git-over-SSH blocked by a network proxy), so it could
-consume releases but not cut one. Anyone running this with a normal `gh auth login` can finish it.
+- `src/prxref/forges/bitbucket_server.py` — project and personal (`~slug`)
+  repositories, deployment context paths, anchored inline comments, `start`/`limit`
+  paging, and the `version` field Data Center requires when updating a comment.
+- Registration in both places that matter: the `detect_forge` module tuple in
+  `forges/base.py` and the `impls` dict in `config.py`'s `make_forge`.
+- Three env vars: `PRXREF_BITBUCKET_SERVER_TOKEN` (falls back to
+  `PRXREF_BITBUCKET_TOKEN`), `PRXREF_BITBUCKET_SERVER_USER` and
+  `PRXREF_BITBUCKET_SERVER_PASSWORD`.
+- **A real bug fix, not just the new forge:** Bitbucket webhooks were broken for
+  *both* products. The receiver accepted only `pr:opened` / `pr:modified` —
+  Bitbucket **Server** event names — while reading the PR URL from
+  `pullrequest.links.html.href`, which is Bitbucket **Cloud**'s payload shape. A
+  genuine Cloud webhook was rejected as not reviewable; a genuine Server webhook
+  produced no URL. Both dialects now work.
+- Docs, README, `CLAUDE.md` and `.env.example` updated, and every "Bitbucket is
+  Cloud only" / "Server is not supported" claim removed.
 
-## Scope of the release
+## Four things the previous handoff got wrong
 
-**v0.5.0 — minor.** A new forge is additive: no existing flag, env var, or forge behaviour
-changes. Nothing here is breaking, so it is not 1.0, and it is more than a patch.
+Recorded because each one would have cost the next person real time.
 
-What lands:
+1. **The Cloud-before-Server ordering rationale was false.** The old handoff said
+   Cloud's parser is the more specific of the two and that Server-first would make
+   Cloud URLs match Server. Tested by reversing the tuple and running six URLs
+   through `detect_forge`: **every case resolved identically.** The parsers are
+   disjoint — Cloud pins `^https?://bitbucket\.org/` plus a bare
+   `owner/repo/pull-requests/N`; Server requires a `/projects|users/KEY/repos/REPO/`
+   prefix. No URL matches both, including the adversarial `bitbucket.org` host with
+   a Server-shaped path, which only Server matches under either order. The Cloud-first
+   order is kept as **defence in depth** — if either parser is later loosened, the
+   failure degrades into a shadowed forge rather than a mis-routed one — but it is
+   not load-bearing, and no document should claim it is.
 
-1. `src/prxref/forges/bitbucket_server.py` from the feature branch.
-2. Registration in **two** places — both must change or the forge is dead code:
-   - `src/prxref/forges/base.py:93` — `detect_forge()` iterates a literal tuple
-     `(bitbucket, github, gitlab)`. Add the Server module, and keep **Cloud before Server**:
-     Cloud's URL parser is the more specific of the two, and flipping the order makes Cloud
-     URLs match Server first.
-   - `src/prxref/config.py:378` — `make_forge()` maps names to implementations in an `impls`
-     dict. Add `"bitbucket-server": bitbucket_server.ForgeImpl`.
-3. Version bump to `0.5.0` in `pyproject.toml` (line 3) **and** `src/prxref/__init__.py`.
-4. `CHANGELOG.md` entry.
+2. **Both registration line numbers pointed at the wrong line.** `forges/base.py:93`
+   and `config.py:378` are the `def` lines; the literals that actually need editing
+   were the tuple at `base.py:97` and the dict at `config.py:386-390`. Cite the
+   construct, not the function.
 
-**Optional, only if cheap:** port the branch's tests, and the `webhooks.py` Server routing (that
-one only matters for the `serve` daemon).
+3. **`uv run pytest` does not work in this repo.** pytest lives in
+   `[project.optional-dependencies] dev`, so the documented command dies with
+   `Failed to spawn: pytest / No such file or directory (os error 2)` — an error that
+   reads like a broken venv rather than a missing extra. The invocation is:
 
-## Why the overlay has been safe, and why merging is therefore low-risk
+   ```bash
+   uv run --extra dev pytest
+   ```
 
-Checked rather than assumed, against v0.4.0: the shared types (`PRRef`, `PRData`,
-`InlineComment`, `Thread`) are identical between the feature branch and the release; the Forge
-protocol methods (`get_pr`, `get_diff`, `post_summary`, `post_inline_comments`, `list_threads`)
-match exactly; and the `review` CLI flags are unchanged. The 18 commits that made up v0.4.0
-touched `llm_backends`, `cli` and chunking — not the forge contract.
+4. **The diff direction that reads "what the branch changed" is backwards here.**
+   `cc58915` was cut from v0.2.0, so `git diff main...cc58915` renders main's own
+   v0.3/v0.4 work as *additions* — applying it literally reverts the entire config-surface
+   release (17 config rows and 4 sections in `docs/env-vars.md` alone). Most hunks on
+   that branch are regressions, not features. Diff the branch's **own** delta instead:
 
-## Steps
+   ```bash
+   git diff a7abbf1 cc58915 -- <path>
+   ```
+
+## The coupling that will catch the next person adding a config key
+
+`tests/test_docs_consistency.py` compiles `docs/env-vars.md` and `.env.example`
+against `config._DEFAULTS` **in both directions**, and asserts two hard-coded
+integers built as `f"**{len(_DEFAULTS)}** configuration keys"` and
+`f"for {len(_DEFAULTS)+len(_LEGACY_ENV_ALIASES)} accepted variable names"`.
+
+So a new config key is not a source change — it is an atomic four-surface change:
+`_DEFAULTS`, the `config.py` docstring, `.env.example`, and `docs/env-vars.md`
+including its counts and its `Per-Forge Auth (N)` section heading. Adding three keys
+here failed five tests until all four surfaces moved together. Current values: **33**
+keys, **1** legacy alias, **34** accepted names.
+
+## Release shape (follow this next time)
 
 ```bash
-git switch -c release/0.5.0 main
-git checkout origin/feat/bitbucket-server-forge -- src/prxref/forges/bitbucket_server.py
-# register in forges/base.py:93 and config.py:378 (see above), bump both version strings,
-# add the CHANGELOG entry
-uv run pytest
-uv run prxref --version          # must print 0.5.0
+uv build                       # produces BOTH sdist and wheel
+gh release upload vX.Y.Z dist/prxref-X.Y.Z.tar.gz dist/prxref-X.Y.Z-py3-none-any.whl
 ```
 
-Then: open a PR, merge it, tag `v0.5.0`, and create the GitHub Release.
+Both assets matter: the v0.4.0 release ships both, and at least one consumer updates
+itself with `gh release download --pattern '*.tar.gz'`, which does **not** match
+GitHub's auto-generated source archive. A release without the attached sdist silently
+breaks those consumers.
 
-**Author identity:** commits and tags use the GitHub noreply address
-(`5125883+sblattj@users.noreply.github.com`). Never a work email.
+## Verified at release
 
-**Do not skip the sdist asset.** The v0.4.0 release ships an attached `*.tar.gz`, and at least one
-consumer updates itself with `gh release download --pattern '*.tar.gz'` — which does **not** match
-GitHub's auto-generated source archive. A release without that asset silently breaks those
-consumers:
-
-```bash
-uv build            # or: python -m build --sdist
-gh release upload v0.5.0 dist/prxref-0.5.0.tar.gz
+```
+840 passed                                    uv run --extra dev pytest
+All checks passed!                            uv run --extra dev ruff check src/ tests/
+0.5.0                                         uv run prxref --version
+bitbucket-server   .../projects/PROJ/repos/app/pull-requests/42
+bitbucket          https://bitbucket.org/ws/app/pull-requests/7
+github             https://github.com/o/r/pull/3
+gitlab             https://gitlab.com/o/r/-/merge_requests/9
+make_forge(ref) -> prxref.forges.bitbucket_server.ForgeImpl, name 'bitbucket-server'
 ```
 
-## How you know it worked
+## Still open — not part of this release
 
-A downstream tree that used to overlay the forge should now report that the release already
-carries it, and stop patching. Directly:
-
-```bash
-python -c "from prxref.forges import bitbucket_server; print(bitbucket_server.ForgeImpl)"
-python -c "from prxref.config import make_forge"   # 'bitbucket-server' resolves
-```
-
-Point it at a Server PR URL (`/rest/api/1.0` style host) and confirm `detect_forge` returns a
-`PRRef` with forge `bitbucket-server`, and that a Cloud URL still detects as `bitbucket`.
-
-## Known-good runtime shape for the Server case
-
-For anyone reproducing the setup this forge was built for: an OpenAI-compatible HTTP backend
-(`PRXREF_LLM_BACKEND=http`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_TIMEOUT`),
-with the forge token supplied at runtime from a credential store rather than committed anywhere.
-`PRXREF_LLM_TIMEOUT` shipped natively in v0.4.0; a per-run `review --timeout SECONDS` flag does
-**not** exist yet and is still a reasonable follow-up.
-
-## Follow-ups that are NOT part of this release
-
-- **Observability / tracing** — prompt+response tracing, a `PRXREF_TRACE_DIR`, per-finding drop
-  reasons, and a machine-readable run report. None of it landed in v0.4.0; still worth filing.
-- **`review --timeout SECONDS`** — the per-run counterpart to the env knob.
-- A configurable-LLM-timeout issue draft is **obsolete**: v0.4.0 shipped the env knob it asked for.
+- **Observability / tracing** — prompt+response tracing, a `PRXREF_TRACE_DIR`,
+  per-finding drop reasons, a machine-readable run report. Nothing has landed.
+- **`review --timeout SECONDS`** — the per-run counterpart to `PRXREF_LLM_TIMEOUT`,
+  which shipped natively in v0.4.0.
+- **`origin/feat/bitbucket-server-forge` can be deleted** once you are satisfied with
+  v0.5.0. Everything worth keeping from it is on `main`; the rest is v0.2.0-era text.
+- **`CONTRIBUTING.md` has no inbound link any more.** Deleting the
+  `### Bitbucket Server / Data Center (unsupported)` section from `docs/forges.md`
+  removed the docs' only pointer to it. The file still exists and GitHub surfaces it
+  natively, so nothing is broken — but nothing points at it either.
 
 | Item | Value |
 |---|---|
-| Target version | `0.5.0` (minor — new forge, nothing breaking) |
-| Source of the forge | `origin/feat/bitbucket-server-forge` @ `cc58915` |
-| Registration points | `src/prxref/forges/base.py:93`, `src/prxref/config.py:378` |
-| Version strings | `pyproject.toml:3`, `src/prxref/__init__.py` |
-| Release must include | an attached sdist `*.tar.gz` asset |
-| Commit identity | `5125883+sblattj@users.noreply.github.com` |
+| Released version | `0.5.0` (minor — new forge plus a webhook fix, nothing breaking) |
+| Registration points | the tuple in `forges/base.py`, the `impls` dict in `config.py` |
+| Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
+| Test command | `uv run --extra dev pytest` |
+| Release assets | sdist **and** wheel, both attached |

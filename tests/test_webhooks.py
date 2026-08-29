@@ -10,6 +10,8 @@ import threading
 import types
 from http.server import ThreadingHTTPServer
 
+import pytest
+
 from prxref.webhooks import _worker_loop, make_webhook_handler, verify_signature
 
 GH_SECRET = "gh-secret"
@@ -455,3 +457,87 @@ class TestHTTPEndpoints:
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_webhook_handler(review_queue))
         assert server.server_address[1] > 0
         server.server_close()
+
+
+BBS_URL = "https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42"
+
+
+def _bb_cloud_body(url: str = BB_URL) -> bytes:
+    """A real Bitbucket Cloud payload."""
+    return json.dumps({"pullrequest": {"links": {"html": {"href": url}}}}).encode()
+
+
+def _bb_server_body(url: str = BBS_URL) -> bytes:
+    """A real Bitbucket Server / Data Center payload.
+
+    Different key casing (pullRequest) and the browsable link is the first
+    entry of a links.self list rather than a links.html object.
+    """
+    return json.dumps({"pullRequest": {"links": {"self": [{"href": url}]}}}).encode()
+
+
+class TestBitbucketDialects:
+    """Cloud and Server both arrive as X-Event-Key and must both be accepted.
+
+    These pair each product's real event names with its real payload shape.
+    The older cases above pair a Server event key with a Cloud payload — a
+    combination neither product sends, which is how the mismatch went unnoticed:
+    only the Server event names were accepted, against a Cloud-only extractor,
+    so every genuine Cloud webhook was rejected as "not reviewable" and every
+    genuine Server webhook yielded no URL.
+    """
+
+    @pytest.mark.parametrize("event", ["pullrequest:created", "pullrequest:updated"])
+    def test_real_cloud_event_and_payload(self, monkeypatch, event):
+        monkeypatch.setenv("PRXREF_BITBUCKET_WEBHOOK_SECRET", BB_SECRET)
+        body = _bb_cloud_body()
+        headers = {"X-Event-Key": event, "X-Hub-Signature": _sign(BB_SECRET, body)}
+        ok, detail = verify_signature(body, headers)
+        assert ok is True
+        assert detail == BB_URL
+
+    @pytest.mark.parametrize(
+        "event", ["pr:opened", "pr:modified", "pr:from_ref_updated"]
+    )
+    def test_real_server_event_and_payload(self, monkeypatch, event):
+        monkeypatch.setenv("PRXREF_BITBUCKET_WEBHOOK_SECRET", BB_SECRET)
+        body = _bb_server_body()
+        headers = {"X-Event-Key": event, "X-Hub-Signature": _sign(BB_SECRET, body)}
+        ok, detail = verify_signature(body, headers)
+        assert ok is True
+        assert detail == BBS_URL
+
+    def test_server_payload_without_a_self_link_is_reported(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_BITBUCKET_WEBHOOK_SECRET", BB_SECRET)
+        body = json.dumps({"pullRequest": {"links": {"self": []}}}).encode()
+        headers = {"X-Event-Key": "pr:opened", "X-Hub-Signature": _sign(BB_SECRET, body)}
+        ok, detail = verify_signature(body, headers)
+        assert ok is False
+        assert "missing" in detail
+
+    def test_an_unreviewable_bitbucket_event_is_still_ignored(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_BITBUCKET_WEBHOOK_SECRET", BB_SECRET)
+        body = _bb_cloud_body()
+        headers = {
+            "X-Event-Key": "pullrequest:comment_created",
+            "X-Hub-Signature": _sign(BB_SECRET, body),
+        }
+        ok, detail = verify_signature(body, headers)
+        assert ok is False
+        assert detail.startswith("ignored:")
+
+    def test_a_server_webhook_url_routes_to_the_server_forge(self, monkeypatch):
+        # End to end: the URL the webhook hands off must be one detect_forge
+        # resolves, or the review dies one step later with "unknown forge".
+        from prxref.forges.base import detect_forge
+
+        monkeypatch.setenv("PRXREF_BITBUCKET_WEBHOOK_SECRET", BB_SECRET)
+        body = _bb_server_body()
+        headers = {"X-Event-Key": "pr:opened", "X-Hub-Signature": _sign(BB_SECRET, body)}
+        ok, url = verify_signature(body, headers)
+        assert ok is True
+        ref = detect_forge(url)
+        assert ref is not None
+        assert ref.forge == "bitbucket-server"
+        assert ref.owner == "PLAT"
+        assert ref.number == 42

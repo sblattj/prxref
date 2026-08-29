@@ -1,6 +1,6 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, and GitHub.
+Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
 
 prxref inspects pull and merge requests across the three major code hosting forges in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary.
 
@@ -73,6 +73,9 @@ Pass any PR or MR URL directly. Forge type, repository namespace, and pull reque
 # Bitbucket Cloud
 prxref review --pr-url https://bitbucket.org/workspace/repo/pull-requests/42
 
+# Bitbucket Server / Data Center (self-hosted, any host, with or without a deployment context path)
+prxref review --pr-url https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42
+
 # GitHub & GitHub Enterprise
 prxref review --pr-url https://github.com/owner/repository/pull/108
 
@@ -80,7 +83,7 @@ prxref review --pr-url https://github.com/owner/repository/pull/108
 prxref review --pr-url https://gitlab.com/group/subgroup/project/-/merge_requests/15
 ```
 
-**Supported hosts.** GitHub Enterprise Server and self-hosted GitLab are supported on any host — their self-hosted products speak the same REST API as their SaaS ones. **Bitbucket is Cloud only:** a Bitbucket Server / Data Center URL is rejected on the host check inside `parse_pr_url`, before any credential is read, so a wrong token is never the explanation. Server exposes a different API (`/rest/api/1.0`) from Cloud's v2, which makes this a missing adapter rather than a base-URL setting. See [docs/forges.md](docs/forges.md).
+**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. See [docs/forges.md](docs/forges.md).
 
 ## LLM Configuration
 
@@ -111,8 +114,10 @@ Configure the authentication token matching your forge:
 
 | Forge | Environment Variable | Notes |
 |---|---|---|
-| **Bitbucket** | `PRXREF_BITBUCKET_TOKEN` | Bearer token (workspace or repo access token) |
-| **Bitbucket (Basic)** | `PRXREF_BITBUCKET_USER` + `PRXREF_BITBUCKET_APP_PASSWORD` | App password fallback |
+| **Bitbucket Cloud** | `PRXREF_BITBUCKET_TOKEN` | Bearer token (workspace or repo access token) |
+| **Bitbucket Cloud (Basic)** | `PRXREF_BITBUCKET_USER` + `PRXREF_BITBUCKET_APP_PASSWORD` | App password fallback |
+| **Bitbucket Server / DC** | `PRXREF_BITBUCKET_SERVER_TOKEN` | HTTP access token (falls back to `PRXREF_BITBUCKET_TOKEN`) |
+| **Bitbucket Server (Basic)** | `PRXREF_BITBUCKET_SERVER_USER` + `PRXREF_BITBUCKET_SERVER_PASSWORD` | Basic-auth fallback |
 | **GitHub** | `PRXREF_GITHUB_TOKEN` | Personal Access Token (PAT) or GitHub App token |
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
