@@ -96,6 +96,11 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
   - `https://{host}/users/{userslug}/repos/{slug}/pull-requests/{number}` (personal repository)
   - Either shape behind a deployment context path, e.g. `https://{host}/bitbucket/projects/...`
   - A trailing route (`/overview`, `/diff`, …) is tolerated and normalized away.
+  - The REST form of any of the above — `https://{host}{context}/rest/api/1.0/projects/...`,
+    plus other version numbers and the `/rest/api/latest` alias — is accepted and normalized
+    back to the browse URL. Server is the only forge here whose REST URL has the same path
+    shape as its browse URL, so an unstripped `/rest/api/1.0` reads as a context path and gets
+    replayed in front of the API base.
 - **Project Key Note:** a personal repository browses under `/users/{slug}` but is
   addressed in the API as the project key `~{slug}`. `PRRef.owner` always holds the
   API form, so every request path is built identically for both kinds.

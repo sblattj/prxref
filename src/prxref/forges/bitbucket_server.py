@@ -26,6 +26,29 @@ _BBS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Data Center serves its REST API at /rest/api/<version> — 1.0 today, plus the
+# /latest alias — hanging directly off any deployment context path. A PR's REST
+# URL therefore has the same shape as its browse URL, so the pattern above
+# captures /rest/api/1.0 as if it were a context path, and every request built
+# from it would carry /rest/api/1.0 twice. Strip it back off before it is
+# mistaken for a context.
+_BBS_REST_PREFIX_RE = re.compile(
+    r"(?P<context>(?:/[^/]+)*?)/rest/api/(?:latest|\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
+
+
+def _strip_rest_prefix(context: str) -> str:
+    """Return a captured context path with any REST API prefix removed.
+
+    ``/rest/api/1.0`` yields ``""``; a REST prefix sitting under a genuine
+    deployment context, ``/bitbucket/rest/api/latest``, yields ``/bitbucket``.
+    Anything that is not a REST prefix is returned untouched, so a deployment
+    context that merely happens to contain ``/rest`` survives.
+    """
+    match = _BBS_REST_PREFIX_RE.fullmatch(context)
+    return match.group("context") if match else context
+
 
 def _make_retry_session() -> requests.Session:
     """Build a requests.Session with bounded retries for transient failures."""
@@ -70,6 +93,10 @@ class ForgeImpl:
         context path such as ``/bitbucket`` between host and route. ``owner``
         holds the API project key, which for a personal repository is the user
         slug prefixed with ``~``.
+
+        A PR's REST URL (``/rest/api/1.0/projects/KEY/repos/...``) is accepted
+        too and normalized back to the browse URL, because ``url`` is the link
+        a human clicks and the value every request path is rebuilt from.
         """
         try:
             parsed = urlparse(url)
@@ -84,7 +111,7 @@ class ForgeImpl:
             return None
 
         host = match.group("host")
-        context = match.group("context") or ""
+        context = _strip_rest_prefix(match.group("context") or "")
         kind = match.group("kind").lower()
         key = match.group("key")
         repo = match.group("repo")
@@ -92,7 +119,11 @@ class ForgeImpl:
 
         # Personal repositories live under the ~slug project key in the API,
         # while their browsable URL uses /users/slug. Keep the API form in
-        # `owner` so every request path is built the same way for both kinds.
+        # `owner` so every request path is built the same way for both kinds,
+        # and put the browse form in the normalized URL — a REST URL names the
+        # repository the API way, so it arrives here as /projects/~slug.
+        if kind == "projects" and len(key) > 1 and key.startswith("~"):
+            kind, key = "users", key[1:]
         owner = f"~{key}" if kind == "users" else key
         normalized_url = (
             f"https://{host}{context}/{kind}/{key}/repos/{repo}/pull-requests/{number}"
@@ -129,10 +160,15 @@ class ForgeImpl:
         return {}, None
 
     def _context_path(self, ref: PRRef) -> str:
-        """Recover the deployment context path from the normalized URL."""
+        """Recover the deployment context path from the normalized URL.
+
+        ``parse_pr_url`` has already stripped any REST prefix out of ``url``;
+        stripping again here costs nothing and keeps a hand-built PRRef from
+        reintroducing the doubled ``/rest/api/1.0`` this recovers into.
+        """
         match = _BBS_URL_RE.match(ref.url)
         if match:
-            return match.group("context") or ""
+            return _strip_rest_prefix(match.group("context") or "")
         return ""
 
     def _pr_url(self, ref: PRRef, suffix: str = "") -> str:
