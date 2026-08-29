@@ -54,6 +54,29 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   per worker chunk, not per run, so raising it widens each chunk's headroom
   rather than one large request.
 
+- **A retry could post the same review comment four times.** All four forge
+  adapters built their `requests.Session` with the write verbs in
+  `allowed_methods` — `POST`, `PUT`, `DELETE`, plus `PATCH` on GitHub — against
+  a `status_forcelist` of `[429, 500, 502, 503, 504]` with `total=3`. urllib3
+  retries underneath the `requests` adapter, so what it re-sends is the whole
+  request: a comment `POST` the forge had already committed, whose `2xx` was
+  then lost on the way back — a 502 or 504 from a proxy in front of the API, or
+  a read timeout — was sent again, up to three more times, and the PR ended up
+  carrying the same summary or the same inline finding two, three, or four
+  times. Nothing downstream could notice, because from the client's side a
+  duplicated comment is a successful POST. `allowed_methods` is now
+  `GET`/`HEAD`/`OPTIONS` on all four adapters: reads still retry, writes are
+  attempted exactly once. A write that fails is left to the caller, which
+  already logs a failed post and finishes the run; a duplicated comment needs a
+  human to delete it. The one case given up is 429, where replaying a write
+  would in fact have been safe — the server is stating it did not process the
+  request — but `Retry.is_retry` tests the method before it consults
+  `status_forcelist`, so no single policy can retry a `POST` on 429 while
+  holding it back on 502, and the safe half of that pair is the one worth
+  keeping. Connection errors are unaffected and still retry for every verb:
+  urllib3 gates only its read-error path on the method, and a connection that
+  was never established carried no write to duplicate.
+
 ## [0.5.0] — 2026-08-28
 
 The self-hosted Bitbucket release. Bitbucket Server / Data Center was the one
