@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 
-from prxref.forges.base import InlineComment, PRRef
+from prxref.forges import gitlab
+from prxref.forges.base import FeedReadError, InlineComment, PRRef
 from prxref.forges.gitlab import ForgeImpl
 from prxref.triage import parse_unified_diff
 
@@ -360,3 +362,156 @@ def test_list_threads_flatten():
     assert threads[2].line is None
     assert threads[2].author == "reviewer2"
     assert threads[2].resolved is True
+
+
+# --- summary dedup: paging and unreadable feeds ------------------------------
+
+# The note page size the adapter is expected to ask for, pinned by its own test
+# below so the rest of these read as data rather than as a coupling.
+NOTE_PAGE_SIZE = 100
+MARKER = "<!-- prxref-summary -->"
+
+
+def _gl_ref():
+    return PRRef(
+        "gitlab", "gitlab.com", "group", "repo", 7,
+        "https://gitlab.com/group/repo/-/merge_requests/7",
+    )
+
+
+def _full_note_page(prefix="chatter"):
+    """A page of exactly per_page notes — the shape that means 'keep going'."""
+    return _mock_response(
+        200, json_data=[{"id": i, "body": f"{prefix} {i}"} for i in range(NOTE_PAGE_SIZE)]
+    )
+
+
+def test_post_summary_asks_for_a_full_page_of_notes():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(200, json_data=[])
+    session.post.return_value = _mock_response(201, json_data={"id": 1})
+
+    ForgeImpl(session=session).post_summary(_gl_ref(), "body")
+
+    params = session.get.call_args[1]["params"]
+    assert params["per_page"] == NOTE_PAGE_SIZE == gitlab._PAGE_SIZE
+    assert params["page"] == 1
+    # Oldest-first, so a note created during the walk lands at the END and
+    # cannot shift a later page's window back over a note already passed.
+    assert params["sort"] == "asc"
+    assert params["order_by"] == "created_at"
+
+
+def test_post_summary_finds_a_summary_past_the_first_page():
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _full_note_page(),
+        _mock_response(200, json_data=[{"id": 88, "body": f"{MARKER}\nold summary"}]),
+    ]
+    session.put.return_value = _mock_response(200, json_data={"id": 88})
+
+    ForgeImpl(session=session).post_summary(_gl_ref(), "new summary")
+
+    session.post.assert_not_called()
+    session.put.assert_called_once()
+    assert session.put.call_args[0][0].endswith("/notes/88")
+    assert session.get.call_args_list[1][1]["params"]["page"] == 2
+
+
+def test_post_summary_stamps_the_marker_when_the_body_lacks_one():
+    # Nothing upstream of the adapter puts the marker in the body, so a summary
+    # posted without one is invisible to every later lookup.
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(200, json_data=[])
+    session.post.return_value = _mock_response(201, json_data={"id": 1})
+
+    ForgeImpl(session=session).post_summary(_gl_ref(), "no marker here")
+
+    assert session.post.call_args[1]["json"] == {"body": f"{MARKER}\nno marker here"}
+
+
+def test_post_summary_refuses_to_post_when_the_note_read_fails():
+    # The old code swallowed the transport error and fell through to the POST,
+    # which is a SECOND summary on a PR that already had one.
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = requests.ConnectionError("down")
+
+    with pytest.raises(FeedReadError, match="note feed"):
+        ForgeImpl(session=session).post_summary(_gl_ref(), "body")
+
+    session.post.assert_not_called()
+    session.put.assert_not_called()
+
+
+def test_post_summary_refuses_to_post_when_the_note_read_returns_an_error_status():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(500, json_data={"message": "boom"})
+
+    with pytest.raises(FeedReadError, match="500"):
+        ForgeImpl(session=session).post_summary(_gl_ref(), "body")
+
+    session.post.assert_not_called()
+
+
+def test_post_summary_refuses_to_post_when_the_notes_outrun_the_page_budget():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _full_note_page()
+
+    with pytest.raises(FeedReadError, match="page budget"):
+        ForgeImpl(session=session).post_summary(_gl_ref(), "body")
+
+    assert session.get.call_count == gitlab._MAX_PAGES
+    session.post.assert_not_called()
+
+
+def test_post_summary_stops_reading_as_soon_as_it_finds_the_marker():
+    session = MagicMock(spec=requests.Session)
+    hit = [{"id": i, "body": "chatter"} for i in range(NOTE_PAGE_SIZE - 1)]
+    hit.append({"id": 88, "body": MARKER})
+    session.get.return_value = _mock_response(200, json_data=hit)
+    session.put.return_value = _mock_response(200, json_data={"id": 88})
+
+    ForgeImpl(session=session).post_summary(_gl_ref(), "new summary")
+
+    assert session.get.call_count == 1
+
+
+def test_list_threads_pages_past_the_first_page():
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(
+            200,
+            json_data=[
+                {"id": f"d{i}", "notes": [{"id": i, "body": f"early {i}"}]}
+                for i in range(NOTE_PAGE_SIZE)
+            ],
+        ),
+        _mock_response(200, json_data=[{"id": "last", "notes": [{"id": 9, "body": "late"}]}]),
+    ]
+
+    threads = ForgeImpl(session=session).list_threads(_gl_ref())
+
+    assert len(threads) == NOTE_PAGE_SIZE + 1
+    assert threads[-1].body_snippet == "late"
+
+
+def test_list_threads_keeps_what_it_read_and_warns_when_the_feed_read_fails(caplog):
+    # Dedup input is best-effort: a partial read beats no read, but the
+    # shortfall has to be visible rather than silent.
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(
+            200,
+            json_data=[
+                {"id": f"d{i}", "notes": [{"id": i, "body": f"early {i}"}]}
+                for i in range(NOTE_PAGE_SIZE)
+            ],
+        ),
+        requests.ConnectionError("down"),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        threads = ForgeImpl(session=session).list_threads(_gl_ref())
+
+    assert len(threads) == NOTE_PAGE_SIZE
+    assert "incomplete" in caplog.text.lower()
