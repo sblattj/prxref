@@ -42,6 +42,23 @@ a hand-maintained overlay on top of a tagged release.
   reviewable" (Cloud sends `pullrequest:created` / `pullrequest:updated`) and a
   genuine Server webhook produced no URL. Both dialects are now accepted and
   their payloads read correctly, `pr:from_ref_updated` included.
+- **A Data Center PR's REST URL built a doubled API path.** The Server URL
+  pattern captures whatever sits between the host and the `/projects|users/`
+  route as the deployment context path, because Data Center is commonly
+  reverse-proxied under one. Server is also the only forge here whose REST URL
+  has the same path shape as its browse URL — the same route, one prefixed with
+  `/rest/api/1.0` and the other not — so pasting a PR's REST URL into
+  `prxref review` parsed happily with `/rest/api/1.0` captured as the context,
+  and every request then replayed it in front of the adapter's own
+  `/rest/api/1.0`: metadata, diff, activities and comments all went to
+  `…/rest/api/1.0/rest/api/1.0/projects/…` and 404ed. Parsing now strips a REST
+  prefix (`/rest/api/1.0`, other version numbers, and the `/rest/api/latest`
+  alias, case-insensitively) off the captured context while keeping any genuine
+  context underneath it, so `PRRef.url` is the browse URL a human can click and
+  the API base is built exactly once. A REST URL for a personal repository,
+  which names it the API way as `~slug`, likewise normalizes back to its
+  `/users/slug` browse route. Webhooks never hit this: Data Center's payload
+  carries the browse URL in `pullRequest.links.self[].href`.
 
 ### Changed
 
