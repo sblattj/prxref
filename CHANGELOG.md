@@ -7,6 +7,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-28
+
+The duplicate-comment release. Three ways prxref could post the same thing twice,
+and the test command the repo documented but could not run.
+
 ### Changed
 
 - **The dev tools moved from a project extra to a PEP 735 dependency group, so
