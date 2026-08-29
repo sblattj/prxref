@@ -10,8 +10,17 @@ prxref uses [uv](https://docs.astral.sh/uv/) for environments and locking.
 ```bash
 git clone https://github.com/sblattj/prxref
 cd prxref
-uv sync --extra dev
+uv sync
 ```
+
+The dev tools (`pytest`, `pytest-cov`, `ruff`) live in the `dev` **dependency
+group**, which uv installs by default — that is why nothing below needs a flag.
+They are deliberately not a project extra: `uv run` never installs an extra, so
+as `[project.optional-dependencies] dev` the bare `uv run pytest` died with
+`Failed to spawn: pytest`. The cost of the fix is that dependency groups are not
+published in package metadata, so **`pip install prxref[dev]` no longer works**.
+Clone the repo and `uv sync`; if you must use pip, install the tools directly
+(`pip install pytest pytest-cov ruff`).
 
 ## The Checks
 
@@ -19,8 +28,8 @@ Both must pass before a PR can merge. CI runs exactly these on Python 3.12 and
 3.13:
 
 ```bash
-uv run --extra dev pytest  # no network required (pytest is a `dev` extra)
-uv run --extra dev ruff check src tests
+uv run pytest  # no network required
+uv run ruff check src tests
 ```
 
 The suite is fully offline — every forge and LLM call is stubbed. If a change
