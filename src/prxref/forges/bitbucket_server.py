@@ -18,7 +18,7 @@ _PAGE_LIMIT = 100
 _MAX_PAGES = 5
 
 _BBS_URL_RE = re.compile(
-    r"^https?://(?P<host>[^/]+)"
+    r"^(?P<scheme>https?)://(?P<host>[^/]+)"
     r"(?P<context>(?:/[^/]+)*?)"
     r"/(?P<kind>projects|users)/(?P<key>[^/]+)"
     r"/repos/(?P<repo>[^/]+)"
@@ -97,6 +97,13 @@ class ForgeImpl:
         A PR's REST URL (``/rest/api/1.0/projects/KEY/repos/...``) is accepted
         too and normalized back to the browse URL, because ``url`` is the link
         a human clicks and the value every request path is rebuilt from.
+
+        The scheme is carried through rather than normalized to ``https``. A
+        Data Center standalone install serves plain HTTP on port 7990, so
+        ``http://`` is the product's out-of-the-box shape and not an edge case;
+        rewriting it would aim every request at a TLS listener that is not
+        there. The scheme is lowercased, so ``HTTP://`` round-trips as
+        ``http://``.
         """
         try:
             parsed = urlparse(url)
@@ -110,6 +117,7 @@ class ForgeImpl:
         if not match:
             return None
 
+        scheme = match.group("scheme").lower()
         host = match.group("host")
         context = _strip_rest_prefix(match.group("context") or "")
         kind = match.group("kind").lower()
@@ -126,7 +134,7 @@ class ForgeImpl:
             kind, key = "users", key[1:]
         owner = f"~{key}" if kind == "users" else key
         normalized_url = (
-            f"https://{host}{context}/{kind}/{key}/repos/{repo}/pull-requests/{number}"
+            f"{scheme}://{host}{context}/{kind}/{key}/repos/{repo}/pull-requests/{number}"
         )
 
         return PRRef(
@@ -171,11 +179,24 @@ class ForgeImpl:
             return _strip_rest_prefix(match.group("context") or "")
         return ""
 
+    def _scheme(self, ref: PRRef) -> str:
+        """Recover the URL scheme from the normalized URL.
+
+        ``PRRef`` carries no scheme field, so the value is read back out of
+        ``url`` exactly as the deployment context path is. A hand-built PRRef
+        whose ``url`` this pattern does not match falls back to ``https``,
+        which is what every other adapter here assumes.
+        """
+        match = _BBS_URL_RE.match(ref.url)
+        if match:
+            return match.group("scheme").lower()
+        return "https"
+
     def _pr_url(self, ref: PRRef, suffix: str = "") -> str:
         """Construct the Data Center API endpoint URL for a given PR."""
         context = self._context_path(ref)
         base = (
-            f"https://{ref.host}{context}/rest/api/1.0"
+            f"{self._scheme(ref)}://{ref.host}{context}/rest/api/1.0"
             f"/projects/{ref.owner}/repos/{ref.repo}/pull-requests/{ref.number}"
         )
         return f"{base}{suffix}"

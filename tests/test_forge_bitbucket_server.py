@@ -88,6 +88,32 @@ def test_parse_pr_url_tolerates_trailing_route():
     assert ref.url.endswith("/pull-requests/42")
 
 
+def test_parse_pr_url_preserves_a_plain_http_scheme():
+    # Data Center's standalone install serves plain HTTP on :7990, so an
+    # http:// PR URL is the out-of-the-box shape, not an edge case. The pattern
+    # accepts the scheme, so normalization must keep it: rewriting it to https
+    # points every later request at a TLS listener that is not there.
+    ref = ForgeImpl.parse_pr_url(
+        "http://bitbucket.internal:7990/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert ref is not None
+    assert ref.host == "bitbucket.internal:7990"
+    assert ref.url == (
+        "http://bitbucket.internal:7990/projects/PLAT/repos/api/pull-requests/42"
+    )
+    # The normalized URL must parse back to itself, or the scheme is lost the
+    # second time a PRRef is rebuilt from its own url.
+    assert ForgeImpl.parse_pr_url(ref.url) == ref
+
+
+def test_parse_pr_url_lowercases_an_uppercase_scheme():
+    ref = ForgeImpl.parse_pr_url(
+        "HTTP://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert ref is not None
+    assert ref.url.startswith("http://bitbucket.corp.example/")
+
+
 def test_parse_pr_url_normalizes_a_rest_api_url_to_the_browse_url():
     # /rest/api/1.0 is a route, not a deployment context path. Captured as a
     # context it gets replayed into the API base, so every request path carries
@@ -253,6 +279,36 @@ def test_api_path_preserves_the_context_path():
     assert session.get.call_args[0][0].startswith(
         "https://tools.corp.example/bitbucket/rest/api/1.0/"
     )
+
+
+def test_api_path_preserves_a_plain_http_scheme():
+    # The scheme parsed off the PR URL has to reach the API base. Hardcoding
+    # https here sends every request to a TLS port an http-only deployment is
+    # not listening on, and the failure names a URL the operator never typed.
+    session = MagicMock()
+    session.get.return_value = _mock_response(json_data={})
+    ref = _ref("http://bitbucket.internal:7990/projects/PLAT/repos/api/pull-requests/42")
+    ForgeImpl(session=session).get_pr(ref)
+    assert session.get.call_args[0][0] == (
+        "http://bitbucket.internal:7990/rest/api/1.0"
+        "/projects/PLAT/repos/api/pull-requests/42"
+    )
+
+
+def test_api_path_over_http_keeps_the_context_path_and_the_rest_stripping():
+    session = MagicMock()
+    session.get.return_value = _mock_response(json_data={})
+    ref = _ref(
+        "http://tools.internal:7990/bitbucket/rest/api/latest"
+        "/projects/PLAT/repos/api/pull-requests/9"
+    )
+    ForgeImpl(session=session).get_pr(ref)
+    url = session.get.call_args[0][0]
+    assert url == (
+        "http://tools.internal:7990/bitbucket/rest/api/1.0"
+        "/projects/PLAT/repos/api/pull-requests/9"
+    )
+    assert url.count("/rest/api/") == 1
 
 
 def test_api_path_for_a_personal_repo():
