@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 
 from prxref.config import make_forge
-from prxref.forges.base import InlineComment, PRRef, detect_forge
+from prxref.forges import bitbucket_server
+from prxref.forges.base import FeedReadError, InlineComment, PRRef, detect_forge
 from prxref.forges.bitbucket_server import ForgeImpl
 from prxref.triage import parse_unified_diff
 
@@ -468,7 +470,9 @@ def test_post_summary_creates_when_absent():
     session.post.return_value = _mock_response(status_code=201, json_data={"id": 5})
 
     ForgeImpl(session=session).post_summary(_ref(), "summary body")
-    assert session.post.call_args.kwargs["json"] == {"text": "summary body"}
+    assert session.post.call_args.kwargs["json"] == {
+        "text": "<!-- prxref-summary -->\nsummary body"
+    }
     session.put.assert_not_called()
 
 
@@ -495,7 +499,10 @@ def test_post_summary_updates_and_sends_the_version():
     ForgeImpl(session=session).post_summary(_ref(), "new body")
     session.post.assert_not_called()
     assert session.put.call_args[0][0].endswith("/comments/77")
-    assert session.put.call_args.kwargs["json"] == {"text": "new body", "version": 3}
+    assert session.put.call_args.kwargs["json"] == {
+        "text": "<!-- prxref-summary -->\nnew body",
+        "version": 3,
+    }
 
 
 def test_post_summary_ignores_an_inline_comment_carrying_the_marker():
@@ -619,3 +626,133 @@ def test_ref_round_trips_through_the_protocol_dataclass():
     ref = _ref()
     assert isinstance(ref, PRRef)
     assert ForgeImpl.parse_pr_url(ref.url) == ref
+
+
+# --- summary dedup: paging and unreadable feeds ------------------------------
+
+MARKER = "<!-- prxref-summary -->"
+
+
+def _activity_page(values, *, last=True, next_start=None):
+    body = {"values": values, "isLastPage": last}
+    if next_start is not None:
+        body["nextPageStart"] = next_start
+    return _mock_response(json_data=body)
+
+
+def _commented(text, **comment):
+    return {"action": "COMMENTED", "comment": {"text": text, **comment}}
+
+
+def test_post_summary_finds_a_summary_past_the_old_five_page_ceiling():
+    # The cap used to be five pages of 100, so a summary sitting at activity
+    # 501 was invisible and the run posted a second one beside it.
+    session = MagicMock()
+    pages = [
+        _activity_page([_commented(f"chatter {n}")], last=False, next_start=(n + 1) * 100)
+        for n in range(6)
+    ]
+    pages.append(_activity_page([_commented(MARKER, id=77, version=3)]))
+    session.get.side_effect = pages
+    session.put.return_value = _mock_response(json_data={"id": 77})
+
+    ForgeImpl(session=session).post_summary(_ref(), "new body")
+
+    session.post.assert_not_called()
+    assert session.put.call_args[0][0].endswith("/comments/77")
+    assert session.put.call_args.kwargs["json"] == {
+        "text": f"{MARKER}\nnew body",
+        "version": 3,
+    }
+
+
+def test_post_summary_stops_reading_as_soon_as_it_finds_the_marker():
+    session = MagicMock()
+    session.get.side_effect = [
+        _activity_page([_commented(MARKER, id=77, version=1)], last=False, next_start=100),
+        _activity_page([]),
+    ]
+    session.put.return_value = _mock_response(json_data={"id": 77})
+
+    ForgeImpl(session=session).post_summary(_ref(), "new body")
+
+    assert session.get.call_count == 1
+
+
+def test_post_summary_stamps_the_marker_when_the_body_lacks_one():
+    # Nothing upstream of the adapter puts the marker in the body, so a summary
+    # posted without one is invisible to every later lookup.
+    session = MagicMock()
+    session.get.return_value = _activity_page([])
+    session.post.return_value = _mock_response(status_code=201, json_data={"id": 5})
+
+    ForgeImpl(session=session).post_summary(_ref(), "no marker here")
+
+    assert session.post.call_args.kwargs["json"] == {"text": f"{MARKER}\nno marker here"}
+
+
+def test_post_summary_refuses_to_post_when_the_activity_read_fails():
+    # The old code caught the transport error, set `existing = None`, and fell
+    # through to the POST — a SECOND summary on a PR that already had one.
+    session = MagicMock()
+    session.get.side_effect = requests.ConnectionError("down")
+
+    with pytest.raises(FeedReadError, match="activity feed"):
+        ForgeImpl(session=session).post_summary(_ref(), "body")
+
+    session.post.assert_not_called()
+    session.put.assert_not_called()
+
+
+def test_post_summary_refuses_to_post_when_the_activity_read_errors_out():
+    session = MagicMock()
+    session.get.return_value = _mock_response(status_code=500, json_data={"errors": []})
+
+    with pytest.raises(FeedReadError, match="500"):
+        ForgeImpl(session=session).post_summary(_ref(), "body")
+
+    session.post.assert_not_called()
+
+
+def test_post_summary_refuses_to_post_when_the_feed_outruns_the_page_budget():
+    session = MagicMock()
+    session.get.return_value = _activity_page(
+        [_commented("chatter")], last=False, next_start=100
+    )
+
+    with pytest.raises(FeedReadError, match="page budget"):
+        ForgeImpl(session=session).post_summary(_ref(), "body")
+
+    assert session.get.call_count == bitbucket_server._MAX_PAGES
+    session.post.assert_not_called()
+
+
+def test_list_threads_pages_past_the_old_five_page_ceiling():
+    session = MagicMock()
+    pages = [
+        _activity_page([_commented(f"page {n}")], last=False, next_start=(n + 1) * 100)
+        for n in range(8)
+    ]
+    pages.append(_activity_page([_commented("last")]))
+    session.get.side_effect = pages
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    assert len(threads) == 9
+    assert threads[-1].body_snippet == "last"
+
+
+def test_list_threads_keeps_what_it_read_and_warns_when_the_feed_read_fails(caplog):
+    # Dedup input is best-effort: a partial read beats no read, but the
+    # shortfall has to be visible rather than silent.
+    session = MagicMock()
+    session.get.side_effect = [
+        _activity_page([_commented("one")], last=False, next_start=100),
+        requests.ConnectionError("down"),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.bitbucket_server"):
+        threads = ForgeImpl(session=session).list_threads(_ref())
+
+    assert [t.body_snippet for t in threads] == ["one"]
+    assert "incomplete" in caplog.text.lower()
