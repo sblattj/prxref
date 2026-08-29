@@ -1,22 +1,39 @@
 """GitHub forge implementation for PR metadata, diffs, comments, and threads."""
 from __future__ import annotations
 
+import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
-from .base import InlineComment, PRData, PRRef, Thread
+from .base import (
+    SUMMARY_MARKER,
+    FeedReadError,
+    InlineComment,
+    PRData,
+    PRRef,
+    Thread,
+    with_summary_marker,
+)
+
+logger = logging.getLogger(__name__)
 
 _PR_URL_RE = re.compile(
     r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/#?].*)?$",
     re.IGNORECASE,
 )
-_SUMMARY_MARKER = "<!-- prxref-summary -->"
+# Both comment reads used to go out unparameterised, which is GitHub's default
+# page of 30 and no second page: a summary or a thread past the 30th comment
+# did not exist as far as this adapter was concerned. 100 is the API maximum;
+# 50 pages puts the ceiling far past any real PR, and running out of budget is
+# a refusal to post rather than an invisible short read.
+_PAGE_SIZE = 100
+_MAX_PAGES = 50
 
 
 def _create_default_session() -> requests.Session:
@@ -115,21 +132,83 @@ class ForgeImpl:
         resp.raise_for_status()
         return resp.text
 
+    def _iter_comment_pages(
+        self, ref: PRRef, url: str, headers: dict[str, str]
+    ) -> Iterator[list[dict]]:
+        """Yield a comment listing one page at a time, oldest page first.
+
+        A page at a time rather than one flat list, so a caller hunting for a
+        single comment stops at the page it appears on instead of paying for
+        the whole feed. Any read that does not reach the end — transport
+        failure, non-OK status, unparseable body, or the page budget running
+        out — raises ``FeedReadError`` instead of returning short, so no
+        caller can mistake "I stopped early" for "that was all".
+
+        A short page ends the walk. A page that comes back exactly full costs
+        one extra request to confirm the end, which is the price of GitHub
+        stating the total nowhere in the body.
+        """
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        for page_number in range(1, _MAX_PAGES + 1):
+            try:
+                resp = self.session.get(
+                    url,
+                    headers=headers,
+                    params={"per_page": _PAGE_SIZE, "page": page_number},
+                )
+            except requests.RequestException as e:
+                raise FeedReadError(
+                    f"comment feed for {where} could not be read at page "
+                    f"{page_number}: {e}"
+                ) from e
+            if not resp.ok:
+                raise FeedReadError(
+                    f"comment feed for {where} returned HTTP "
+                    f"{resp.status_code} at page {page_number}"
+                )
+            try:
+                items = resp.json()
+            except ValueError as e:
+                raise FeedReadError(
+                    f"comment feed for {where} returned an unreadable body at "
+                    f"page {page_number}: {e}"
+                ) from e
+            if not isinstance(items, list):
+                raise FeedReadError(
+                    f"comment feed for {where} returned "
+                    f"{type(items).__name__}, not a list of comments"
+                )
+
+            yield [item for item in items if isinstance(item, dict)]
+
+            if len(items) < _PAGE_SIZE:
+                return
+
+        raise FeedReadError(
+            f"comment feed for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_SIZE} comments) without reaching the end"
+        )
+
     def post_summary(self, ref: PRRef, body: str) -> None:
-        """Post (or update) the top-level review summary comment."""
+        """Post (or update) the top-level review summary comment.
+
+        A ``FeedReadError`` from the lookup propagates. The old code branched
+        on ``if list_resp.ok:`` with no else, so a rate-limited or otherwise
+        failed listing fell straight through to the POST and put a second
+        summary on a PR that already had one.
+        """
         list_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/issues/{ref.number}/comments"
         headers = self._headers(ref.host)
+        body = with_summary_marker(body)
 
         existing_comment_id: int | None = None
-        list_resp = self.session.get(list_url, headers=headers)
-        if list_resp.ok:
-            comments = list_resp.json()
-            if isinstance(comments, list):
-                for c in comments:
-                    c_body = c.get("body") or ""
-                    if _SUMMARY_MARKER in c_body:
-                        existing_comment_id = c.get("id")
-                        break
+        for comments in self._iter_comment_pages(ref, list_url, headers):
+            for c in comments:
+                if SUMMARY_MARKER in (c.get("body") or ""):
+                    existing_comment_id = c.get("id")
+                    break
+            if existing_comment_id is not None:
+                break
 
         if existing_comment_id is not None:
             patch_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/issues/comments/{existing_comment_id}"
@@ -161,30 +240,42 @@ class ForgeImpl:
         return posted
 
     def list_threads(self, ref: PRRef) -> list[Thread]:
-        """List existing threads so re-reviews skip already-discussed findings."""
+        """List existing threads so re-reviews skip already-discussed findings.
+
+        Unlike ``post_summary`` this keeps whatever it managed to read: the
+        threads only feed best-effort dedup, and the orchestrator substitutes
+        an empty list for any exception, so raising would throw away pages
+        that were read successfully. The shortfall is logged rather than
+        swallowed — an under-read here shows up as findings re-posted on a
+        re-review, with nothing in the output to explain why.
+        """
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
         headers = self._headers(ref.host)
-        resp = self.session.get(url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
 
         threads: list[Thread] = []
-        if isinstance(data, list):
-            for item in data:
-                path = item.get("path")
-                line = item.get("line") or item.get("original_line") or item.get("position")
-                user = item.get("user") or {}
-                author = user.get("login", "") if isinstance(user, dict) else ""
-                body = item.get("body") or ""
-                snippet = body[:120]
-                threads.append(
-                    Thread(
-                        path=path,
-                        line=line,
-                        resolved=False,
-                        author=author,
-                        body_snippet=snippet,
+        try:
+            for data in self._iter_comment_pages(ref, url, headers):
+                for item in data:
+                    path = item.get("path")
+                    line = item.get("line") or item.get("original_line") or item.get("position")
+                    user = item.get("user") or {}
+                    author = user.get("login", "") if isinstance(user, dict) else ""
+                    body = item.get("body") or ""
+                    snippet = body[:120]
+                    threads.append(
+                        Thread(
+                            path=path,
+                            line=line,
+                            resolved=False,
+                            author=author,
+                            body_snippet=snippet,
+                        )
                     )
-                )
+        except FeedReadError as e:
+            logger.warning(
+                "review-comment feed read was incomplete for %s/%s#%s; thread "
+                "dedup is working from the %d comments that were read: %s",
+                ref.owner, ref.repo, ref.number, len(threads), e,
+            )
 
         return threads

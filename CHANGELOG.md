@@ -7,6 +7,57 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every re-review posted a second summary comment, on all four forges.**
+  Each adapter's `post_summary` is meant to find its own previous summary by
+  the hidden `<!-- prxref-summary -->` marker and update that comment instead
+  of posting beside it — but nothing ever put the marker into the body.
+  `orchestrator._render_summary` and `prompts/summary.md` render the verdict,
+  the findings and the attribution and no marker, so the lookup matched
+  nothing on the second run, and every run after the first left another
+  summary on the PR. The three adapters that looked were looking for something
+  that was never written; the fourth did not look at all (below). The marker is
+  now stamped by the adapter that searches for it — `forges/base.py` owns
+  `SUMMARY_MARKER` and an idempotent `with_summary_marker()`, so a body that
+  already carries one (a caller's, or a template's) is left alone.
+- **Bitbucket Cloud never looked for an existing summary.** Its `post_summary`
+  was an unconditional POST, with no lookup of any kind, so it duplicated on
+  every re-review even once the marker was present. It now does what the other
+  three do: walk the comment feed for a top-level comment carrying the marker
+  and `PUT` over that one. Inline comments quoting the marker are skipped, as
+  are deleted comments — Bitbucket keeps those in the feed with the body
+  blanked, and an update aimed at one lands where nobody can read it.
+- **A busy PR hid the existing summary past the end of the read.** The comment
+  and activity walks all stopped early, each in its own way: Bitbucket Cloud
+  and Data Center capped at 5 pages of 100, GitLab read one page of 50 with no
+  loop at all, and both GitHub reads went out unparameterised — one default
+  page of 30. Past that window a summary simply did not exist as far as the
+  adapter was concerned, so `post_summary` missed its own marker and posted a
+  duplicate, and `list_threads` under-reported the threads that suppress
+  already-discussed findings. Every walk now pages to the end of the feed at
+  100 per page, stopping the moment the marker turns up — the common case is
+  still one request — and the marker is searched for page by page rather than
+  after collecting the whole feed. The bound is 50 pages rather than 5, and
+  reaching it is now an error rather than a silent short read. GitLab's note
+  walk asks for oldest-first explicitly: GitLab lists notes newest-first, and
+  offset paging over a feed that grows at the front steps over entries, which
+  is the same miss by another route.
+- **A feed read that failed was treated as "no summary exists".** Bitbucket
+  Data Center caught `RequestException` and set `existing = None`; GitLab
+  caught it and left `existing_note_id` unset; GitHub branched on
+  `if list_resp.ok:` with no else. All three then fell through to the POST — so
+  a rate-limited or briefly unreachable forge turned a re-review into a second
+  summary on someone's PR. An incomplete read now raises `FeedReadError`
+  (`forges/base.py`) and no summary is posted at all. This is a deliberate
+  trade: a summary that failed to post is recoverable by re-running, and the
+  orchestrator already logs it and reports `posted=False`, while a duplicate
+  comment on a PR is not recoverable without a human deleting it. `list_threads`
+  makes the opposite trade on purpose — its output only feeds best-effort
+  dedup, and the orchestrator substitutes an empty list for any exception, so
+  raising would throw away the pages that were read. It keeps them and logs a
+  warning naming how many it got, rather than under-reporting in silence.
+
 ## [0.5.0] — 2026-08-28
 
 The self-hosted Bitbucket release. Bitbucket Server / Data Center was the one
