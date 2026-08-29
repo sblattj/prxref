@@ -7,6 +7,130 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-28
+
+The duplicate-comment release. Three ways prxref could post the same thing twice,
+and the test command the repo documented but could not run.
+
+### Changed
+
+- **The dev tools moved from a project extra to a PEP 735 dependency group, so
+  the test command is now the bare `uv run pytest`.** `pytest`, `pytest-cov` and
+  `ruff` lived in `[project.optional-dependencies] dev`, and `uv run` never
+  installs a project *extra* — only `--extra dev` does. On a cold checkout the
+  documented-everywhere-else `uv run pytest` therefore exited 2 with
+  `Failed to spawn: pytest / No such file or directory (os error 2)`, printed
+  immediately after a cheerful `Installed N packages`, which reads as a broken
+  virtualenv rather than a missing flag. uv installs the default `dev` group
+  automatically on both `uv run` and `uv sync`, so `[dependency-groups] dev`
+  removes the trap at its source rather than documenting around it. Every
+  surface dropped the flag with it: `uv sync`, `uv run pytest`,
+  `uv run ruff check src tests` in CI, `CONTRIBUTING.md`, `CLAUDE.md` and
+  `HANDOFF.md`.
+
+  **`pip install prxref[dev]` no longer works.** Dependency groups are a
+  lockfile-and-workspace concept: they are never written into wheel or sdist
+  metadata, so the built distribution now carries no `Provides-Extra: dev` and
+  `prxref[dev]` resolves to plain `prxref`. That failure is quiet by design on
+  pip's side: the install exits 0 having shipped none of the tools (`uv pip`
+  warns "does not have an extra named `dev`"; pip installing the wheel directly
+  says nothing at all). Contributors clone the repo and run `uv sync`; with pip,
+  install the tools directly (`pip install pytest pytest-cov ruff`). The
+  `litellm` extra is untouched — that one is a genuine runtime extra for users,
+  and `pip install 'prxref[litellm]'` still works.
+
+### Fixed
+
+- **The GitHub Actions review workflow reviewed only part of a PR and said so in
+  a banner nobody was meant to see in normal operation.**
+  `.github/workflows/prxref-review.yml` set no `PRXREF_LLM_MAX_TOKENS`, so every
+  worker call ran on prxref's built-in default of 4096. The model configured
+  there is a reasoning model, and a reasoning model draws its hidden reasoning
+  trace from the *same* completion budget as the answer — so the budget was
+  spent before the findings JSON began, the provider returned
+  `finish_reason=length`, and prxref counted that chunk as failed. Nothing about
+  the run looked wrong: HTTP 200, plausible usage numbers, exit 0. On a real PR
+  it reviewed 2 of 4 chunks and posted "Findings may be incomplete"; the same PR
+  reviewed locally at 32000 completed 4/4. The workflow now passes
+  `PRXREF_LLM_MAX_TOKENS: ${{ vars.PRXREF_LLM_MAX_TOKENS || '32000' }}` —
+  operator-tunable through a repository variable like its neighbours, but with a
+  literal fallback they do not need, because an unset variable renders as the
+  empty string and prxref falls back to the 4096 that caused this. The budget is
+  per worker chunk, not per run, so raising it widens each chunk's headroom
+  rather than one large request.
+
+- **A retry could post the same review comment four times.** All four forge
+  adapters built their `requests.Session` with the write verbs in
+  `allowed_methods` — `POST`, `PUT`, `DELETE`, plus `PATCH` on GitHub — against
+  a `status_forcelist` of `[429, 500, 502, 503, 504]` with `total=3`. urllib3
+  retries underneath the `requests` adapter, so what it re-sends is the whole
+  request: a comment `POST` the forge had already committed, whose `2xx` was
+  then lost on the way back — a 502 or 504 from a proxy in front of the API, or
+  a read timeout — was sent again, up to three more times, and the PR ended up
+  carrying the same summary or the same inline finding two, three, or four
+  times. Nothing downstream could notice, because from the client's side a
+  duplicated comment is a successful POST. `allowed_methods` is now
+  `GET`/`HEAD`/`OPTIONS` on all four adapters: reads still retry, writes are
+  attempted exactly once. A write that fails is left to the caller, which
+  already logs a failed post and finishes the run; a duplicated comment needs a
+  human to delete it. The one case given up is 429, where replaying a write
+  would in fact have been safe — the server is stating it did not process the
+  request — but `Retry.is_retry` tests the method before it consults
+  `status_forcelist`, so no single policy can retry a `POST` on 429 while
+  holding it back on 502, and the safe half of that pair is the one worth
+  keeping. Connection errors are unaffected and still retry for every verb:
+  urllib3 gates only its read-error path on the method, and a connection that
+  was never established carried no write to duplicate.
+
+- **Every re-review posted a second summary comment, on all four forges.**
+  Each adapter's `post_summary` is meant to find its own previous summary by
+  the hidden `<!-- prxref-summary -->` marker and update that comment instead
+  of posting beside it — but nothing ever put the marker into the body.
+  `orchestrator._render_summary` and `prompts/summary.md` render the verdict,
+  the findings and the attribution and no marker, so the lookup matched
+  nothing on the second run, and every run after the first left another
+  summary on the PR. The three adapters that looked were looking for something
+  that was never written; the fourth did not look at all (below). The marker is
+  now stamped by the adapter that searches for it — `forges/base.py` owns
+  `SUMMARY_MARKER` and an idempotent `with_summary_marker()`, so a body that
+  already carries one (a caller's, or a template's) is left alone.
+- **Bitbucket Cloud never looked for an existing summary.** Its `post_summary`
+  was an unconditional POST, with no lookup of any kind, so it duplicated on
+  every re-review even once the marker was present. It now does what the other
+  three do: walk the comment feed for a top-level comment carrying the marker
+  and `PUT` over that one. Inline comments quoting the marker are skipped, as
+  are deleted comments — Bitbucket keeps those in the feed with the body
+  blanked, and an update aimed at one lands where nobody can read it.
+- **A busy PR hid the existing summary past the end of the read.** The comment
+  and activity walks all stopped early, each in its own way: Bitbucket Cloud
+  and Data Center capped at 5 pages of 100, GitLab read one page of 50 with no
+  loop at all, and both GitHub reads went out unparameterised — one default
+  page of 30. Past that window a summary simply did not exist as far as the
+  adapter was concerned, so `post_summary` missed its own marker and posted a
+  duplicate, and `list_threads` under-reported the threads that suppress
+  already-discussed findings. Every walk now pages to the end of the feed at
+  100 per page, stopping the moment the marker turns up — the common case is
+  still one request — and the marker is searched for page by page rather than
+  after collecting the whole feed. The bound is 50 pages rather than 5, and
+  reaching it is now an error rather than a silent short read. GitLab's note
+  walk asks for oldest-first explicitly: GitLab lists notes newest-first, and
+  offset paging over a feed that grows at the front steps over entries, which
+  is the same miss by another route.
+- **A feed read that failed was treated as "no summary exists".** Bitbucket
+  Data Center caught `RequestException` and set `existing = None`; GitLab
+  caught it and left `existing_note_id` unset; GitHub branched on
+  `if list_resp.ok:` with no else. All three then fell through to the POST — so
+  a rate-limited or briefly unreachable forge turned a re-review into a second
+  summary on someone's PR. An incomplete read now raises `FeedReadError`
+  (`forges/base.py`) and no summary is posted at all. This is a deliberate
+  trade: a summary that failed to post is recoverable by re-running, and the
+  orchestrator already logs it and reports `posted=False`, while a duplicate
+  comment on a PR is not recoverable without a human deleting it. `list_threads`
+  makes the opposite trade on purpose — its output only feeds best-effort
+  dedup, and the orchestrator substitutes an empty list for any exception, so
+  raising would throw away the pages that were read. It keeps them and logs a
+  warning naming how many it got, rather than under-reporting in silence.
+
 ## [0.5.0] — 2026-08-28
 
 The self-hosted Bitbucket release. Bitbucket Server / Data Center was the one

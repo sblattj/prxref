@@ -62,6 +62,44 @@ class PRData:
     raw: dict  # forge-native payload, for forge-specific needs
 
 
+SUMMARY_MARKER = "<!-- prxref-summary -->"
+
+
+class FeedReadError(RuntimeError):
+    """A PR's comment/activity feed could not be read all the way to the end.
+
+    ``post_summary`` finds its own previous summary by scanning that feed for
+    ``SUMMARY_MARKER``; finding it is the only thing standing between a
+    re-review and a SECOND summary comment on someone's PR. A scan that did
+    not finish — a transport failure, a non-OK response, a page budget spent
+    before the feed ran out — therefore cannot be read as "no summary exists".
+    Every adapter raises this instead of falling through to the POST, so the
+    caller sees a review that failed to post (recoverable: re-run it) rather
+    than a duplicate comment (not recoverable without a human deleting it).
+
+    ``list_threads`` makes the opposite trade and never raises it: its output
+    only feeds best-effort dedup, and the orchestrator already substitutes an
+    empty list for any exception, so returning the pages that WERE read beats
+    throwing them away. It logs a warning instead, so the under-read is
+    visible rather than silent.
+    """
+
+
+def with_summary_marker(body: str) -> str:
+    """Return ``body`` guaranteed to carry ``SUMMARY_MARKER``.
+
+    The marker is what a later run matches on, so the adapter that looks for
+    it is also the one that has to put it there — nothing upstream of the
+    forge layer adds it, and a summary posted without it is invisible to the
+    next run's lookup, which then posts a duplicate. Idempotent: a body that
+    already carries the marker (from a template, or from a caller that stamps
+    its own) is returned untouched.
+    """
+    if SUMMARY_MARKER in body:
+        return body
+    return f"{SUMMARY_MARKER}\n{body}"
+
+
 class Forge(Protocol):
     """The contract every forge adapter implements."""
 

@@ -1,19 +1,41 @@
 """GitLab REST API v4 forge implementation."""
 from __future__ import annotations
 
+import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from prxref.forges.base import InlineComment, PRData, PRRef, Thread
+from prxref.forges.base import (
+    SUMMARY_MARKER,
+    FeedReadError,
+    InlineComment,
+    PRData,
+    PRRef,
+    Thread,
+    with_summary_marker,
+)
+
+logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = (10.0, 30.0)
-_SUMMARY_MARKER = "<!-- prxref-summary -->"
+# Both reads used to take a single page of 50 with no loop, so a summary or a
+# discussion past the 50th entry did not exist as far as this adapter was
+# concerned. 100 is the API maximum; 50 pages puts the ceiling far past any
+# real MR, and running out of budget is a refusal to post rather than an
+# invisible short read.
+_PAGE_SIZE = 100
+_MAX_PAGES = 50
+# Oldest-first. GitLab lists notes newest-first by default, and offset paging
+# over a feed that grows at the front skips entries: a note added between two
+# page requests shifts every later window back by one. Ascending order appends
+# at the END, past the cursor, so a walk in progress cannot step over anything.
+_NOTE_ORDER = {"order_by": "created_at", "sort": "asc"}
 
 _GL_URL_RE = re.compile(
     r"^https?://(?P<host>[^/]+)/(?P<path>.+?)/-/merge_requests/(?P<number>\d+)(?:/.*)?$",
@@ -31,9 +53,24 @@ def _make_retry_session() -> requests.Session:
         status=3,
         backoff_factor=1.0,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=frozenset(
-            ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"]
-        ),
+        # Read verbs only, deliberately. urllib3 retries beneath the
+        # requests adapter, so a re-sent write is sent whole: a comment POST
+        # that commits server-side and then loses its 2xx to a 502/504 or a
+        # read timeout would be posted a second time, and the PR carries a
+        # duplicate comment — the most visible failure this tool has. No
+        # response status tells the client whether the origin processed the
+        # request, and `Retry.is_retry` tests the method before it looks at
+        # `status_forcelist`, so a single policy cannot retry a POST on 429
+        # (which the server states it did not process) while holding it back
+        # on 502. Writes are therefore left to the caller, which already logs
+        # a failed post and carries on; a duplicated comment needs a human to
+        # delete it. The other write verbs go with POST: no adapter issues a
+        # DELETE, and the summary update (PUT, or PATCH on GitHub) is at best
+        # a no-op on replay and at worst a version conflict. Connection
+        # errors are still retried for every verb: urllib3 gates only its
+        # read-error path on the method, and a connection that was never
+        # established carried no write to duplicate.
+        allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
         respect_retry_after_header=True,
         raise_on_status=False,
     )
@@ -218,28 +255,92 @@ class ForgeImpl:
 
         return "".join(diff_parts)
 
+    def _iter_pages(
+        self,
+        ref: PRRef,
+        url: str,
+        headers: dict[str, str],
+        *,
+        what: str,
+        extra_params: dict[str, str] | None = None,
+    ) -> Iterator[list[dict]]:
+        """Yield a paginated GitLab collection one page at a time.
+
+        A page at a time rather than one flat list, so a caller hunting for a
+        single entry stops at the page it appears on instead of paying for the
+        whole feed. Any read that does not reach the end — transport failure,
+        non-OK status, unparseable body, or the page budget running out —
+        raises ``FeedReadError`` instead of returning short, so no caller can
+        mistake "I stopped early" for "that was all".
+        """
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        for page_number in range(1, _MAX_PAGES + 1):
+            params: dict[str, int | str] = {
+                "per_page": _PAGE_SIZE,
+                "page": page_number,
+            }
+            if extra_params:
+                params.update(extra_params)
+            try:
+                resp = self._session.get(
+                    url, headers=headers, params=params, timeout=_REQUEST_TIMEOUT
+                )
+            except requests.RequestException as e:
+                raise FeedReadError(
+                    f"{what} for {where} could not be read at page "
+                    f"{page_number}: {e}"
+                ) from e
+            if not resp.ok:
+                raise FeedReadError(
+                    f"{what} for {where} returned HTTP {resp.status_code} at "
+                    f"page {page_number}"
+                )
+            try:
+                items = resp.json()
+            except ValueError as e:
+                raise FeedReadError(
+                    f"{what} for {where} returned an unreadable body at page "
+                    f"{page_number}: {e}"
+                ) from e
+            if not isinstance(items, list):
+                raise FeedReadError(
+                    f"{what} for {where} returned {type(items).__name__}, not "
+                    "a list"
+                )
+
+            yield [item for item in items if isinstance(item, dict)]
+
+            if len(items) < _PAGE_SIZE:
+                return
+
+        raise FeedReadError(
+            f"{what} for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_SIZE} entries) without reaching the end"
+        )
+
     def post_summary(self, ref: PRRef, body: str) -> None:
-        """Post (or update) the top-level review summary comment."""
+        """Post (or update) the top-level review summary comment.
+
+        A ``FeedReadError`` from the lookup propagates rather than being
+        swallowed: the transport error used to be caught and dropped, leaving
+        ``existing_note_id`` at ``None``, which fell straight through to the
+        POST and put a second summary on an MR that already had one.
+        """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
         notes_url = f"{base}/merge_requests/{ref.number}/notes"
+        body = with_summary_marker(body)
 
         existing_note_id: int | None = None
-        try:
-            list_resp = self._session.get(
-                notes_url,
-                headers=headers,
-                params={"per_page": 50},
-                timeout=_REQUEST_TIMEOUT,
-            )
-            if list_resp.ok:
-                notes = list_resp.json()
-                for note in notes:
-                    if _SUMMARY_MARKER in (note.get("body") or ""):
-                        existing_note_id = note.get("id")
-                        break
-        except requests.RequestException:
-            pass
+        for notes in self._iter_pages(
+            ref, notes_url, headers, what="note feed", extra_params=_NOTE_ORDER,
+        ):
+            for note in notes:
+                if SUMMARY_MARKER in (note.get("body") or ""):
+                    existing_note_id = note.get("id")
+                    break
+            if existing_note_id is not None:
+                break
 
         if existing_note_id is not None:
             update_url = f"{notes_url}/{existing_note_id}"
@@ -314,56 +415,70 @@ class ForgeImpl:
         return posted
 
     def list_threads(self, ref: PRRef) -> list[Thread]:
-        """List existing discussion threads on the PR."""
+        """List existing discussion threads on the PR.
+
+        Unlike ``post_summary`` this keeps whatever it managed to read: the
+        threads only feed best-effort dedup, and the orchestrator substitutes
+        an empty list for any exception, so raising would throw away pages
+        that were read successfully. The shortfall is logged rather than
+        swallowed — an under-read here shows up as findings re-posted on a
+        re-review, with nothing in the output to explain why.
+
+        The discussions endpoint takes no ordering parameters, so this walk
+        gets plain page/per_page rather than the notes walk's explicit
+        oldest-first order.
+        """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
         url = f"{base}/merge_requests/{ref.number}/discussions"
-        params = {"per_page": 50}
 
         threads: list[Thread] = []
         try:
-            resp = self._session.get(url, headers=headers, params=params, timeout=_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            discussions = resp.json()
-        except requests.RequestException:
-            return threads
+            for discussions in self._iter_pages(
+                ref, url, headers, what="discussion feed",
+            ):
+                for disc in discussions:
+                    notes = disc.get("notes") or []
+                    if not notes:
+                        continue
 
-        for disc in discussions:
-            notes = disc.get("notes") or []
-            if not notes:
-                continue
+                    disc_resolved = False
+                    if "resolved" in disc:
+                        disc_resolved = bool(disc["resolved"])
 
-            disc_resolved = False
-            if "resolved" in disc:
-                disc_resolved = bool(disc["resolved"])
+                    first_path: str | None = None
+                    first_line: int | None = None
 
-            first_path: str | None = None
-            first_line: int | None = None
+                    for note in notes:
+                        pos = note.get("position")
+                        if pos and isinstance(pos, dict):
+                            if not first_path:
+                                first_path = pos.get("new_path") or pos.get("old_path")
+                            if first_line is None:
+                                first_line = pos.get("new_line") or pos.get("old_line")
+                        if "resolved" in note and not disc_resolved:
+                            disc_resolved = bool(note["resolved"])
 
-            for note in notes:
-                pos = note.get("position")
-                if pos and isinstance(pos, dict):
-                    if not first_path:
-                        first_path = pos.get("new_path") or pos.get("old_path")
-                    if first_line is None:
-                        first_line = pos.get("new_line") or pos.get("old_line")
-                if "resolved" in note and not disc_resolved:
-                    disc_resolved = bool(note["resolved"])
+                    for note in notes:
+                        author_info = note.get("author") or {}
+                        author = author_info.get("username") or author_info.get("name") or ""
+                        body = note.get("body") or ""
+                        note_resolved = note.get("resolved", disc_resolved)
 
-            for note in notes:
-                author_info = note.get("author") or {}
-                author = author_info.get("username") or author_info.get("name") or ""
-                body = note.get("body") or ""
-                note_resolved = note.get("resolved", disc_resolved)
-
-                threads.append(
-                    Thread(
-                        path=first_path,
-                        line=first_line,
-                        resolved=bool(note_resolved),
-                        author=author,
-                        body_snippet=body[:200],
-                    )
-                )
+                        threads.append(
+                            Thread(
+                                path=first_path,
+                                line=first_line,
+                                resolved=bool(note_resolved),
+                                author=author,
+                                body_snippet=body[:200],
+                            )
+                        )
+        except FeedReadError as e:
+            logger.warning(
+                "discussion feed read was incomplete for %s/%s#%s; thread "
+                "dedup is working from the %d notes that were read: %s",
+                ref.owner, ref.repo, ref.number, len(threads), e,
+            )
 
         return threads
