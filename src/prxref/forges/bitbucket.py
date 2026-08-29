@@ -1,19 +1,35 @@
 """Bitbucket Cloud REST API v2 forge implementation."""
 from __future__ import annotations
 
+import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from prxref.forges.base import InlineComment, PRData, PRRef, Thread
+from prxref.forges.base import (
+    SUMMARY_MARKER,
+    FeedReadError,
+    InlineComment,
+    PRData,
+    PRRef,
+    Thread,
+    with_summary_marker,
+)
+
+logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.bitbucket.org/2.0"
 _REQUEST_TIMEOUT = (10.0, 30.0)
+_PAGE_SIZE = 100
+# The comment walk used to stop at 5 pages, which silently truncated dedup at
+# 500 comments. 50 puts the ceiling far past any real PR, and running out of
+# budget is now a refusal to post rather than an invisible short read.
+_MAX_PAGES = 50
 
 _BB_URL_RE = re.compile(
     r"^https?://bitbucket\.org/(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?:pull-requests|pullrequests|pullrequest)/(?P<number>\d+)(?:/.*)?$",
@@ -31,9 +47,24 @@ def _make_retry_session() -> requests.Session:
         status=3,
         backoff_factor=1.0,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=frozenset(
-            ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"]
-        ),
+        # Read verbs only, deliberately. urllib3 retries beneath the
+        # requests adapter, so a re-sent write is sent whole: a comment POST
+        # that commits server-side and then loses its 2xx to a 502/504 or a
+        # read timeout would be posted a second time, and the PR carries a
+        # duplicate comment — the most visible failure this tool has. No
+        # response status tells the client whether the origin processed the
+        # request, and `Retry.is_retry` tests the method before it looks at
+        # `status_forcelist`, so a single policy cannot retry a POST on 429
+        # (which the server states it did not process) while holding it back
+        # on 502. Writes are therefore left to the caller, which already logs
+        # a failed post and carries on; a duplicated comment needs a human to
+        # delete it. The other write verbs go with POST: no adapter issues a
+        # DELETE, and the summary update (PUT, or PATCH on GitHub) is at best
+        # a no-op on replay and at worst a version conflict. Connection
+        # errors are still retried for every verb: urllib3 gates only its
+        # read-error path on the method, and a connection that was never
+        # established carried no write to duplicate.
+        allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
         respect_retry_after_header=True,
         raise_on_status=False,
     )
@@ -162,18 +193,110 @@ class ForgeImpl:
 
         return diff_text
 
+    def _iter_comment_pages(self, ref: PRRef) -> Iterator[list[dict]]:
+        """Yield the PR's comments one page at a time, following ``next``.
+
+        A page at a time rather than one flat list, so a caller hunting for a
+        single comment stops at the page it appears on instead of paying for
+        the whole feed. Any read that does not reach the end — transport
+        failure, non-OK status, unparseable body, or the page budget running
+        out — raises ``FeedReadError`` instead of returning short, so no
+        caller can mistake "I stopped early" for "that was all".
+        """
+        headers, auth = self._get_auth()
+        url: str | None = self._pr_url(ref, "/comments")
+        params: dict[str, int | str] | None = {"pagelen": _PAGE_SIZE}
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+
+        for _ in range(_MAX_PAGES):
+            try:
+                resp = self._session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    auth=auth,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                raise FeedReadError(
+                    f"comment feed for {where} could not be read: {e}"
+                ) from e
+            if not resp.ok:
+                raise FeedReadError(
+                    f"comment feed for {where} returned HTTP {resp.status_code}"
+                )
+            try:
+                data = resp.json()
+            except ValueError as e:
+                raise FeedReadError(
+                    f"comment feed for {where} returned an unreadable body: {e}"
+                ) from e
+            if not isinstance(data, dict):
+                raise FeedReadError(
+                    f"comment feed for {where} returned "
+                    f"{type(data).__name__}, not a page object"
+                )
+
+            yield [v for v in (data.get("values") or []) if isinstance(v, dict)]
+
+            url = data.get("next")
+            params = None
+            if not url:
+                return
+
+        raise FeedReadError(
+            f"comment feed for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_SIZE} comments) without reaching the end"
+        )
+
     def post_summary(self, ref: PRRef, body: str) -> None:
-        """Post the top-level review summary comment."""
+        """Post (or update) the top-level review summary comment.
+
+        This adapter used to POST unconditionally — no lookup at all — so
+        every re-review left another summary on the PR. It now does what the
+        other three do: scan the comment feed for ``SUMMARY_MARKER`` on a
+        top-level comment and PUT over that one if it is there.
+
+        A ``FeedReadError`` from the lookup propagates rather than being
+        swallowed. A summary that fails to post is recoverable by re-running;
+        a second summary on someone's PR is not recoverable without a human
+        deleting it, so the unreadable feed loses the tie.
+        """
         headers, auth = self._get_auth()
         url = self._pr_url(ref, "/comments")
+        body = with_summary_marker(body)
+
+        existing_id = None
+        for page in self._iter_comment_pages(ref):
+            for item in page:
+                # An inline comment quoting the marker is not the summary, and
+                # a deleted comment is a slot nobody can read an update in.
+                if item.get("inline") or _is_deleted(item):
+                    continue
+                raw = (item.get("content") or {}).get("raw") or ""
+                if SUMMARY_MARKER in raw:
+                    existing_id = item.get("id")
+                    break
+            if existing_id is not None:
+                break
+
         payload = {"content": {"raw": body}}
-        resp = self._session.post(
-            url,
-            json=payload,
-            headers=headers,
-            auth=auth,
-            timeout=_REQUEST_TIMEOUT,
-        )
+        if existing_id is not None:
+            resp = self._session.put(
+                f"{url}/{existing_id}",
+                json=payload,
+                headers=headers,
+                auth=auth,
+                timeout=_REQUEST_TIMEOUT,
+            )
+        else:
+            resp = self._session.post(
+                url,
+                json=payload,
+                headers=headers,
+                auth=auth,
+                timeout=_REQUEST_TIMEOUT,
+            )
         resp.raise_for_status()
 
     def post_inline_comments(self, ref: PRRef, comments: Sequence[InlineComment]) -> int:
@@ -210,56 +333,59 @@ class ForgeImpl:
         return posted
 
     def list_threads(self, ref: PRRef) -> list[Thread]:
-        """List existing discussion threads on the PR."""
-        headers, auth = self._get_auth()
-        url: str | None = self._pr_url(ref, "/comments")
-        params: dict[str, int | str] | None = {"pagelen": 100}
+        """List existing discussion threads on the PR.
+
+        Unlike ``post_summary`` this keeps whatever it managed to read: the
+        threads only feed best-effort dedup, and the orchestrator substitutes
+        an empty list for any exception, so raising would throw away pages
+        that were read successfully. The shortfall is logged rather than
+        swallowed — an under-read here shows up as findings re-posted on a
+        re-review, with nothing in the output to explain why.
+        """
         threads: list[Thread] = []
-        page_count = 0
+        try:
+            for page in self._iter_comment_pages(ref):
+                for item in page:
+                    inline = item.get("inline")
+                    path = inline.get("path") if inline else None
+                    line = inline.get("to") if inline else None
 
-        while url and page_count < 5:
-            page_count += 1
-            resp = self._session.get(
-                url,
-                params=params,
-                headers=headers,
-                auth=auth,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            for item in data.get("values", []):
-                inline = item.get("inline")
-                path = inline.get("path") if inline else None
-                line = inline.get("to") if inline else None
-
-                is_deleted = bool(item.get("deleted", False)) or item.get("deleted_on") is not None
-                resolved = is_deleted
-
-                user = item.get("user") or item.get("author") or {}
-                author = (
-                    user.get("uuid")
-                    or user.get("nickname")
-                    or user.get("display_name")
-                    or ""
-                )
-
-                content = item.get("content") or {}
-                raw_body = content.get("raw") or ""
-                body_snippet = raw_body[:200]
-
-                threads.append(
-                    Thread(
-                        path=path,
-                        line=line,
-                        resolved=resolved,
-                        author=author,
-                        body_snippet=body_snippet,
+                    user = item.get("user") or item.get("author") or {}
+                    author = (
+                        user.get("uuid")
+                        or user.get("nickname")
+                        or user.get("display_name")
+                        or ""
                     )
-                )
 
-            url = data.get("next")
-            params = None
+                    content = item.get("content") or {}
+                    raw_body = content.get("raw") or ""
+                    body_snippet = raw_body[:200]
+
+                    threads.append(
+                        Thread(
+                            path=path,
+                            line=line,
+                            resolved=_is_deleted(item),
+                            author=author,
+                            body_snippet=body_snippet,
+                        )
+                    )
+        except FeedReadError as e:
+            logger.warning(
+                "comment feed read was incomplete for %s/%s#%s; thread dedup "
+                "is working from the %d comments that were read: %s",
+                ref.owner, ref.repo, ref.number, len(threads), e,
+            )
 
         return threads
+
+
+def _is_deleted(comment: dict) -> bool:
+    """Whether Bitbucket has tombstoned this comment.
+
+    A deleted comment stays in the feed with its body blanked. It counts as
+    resolved for dedup, and it is not a slot ``post_summary`` may update into:
+    the update would land somewhere nobody can read.
+    """
+    return bool(comment.get("deleted", False)) or comment.get("deleted_on") is not None

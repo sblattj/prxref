@@ -55,5 +55,17 @@ jobs:
           PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
           PRXREF_LLM_MODELS: ${{ vars.PRXREF_LLM_MODELS }}
           PRXREF_LLM_REASONING_EFFORT: ${{ vars.PRXREF_LLM_REASONING_EFFORT }}
+          # Per-WORKER-CHUNK completion budget, not a per-run one: each chunk gets
+          # its own call with this ceiling, so raising it does not multiply into a
+          # single huge request. It needs a literal fallback where the neighbours
+          # above do not, because an unset repository variable renders as the empty
+          # string and prxref then falls back to its own default of 4096 — silently
+          # restoring the bug. The configured model is a reasoning model, and the
+          # hidden reasoning trace is drawn from this same completion budget, so at
+          # 4096 the response hit finish_reason=length before the findings JSON was
+          # emitted: a real PR reviewed 2 of 4 chunks and posted "Findings may be
+          # incomplete". The same PR at 32000 completed 4/4. Override per repo by
+          # setting the variable.
+          PRXREF_LLM_MAX_TOKENS: ${{ vars.PRXREF_LLM_MAX_TOKENS || '32000' }}
         run: |
           .venv/bin/prxref review --pr-url "${{ github.event.pull_request.html_url }}" -v
