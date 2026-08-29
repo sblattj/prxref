@@ -1,21 +1,36 @@
 """Bitbucket Server / Data Center REST API v1 forge implementation."""
 from __future__ import annotations
 
+import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from prxref.forges.base import InlineComment, PRData, PRRef, Thread
+from prxref.forges.base import (
+    SUMMARY_MARKER,
+    FeedReadError,
+    InlineComment,
+    PRData,
+    PRRef,
+    Thread,
+    with_summary_marker,
+)
+
+logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = (10.0, 30.0)
-_SUMMARY_MARKER = "<!-- prxref-summary -->"
 _PAGE_LIMIT = 100
-_MAX_PAGES = 5
+# 5 pages of 100 was the old ceiling: a summary sitting at activity 501 was
+# invisible, so post_summary missed its own marker and posted a second comment.
+# 50 keeps the walk bounded (a feed that long is pathological, and the budget
+# is a refusal to post rather than a silent short read) while putting the
+# ceiling far past any real PR.
+_MAX_PAGES = 50
 
 _BBS_URL_RE = re.compile(
     r"^(?P<scheme>https?)://(?P<host>[^/]+)"
@@ -268,40 +283,74 @@ class ForgeImpl:
 
         return diff_text
 
-    def _iter_activities(self, ref: PRRef) -> list[dict]:
-        """Page through the PR activity feed and return the COMMENTED entries.
+    def _iter_activity_pages(self, ref: PRRef) -> Iterator[list[dict]]:
+        """Yield the COMMENTED activity entries one page at a time.
 
         Data Center has no flat comment listing: comments arrive as entries in
         an activity stream, paged with start/limit rather than a next URL.
+
+        A page at a time rather than one flat list, so a caller that is
+        hunting for one entry stops at the page it appears on instead of
+        paying for the whole feed. Any read that does not reach the end of the
+        feed — transport failure, non-OK status, unparseable body, or the page
+        budget running out — raises ``FeedReadError`` instead of returning
+        short, so no caller can mistake "I stopped early" for "that was all".
         """
         headers, auth = self._get_auth()
         url = self._pr_url(ref, "/activities")
-        entries: list[dict] = []
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
         start = 0
 
         for _ in range(_MAX_PAGES):
-            resp = self._session.get(
-                url,
-                params={"start": start, "limit": _PAGE_LIMIT},
-                headers=headers,
-                auth=auth,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            page = resp.json()
+            try:
+                resp = self._session.get(
+                    url,
+                    params={"start": start, "limit": _PAGE_LIMIT},
+                    headers=headers,
+                    auth=auth,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                raise FeedReadError(
+                    f"activity feed for {where} could not be read at "
+                    f"start={start}: {e}"
+                ) from e
+            if not resp.ok:
+                raise FeedReadError(
+                    f"activity feed for {where} returned HTTP "
+                    f"{resp.status_code} at start={start}"
+                )
+            try:
+                page = resp.json()
+            except ValueError as e:
+                raise FeedReadError(
+                    f"activity feed for {where} returned an unreadable body at "
+                    f"start={start}: {e}"
+                ) from e
+            if not isinstance(page, dict):
+                raise FeedReadError(
+                    f"activity feed for {where} returned "
+                    f"{type(page).__name__}, not a page object"
+                )
 
-            for item in page.get("values", []):
-                if (item.get("action") or "").upper() == "COMMENTED":
-                    entries.append(item)
+            yield [
+                item
+                for item in (page.get("values") or [])
+                if isinstance(item, dict)
+                and (item.get("action") or "").upper() == "COMMENTED"
+            ]
 
             if page.get("isLastPage", True):
-                break
+                return
             next_start = page.get("nextPageStart")
             if next_start is None:
-                break
+                return
             start = next_start
 
-        return entries
+        raise FeedReadError(
+            f"activity feed for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_LIMIT} entries) without reaching the end"
+        )
 
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
@@ -309,21 +358,27 @@ class ForgeImpl:
         Data Center rejects a comment update that does not carry the comment's
         current ``version``, so the existing comment is looked up for its
         version rather than only its id.
+
+        A ``FeedReadError`` from the lookup propagates rather than being
+        swallowed: it used to be caught here and turned into ``existing =
+        None``, which fell straight through to the POST and put a second
+        summary on a PR that already had one.
         """
         headers, auth = self._get_auth()
         url = self._pr_url(ref, "/comments")
+        body = with_summary_marker(body)
 
         existing: dict | None = None
-        try:
-            for item in self._iter_activities(ref):
+        for entries in self._iter_activity_pages(ref):
+            for item in entries:
                 comment = item.get("comment") or {}
                 if comment.get("anchor"):
                     continue
-                if _SUMMARY_MARKER in (comment.get("text") or ""):
+                if SUMMARY_MARKER in (comment.get("text") or ""):
                     existing = comment
                     break
-        except requests.RequestException:
-            existing = None
+            if existing is not None:
+                break
 
         if existing is not None and existing.get("id") is not None:
             resp = self._session.put(
@@ -387,31 +442,42 @@ class ForgeImpl:
         return posted
 
     def list_threads(self, ref: PRRef) -> list[Thread]:
-        """List existing discussion threads on the PR."""
+        """List existing discussion threads on the PR.
+
+        Unlike ``post_summary`` this keeps whatever it managed to read: the
+        threads only feed best-effort dedup, and the orchestrator substitutes
+        an empty list for any exception, so raising would throw away pages
+        that were read successfully. The shortfall is logged rather than
+        swallowed — an under-read here shows up as findings re-posted on a
+        re-review, with nothing in the output to explain why.
+        """
         threads: list[Thread] = []
         try:
-            entries = self._iter_activities(ref)
-        except requests.RequestException:
-            return threads
+            for entries in self._iter_activity_pages(ref):
+                for item in entries:
+                    comment = item.get("comment") or {}
+                    if not comment:
+                        continue
 
-        for item in entries:
-            comment = item.get("comment") or {}
-            if not comment:
-                continue
+                    anchor = comment.get("anchor") or {}
+                    path = anchor.get("path")
+                    line = anchor.get("line")
 
-            anchor = comment.get("anchor") or {}
-            path = anchor.get("path")
-            line = anchor.get("line")
-
-            author = comment.get("author") or {}
-            threads.append(
-                Thread(
-                    path=path,
-                    line=line,
-                    resolved=_is_resolved(comment),
-                    author=author.get("name") or author.get("slug") or "",
-                    body_snippet=(comment.get("text") or "")[:200],
-                )
+                    author = comment.get("author") or {}
+                    threads.append(
+                        Thread(
+                            path=path,
+                            line=line,
+                            resolved=_is_resolved(comment),
+                            author=author.get("name") or author.get("slug") or "",
+                            body_snippet=(comment.get("text") or "")[:200],
+                        )
+                    )
+        except FeedReadError as e:
+            logger.warning(
+                "activity feed read was incomplete for %s/%s#%s; thread dedup "
+                "is working from the %d entries that were read: %s",
+                ref.owner, ref.repo, ref.number, len(threads), e,
             )
 
         return threads
