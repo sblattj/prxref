@@ -19,8 +19,8 @@ Both must pass before a PR can merge. CI runs exactly these on Python 3.12 and
 3.13:
 
 ```bash
-uv run pytest              # no network required
-uv run ruff check src tests
+uv run --extra dev pytest  # no network required (pytest is a `dev` extra)
+uv run --extra dev ruff check src tests
 ```
 
 The suite is fully offline — every forge and LLM call is stubbed. If a change

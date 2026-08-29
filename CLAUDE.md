@@ -32,8 +32,9 @@ auto-detects the forge.
 
 ## Commands
 
-- `uv run pytest` — tests
-- `uv run ruff check src tests` — lint
+- `uv run --extra dev pytest` — tests (pytest is a `dev` extra; the bare
+  `uv run pytest` fails with `Failed to spawn: pytest`)
+- `uv run --extra dev ruff check src tests` — lint
 - `uv run prxref review --pr-url ...` — one-shot review
 
 ## Conventions
