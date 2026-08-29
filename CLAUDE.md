@@ -1,6 +1,6 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, and GitHub.
+Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
 
 ## What This Is
 
@@ -15,14 +15,17 @@ auto-detects the forge.
 ## Tech
 
 - Python 3.12+, `uv` for env/lock, hatchling packaging
-- One `Forge` Protocol (src/prxref/forges/base.py), three adapters
-- Forge coverage is asymmetric, on purpose: GitHub Enterprise Server and
-  self-hosted GitLab work on any host (same REST API, different base URL), but
-  **Bitbucket is Cloud only**. `bitbucket.ForgeImpl.parse_pr_url` returns None
-  unless the host is `bitbucket.org`, so a Server/Data Center URL is rejected
-  before any credential is read — a token is never the explanation. Server
-  speaks `/rest/api/1.0` against different resource shapes, so supporting it is
-  a fourth adapter, not a base-URL setting.
+- One `Forge` Protocol (src/prxref/forges/base.py), four adapters
+- Bitbucket needs two of them: Cloud speaks `/2.0` on `bitbucket.org` only,
+  Server / Data Center speaks `/rest/api/1.0` on any host, so the adapter is
+  picked from the URL. `detect_forge` asks Cloud first, but that order is
+  defensive, not load-bearing: Cloud pins `bitbucket.org` and a bare
+  `owner/repo/pull-requests/N` path while Server requires a
+  `/projects|users/KEY/repos/REPO/` prefix, so the two patterns are disjoint and
+  every URL resolves identically under either order. Asking the narrower parser
+  first means a later loosening degrades into a shadowed forge rather than a
+  silently mis-routed one. GitHub and GitLab stay one adapter each, because
+  their self-hosted products differ only in base URL.
 - LLM access via a fallback chain (llm-ferry preferred, litellm optional,
   plain-HTTP client as zero-dependency default) — provider-agnostic, no
   Anthropic key by design

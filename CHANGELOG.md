@@ -7,6 +7,48 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-28
+
+The self-hosted Bitbucket release. Bitbucket Server / Data Center was the one
+supported forge family with no self-hosted path; deployments that needed it ran
+a hand-maintained overlay on top of a tagged release.
+
+### Added
+
+- **Bitbucket Server / Data Center forge** (`bitbucket-server`). Self-hosted
+  Bitbucket previously had no path at all: the Cloud adapter pins itself to
+  `bitbucket.org`, while GitHub and GitLab each covered their self-hosted
+  deployment. Data Center is a different API rather than the same one on
+  another host — `/rest/api/1.0`, project keys instead of workspaces, an
+  activity feed instead of a comment list, `start`/`limit` paging — so it is a
+  fourth adapter under the existing `Forge` Protocol, and nothing downstream of
+  `forges/base.py` changed. Handles project and personal (`~slug`)
+  repositories, a deployment context path, anchored inline comments, and the
+  version field Data Center requires when updating a comment. `detect_forge`
+  tries Cloud before Server, though the two parsers are disjoint — Cloud pins
+  `bitbucket.org`, Server requires a `/projects|users/KEY/repos/REPO/` path — so
+  no URL matches both and the order is defensive rather than load-bearing.
+- **`PRXREF_BITBUCKET_SERVER_TOKEN`** (HTTP access token, falls back to
+  `PRXREF_BITBUCKET_TOKEN`), **`PRXREF_BITBUCKET_SERVER_USER`** and
+  **`PRXREF_BITBUCKET_SERVER_PASSWORD`** (basic-auth pair, used only when no
+  token is set).
+
+### Fixed
+
+- **Bitbucket webhooks were broken for both products.** The receiver accepted
+  only `pr:opened` / `pr:modified` — Bitbucket **Server** event names — while
+  reading the PR URL from `pullrequest.links.html.href`, which is Bitbucket
+  **Cloud**'s payload shape. So a genuine Cloud webhook was rejected as "not
+  reviewable" (Cloud sends `pullrequest:created` / `pullrequest:updated`) and a
+  genuine Server webhook produced no URL. Both dialects are now accepted and
+  their payloads read correctly, `pr:from_ref_updated` included.
+
+### Changed
+
+- `prxref review`'s hint for an unparseable PR URL now names the self-hosted
+  deployments alongside the three cloud hosts, and says that the URL must keep
+  the forge's own path shape.
+
 ## [0.4.0] — 2026-08-27
 
 The second half of the on-prem field report: posting controls, the exit-code
@@ -239,6 +281,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/sblattj/prxref/releases/tag/v0.5.0
+[0.4.0]: https://github.com/sblattj/prxref/releases/tag/v0.4.0
 [0.3.0]: https://github.com/sblattj/prxref/releases/tag/v0.3.0
 [0.2.0]: https://github.com/sblattj/prxref/releases/tag/v0.2.0
