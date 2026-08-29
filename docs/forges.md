@@ -92,8 +92,8 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
 
 - **Forge Identifier:** `bitbucket-server`
 - **Supported URL Shapes:**
-  - `https://{host}/projects/{PROJECTKEY}/repos/{slug}/pull-requests/{number}`
-  - `https://{host}/users/{userslug}/repos/{slug}/pull-requests/{number}` (personal repository)
+  - `http(s)://{host}/projects/{PROJECTKEY}/repos/{slug}/pull-requests/{number}`
+  - `http(s)://{host}/users/{userslug}/repos/{slug}/pull-requests/{number}` (personal repository)
   - Either shape behind a deployment context path, e.g. `https://{host}/bitbucket/projects/...`
   - A trailing route (`/overview`, `/diff`, …) is tolerated and normalized away.
   - The REST form of any of the above — `https://{host}{context}/rest/api/1.0/projects/...`,
@@ -101,6 +101,12 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     back to the browse URL. Server is the only forge here whose REST URL has the same path
     shape as its browse URL, so an unstripped `/rest/api/1.0` reads as a context path and gets
     replayed in front of the API base.
+- **Scheme Note:** the scheme of the URL you pass is preserved, not normalized to
+  `https`. A Data Center standalone install serves plain HTTP on port 7990, so
+  `http://{host}:7990/projects/...` is the product's out-of-the-box shape; the
+  normalized `PRRef.url` and every API request keep that scheme. `HTTP://` is
+  lowercased. This adapter is the exception — the other three build their API base
+  URL as `https://` regardless of the scheme given.
 - **Project Key Note:** a personal repository browses under `/users/{slug}` but is
   addressed in the API as the project key `~{slug}`. `PRRef.owner` always holds the
   API form, so every request path is built identically for both kinds.
@@ -117,7 +123,8 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     `PRXREF_GITHUB_TOKEN`.
   - `PRXREF_BITBUCKET_SERVER_USER` + `PRXREF_BITBUCKET_SERVER_PASSWORD` (HTTP Basic fallback)
 - **API Endpoints & Behavior:**
-  - **Base URL:** `https://{host}{context}/rest/api/1.0/projects/{key}/repos/{slug}/pull-requests/{number}`
+  - **Base URL:** `{scheme}://{host}{context}/rest/api/1.0/projects/{key}/repos/{slug}/pull-requests/{number}`,
+    where `{scheme}` is the one the PR URL was given with.
   - **Metadata:** `GET` on the base URL. Branches and SHAs come from `fromRef`/`toRef`
     (`displayId`, `latestCommit`); author from `author.user.name`, falling back to
     its `slug` then `displayName`.
