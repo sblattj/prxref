@@ -291,7 +291,7 @@ class ForgeImpl:
         except FeedReadError as e:
             logger.warning(
                 "review-comment feed read was incomplete for %s/%s#%s; thread "
-                "dedup is working from the %d comments that were read: %s",
+                "dedup is working from the %d threads recovered so far: %s",
                 ref.owner, ref.repo, ref.number, len(threads), e,
             )
 
