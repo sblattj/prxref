@@ -17,12 +17,23 @@ Issues = "https://github.com/sblattj/prxref/issues"
 Changelog = "https://github.com/sblattj/prxref/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+litellm = ["litellm>=1.40"]
+
+# The dev tools are a PEP 735 dependency group, NOT a project extra. uv installs
+# the default `dev` group automatically on `uv run` and `uv sync`; it installs an
+# extra only when the caller passes `--extra dev`. As an extra, the bare
+# `uv run pytest` died with `Failed to spawn: pytest` right after a cheerful
+# "Installed N packages" — which reads as a broken virtualenv, not a missing flag.
+# The trade-off is deliberate and one-way: dependency groups are not published in
+# wheel/sdist metadata, so `pip install prxref[dev]` no longer resolves them.
+# Contributors clone the repo and use uv; only `litellm` above is a real runtime
+# extra for users.
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.6",
 ]
-litellm = ["litellm>=1.40"]
 
 [project.scripts]
 prxref = "prxref.cli:main"

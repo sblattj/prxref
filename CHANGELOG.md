@@ -7,6 +7,53 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **The dev tools moved from a project extra to a PEP 735 dependency group, so
+  the test command is now the bare `uv run pytest`.** `pytest`, `pytest-cov` and
+  `ruff` lived in `[project.optional-dependencies] dev`, and `uv run` never
+  installs a project *extra* — only `--extra dev` does. On a cold checkout the
+  documented-everywhere-else `uv run pytest` therefore exited 2 with
+  `Failed to spawn: pytest / No such file or directory (os error 2)`, printed
+  immediately after a cheerful `Installed N packages`, which reads as a broken
+  virtualenv rather than a missing flag. uv installs the default `dev` group
+  automatically on both `uv run` and `uv sync`, so `[dependency-groups] dev`
+  removes the trap at its source rather than documenting around it. Every
+  surface dropped the flag with it: `uv sync`, `uv run pytest`,
+  `uv run ruff check src tests` in CI, `CONTRIBUTING.md`, `CLAUDE.md` and
+  `HANDOFF.md`.
+
+  **`pip install prxref[dev]` no longer works.** Dependency groups are a
+  lockfile-and-workspace concept: they are never written into wheel or sdist
+  metadata, so the built distribution now carries no `Provides-Extra: dev` and
+  `prxref[dev]` resolves to plain `prxref`. That failure is quiet by design on
+  pip's side: the install exits 0 having shipped none of the tools (`uv pip`
+  warns "does not have an extra named `dev`"; pip installing the wheel directly
+  says nothing at all). Contributors clone the repo and run `uv sync`; with pip,
+  install the tools directly (`pip install pytest pytest-cov ruff`). The
+  `litellm` extra is untouched — that one is a genuine runtime extra for users,
+  and `pip install 'prxref[litellm]'` still works.
+
+### Fixed
+
+- **The GitHub Actions review workflow reviewed only part of a PR and said so in
+  a banner nobody was meant to see in normal operation.**
+  `.github/workflows/prxref-review.yml` set no `PRXREF_LLM_MAX_TOKENS`, so every
+  worker call ran on prxref's built-in default of 4096. The model configured
+  there is a reasoning model, and a reasoning model draws its hidden reasoning
+  trace from the *same* completion budget as the answer — so the budget was
+  spent before the findings JSON began, the provider returned
+  `finish_reason=length`, and prxref counted that chunk as failed. Nothing about
+  the run looked wrong: HTTP 200, plausible usage numbers, exit 0. On a real PR
+  it reviewed 2 of 4 chunks and posted "Findings may be incomplete"; the same PR
+  reviewed locally at 32000 completed 4/4. The workflow now passes
+  `PRXREF_LLM_MAX_TOKENS: ${{ vars.PRXREF_LLM_MAX_TOKENS || '32000' }}` —
+  operator-tunable through a repository variable like its neighbours, but with a
+  literal fallback they do not need, because an unset variable renders as the
+  empty string and prxref falls back to the 4096 that caused this. The budget is
+  per worker chunk, not per run, so raising it widens each chunk's headroom
+  rather than one large request.
+
 ## [0.5.0] — 2026-08-28
 
 The self-hosted Bitbucket release. Bitbucket Server / Data Center was the one
