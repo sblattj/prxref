@@ -27,9 +27,9 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
 - **API Endpoints & Behavior:**
   - **Metadata:** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}`
   - **Diffs:** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}/diff` with `Accept: text/plain`. Note that Bitbucket's `/diff` endpoint enforces an upstream size ceiling of ~5–10MB.
-  - **Summary Comments:** `POST /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` with `{"content": {"raw": body}}`.
+  - **Summary Comments:** `POST /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` with `{"content": {"raw": body}}`, or `PUT .../comments/{id}` when a previous prxref summary is found. The comment feed is scanned for the summary marker first, so a re-review updates its own summary rather than adding another one; inline comments and tombstoned deletions are skipped as update targets.
   - **Inline Comments:** `POST /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` with `inline.path` and `inline.to`. Non-fatal 4xx errors on individual inline comments are skipped.
-  - **Thread List:** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` (paginated, up to 500 comments).
+  - **Thread List:** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments`, following the cursor until the feed is exhausted. A walk that stops early logs a warning naming the count rather than silently under-reporting.
 - **Webhook Integration:**
   - **Event Header:** `X-Event-Key`
   - **Accepted Events:** `pullrequest:created`, `pullrequest:updated`
@@ -139,7 +139,10 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     `inline.to`. Individual 4xx responses (line outside the diff) are skipped, as elsewhere.
   - **Thread List:** `GET {base}/activities`, filtered to `action == "COMMENTED"`. There is
     no flat comment listing on Data Center. Paged with `start`/`limit`, following
-    `nextPageStart` until `isLastPage`, capped at 5 pages.
+    `nextPageStart` until `isLastPage` or the page cap. The summary lookup exits as soon
+    as it finds the marker, so the common case is one request; exhausting the cap is an
+    error rather than a silent stop, because a summary hidden past the window is how a
+    re-review ends up posting a second one.
   - **Resolution:** read from whichever of `state == "RESOLVED"`, `threadResolved`, or
     `resolvedDate` the deployment's version exposes.
 - **Webhook Integration:**
