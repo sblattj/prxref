@@ -28,7 +28,16 @@ _ALLOW_UNSIGNED_ENV = "PRXREF_ALLOW_UNSIGNED"
 _UNSIGNED_PREFIX = "unsigned:"
 
 _GITHUB_ACTIONS = ("opened", "synchronize")
-_BITBUCKET_EVENTS = ("pr:opened", "pr:modified")
+# Bitbucket Cloud and Bitbucket Server both announce themselves with
+# X-Event-Key, but they do not share an event vocabulary. Cloud sends
+# pullrequest:created / pullrequest:updated; Server sends pr:opened /
+# pr:modified, plus pr:from_ref_updated when the source branch moves.
+# Only the Server names were listed here, against a payload extractor that
+# reads Cloud's shape — so a real Cloud webhook was rejected as "not
+# reviewable" while a real Server webhook failed to yield a URL.
+_BITBUCKET_CLOUD_EVENTS = ("pullrequest:created", "pullrequest:updated")
+_BITBUCKET_SERVER_EVENTS = ("pr:opened", "pr:modified", "pr:from_ref_updated")
+_BITBUCKET_EVENTS = _BITBUCKET_CLOUD_EVENTS + _BITBUCKET_SERVER_EVENTS
 _GITLAB_ACTIONS = ("open", "update")
 
 
@@ -37,8 +46,10 @@ def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
 
     The source forge is detected from its event header (X-GitHub-Event,
     X-Event-Key, or X-Gitlab-Event; header names are case-insensitive).
-    Signature is checked per forge: GitHub HMAC-SHA256 in
-    X-Hub-Signature-256, Bitbucket HMAC-SHA256 in X-Hub-Signature,
+    Bitbucket Cloud and Bitbucket Server are both recognized by X-Event-Key
+    and share one verification path; their event names and payload shapes
+    differ and both are accepted. Signature is checked per forge: GitHub
+    HMAC-SHA256 in X-Hub-Signature-256, Bitbucket HMAC-SHA256 in X-Hub-Signature,
     GitLab plain token in X-Gitlab-Token — each against its
     PRXREF_<FORGE>_WEBHOOK_SECRET env var. Only PR-open/update events are
     reviewable; anything else is ignored.
@@ -203,12 +214,33 @@ def _verify_bitbucket(body: bytes, h: dict) -> tuple[bool, str]:
     payload = _parse_json(body)
     if payload is None:
         return False, "invalid JSON payload"
-    pullrequest = payload.get("pullrequest") or {}
-    links = pullrequest.get("links") or {}
-    url = (links.get("html") or {}).get("href")
+    url = _bitbucket_pr_url(payload)
     if not url:
-        return False, "bitbucket payload missing pullrequest.links.html.href"
+        return False, (
+            "bitbucket payload missing pullrequest.links.html.href "
+            "(Cloud) or pullRequest.links.self[].href (Server)"
+        )
     return _result(state, url)
+
+
+def _bitbucket_pr_url(payload: dict) -> str | None:
+    """Extract the PR URL from either a Cloud or a Server webhook payload.
+
+    Cloud nests the browsable link under pullrequest.links.html.href. Server
+    uses a differently-cased pullRequest key and exposes the link as the first
+    entry of a links.self list.
+    """
+    cloud = payload.get("pullrequest") or {}
+    url = ((cloud.get("links") or {}).get("html") or {}).get("href")
+    if url:
+        return url
+
+    server = payload.get("pullRequest") or {}
+    self_links = (server.get("links") or {}).get("self") or []
+    for link in self_links:
+        if isinstance(link, dict) and link.get("href"):
+            return link["href"]
+    return None
 
 
 def _verify_gitlab(body: bytes, h: dict) -> tuple[bool, str]:
