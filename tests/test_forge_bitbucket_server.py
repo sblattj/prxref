@@ -88,6 +88,83 @@ def test_parse_pr_url_tolerates_trailing_route():
     assert ref.url.endswith("/pull-requests/42")
 
 
+def test_parse_pr_url_normalizes_a_rest_api_url_to_the_browse_url():
+    # /rest/api/1.0 is a route, not a deployment context path. Captured as a
+    # context it gets replayed into the API base, so every request path carries
+    # /rest/api/1.0 twice and 404s.
+    ref = ForgeImpl.parse_pr_url(
+        "https://bitbucket.corp.example/rest/api/1.0/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert ref is not None
+    assert ref.owner == "PLAT"
+    assert ref.repo == "api"
+    assert ref.number == 42
+    assert ref.url == (
+        "https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42"
+    )
+
+
+def test_parse_pr_url_keeps_the_context_when_a_rest_prefix_follows_it():
+    # A reverse-proxied deployment's REST URL carries both: the context path is
+    # real and must survive, the REST prefix is not and must not.
+    ref = ForgeImpl.parse_pr_url(
+        "https://tools.corp.example/bitbucket/rest/api/1.0/projects/PLAT/repos/api/pull-requests/9"
+    )
+    assert ref is not None
+    assert ref.host == "tools.corp.example"
+    assert ref.url == (
+        "https://tools.corp.example/bitbucket/projects/PLAT/repos/api/pull-requests/9"
+    )
+
+
+@pytest.mark.parametrize("version", ["1.0", "latest", "LATEST", "2", "2.1"])
+def test_parse_pr_url_strips_any_rest_api_version_alias(version):
+    # Data Center serves the versioned path and the /latest alias alike, and the
+    # surrounding pattern is case-insensitive.
+    ref = ForgeImpl.parse_pr_url(
+        f"https://bitbucket.corp.example/rest/api/{version}/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert ref is not None
+    assert ref.url == (
+        "https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42"
+    )
+
+
+def test_parse_pr_url_strips_a_rest_prefix_in_any_case():
+    ref = ForgeImpl.parse_pr_url(
+        "https://bitbucket.corp.example/REST/API/1.0/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert ref is not None
+    assert ref.url == (
+        "https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42"
+    )
+
+
+def test_parse_pr_url_rest_form_of_a_personal_repo_normalizes_to_the_users_route():
+    # The API addresses a personal repo as the ~slug project key; it browses as
+    # /users/slug. PRRef.url is the link a human clicks, so it gets the browse
+    # form while owner keeps the API form.
+    ref = ForgeImpl.parse_pr_url(
+        "https://bitbucket.corp.example/rest/api/1.0/projects/~jdoe/repos/scratch/pull-requests/7"
+    )
+    assert ref is not None
+    assert ref.owner == "~jdoe"
+    assert ref.url == (
+        "https://bitbucket.corp.example/users/jdoe/repos/scratch/pull-requests/7"
+    )
+
+
+def test_parse_pr_url_does_not_mistake_a_repo_named_rest_for_the_api_prefix():
+    # Only a genuine /rest/api/<version> tail is stripped.
+    ref = ForgeImpl.parse_pr_url(
+        "https://bitbucket.corp.example/rest/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert ref is not None
+    assert ref.url == (
+        "https://bitbucket.corp.example/rest/projects/PLAT/repos/api/pull-requests/42"
+    )
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -184,6 +261,38 @@ def test_api_path_for_a_personal_repo():
     ref = _ref("https://bitbucket.corp.example/users/jdoe/repos/scratch/pull-requests/7")
     ForgeImpl(session=session).get_pr(ref)
     assert "/projects/~jdoe/repos/scratch/" in session.get.call_args[0][0]
+
+
+def test_api_path_is_not_doubled_for_a_rest_form_url():
+    # Pasting a PR's REST URL into `prxref review` must not yield
+    # /rest/api/1.0/rest/api/1.0/projects/...
+    session = MagicMock()
+    session.get.return_value = _mock_response(json_data={})
+    ref = _ref(
+        "https://bitbucket.corp.example/rest/api/1.0/projects/PLAT/repos/api/pull-requests/42"
+    )
+    ForgeImpl(session=session).get_pr(ref)
+    url = session.get.call_args[0][0]
+    assert url == (
+        "https://bitbucket.corp.example/rest/api/1.0"
+        "/projects/PLAT/repos/api/pull-requests/42"
+    )
+    assert url.count("/rest/api/") == 1
+
+
+def test_api_path_from_a_rest_form_url_replays_only_the_deployment_context():
+    session = MagicMock()
+    session.get.return_value = _mock_response(json_data={})
+    ref = _ref(
+        "https://tools.corp.example/bitbucket/rest/api/latest/projects/PLAT/repos/api/pull-requests/9"
+    )
+    ForgeImpl(session=session).get_pr(ref)
+    url = session.get.call_args[0][0]
+    assert url == (
+        "https://tools.corp.example/bitbucket/rest/api/1.0"
+        "/projects/PLAT/repos/api/pull-requests/9"
+    )
+    assert url.count("/rest/api/") == 1
 
 
 # --- get_pr -----------------------------------------------------------------
