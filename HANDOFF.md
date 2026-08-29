@@ -49,13 +49,15 @@ Recorded because each one would have cost the next person real time.
    were the tuple at `base.py:97` and the dict at `config.py:386-390`. Cite the
    construct, not the function.
 
-3. **`uv run pytest` does not work in this repo.** pytest lives in
-   `[project.optional-dependencies] dev`, so the documented command dies with
-   `Failed to spawn: pytest / No such file or directory (os error 2)` — an error that
-   reads like a broken venv rather than a missing extra. The invocation is:
+3. **`uv run pytest` works again — the invocation is now the bare one.** It used
+   to die with `Failed to spawn: pytest / No such file or directory (os error 2)`,
+   because pytest lived in `[project.optional-dependencies] dev` and `uv run` never
+   installs a project *extra*; the error reads like a broken venv rather than a
+   missing flag. The dev tools now live in `[dependency-groups] dev`, which uv
+   installs by default, so the `--extra dev` form is gone from every surface:
 
    ```bash
-   uv run --extra dev pytest
+   uv run pytest
    ```
 
 4. **The diff direction that reads "what the branch changed" is backwards here.**
@@ -96,8 +98,8 @@ breaks those consumers.
 ## Verified at release
 
 ```
-840 passed                                    uv run --extra dev pytest
-All checks passed!                            uv run --extra dev ruff check src/ tests/
+840 passed                                    uv run pytest
+All checks passed!                            uv run ruff check src/ tests/
 0.5.0                                         uv run prxref --version
 bitbucket-server   .../projects/PROJ/repos/app/pull-requests/42
 bitbucket          https://bitbucket.org/ws/app/pull-requests/7
@@ -105,6 +107,10 @@ github             https://github.com/o/r/pull/3
 gitlab             https://gitlab.com/o/r/-/merge_requests/9
 make_forge(ref) -> prxref.forges.bitbucket_server.ForgeImpl, name 'bitbucket-server'
 ```
+
+The counts are the ones the v0.5.0 release run produced; the commands are written
+in today's form. That run spelled them `uv run --extra dev …`, which was correct
+before the dev tools moved to `[dependency-groups]` and does not work now.
 
 ## Still open — not part of this release
 
@@ -144,15 +150,12 @@ takes one on should change all four adapters in the same commit.
   existing summary, so it posts a duplicate on *every* re-review. Distinguishing
   "read failed" from "nothing found" and skipping the post is the fix, and it is the
   same three-line change in each adapter.
-- **Move the dev tools to a dependency group.** `pytest` and `ruff` are declared under
-  `[project.optional-dependencies] dev`, and `uv run` never installs a project *extra* —
-  which is why the bare `uv run pytest` fails on a cold checkout with
-  `Failed to spawn: pytest` (reproduced on a pristine `git archive` of this branch,
-  exit 2). Every doc now spells the `--extra dev` form, but replacing
-  `[project.optional-dependencies] dev` with `[dependency-groups] dev` would make the
-  bare command correct and remove the trap at its source. It is a real behaviour change
-  — the `dev` extra stops being installable as `pip install prxref[dev]` — so it needs
-  its own decision rather than riding along with a release.
+- ~~**Move the dev tools to a dependency group.**~~ **Done** — the dev tools moved
+  from `[project.optional-dependencies] dev` to `[dependency-groups] dev`, so the bare
+  `uv run pytest` and `uv run ruff check` work on a cold checkout and the `--extra dev`
+  form is gone from CI and every doc. The behaviour change was accepted deliberately:
+  dependency groups are not published in package metadata, so `pip install prxref[dev]`
+  no longer resolves the tools. See the `Unreleased` section of `CHANGELOG.md`.
 
 - **`origin/feat/bitbucket-server-forge` can be deleted** once you are satisfied with
   v0.5.0. Everything worth keeping from it is on `main`; the rest is v0.2.0-era text.
@@ -166,5 +169,5 @@ takes one on should change all four adapters in the same commit.
 | Released version | `0.5.0` (minor — new forge plus a webhook fix, nothing breaking) |
 | Registration points | the tuple in `forges/base.py`, the `impls` dict in `config.py` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
-| Test command | `uv run --extra dev pytest` |
+| Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | sdist **and** wheel, both attached |

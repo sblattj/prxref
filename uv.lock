@@ -1160,24 +1160,30 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+litellm = [
+    { name = "litellm" },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
-litellm = [
-    { name = "litellm" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.40" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "requests", specifier = ">=2.31" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
-provides-extras = ["dev", "litellm"]
+provides-extras = ["litellm"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]
 
 [[package]]
 name = "pydantic"
