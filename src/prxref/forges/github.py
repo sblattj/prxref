@@ -26,7 +26,24 @@ def _create_default_session() -> requests.Session:
         backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
         respect_retry_after_header=True,
-        allowed_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "HEAD", "OPTIONS"],
+        # Read verbs only, deliberately. urllib3 retries beneath the
+        # requests adapter, so a re-sent write is sent whole: a comment POST
+        # that commits server-side and then loses its 2xx to a 502/504 or a
+        # read timeout would be posted a second time, and the PR carries a
+        # duplicate comment — the most visible failure this tool has. No
+        # response status tells the client whether the origin processed the
+        # request, and `Retry.is_retry` tests the method before it looks at
+        # `status_forcelist`, so a single policy cannot retry a POST on 429
+        # (which the server states it did not process) while holding it back
+        # on 502. Writes are therefore left to the caller, which already logs
+        # a failed post and carries on; a duplicated comment needs a human to
+        # delete it. The other write verbs go with POST: no adapter issues a
+        # DELETE, and the summary update (PUT, or PATCH on GitHub) is at best
+        # a no-op on replay and at worst a version conflict. Connection
+        # errors are still retried for every verb: urllib3 gates only its
+        # read-error path on the method, and a connection that was never
+        # established carried no write to duplicate.
+        allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
