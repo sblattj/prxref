@@ -112,6 +112,48 @@ make_forge(ref) -> prxref.forges.bitbucket_server.ForgeImpl, name 'bitbucket-ser
   per-finding drop reasons, a machine-readable run report. Nothing has landed.
 - **`review --timeout SECONDS`** — the per-run counterpart to `PRXREF_LLM_TIMEOUT`,
   which shipped natively in v0.4.0.
+
+The next three came out of the v0.5.0 release review, which raised them against
+`bitbucket_server.py`. Each one is real, and each one is **repo-wide, not a porting
+defect**: the new adapter does what its siblings already do, so all three were left
+alone rather than fixed in one adapter and creating a four-way inconsistency. Whoever
+takes one on should change all four adapters in the same commit.
+
+- **Retries re-send non-idempotent writes.** All four retry sessions list `POST` in
+  `allowed_methods` against `status_forcelist [429, 500, 502, 503, 504]` with
+  `total=3` — `bitbucket_server.py:62-65`, `bitbucket.py:33-36`, `gitlab.py:33-36`,
+  `github.py:27-29` (which adds `PATCH`). If a comment POST commits server-side and
+  the response is lost to a 502/504 or a read timeout, urllib3 re-sends it and the
+  comment is duplicated. The fix is to drop the write verbs from `allowed_methods`
+  and let the caller decide, but it changes retry behaviour for every forge.
+- **Comment listings are capped and the cap is silent.** Bitbucket Server reads
+  5 x 100 activities (`bitbucket_server.py:17-18,267`) and Bitbucket Cloud 5 x 100
+  comments (`bitbucket.py:216-220`); GitLab reads a single page of 50
+  (`gitlab.py:232,321`) and GitHub a single unparameterised page, so 30
+  (`github.py:124,167`). Past the cap `list_threads` under-reports and `post_summary`
+  can miss its own `<!-- prxref-summary -->` and post a second summary. Server is the
+  *most* thorough of the four here, not the least. A shared paging helper with an
+  explicit "truncated" signal would fix all four at once.
+- **A failed comment-listing read is treated as "no summary exists".** In
+  `post_summary`, a listing that errors leaves the existing-summary handle unset and
+  control falls through to the create-a-new-comment POST:
+  `bitbucket_server.py:310-311` then `:324`, and `gitlab.py:241-242` then `:254`.
+  GitHub has no `try` at all — a transport error propagates — but a non-`ok`
+  response takes the same fall-through (`github.py:125` -> `:139`). Bitbucket Cloud
+  is furthest from correct: `post_summary` (`bitbucket.py:165`) never looks for an
+  existing summary, so it posts a duplicate on *every* re-review. Distinguishing
+  "read failed" from "nothing found" and skipping the post is the fix, and it is the
+  same three-line change in each adapter.
+- **Move the dev tools to a dependency group.** `pytest` and `ruff` are declared under
+  `[project.optional-dependencies] dev`, and `uv run` never installs a project *extra* —
+  which is why the bare `uv run pytest` fails on a cold checkout with
+  `Failed to spawn: pytest` (reproduced on a pristine `git archive` of this branch,
+  exit 2). Every doc now spells the `--extra dev` form, but replacing
+  `[project.optional-dependencies] dev` with `[dependency-groups] dev` would make the
+  bare command correct and remove the trap at its source. It is a real behaviour change
+  — the `dev` extra stops being installable as `pip install prxref[dev]` — so it needs
+  its own decision rather than riding along with a release.
+
 - **`origin/feat/bitbucket-server-forge` can be deleted** once you are satisfied with
   v0.5.0. Everything worth keeping from it is on `main`; the rest is v0.2.0-era text.
 - **`CONTRIBUTING.md` has no inbound link any more.** Deleting the

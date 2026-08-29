@@ -59,6 +59,21 @@ a hand-maintained overlay on top of a tagged release.
   which names it the API way as `~slug`, likewise normalizes back to its
   `/users/slug` browse route. Webhooks never hit this: Data Center's payload
   carries the browse URL in `pullRequest.links.self[].href`.
+- **A plain-HTTP Data Center deployment was silently retargeted to TLS.** The
+  Server URL pattern accepts `http://` as well as `https://`, but normalization
+  and the API base both wrote `https://` back unconditionally, so an
+  `http://host:7990/projects/…` URL parsed happily and then sent every request
+  — metadata, diff, activities, comments — to `https://host:7990/…`. That is
+  not a hypothetical host: a Data Center standalone install serves plain HTTP on
+  port 7990, so the out-of-the-box deployment shape was the one that broke, and
+  it broke as a TLS handshake failure against a URL the operator never typed.
+  `PRRef.url` now carries the scheme it was parsed with, and `_pr_url` reads it
+  back out of `url` the same way the deployment context path is recovered, so an
+  `http://` deployment stays on `http://` end to end and an uppercase `HTTP://`
+  round-trips lowercased. Nothing changes for an `https://` URL. This makes the
+  Server adapter deliberately unlike its three siblings, which all build their
+  API base as `https://` whatever scheme they were handed; only Bitbucket
+  Server ships a default install that is not on TLS.
 
 ### Changed
 

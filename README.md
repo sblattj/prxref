@@ -76,6 +76,9 @@ prxref review --pr-url https://bitbucket.org/workspace/repo/pull-requests/42
 # Bitbucket Server / Data Center (self-hosted, any host, with or without a deployment context path)
 prxref review --pr-url https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42
 
+# ...including a plain-HTTP deployment, e.g. the standalone install's default port
+prxref review --pr-url http://bitbucket.internal:7990/projects/PLAT/repos/api/pull-requests/42
+
 # GitHub & GitHub Enterprise
 prxref review --pr-url https://github.com/owner/repository/pull/108
 
