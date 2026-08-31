@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import inspect
+import json as json_module
 import pathlib
 import sys
+import time
 import types
 from types import SimpleNamespace
 
@@ -20,6 +22,26 @@ from prxref.llm_backends import (
 )
 
 
+def _streamable(resp):
+    """Attach the streaming interface a real ``requests.Response`` exposes.
+
+    The client reads the body through ``iter_content()`` under a wall-clock
+    deadline, so any HTTP-response fake has to answer it. Doing this at the
+    fake-session boundary keeps every individual response fixture free of
+    transport plumbing.
+    """
+    if hasattr(resp, "iter_content"):
+        return resp
+    try:
+        body = json_module.dumps(resp.json()).encode()
+    except Exception:
+        body = getattr(resp, "text", "") or ""
+        body = body.encode() if isinstance(body, str) else body
+    resp.iter_content = lambda chunk_size=None: iter([body])
+    resp.close = lambda: None
+    return resp
+
+
 def _resp(status_code=200, model="m1-resolved", prompt=11, completion=7, text="ok", **extra):
     payload = {
         "choices": [{"message": {"role": "assistant", "content": text}}],
@@ -27,7 +49,14 @@ def _resp(status_code=200, model="m1-resolved", prompt=11, completion=7, text="o
         "usage": {"prompt_tokens": prompt, "completion_tokens": completion},
     }
     payload.update(extra)
-    return SimpleNamespace(status_code=status_code, payload=payload, json=lambda: payload)
+    body = json_module.dumps(payload).encode()
+    # The client streams the body under a wall-clock deadline, so a fake
+    # response has to answer iter_content()/close() the way a real one does.
+    return SimpleNamespace(
+        status_code=status_code, payload=payload, json=lambda: payload,
+        iter_content=lambda chunk_size=None: iter([body]),
+        close=lambda: None,
+    )
 
 
 class _ScriptedSession:
@@ -37,12 +66,12 @@ class _ScriptedSession:
         self.script = list(script)
         self.calls = []
 
-    def post(self, url, json=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+    def post(self, url, json=None, headers=None, timeout=None, stream=None):
+        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout, "stream": stream})
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
-        return item
+        return _streamable(item)
 
 
 def _client(session, models=("m1", "m2")):
@@ -62,7 +91,7 @@ class _PayloadCapturingSession:
         self.captured = captured
         self.fail_first = fail_first
 
-    def post(self, url, json=None, headers=None, timeout=None):
+    def post(self, url, json=None, headers=None, timeout=None, stream=None):
         self.captured.append(json)
         if self.fail_first and len(self.captured) == 1:
             return _resp(status_code=500)
@@ -142,7 +171,9 @@ class TestRequestShape:
         call = s.calls[0]
         assert call["url"] == "https://llm.test/v1/chat/completions"
         assert call["headers"] == {"Authorization": "Bearer local"}
-        assert call["timeout"] == 12
+        # (connect, read): the configured value is the READ budget.
+        assert call["timeout"][1] == 12
+        assert call["timeout"][0] <= 12
         assert call["json"]["model"] == "m1"
         assert call["json"]["max_tokens"] == 99
         assert call["json"]["messages"] == [
@@ -163,7 +194,8 @@ class TestRequestShape:
     def test_uses_default_timeout_when_unset(self):
         s = _ScriptedSession(_resp())
         _client(s).invoke("sys", "usr")
-        assert s.calls[0]["timeout"] == 45.0
+        assert s.calls[0]["timeout"][1] == 45.0
+        assert s.calls[0]["timeout"][0] <= 45.0
 
 
 class TestUsageMapping:
@@ -331,13 +363,15 @@ class TestBudgetKnobsFromConfig:
         monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
         s = _ScriptedSession(_resp())
         create_llm_client(session=s).invoke("sys", "usr")
-        assert s.calls[0]["timeout"] == 12.5
+        assert s.calls[0]["timeout"][1] == 12.5
 
     def test_timeout_from_cfg_beats_env(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
         s = _ScriptedSession(_resp())
         create_llm_client({"llm_timeout": 3.0}, session=s).invoke("sys", "usr")
-        assert s.calls[0]["timeout"] == 3.0
+        assert s.calls[0]["timeout"][1] == 3.0
+        # A deadline smaller than the connect budget clamps it.
+        assert s.calls[0]["timeout"][0] <= 3.0
 
     def test_temperature_unset_is_omitted_from_the_payload(self):
         s = _ScriptedSession(_resp())
@@ -617,3 +651,60 @@ class TestFinishReasonLiteLLM:
             message=SimpleNamespace(content="ok"), finish_reason=None
         )
         assert self._client_with(monkeypatch, choice).invoke("s", "u").finish_reason == ""
+
+
+class TestWallClockDeadline:
+    """The configured timeout must bound TOTAL elapsed, not the gap between bytes.
+
+    ``requests`` treats a scalar ``timeout`` as connect-and-read, and its read
+    timeout measures the interval BETWEEN chunks. A peer that trickles resets
+    that clock on every chunk and runs unbounded. Measured against a real
+    provider before this was fixed: 496s elapsed under a configured 240s, with
+    the socket still ESTABLISHED and nothing in any log.
+    """
+
+    def _dribbling(self, chunk_delay, chunks=40):
+        def iter_content(chunk_size=None):
+            for _ in range(chunks):
+                time.sleep(chunk_delay)
+                yield b'{"x":1}'
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"content": "ok"}}]},
+            iter_content=iter_content,
+            close=lambda: None,
+        )
+
+    def test_a_trickling_body_is_cut_off_at_the_deadline(self):
+        s = _ScriptedSession(self._dribbling(chunk_delay=0.02))
+        client = OpenAICompatClient(
+            base_url="https://llm.test/v1", api_key="local",
+            models=["only"], session=s, default_timeout=0.05,
+        )
+        t0 = time.monotonic()
+        with pytest.raises(LLMError) as exc:
+            client.invoke("sys", "usr")
+        elapsed = time.monotonic() - t0
+        assert "timeout" in str(exc.value).lower()
+        # The control that makes this falsifiable: 40 chunks x 20ms is 800ms of
+        # work, so finishing well under that proves it was CUT OFF rather than
+        # merely allowed to run to completion.
+        assert elapsed < 0.5, f"ran {elapsed:.2f}s; deadline did not cut it off"
+
+    def test_a_body_that_arrives_in_time_still_succeeds(self):
+        """Control: the deadline must not truncate a healthy response."""
+        s = _ScriptedSession(self._dribbling(chunk_delay=0.0, chunks=2))
+        client = OpenAICompatClient(
+            base_url="https://llm.test/v1", api_key="local",
+            models=["only"], session=s, default_timeout=5.0,
+        )
+        assert client.invoke("sys", "usr").text == "ok"
+
+    def test_the_deadline_advances_the_chain_to_the_next_model(self):
+        """A stuck model must not strand the review: failover still applies."""
+        s = _ScriptedSession(self._dribbling(chunk_delay=0.02), _resp(text="second"))
+        client = OpenAICompatClient(
+            base_url="https://llm.test/v1", api_key="local",
+            models=["stuck", "healthy"], session=s, default_timeout=0.05,
+        )
+        assert client.invoke("sys", "usr").text == "second"

@@ -9,7 +9,8 @@ from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
+
+from prxref.retry_logging import LoggingRetry
 
 from .base import (
     SUMMARY_MARKER,
@@ -54,7 +55,7 @@ def _response_detail(resp: requests.Response) -> str:
 
 def _create_default_session() -> requests.Session:
     session = requests.Session()
-    retry_strategy = Retry(
+    retry_strategy = LoggingRetry(
         total=3,
         backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
