@@ -53,6 +53,7 @@ import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from . import reviewer
 from .forges.base import Forge, InlineComment, PRData, PRRef
@@ -281,7 +282,10 @@ def orchestrate_review(
     except Exception as e:  # noqa: BLE001
         logger.error("get_pr failed: %s", e)
         tracer.event("run", "fail")
-        return _error_run(forge, ref, post, 0, f"get_pr failed: {e}", t0, post_mode=post_mode)
+        return _error_run(
+            forge, ref, post, 0, f"get_pr failed: {e}", t0,
+            post_mode=post_mode, tracer=tracer,
+        )
 
     try:
         with tracer.span("forge.get_diff") as sp:
@@ -290,7 +294,10 @@ def orchestrate_review(
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
         tracer.event("run", "fail")
-        return _error_run(forge, ref, post, 0, f"get_diff failed: {e}", t0, post_mode=post_mode)
+        return _error_run(
+            forge, ref, post, 0, f"get_diff failed: {e}", t0,
+            post_mode=post_mode, tracer=tracer,
+        )
 
     # Wrapped like every neighbouring stage. These two were the only ones that
     # could raise out of orchestrate_review, which made the never-raise contract
@@ -307,7 +314,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0,
-            post_mode=post_mode,
+            post_mode=post_mode, tracer=tracer,
         )
 
     try:
@@ -322,14 +329,14 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"build_chunks failed: {e}", t0,
-            post_mode=post_mode,
+            post_mode=post_mode, tracer=tracer,
         )
 
     if not chunks:
         tracer.event("run", "ok", chunks_reviewed=0, findings=0)
         return _summary_only_run(
             forge, ref, pr, files, post, t0,
-            post_mode=post_mode, post_verdict=post_verdict,
+            post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
         )
 
     results = _run_workers(
@@ -346,7 +353,7 @@ def orchestrate_review(
         logger.error("Total LLM failure: %s", reason)
         tracer.event("run", "fail")
         return _error_run(
-            forge, ref, post, len(chunks), reason, t0,
+            forge, ref, post, len(chunks), reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
             post_mode=post_mode,
         )
@@ -732,13 +739,44 @@ def _format_finding(f: Finding, model: str) -> str:
     )
 
 
+def _trace_post_begin(
+    tracer: Tracer, *, wanted: bool, reason: str, **meta: Any
+) -> None:
+    """Open the ``post`` node, or record that nothing asked it to open.
+
+    A graph built only from what HAPPENED cannot express "nobody asked this to
+    run", and that renders identically to "the run died before reaching it" --
+    opposite findings. Every route out of a review calls this, including the
+    two that return early and post their own notice.
+    """
+    if wanted:
+        tracer.event("post", "start", **meta)
+    else:
+        tracer.event("post", "skip", reason=reason)
+
+
+def _trace_post_end(
+    tracer: Tracer, *, wanted: bool, posted: bool, **meta: Any
+) -> None:
+    """Close the ``post`` node opened by :func:`_trace_post_begin`."""
+    if wanted:
+        tracer.event("post", "ok" if posted else "fail", **meta)
+
+
 def _summary_only_run(
     forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
+    tracer: Tracer | None = None,
 ) -> dict:
+    tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
-    if post and post_mode in POST_SUMMARY_MODES:
+    wanted = post and post_mode in POST_SUMMARY_MODES
+    _trace_post_begin(
+        tracer, wanted=wanted, mode=post_mode, kind="empty-diff summary",
+        reason="posting disabled" if not post else f"post_mode={post_mode} posts no summary",
+    )
+    if wanted:
         summary = _render_summary(
             pr, files, "Approved", [], "unknown", 0, 0, elapsed_ms,
             chunks_reviewed=0, chunks_failed=0,
@@ -749,6 +787,7 @@ def _summary_only_run(
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary failed: %s", e)
+    _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
     return {
         "verdict": "Approved",
         "findings_active": [],
@@ -774,10 +813,17 @@ def _error_run(
     input_tokens: int = 0,
     output_tokens: int = 0,
     post_mode: str = "summary+inline",
+    tracer: Tracer | None = None,
 ) -> dict:
+    tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
-    if post and post_mode in POST_SUMMARY_MODES:
+    wanted = post and post_mode in POST_SUMMARY_MODES
+    _trace_post_begin(
+        tracer, wanted=wanted, mode=post_mode, kind="error notice",
+        reason="posting disabled" if not post else f"post_mode={post_mode} posts no summary",
+    )
+    if wanted:
         attribution = _attribution(
             model, input_tokens + output_tokens, elapsed_ms,
         )
@@ -795,6 +841,7 @@ def _error_run(
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary (error notice) failed: %s", e)
+    _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
     return {
         "verdict": "Error",
         "findings_active": [],

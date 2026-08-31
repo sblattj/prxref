@@ -1640,6 +1640,7 @@ class TestRunTrace:
     """
 
     def _run(self, tmp_path, forge, llm, **kw):
+        tmp_path.mkdir(parents=True, exist_ok=True)
         target = tmp_path / "run.jsonl"
         res = orchestrate_review(forge, REF, llm, trace_file=str(target), **kw)
         events = [json.loads(x) for x in target.read_text().splitlines() if x.strip()]
@@ -1763,6 +1764,77 @@ class TestRunTrace:
         chunk = [e for e in events if e["node"] == "chunk"]
         assert [e["phase"] for e in chunk] == ["start", "fail"]
         assert "truncated" in chunk[-1]["meta"]["error"]
+
+    def test_the_error_path_records_its_own_posting_too(self, tmp_path):
+        """The gap the happy-path fix left, found by running it for real.
+
+        A total-LLM-failure run returns through `_error_run`, which posts an
+        error notice of its own and never reached the instrumented block — so
+        the picture showed `post` grey, "not reached", for a run that had just
+        posted. Same lie, different route.
+        """
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM(error=RuntimeError("no model")))
+        assert [e["phase"] for e in events if e["node"] == "post"] == ["start", "ok"]
+        assert len(forge.summaries) == 1
+        assert "could not complete" in forge.summaries[0]
+
+    def test_the_error_path_reports_a_failed_post_as_failed(self, tmp_path):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.add("post_summary")
+        _, events = self._run(tmp_path, forge, FakeLLM(error=RuntimeError("no model")))
+        assert [e["phase"] for e in events if e["node"] == "post"] == ["start", "fail"]
+
+    def test_the_error_path_says_skipped_when_posting_is_off(self, tmp_path):
+        """Control: the error route must distinguish the same two states the
+        happy route does, or the fix only moved the lie."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(
+            tmp_path, forge, FakeLLM(error=RuntimeError("no model")), post=False
+        )
+        post = [e for e in events if e["node"] == "post"]
+        assert [e["phase"] for e in post] == ["skip"]
+        assert forge.summaries == []
+
+    def test_an_empty_diff_records_its_summary_post(self, tmp_path):
+        """The third early return: nothing to review still posts a summary."""
+        forge = FakeForge(diff="")
+        _, events = self._run(tmp_path, forge, FakeLLM())
+        assert [e["phase"] for e in events if e["node"] == "post"] == ["start", "ok"]
+        assert len(forge.summaries) == 1
+
+    @pytest.mark.parametrize("failing", ["get_pr", "get_diff"])
+    def test_a_forge_failure_still_records_its_error_notice(self, tmp_path, failing):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.add(failing)
+        _, events = self._run(tmp_path, forge, FakeLLM())
+        assert [e["phase"] for e in events if e["node"] == "post"] == ["start", "ok"]
+
+    def test_every_route_out_of_a_review_touches_the_post_node(self, tmp_path):
+        """The property, stated once, rather than one route at a time.
+
+        Whatever happens, the picture must be able to say what posting did —
+        ran, failed, or was never asked. A route that emits nothing renders
+        identically to a run that died upstream.
+        """
+        cases = [
+            ("get_pr fails", lambda f: f.fail.add("get_pr"), FakeLLM(), {}),
+            ("get_diff fails", lambda f: f.fail.add("get_diff"), FakeLLM(), {}),
+            ("empty diff", lambda f: setattr(f, "diff", ""), FakeLLM(), {}),
+            ("llm dies", lambda f: None, FakeLLM(error=RuntimeError("x")), {}),
+            ("happy", lambda f: None, FakeLLM(findings_by_path=HAPPY_FINDINGS), {}),
+            ("inline only", lambda f: None,
+             FakeLLM(findings_by_path=HAPPY_FINDINGS), {"post_mode": "inline"}),
+            ("no post", lambda f: None,
+             FakeLLM(findings_by_path=HAPPY_FINDINGS), {"post": False}),
+        ]
+        for i, (name, mutate, llm, kw) in enumerate(cases):
+            forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+            mutate(forge)
+            _, events = self._run(tmp_path / str(i), forge, llm, **kw)
+            phases = [e["phase"] for e in events if e["node"] == "post"]
+            assert phases in (["start", "ok"], ["start", "fail"], ["skip"]), \
+                f"{name}: post node phases were {phases}"
 
     def test_tracing_is_off_when_no_file_is_named(self, tmp_path, monkeypatch):
         """Control: the events above are produced by the trace file, not by
