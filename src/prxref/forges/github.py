@@ -35,6 +35,22 @@ _PR_URL_RE = re.compile(
 # a refusal to post rather than an invisible short read.
 _PAGE_SIZE = 100
 _MAX_PAGES = 50
+# A rejection body is operator-only diagnostics, never posted to the forge, but
+# it is still bounded: GitHub's validation errors enumerate every unmatched
+# subschema and run long enough to bury the log line that carries them.
+_ERROR_DETAIL_CHARS = 400
+
+
+def _response_detail(resp: requests.Response) -> str:
+    """Return a bounded, single-line rendering of an error response body."""
+    try:
+        body = resp.text or ""
+    except Exception:  # noqa: BLE001 - a body that will not decode is not a failure
+        return "<unreadable body>"
+    collapsed = " ".join(body.split())
+    if len(collapsed) > _ERROR_DETAIL_CHARS:
+        return collapsed[:_ERROR_DETAIL_CHARS] + "…"
+    return collapsed or "<empty body>"
 
 
 def _create_default_session() -> requests.Session:
@@ -237,9 +253,20 @@ class ForgeImpl:
             resp.raise_for_status()
 
     def post_inline_comments(self, ref: PRRef, comments: Sequence[InlineComment]) -> int:
-        """Post inline comments; returns the number actually posted."""
+        """Post inline comments; returns the number actually posted.
+
+        ``commit_id`` is required: without it GitHub rejects the whole payload
+        as matching no subschema, and reports ``line`` itself as an
+        unpermitted key, so every comment 422s rather than only the ones whose
+        line falls outside the diff. The head SHA is read from ``get_pr`` the
+        way the GitLab adapter reads its own position SHAs.
+        """
+        if not comments:
+            return 0
+
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
         headers = self._headers(ref.host)
+        commit_id = self.get_pr(ref).source_sha
         posted = 0
 
         for comment in comments:
@@ -248,9 +275,18 @@ class ForgeImpl:
                 "path": comment.path,
                 "line": comment.line,
                 "side": comment.side or "RIGHT",
+                "commit_id": commit_id,
             }
             resp = self.session.post(url, json=payload, headers=headers)
             if resp.status_code == 422:
+                # A line outside the diff is the expected 422 and skipping it
+                # is correct, but the same status covers a malformed payload
+                # that would skip every comment. Log the body so the two are
+                # distinguishable instead of both reading as "0 posted".
+                logger.warning(
+                    "GitHub rejected an inline comment on %s:%s (422): %s",
+                    comment.path, comment.line, _response_detail(resp),
+                )
                 continue
             resp.raise_for_status()
             posted += 1
