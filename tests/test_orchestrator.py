@@ -26,8 +26,8 @@ from prxref.triage import DEFAULT_TOKEN_BUDGET, Finding, build_chunks, parse_uni
 SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
-    "Files reviewed: {file_count} · errors: {error_count} · "
-    "warnings: {warning_count} · notes: {note_count}\n\n"
+    "Files reviewed: {file_count} · 🟥 {error_count} error · "
+    "🟧 {warning_count} warning · 🟦 {note_count} note\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -268,7 +268,7 @@ class TestHappyPath:
         assert "Request-Changes" in summary
         assert "Add widget" in summary
         assert "Files reviewed: 1" in summary
-        assert "errors: 1" in summary
+        assert "🟥 1 error" in summary
         assert "Null deref" in summary
         assert "Reviewed by prxref · model=test-model-1 · 150 tok" in summary
 
@@ -278,11 +278,11 @@ class TestHappyPath:
         by_line = {c.line: c for c in comments}
         assert set(by_line) == {3, 7}
         assert by_line[3].path == "src/app.py"
-        assert "🚨" in by_line[3].body
+        assert "🟥" in by_line[3].body
         assert "[ERROR] Null deref" in by_line[3].body
         assert "x may be None" in by_line[3].body
         assert "Reviewed by prxref · model=test-model-1" in by_line[3].body
-        assert "📝" in by_line[7].body
+        assert "🟦" in by_line[7].body
 
     def test_inline_comments_capped_at_fifteen(self):
         findings = {
@@ -1587,7 +1587,7 @@ class TestPostVerdictKnobs:
         assert "**prxref review**" in summary
         assert "Add widget" in summary
         assert "Files reviewed: 1" in summary
-        assert "errors: 1" in summary
+        assert "🟥 1 error" in summary
         assert "Null deref" in summary
         assert "Reviewed by prxref · model=test-model-1 · 150 tok" in summary
 
