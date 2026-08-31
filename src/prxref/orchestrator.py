@@ -27,7 +27,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    successful one, so a reason left only in the logs reaches nobody.
 6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
-   {warning_count} {note_count} {findings} {attribution}`` filled, plus
+   {warning_count} {outofscope_count} {findings} {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
    ``post_mode`` narrows what is written: ``"summary+inline"`` (default) is
    that full behaviour, ``"summary"`` skips the inline batch, ``"inline"``
@@ -88,7 +88,7 @@ POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 # findings under its own diagnostics.
 MAX_REPORTED_REASONS = 3
 
-_SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "note": "🟦"}
+_SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "outofscope": "🟦"}
 
 _REDACTED = "[redacted]"
 
@@ -200,7 +200,7 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
-    "🟧 {warning_count} warning · 🟦 {note_count} note\n\n"
+    "🟧 {warning_count} warning · 🟦 {outofscope_count} outofscope\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -652,7 +652,7 @@ def _render_summary(
     if not include_verdict:
         template = _strip_verdict_stamp(template)
 
-    counts = {"error": 0, "warning": 0, "note": 0}
+    counts = {"error": 0, "warning": 0, "outofscope": 0}
     for f in findings_active:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
@@ -675,7 +675,7 @@ def _render_summary(
         .replace("{file_count}", str(len(files)))
         .replace("{error_count}", str(counts["error"]))
         .replace("{warning_count}", str(counts["warning"]))
-        .replace("{note_count}", str(counts["note"]))
+        .replace("{outofscope_count}", str(counts["outofscope"]))
         .replace("{findings}", bullets)
         .replace("{attribution}", attribution)
     )

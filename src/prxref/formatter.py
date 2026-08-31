@@ -20,14 +20,14 @@ except ImportError:  # reviewer seat not landed yet; inline default applies
 _SEVERITY_MARKERS: dict[str, str] = {
     "error": "🟥",
     "warning": "🟧",
-    "note": "🟦",
+    "outofscope": "🟦",
 }
-_SEVERITY_ORDER: dict[str, int] = {"error": 0, "warning": 1, "note": 2}
+_SEVERITY_ORDER: dict[str, int] = {"error": 0, "warning": 1, "outofscope": 2}
 
 _DEFAULT_SUMMARY_TEMPLATE = """\
 ## {verdict_banner}
 
-**Findings:** 🟥 {error_count} error · 🟧 {warning_count} warning · 🟦 {note_count} note
+**Findings:** 🟥 {error_count} error · 🟧 {warning_count} warning · 🟦 {outofscope_count} outofscope
 
 {active_count} active of {total_count} raw
 
@@ -42,11 +42,11 @@ _DEFAULT_SUMMARY_TEMPLATE = """\
 
 
 def _norm_severity(severity: str) -> str:
-    """Normalize a severity for lookup; unknown values read as ``note``."""
+    """Normalize a severity for lookup; unknown values read as ``outofscope``."""
     norm = (severity or "").strip().lower()
     if norm in _SEVERITY_MARKERS:
         return norm
-    return "note"
+    return "outofscope"
 
 
 def _fmt_seconds(elapsed_ms: int) -> str:
@@ -121,7 +121,7 @@ def _load_summary_template() -> str:
     """Load ``prompts/summary.md`` via the shared loader, else inline default.
 
     Placeholder contract for the template owner: ``verdict_banner``,
-    ``error_count``, ``warning_count``, ``note_count``, ``active_count``,
+    ``error_count``, ``warning_count``, ``outofscope_count``, ``active_count``,
     ``total_count``, ``findings_table``, ``dropped_section``,
     ``chunk_count``, ``input_tokens``, ``output_tokens``, ``elapsed_s``,
     ``model``, ``attribution``.
@@ -175,8 +175,8 @@ def format_summary(
         "warning_count": sum(
             1 for f in findings_active if _norm_severity(f.severity) == "warning"
         ),
-        "note_count": sum(
-            1 for f in findings_active if _norm_severity(f.severity) == "note"
+        "outofscope_count": sum(
+            1 for f in findings_active if _norm_severity(f.severity) == "outofscope"
         ),
         "active_count": len(findings_active),
         "total_count": len(findings_active) + len(findings_dropped),

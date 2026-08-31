@@ -22,7 +22,7 @@ from dataclasses import replace
 from .forges.base import Thread
 from .triage import Finding
 
-SEVERITIES: frozenset[str] = frozenset({"error", "warning", "note"})
+SEVERITIES: frozenset[str] = frozenset({"error", "warning", "outofscope"})
 
 DEFAULT_CONFIDENCE_FLOOR: float = 0.6
 DEFAULT_MAX_ERRORS: int = 10
