@@ -7,6 +7,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-31
+
+The severity-rename release. The blue bucket is now called `outofscope`.
+
+### Changed
+
+- **The third severity is renamed `note` -> `outofscope`** (owner decision). The
+  class contents are unchanged — minor findings: misleading naming, TODOs
+  without context, dead code the diff adds — as are the marker (🟦), the
+  ordering (error-first, outofscope last) and the unknown-severity fallback.
+  Every surface moved together: the worker prompt vocabulary, the quality-gate
+  `SEVERITIES` set, the summary template placeholder (`{outofscope_count}`),
+  both renderers, and the tests. Posted comments now read
+  `🟥 N error · 🟧 N warning · 🟦 N outofscope`.
+
 ## [0.7.0] — 2026-08-31
 
 The severity-marker release. Every posted comment now carries the severity
