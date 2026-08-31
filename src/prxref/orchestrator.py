@@ -379,8 +379,18 @@ def orchestrate_review(
 
     elapsed_ms = _elapsed_ms(t0)
     posted = False
+    inline_posted = 0
     post_summary_wanted = post and post_mode in POST_SUMMARY_MODES
     post_inline_wanted = post and post_mode in POST_INLINE_MODES
+    if not post:
+        # "Skipped" and "never reached" look identical in a graph that only
+        # records what happened, and they mean opposite things: one is a
+        # choice, the other is a failure upstream. Say which.
+        tracer.event("post", "skip", reason="posting disabled (dry run or --no-post)")
+    elif not (post_summary_wanted or post_inline_wanted):
+        tracer.event("post", "skip", reason=f"post_mode={post_mode} posts nothing here")
+    else:
+        tracer.event("post", "start", mode=post_mode)
     if post_summary_wanted:
         summary = _render_summary(
             pr, files, verdict, findings_active, model,
@@ -411,9 +421,16 @@ def orchestrate_review(
         try:
             forge.post_inline_comments(ref, comments)
             posted = True
+            inline_posted = len(comments)
         except Exception as e:  # noqa: BLE001
             logger.error("post_inline_comments failed: %s", e)
 
+    if post and (post_summary_wanted or post_inline_wanted):
+        tracer.event(
+            "post", "ok" if posted else "fail",
+            mode=post_mode, summary=post_summary_wanted and posted,
+            inline=inline_posted,
+        )
     tracer.event(
         "run", "ok", verdict=verdict,
         chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,

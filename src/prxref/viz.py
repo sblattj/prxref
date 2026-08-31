@@ -73,12 +73,14 @@ def summarize(events: list[dict]) -> dict[str, Any]:
         phase = ev.get("phase", "")
         meta = ev.get("meta") or {}
         entry = nodes.setdefault(
-            node, {"starts": 0, "ok": 0, "fail": 0, "elapsed_ms": 0,
+            node, {"starts": 0, "ok": 0, "fail": 0, "skip": 0, "elapsed_ms": 0,
                    "first_t": ev.get("t_ms", 0), "last_t": ev.get("t_ms", 0), "meta": {}}
         )
         entry["last_t"] = ev.get("t_ms", entry["last_t"])
         if phase == "start":
             entry["starts"] += 1
+        elif phase == "skip":
+            entry["skip"] += 1
         elif phase in ("ok", "fail"):
             entry[phase] += 1
             entry["elapsed_ms"] = max(entry["elapsed_ms"], int(meta.get("elapsed_ms") or 0))
@@ -173,6 +175,7 @@ _TEMPLATE = """<!doctype html>
     <span><i class="dot" style="background:var(--ok)"></i>completed</span>
     <span><i class="dot" style="background:var(--run)"></i>still open</span>
     <span><i class="dot" style="background:var(--fail)"></i>failed</span>
+    <span><i class="dot" style="background:var(--warn)"></i>skipped</span>
     <span><i class="dot" style="background:var(--idle)"></i>never ran</span>
   </div>
 </div>
@@ -215,9 +218,11 @@ _TEMPLATE = """<!doctype html>
     if (!e) return 'idle';
     if (e.fail) return 'fail';
     if (e.starts > e.ok + e.fail) return 'run';
+    if (!e.starts && e.skip) return 'skip';
     return 'ok';
   }
-  var COLOR = {idle:'var(--idle)', ok:'var(--ok)', run:'var(--run)', fail:'var(--fail)'};
+  var COLOR = {idle:'var(--idle)', ok:'var(--ok)', run:'var(--run)',
+               fail:'var(--fail)', skip:'var(--warn)'};
 
   // Fixed DAG, so lay it out arithmetically - no layout library needed, and
   // nothing to fail to load offline.
@@ -242,6 +247,9 @@ _TEMPLATE = """<!doctype html>
                 stroke: lit ? 'var(--accent)' : 'var(--line)', 'stroke-width': lit?2:1.5});
   });
 
+  // ~17 chars is what W=128 holds at this font size; SVG text does not wrap.
+  function clip(t){ return t.length > 17 ? t.slice(0, 16) + '\u2026' : t; }
+
   NODES.forEach(function(n){
     var p = pos[n.id], st = state(n.id), e = S.nodes[n.id];
     el('rect', {x:p.x, y:p.y, width:W, height:H, rx:9,
@@ -251,6 +259,7 @@ _TEMPLATE = """<!doctype html>
     el('text', {x:p.x+11, y:p.y+35, class:'nsub'}, n.sub);
     var detail;
     if (!e) detail = 'not reached';
+    else if (st === 'skip') detail = clip('skipped: ' + (e.meta.reason || 'by configuration'));
     else if (n.id === 'chunk') {
       var open = e.starts - e.ok - e.fail;
       detail = e.starts + '\u00d7 · ' + fmt(e.elapsed_ms || (e.last_t - e.first_t)) +
@@ -264,7 +273,7 @@ _TEMPLATE = """<!doctype html>
   var rows = Object.keys(S.nodes).map(function(id){
     var e = S.nodes[id];
     return {id:id, ms: e.elapsed_ms || (e.last_t - e.first_t), st: state(id)};
-  }).filter(function(r){ return r.id !== 'heartbeat'; })
+  }).filter(function(r){ return r.id !== 'heartbeat' && r.st !== 'skip'; })
     .sort(function(a,b){ return b.ms - a.ms; });
   var max = rows.reduce(function(m,r){ return Math.max(m, r.ms); }, 1);
   rows.forEach(function(r){
