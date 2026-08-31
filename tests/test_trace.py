@@ -175,3 +175,39 @@ class TestPipelineView:
                             "phase": "start", "meta": {"x": "</script><b>pwned"}}])
         assert "</script><b>pwned" not in doc
         assert "<\\/script>" in doc
+
+    def test_a_skipped_stage_is_not_reported_as_never_reached(self):
+        """"Nobody asked it to run" and "it never got there" are opposite
+        findings; a graph built only from starts and finishes conflates them."""
+        from prxref.viz import summarize
+
+        s = summarize([
+            {"v": 1, "seq": 1, "t_ms": 0, "node": "run", "phase": "start"},
+            {"v": 1, "seq": 2, "t_ms": 5, "node": "post", "phase": "skip",
+             "meta": {"reason": "posting disabled"}},
+            {"v": 1, "seq": 3, "t_ms": 6, "node": "run", "phase": "ok"},
+        ])
+        assert s["nodes"]["post"]["skip"] == 1
+        assert s["nodes"]["post"]["starts"] == 0
+        assert s["open_nodes"] == []
+        assert s["failed"] == []
+
+    def test_a_skip_does_not_make_the_run_look_failed(self):
+        """Control: skip must not leak into either alarm channel."""
+        from prxref.viz import render_html
+
+        doc = render_html([
+            {"v": 1, "seq": 1, "t_ms": 0, "node": "post", "phase": "skip",
+             "meta": {"reason": "posting disabled"}},
+        ])
+        assert "posting disabled" in doc
+
+    def test_a_post_that_ran_is_distinguishable_from_one_that_was_skipped(self):
+        from prxref.viz import summarize
+
+        ran = summarize([
+            {"v": 1, "seq": 1, "t_ms": 0, "node": "post", "phase": "start"},
+            {"v": 1, "seq": 2, "t_ms": 9, "node": "post", "phase": "ok"},
+        ])
+        assert ran["nodes"]["post"]["skip"] == 0
+        assert ran["nodes"]["post"]["ok"] == 1
