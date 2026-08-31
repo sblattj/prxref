@@ -255,12 +255,30 @@ def test_list_threads_keeps_what_it_read_and_warns_when_the_feed_read_fails(capl
 # --- inline comments (unchanged behavior, previously untested) --------------
 
 
-def test_post_inline_comments_skips_422_and_keeps_going():
+def _session_for_inline(post_responses, head_sha="deadbeef"):
+    """A session whose get() answers get_pr and whose post() replays statuses.
+
+    post_inline_comments reads the head SHA through get_pr, so an inline-comment
+    test has to satisfy that GET as well as the comment POSTs.
+    """
     session = MagicMock(spec=requests.Session)
-    session.post.side_effect = [
+    session.get.return_value = _mock_response(
+        200,
+        json_data={
+            "title": "t", "body": "", "user": {"login": "u"},
+            "head": {"ref": "feature", "sha": head_sha},
+            "base": {"ref": "main", "sha": "cafe"},
+        },
+    )
+    session.post.side_effect = post_responses
+    return session
+
+
+def test_post_inline_comments_skips_422_and_keeps_going():
+    session = _session_for_inline([
         _mock_response(422),
         _mock_response(201, json_data={"id": 2}),
-    ]
+    ])
     posted = ForgeImpl(session=session).post_inline_comments(
         _ref(),
         [
@@ -269,6 +287,44 @@ def test_post_inline_comments_skips_422_and_keeps_going():
         ],
     )
     assert posted == 1
+
+
+def test_post_inline_comments_sends_commit_id():
+    """GitHub rejects the whole payload without commit_id, reporting `line`
+    itself as an unpermitted key, so every comment 422s rather than only the
+    out-of-diff ones. Assert on the payload: a call-count assertion passes
+    against a body GitHub refuses."""
+    session = _session_for_inline([_mock_response(201, json_data={"id": 1})], head_sha="abc123")
+    posted = ForgeImpl(session=session).post_inline_comments(
+        _ref(), [InlineComment(path="a.py", line=7, body="x")]
+    )
+    assert posted == 1
+    payload = session.post.call_args.kwargs["json"]
+    assert payload["commit_id"] == "abc123"
+    assert payload["path"] == "a.py"
+    assert payload["line"] == 7
+    assert payload["side"] == "RIGHT"
+
+
+def test_post_inline_comments_no_comments_makes_no_requests():
+    """An empty list must not cost a get_pr round trip."""
+    session = MagicMock(spec=requests.Session)
+    assert ForgeImpl(session=session).post_inline_comments(_ref(), []) == 0
+    session.get.assert_not_called()
+    session.post.assert_not_called()
+
+
+def test_post_inline_comments_logs_the_422_body(caplog):
+    """A swallowed 422 used to leave nothing behind, so a payload-level
+    rejection and a legitimately skipped line both read as \"0 posted\"."""
+    session = _session_for_inline([_mock_response(422, text='{"message":"No subschema matched"}')])
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.github"):
+        posted = ForgeImpl(session=session).post_inline_comments(
+            _ref(), [InlineComment(path="a.py", line=1, body="x")]
+        )
+    assert posted == 0
+    assert "No subschema matched" in caplog.text
+    assert "a.py" in caplog.text
 
 
 def test_ref_round_trips_through_the_protocol_dataclass():
