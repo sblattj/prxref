@@ -7,6 +7,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-31
+
+The severity-marker release. Every posted comment now carries the severity
+class at a glance: 🟥 error, 🟧 warning, 🟦 note.
+
+### Changed
+
+- **Severity markers in every posted comment.** The squares existed only in
+  `formatter.py`, which nothing imports — the live renderer posted 🚨/⚠️/📝 on
+  inline comments and a plain `0 error · 0 warning · 0 note` counts line on
+  summaries. `_SEVERITY_EMOJI` is now `_SEVERITY_MARKERS` mapping to
+  🟥/🟧/🟦 (unknown severities read as 🟦 note), and both the shipped
+  `prompts/summary.md` counts line and the fallback template carry the same
+  markers. Summary counts lines read `🟥 N error · 🟧 N warning · 🟦 N note`,
+  findings bullets are prefixed with their square, and each inline comment
+  body is prefixed `🤖 🟥 **[ERROR] …` / `🟧 **[WARNING] …` / `🟦 **[NOTE] …`.
+
 ## [0.6.0] — 2026-08-28
 
 The duplicate-comment release. Three ways prxref could post the same thing twice,
