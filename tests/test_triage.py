@@ -14,6 +14,67 @@ from prxref.triage import (
 )
 
 
+class TestBitbucketServerDiffPrefixes:
+    """Bitbucket Server / Data Center emits ``src://``/``dst://`` where git
+    emits ``a/``/``b/``.
+
+    The header and operand shapes below are copied verbatim from a real
+    Bitbucket Data Center 10.4.2 pull-request diff. The hand-written Server
+    fixtures elsewhere in the suite all use git-style prefixes, which is
+    exactly why an unstripped ``dst://`` survived into every reported location
+    without a test noticing.
+    """
+
+    SERVER_DIFF = (
+        "diff --git src://cache.py dst://cache.py\n"
+        "index 3cc2d49..4a62838 100644\n"
+        "--- src://cache.py\n"
+        "+++ dst://cache.py\n"
+        "@@ -17,3 +17,4 @@ class TTLCache:\n"
+        " context1\n"
+        " context2\n"
+        " context3\n"
+        "+added_line\n"
+    )
+
+    GIT_DIFF = (
+        SERVER_DIFF
+        .replace("src://", "a/")
+        .replace("dst://", "b/")
+    )
+
+    def test_server_prefixes_are_stripped(self):
+        files = parse_unified_diff(self.SERVER_DIFF)
+        assert len(files) == 1
+        assert files[0].path == "cache.py"
+        assert files[0].old_path == "cache.py"
+        assert files[0].new_path == "cache.py"
+
+    def test_server_form_parses_identically_to_the_git_form(self):
+        """The control: the same diff in git spelling must come out the same."""
+        server = parse_unified_diff(self.SERVER_DIFF)
+        git = parse_unified_diff(self.GIT_DIFF)
+        assert [f.path for f in server] == [f.path for f in git] == ["cache.py"]
+        assert server[0].added_lines == git[0].added_lines
+
+    def test_server_header_is_matched_not_just_the_operands(self):
+        """Without the header pattern the file is still recovered from
+        ``---``/``+++``, so assert the header itself parses -- otherwise a
+        header-only regression stays invisible."""
+        header_only = (
+            "diff --git src://pkg/mod.py dst://pkg/mod.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " context\n"
+            "+added\n"
+        )
+        files = parse_unified_diff(header_only)
+        assert len(files) == 1
+        assert files[0].path == "pkg/mod.py"
+
+    def test_git_prefixes_still_work(self):
+        assert parse_unified_diff(self.GIT_DIFF)[0].path == "cache.py"
+
+
 class TestUnifiedDiffParsing:
     def test_parses_single_modified_file(self):
         diff = (
