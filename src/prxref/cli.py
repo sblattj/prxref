@@ -1,8 +1,9 @@
 """prxref command-line interface.
 
-Provides two subcommands:
+Provides three subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a forge URL.
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
+  * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
 
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
@@ -33,12 +34,14 @@ import importlib
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import prxref
 from prxref.config import load_config, make_forge
 from prxref.forges.base import detect_forge
 from prxref.llm import ConfigError
+from prxref.viz import render_file
 
 logger = logging.getLogger("prxref")
 
@@ -93,6 +96,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--host",
         default="0.0.0.0",
         help="bind address (default 0.0.0.0)",
+    )
+
+    tr = sub.add_parser("trace", help="work with a JSONL run trace")
+    tr_sub = tr.add_subparsers(dest="trace_command")
+    tr_render = tr_sub.add_parser(
+        "render", help="render a run trace to a standalone HTML pipeline view"
+    )
+    tr_render.add_argument("trace_file", help="path to the JSONL trace to render")
+    tr_render.add_argument(
+        "-o", "--out",
+        help="output HTML path (default: the trace path with an .html suffix)",
     )
 
     return parser
@@ -199,6 +213,7 @@ def _run_review(
         max_errors=cfg["max_error_findings"],
         post_mode=cfg["post_mode"],
         post_verdict=cfg["post_verdict"],
+        trace_file=cfg["trace_file"],
     )
 
 
@@ -304,6 +319,27 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_trace_render(args: argparse.Namespace) -> int:
+    """Render a JSONL trace to a self-contained HTML pipeline view.
+
+    Exit 2 on a missing or unreadable trace, matching the configuration-error
+    contract: the operator named a path that is not there, which is the same
+    class of mistake as a malformed env var, not a review failure.
+    """
+    src = Path(args.trace_file)
+    if not src.is_file():
+        logger.error("trace render: no such trace file: %s", src)
+        return 2
+    out = Path(args.out) if args.out else src.with_suffix(".html")
+    try:
+        written = render_file(src, out)
+    except OSError as e:
+        logger.error("trace render: could not write %s: %s", out, e)
+        return 2
+    print(written)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point dispatching ``review``, ``serve``, or ``--version``."""
     parser = _build_parser()
@@ -323,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_review(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "trace":
+        if args.trace_command == "render":
+            return _cmd_trace_render(args)
+        parser.print_help(sys.stderr)
+        return 2
 
     parser.print_help(sys.stderr)
     return 2

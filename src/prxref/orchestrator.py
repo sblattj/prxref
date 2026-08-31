@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +58,7 @@ from . import reviewer
 from .forges.base import Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import active, apply_line_align, apply_quality_gate, apply_thread_dedup
+from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
     DEFAULT_MAX_FILES_PER_CHUNK,
@@ -235,6 +237,7 @@ def orchestrate_review(
     max_errors: int | None = None,
     post_mode: str = "summary+inline",
     post_verdict: bool = True,
+    trace_file: str | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -269,17 +272,24 @@ def orchestrate_review(
     membership tests produce.
     """
     t0 = time.perf_counter()
+    tracer = get_tracer(trace_file)
+    tracer.event("run", "start", forge=ref.forge, url=ref.url, number=ref.number)
 
     try:
-        pr = forge.get_pr(ref)
+        with tracer.span("forge.get_pr"):
+            pr = forge.get_pr(ref)
     except Exception as e:  # noqa: BLE001
         logger.error("get_pr failed: %s", e)
+        tracer.event("run", "fail")
         return _error_run(forge, ref, post, 0, f"get_pr failed: {e}", t0, post_mode=post_mode)
 
     try:
-        raw = forge.get_diff(ref)
+        with tracer.span("forge.get_diff") as sp:
+            raw = forge.get_diff(ref)
+            sp["bytes"] = len(raw)
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
+        tracer.event("run", "fail")
         return _error_run(forge, ref, post, 0, f"get_diff failed: {e}", t0, post_mode=post_mode)
 
     # Wrapped like every neighbouring stage. These two were the only ones that
@@ -289,27 +299,34 @@ def orchestrate_review(
     # The CLI is fenced off earlier by config's range check; this closes the
     # library route and covers every other malformed-diff crash besides.
     try:
-        files = parse_unified_diff(raw)
+        with tracer.span("parse_diff") as sp:
+            files = parse_unified_diff(raw)
+            sp["files"] = len(files)
     except Exception as e:  # noqa: BLE001
         logger.error("parse_unified_diff failed: %s", e)
+        tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0,
             post_mode=post_mode,
         )
 
     try:
-        chunks = build_chunks(
-            files, max_chunks=max_chunks, token_budget=token_budget,
-            max_files_per_chunk=max_files_per_chunk,
-        )
+        with tracer.span("build_chunks") as sp:
+            chunks = build_chunks(
+                files, max_chunks=max_chunks, token_budget=token_budget,
+                max_files_per_chunk=max_files_per_chunk,
+            )
+            sp["chunks"] = len(chunks)
     except Exception as e:  # noqa: BLE001
         logger.error("build_chunks failed: %s", e)
+        tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"build_chunks failed: {e}", t0,
             post_mode=post_mode,
         )
 
     if not chunks:
+        tracer.event("run", "ok", chunks_reviewed=0, findings=0)
         return _summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict,
@@ -317,7 +334,7 @@ def orchestrate_review(
 
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
-        context_lines=context_lines,
+        context_lines=context_lines, tracer=tracer,
     )
 
     input_tokens = sum(r["input_tokens"] for r in results)
@@ -327,6 +344,7 @@ def orchestrate_review(
     if all(r["error"] for r in results):
         reason = f"all {len(results)} worker reviews failed ({results[0]['error']})"
         logger.error("Total LLM failure: %s", reason)
+        tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, len(chunks), reason, t0,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
@@ -396,6 +414,11 @@ def orchestrate_review(
         except Exception as e:  # noqa: BLE001
             logger.error("post_inline_comments failed: %s", e)
 
+    tracer.event(
+        "run", "ok", verdict=verdict,
+        chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
+        findings=len(findings_active),
+    )
     return {
         "verdict": verdict,
         "findings_active": findings_active,
@@ -418,39 +441,86 @@ def _attribution(model: str, tokens: int, elapsed_ms: int) -> str:
     return f"Reviewed by prxref · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
 
 
+HEARTBEAT_SECONDS = 30.0
+
+
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
+    tracer: Tracer | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
+    tracer = tracer if tracer is not None else get_tracer()
     workers = max(1, min(max_workers, len(chunks)))
+    done = threading.Event()
+    t_start = time.perf_counter()
+
+    def _heartbeat() -> None:
+        """Say the run is alive while nothing else is saying anything.
+
+        Chunks log on completion, so a chunk that never completes produces
+        silence indistinguishable from a wedged process -- the exact shape of
+        the 496s hang this was written for. One line per interval turns that
+        into a readable countdown.
+        """
+        while not done.wait(HEARTBEAT_SECONDS):
+            waited = int(time.perf_counter() - t_start)
+            pending = sum(1 for f in futures if not f.done())
+            if pending:
+                logger.info(
+                    "still running: %d/%d chunks outstanding, %ds elapsed",
+                    pending, len(chunks), waited,
+                )
+                tracer.event(
+                    "heartbeat", "tick", pending=pending,
+                    total=len(chunks), elapsed_s=waited,
+                )
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
-                max_tokens, context_lines,
+                max_tokens, context_lines, tracer,
             )
             for i, chunk in enumerate(chunks)
         ]
-        results = []
-        for future in futures:
-            try:
-                results.append(future.result())
-            except Exception as e:  # noqa: BLE001
-                results.append({
-                    "findings": [], "error": f"worker crashed: {e}",
-                    "input_tokens": 0, "output_tokens": 0,
-                    "model": "", "elapsed_ms": 0,
-                })
-        return results
+        beat = threading.Thread(target=_heartbeat, name="prxref-heartbeat", daemon=True)
+        beat.start()
+        try:
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:  # noqa: BLE001
+                    results.append({
+                        "findings": [], "error": f"worker crashed: {e}",
+                        "input_tokens": 0, "output_tokens": 0,
+                        "model": "", "elapsed_ms": 0,
+                    })
+            return results
+        finally:
+            done.set()
 
 
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
+    tracer: Tracer | None = None,
 ) -> dict:
+    tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
+    # Logged on ENTRY, not only on completion. A chunk that never finishes
+    # otherwise leaves no evidence it ever started, so a hang cannot be
+    # attributed to a chunk, a file, or a model.
+    # A chunk IS the list of FileDiffs, not an object wrapping one. A defensive
+    # getattr(chunk, "files", []) here reported "0 files" for every chunk --
+    # a log line that lies is worse than no log line, because it is believed.
+    logger.info("[chunk %d/%d] start: %d files", index, total, len(chunk))
+    tracer.event(
+        "chunk", "start", index=index, total=total,
+        files=[f.path for f in chunk],
+    )
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
@@ -458,6 +528,10 @@ def _run_worker(
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[chunk %d/%d] worker raised: %s", index, total, e)
+        tracer.event(
+            "chunk", "fail", index=index, total=total,
+            elapsed_ms=_elapsed_ms(t0), error=e.__class__.__name__,
+        )
         return {
             "findings": [], "error": str(e),
             "input_tokens": 0, "output_tokens": 0, "model": "",
@@ -485,10 +559,21 @@ def _run_worker(
     error = res.get("error")
     if error:
         logger.error("[chunk %d/%d] worker reported error: %s", index, total, error)
+        tracer.event(
+            "chunk", "fail", index=index, total=total,
+            elapsed_ms=_elapsed_ms(t0), error=str(error)[:200],
+        )
     else:
         logger.info(
             "[chunk %d/%d] %d findings in %d ms",
             index, total, len(findings), _elapsed_ms(t0),
+        )
+        tracer.event(
+            "chunk", "ok", index=index, total=total,
+            elapsed_ms=_elapsed_ms(t0), findings=len(findings),
+            model=res.get("model", ""),
+            input_tokens=res.get("input_tokens", 0),
+            output_tokens=res.get("output_tokens", 0),
         )
     return {
         "findings": findings,

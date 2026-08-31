@@ -1628,3 +1628,113 @@ class TestPostVerdictKnobs:
     def test_the_shipped_template_style_strips_to_a_clean_header(self):
         out = orchestrator._strip_verdict_stamp("## prxref automated review: {verdict}\n")
         assert out == "## prxref automated review\n"
+
+
+class TestRunTrace:
+    """Every exit closes the ``run`` node, and says which kind of exit it was.
+
+    The pipeline view reads open-vs-closed to answer "did this finish?". A path
+    that returns without closing is reported as a run still in flight forever,
+    which is the one answer worse than no answer — so each of the seven ways
+    out of ``orchestrate_review`` is walked here, not just the happy one.
+    """
+
+    def _run(self, tmp_path, forge, llm, **kw):
+        target = tmp_path / "run.jsonl"
+        res = orchestrate_review(forge, REF, llm, trace_file=str(target), **kw)
+        events = [json.loads(x) for x in target.read_text().splitlines() if x.strip()]
+        return res, events
+
+    def _run_phases(self, events):
+        return [e["phase"] for e in events if e["node"] == "run"]
+
+    def test_a_completed_review_opens_and_closes_the_run(self, tmp_path):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert self._run_phases(events) == ["start", "ok"]
+        closing = [e for e in events if e["node"] == "run" and e["phase"] == "ok"][0]
+        assert closing["meta"]["chunks_reviewed"] == 1
+        assert closing["meta"]["findings"] == 2
+
+    def test_the_stages_of_a_completed_review_are_all_there(self, tmp_path):
+        """The view draws fixed stages; a missing one reads as "never ran"."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        opened = {e["node"] for e in events if e["phase"] == "start"}
+        assert opened == {
+            "run", "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks", "chunk",
+        }
+        assert {e["node"] for e in events if e["phase"] == "ok"} >= {
+            "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks", "chunk", "run",
+        }
+
+    @pytest.mark.parametrize("failing", ["get_pr", "get_diff"])
+    def test_a_forge_failure_closes_the_run_as_failed(self, tmp_path, failing):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.add(failing)
+        _, events = self._run(tmp_path, forge, FakeLLM())
+        assert self._run_phases(events) == ["start", "fail"]
+        stage = "forge." + failing
+        assert [e["phase"] for e in events if e["node"] == stage] == ["start", "fail"]
+
+    @pytest.mark.parametrize("stage", ["parse_unified_diff", "build_chunks"])
+    def test_a_pipeline_stage_crash_closes_the_run_as_failed(
+        self, tmp_path, monkeypatch, stage
+    ):
+        def boom(*a, **kw):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(prxref.orchestrator, stage, boom)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM())
+        assert self._run_phases(events) == ["start", "fail"]
+
+    def test_an_empty_diff_closes_the_run_as_ok(self, tmp_path):
+        """Nothing to review is a completed review, not a failure — the
+        exit-code doctrine says so, and the trace must agree with it."""
+        _, events = self._run(tmp_path, FakeForge(diff=""), FakeLLM())
+        assert self._run_phases(events) == ["start", "ok"]
+
+    def test_total_llm_failure_closes_the_run_as_failed(self, tmp_path):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM(error=RuntimeError("no model")))
+        assert self._run_phases(events) == ["start", "fail"]
+
+    def test_a_failed_chunk_closes_its_own_node_too(self, tmp_path):
+        """A worker catches and returns rather than raising, so the span never
+        unwinds; without an explicit close the chunk reads as still running."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM(error=RuntimeError("no model")))
+        assert [e["phase"] for e in events if e["node"] == "chunk"] == ["start", "fail"]
+
+    def test_a_chunk_that_REPORTS_an_error_also_closes_as_failed(
+        self, tmp_path, monkeypatch
+    ):
+        """The other half of the failed-chunk path, and the quieter one.
+
+        A worker that raises is caught by the except branch; a worker that
+        hands back {"error": ...} — a truncated completion, a malformed body —
+        returns normally, so nothing unwinds and the close has to be explicit.
+        """
+        def reports_error(llm, files, **kw):
+            return [], {
+                "escalations": [], "input_tokens": 1, "output_tokens": 1,
+                "model": "test-model-1", "elapsed_ms": 1,
+                "error": "truncated: finish_reason=length",
+            }
+
+        monkeypatch.setattr(prxref.orchestrator.reviewer, "review_chunk", reports_error)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(tmp_path, forge, FakeLLM())
+        chunk = [e for e in events if e["node"] == "chunk"]
+        assert [e["phase"] for e in chunk] == ["start", "fail"]
+        assert "truncated" in chunk[-1]["meta"]["error"]
+
+    def test_tracing_is_off_when_no_file_is_named(self, tmp_path, monkeypatch):
+        """Control: the events above are produced by the trace file, not by
+        something that would have written them regardless."""
+        monkeypatch.delenv("PRXREF_TRACE_FILE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert list(tmp_path.iterdir()) == []
