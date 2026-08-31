@@ -27,7 +27,7 @@ SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
-    "🟧 {warning_count} warning · 🟦 {note_count} note\n\n"
+    "🟧 {warning_count} warning · 🟦 {outofscope_count} note\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -236,7 +236,7 @@ HAPPY_FINDINGS = {
     "src/app.py": [
         {"file": "src/app.py", "line": 3, "severity": "error", "confidence": 0.9,
          "title": "Null deref", "body": "x may be None when config is missing."},
-        {"file": "src/app.py", "line": 7, "severity": "note", "confidence": 0.8,
+        {"file": "src/app.py", "line": 7, "severity": "outofscope", "confidence": 0.8,
          "title": "Typo", "body": "recieve -> receive."},
     ],
 }
@@ -974,7 +974,7 @@ def _review_chunk_failing(errors_by_path: dict[str, str], *, tokens: int = 0):
         error = errors_by_path.get(files[0].path, "")
         findings = [] if error else [
             Finding(
-                file=files[0].path, line=1, severity="note", confidence=0.9,
+                file=files[0].path, line=1, severity="outofscope", confidence=0.9,
                 title="ok", body="b",
             )
         ]

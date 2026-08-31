@@ -68,7 +68,7 @@ class TestFormatInlineComment:
 
     def test_warning_and_note_markers(self):
         assert format_inline_comment(_f(severity="warning"), "a").startswith("🟧 **")
-        assert format_inline_comment(_f(severity="note"), "a").startswith("🟦 **")
+        assert format_inline_comment(_f(severity="outofscope"), "a").startswith("🟦 **")
 
     def test_unknown_severity_defaults_to_note(self):
         assert format_inline_comment(_f(severity=""), "a").startswith("🟦 **")
@@ -95,12 +95,12 @@ class TestFormatSummaryCounts:
             findings_active=[
                 _f(severity="error", file="a.py"),
                 _f(severity="error", file="b.py"),
-                _f(severity="note"),
+                _f(severity="outofscope"),
             ]
         )
         assert "🟥 2 error" in text
         assert "🟧 0 warning" in text
-        assert "🟦 1 note" in text
+        assert "🟦 1 outofscope" in text
 
     def test_active_of_total_counts(self):
         assert "1 active of 2 raw" in _summary()
@@ -112,7 +112,7 @@ class TestFormatSummaryCounts:
             findings_dropped=[],
         )
         assert "✅ Approved" in text
-        assert "🟥 0 error · 🟧 0 warning · 🟦 0 note" in text
+        assert "🟥 0 error · 🟧 0 warning · 🟦 0 outofscope" in text
         assert "0 active of 0 raw" in text
         assert "No findings survived the quality passes." in text
 
@@ -121,7 +121,7 @@ class TestFormatSummaryTables:
     def test_table_rows_sorted_error_first(self):
         text = _summary(
             findings_active=[
-                _f(severity="note", file="z.py", line=1),
+                _f(severity="outofscope", file="z.py", line=1),
                 _f(severity="error", file="z.py", line=2, title="Boom"),
             ]
         )
