@@ -196,7 +196,7 @@ class TestQualityGate:
     def test_enforces_severity_vocabulary(self):
         f_invalid = _f(severity="concern", confidence=0.95)
         f_blueprint = _f(severity="blueprint", confidence=0.95)
-        f_note = _f(severity="note", confidence=0.95)
+        f_note = _f(severity="outofscope", confidence=0.95)
 
         result = apply_quality_gate([f_invalid, f_blueprint, f_note])
         assert result[0].drop_reason == "invalid severity: 'concern'"

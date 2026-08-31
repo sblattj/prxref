@@ -257,8 +257,8 @@ class TestReviewChunk:
     def test_skips_finding_entries_without_file(self):
         payload = json.dumps({
             "findings": [
-                {"line": 1, "severity": "note", "title": "Missing file", "body": "no file key"},
-                {"file": "src/app.py", "line": 2, "severity": "note", "title": "OK", "body": "has file"},
+                {"line": 1, "severity": "outofscope", "title": "Missing file", "body": "no file key"},
+                {"file": "src/app.py", "line": 2, "severity": "outofscope", "title": "OK", "body": "has file"},
             ],
             "escalations": [],
         })
