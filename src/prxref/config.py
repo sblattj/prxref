@@ -13,7 +13,9 @@ LLM / pipeline:
                                 passed through unvalidated; empty = omit
   PRXREF_LLM_MAX_TOKENS         Completion-token budget per worker review
                                 call; positive int (default 4096)
-  PRXREF_LLM_TIMEOUT            Per-request LLM timeout in seconds; must be
+  PRXREF_LLM_TIMEOUT            Wall-clock deadline for one model's review
+                                call, in seconds; the chain then tries the
+                                next model, so a run can exceed it. Must be
                                 greater than 0 (default 45.0)
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
                                 >= 0, no upper bound (provider-specific);
@@ -42,6 +44,11 @@ LLM / pipeline:
                                 (default 4)
   PRXREF_MAX_INLINE_COMMENTS    Max inline comments posted per review, after
                                 the quality gate; positive int (default 15)
+  PRXREF_TRACE_FILE             path to append a JSONL run trace to; unset
+                                (the default) disables tracing entirely.
+                                One event per line, flushed as it happens, so
+                                a run still in flight is readable. Render it
+                                with ``prxref trace render``.
   PRXREF_DRY_RUN                literal "1" reviews without writing anything
                                 to the forge — no summary, no inline comments
                                 (default off). Applies to the webhook daemon
@@ -142,6 +149,7 @@ _DEFAULTS: dict[str, object] = {
     "max_inline_comments": 15,
     "fail_on": "never",
     "dry_run": False,
+    "trace_file": "",
     "post_mode": "summary+inline",
     "post_verdict": True,
     "bitbucket_token": "",
