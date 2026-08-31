@@ -888,3 +888,60 @@ class TestModuleEntryPoint:
         proc = self._run()
         assert proc.returncode == 2
         assert "usage:" in proc.stderr.lower()
+
+
+class TestTraceSubcommand:
+    """`trace render` turns a run trace into something a human can look at."""
+
+    def _trace(self, tmp_path):
+        f = tmp_path / "run.jsonl"
+        f.write_text(
+            '{"v":1,"seq":1,"t_ms":0,"node":"run","phase":"start"}\n'
+            '{"v":1,"seq":2,"t_ms":9,"node":"forge.get_pr","phase":"start"}\n'
+        )
+        return f
+
+    def test_it_writes_html_next_to_the_trace_by_default(self, tmp_path, capsys):
+        src = self._trace(tmp_path)
+        assert main(["trace", "render", str(src)]) == 0
+        out = src.with_suffix(".html")
+        assert out.is_file()
+        assert out.read_text().lstrip().startswith("<!doctype html")
+        assert capsys.readouterr().out.strip() == str(out)
+
+    def test_the_output_path_is_overridable(self, tmp_path):
+        src = self._trace(tmp_path)
+        dest = tmp_path / "elsewhere" / "view.html"
+        dest.parent.mkdir()
+        assert main(["trace", "render", str(src), "-o", str(dest)]) == 0
+        assert dest.is_file()
+
+    def test_a_missing_trace_exits_2_and_names_the_path(self, tmp_path, caplog):
+        """A path that is not there is an operator mistake, not a review
+        outcome — same class as a malformed env var, so exit 2, not 0."""
+        missing = tmp_path / "nope.jsonl"
+        with caplog.at_level(logging.ERROR, logger="prxref"):
+            assert main(["trace", "render", str(missing)]) == 2
+        assert str(missing) in caplog.text
+        assert not missing.with_suffix(".html").exists()
+
+    def test_a_missing_output_directory_is_created(self, tmp_path):
+        """The convenient half of the write path: -o names a tree, not a hole."""
+        src = self._trace(tmp_path)
+        dest = tmp_path / "fresh" / "nested" / "view.html"
+        assert main(["trace", "render", str(src), "-o", str(dest)]) == 0
+        assert dest.is_file()
+
+    def test_an_unwritable_destination_exits_2(self, tmp_path, caplog):
+        """A file standing where a directory must go: mkdir cannot rescue this,
+        so the OSError branch is the one actually taken."""
+        src = self._trace(tmp_path)
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        with caplog.at_level(logging.ERROR, logger="prxref"):
+            assert main(["trace", "render", str(src), "-o", str(blocker / "d.html")]) == 2
+        assert "could not write" in caplog.text
+
+    def test_trace_without_a_subcommand_exits_2_with_usage(self, capsys):
+        assert main(["trace"]) == 2
+        assert "usage:" in capsys.readouterr().err.lower()

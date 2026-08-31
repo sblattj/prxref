@@ -17,6 +17,7 @@ never here.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -29,6 +30,13 @@ DEFAULT_BASE_URL = ""
 DEFAULT_API_KEY = ""
 DEFAULT_MODELS = ""
 DEFAULT_TIMEOUT = 45.0
+logger = logging.getLogger(__name__)
+# Connecting is not generating: a reachable endpoint answers the TCP/TLS
+# handshake in well under this, so a separate, much smaller connect budget
+# fails a dead host fast instead of spending the whole generation deadline on
+# it. Clamped to the deadline itself when that is smaller.
+_CONNECT_TIMEOUT = 10.0
+_READ_CHUNK_BYTES = 8192
 
 
 class LLMError(Exception):
@@ -69,6 +77,54 @@ class OpenAICompatClient(LLMClient):
         self.reasoning_effort = reasoning_effort or None
         self.temperature = temperature
 
+    def _post_within_deadline(
+        self,
+        url: str,
+        *,
+        json: dict,
+        headers: dict[str, str],
+        deadline_s: float,
+    ) -> requests.Response:
+        """POST and read the body under a WALL-CLOCK deadline.
+
+        ``requests`` treats a scalar ``timeout`` as connect-and-read, and its
+        read timeout bounds the gap BETWEEN bytes, never the duration of the
+        call. An endpoint that dribbles -- or a proxy holding the connection
+        open -- therefore resets that clock indefinitely, and the request runs
+        unbounded while every log stays silent. Measured against a real
+        provider: 496s elapsed under a configured 240s.
+
+        Streaming the body puts the deadline back in reach: the socket read is
+        still bounded by ``read_timeout`` so a silent peer fails fast, and the
+        elapsed check between chunks bounds a peer that trickles.
+        """
+        deadline = time.monotonic() + deadline_s
+        connect_timeout = min(_CONNECT_TIMEOUT, deadline_s)
+        resp = self.session.post(
+            url,
+            json=json,
+            headers=headers,
+            timeout=(connect_timeout, deadline_s),
+            stream=True,
+        )
+        try:
+            chunks: list[bytes] = []
+            for chunk in resp.iter_content(chunk_size=_READ_CHUNK_BYTES):
+                chunks.append(chunk)
+                if time.monotonic() > deadline:
+                    raise requests.Timeout(
+                        f"exceeded the {deadline_s:.0f}s deadline while reading the "
+                        f"response body ({sum(len(c) for c in chunks)} bytes read)"
+                    )
+            # _content/_content_consumed is how requests itself marks a streamed
+            # body as fully read; setting them lets .json()/.text work normally
+            # downstream instead of raising on an already-consumed stream.
+            resp._content = b"".join(chunks)
+            resp._content_consumed = True
+            return resp
+        finally:
+            resp.close()
+
     def invoke(
         self,
         system: str,
@@ -96,23 +152,41 @@ class OpenAICompatClient(LLMClient):
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         failures: list[str] = []
-        for model in self.models:
+        for attempt, model in enumerate(self.models, start=1):
             t0 = time.perf_counter()
+            logger.info(
+                "llm attempt %d/%d: model=%s deadline=%.0fs",
+                attempt, len(self.models), model, request_timeout,
+            )
             try:
-                resp = self.session.post(
+                resp = self._post_within_deadline(
                     f"{self.base_url}/chat/completions",
                     json={**payload, "model": model},
                     headers=headers,
-                    timeout=request_timeout,
+                    deadline_s=request_timeout,
                 )
             except requests.Timeout as exc:
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                logger.warning(
+                    "llm attempt %d/%d failed: model=%s timeout after %dms (%s)",
+                    attempt, len(self.models), model, elapsed_ms, exc.__class__.__name__,
+                )
                 failures.append(f"{model}: timeout ({exc.__class__.__name__})")
                 continue
             except requests.RequestException as exc:
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                logger.warning(
+                    "llm attempt %d/%d failed: model=%s %s after %dms",
+                    attempt, len(self.models), model, exc.__class__.__name__, elapsed_ms,
+                )
                 failures.append(f"{model}: {exc.__class__.__name__}: {exc}")
                 continue
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             if resp.status_code >= 400:
+                logger.warning(
+                    "llm attempt %d/%d failed: model=%s HTTP %d after %dms",
+                    attempt, len(self.models), model, resp.status_code, elapsed_ms,
+                )
                 failures.append(f"{model}: HTTP {resp.status_code}")
                 continue
             try:
@@ -135,8 +209,22 @@ class OpenAICompatClient(LLMClient):
                 usage = body.get("usage") or {}
                 resp_model = body.get("model") or model
             except (KeyError, IndexError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "llm attempt %d/%d failed: model=%s malformed response (%s) after %dms",
+                    attempt, len(self.models), model, exc.__class__.__name__, elapsed_ms,
+                )
                 failures.append(f"{model}: malformed response ({exc.__class__.__name__})")
                 continue
+            # finish_reason is logged on the SUCCESS path deliberately: a
+            # "length" stop is a 200 carrying a truncated body, so it never
+            # reaches any of the failure branches above, and without this line
+            # the only place it surfaces is the posted summary.
+            logger.info(
+                "llm attempt %d/%d ok: model=%s %dms in=%s out=%s finish=%s",
+                attempt, len(self.models), resp_model, elapsed_ms,
+                usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0,
+                finish_reason or "-",
+            )
             return InvokeResult(
                 text=text,
                 input_tokens=usage.get("prompt_tokens") or 0,
