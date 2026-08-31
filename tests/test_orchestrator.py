@@ -1662,11 +1662,45 @@ class TestRunTrace:
         _, events = self._run(tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS))
         opened = {e["node"] for e in events if e["phase"] == "start"}
         assert opened == {
-            "run", "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks", "chunk",
+            "run", "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks",
+            "chunk", "post",
         }
         assert {e["node"] for e in events if e["phase"] == "ok"} >= {
-            "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks", "chunk", "run",
+            "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks",
+            "chunk", "post", "run",
         }
+
+    def test_posting_that_was_turned_off_says_so_rather_than_looking_unreached(
+        self, tmp_path
+    ):
+        """A stage that was skipped and one that was never reached look
+        identical in a graph built only from what happened, and they mean
+        opposite things: a choice versus a failure upstream."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(
+            tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS), post=False
+        )
+        post = [e for e in events if e["node"] == "post"]
+        assert [e["phase"] for e in post] == ["skip"]
+        assert "disabled" in post[0]["meta"]["reason"]
+        assert forge.summaries == [] and forge.inline_batches == []
+
+    def test_a_post_mode_that_posts_nothing_is_also_a_skip(self, tmp_path):
+        """Control: the skip reason must distinguish WHY, not just that."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        _, events = self._run(
+            tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS),
+            post=True, post_mode="inline",
+        )
+        post = [e for e in events if e["node"] == "post"]
+        assert [e["phase"] for e in post] == ["start", "ok"]
+        assert post[-1]["meta"]["inline"] == 2
+
+    def test_a_failed_post_closes_the_post_node_as_failed(self, tmp_path):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.update({"post_summary", "post_inline"})
+        _, events = self._run(tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert [e["phase"] for e in events if e["node"] == "post"] == ["start", "fail"]
 
     @pytest.mark.parametrize("failing", ["get_pr", "get_diff"])
     def test_a_forge_failure_closes_the_run_as_failed(self, tmp_path, failing):
