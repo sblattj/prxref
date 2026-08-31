@@ -88,7 +88,7 @@ POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 # findings under its own diagnostics.
 MAX_REPORTED_REASONS = 3
 
-_SEVERITY_EMOJI = {"error": "🚨", "warning": "⚠️", "note": "📝"}
+_SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "note": "🟦"}
 
 _REDACTED = "[redacted]"
 
@@ -199,8 +199,8 @@ def redact_for_post(reason: str) -> str:
 _FALLBACK_SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
-    "Files reviewed: {file_count} · errors: {error_count} · "
-    "warnings: {warning_count} · notes: {note_count}\n\n"
+    "Files reviewed: {file_count} · 🟥 {error_count} error · "
+    "🟧 {warning_count} warning · 🟦 {note_count} note\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -658,7 +658,7 @@ def _render_summary(
 
     if findings_active:
         bullets = "\n".join(
-            f"- {_SEVERITY_EMOJI.get(f.severity, '📝')} "
+            f"- {_SEVERITY_MARKERS.get(f.severity, '🟦')} "
             f"`{f.file}:{f.line if f.line > 0 else '—'}` — {f.title}"
             for f in findings_active
         )
@@ -730,10 +730,10 @@ def _failure_reason_lines(reasons: Sequence[str]) -> list[str]:
 
 
 def _format_finding(f: Finding, model: str) -> str:
-    emoji = _SEVERITY_EMOJI.get(f.severity, "📝")
+    marker = _SEVERITY_MARKERS.get(f.severity, "🟦")
     loc = f"{f.file}:{f.line}" if f.line > 0 else f.file
     return (
-        f"🤖 {emoji} **[{f.severity.upper()}] {f.title}** (`{loc}`)\n\n"
+        f"🤖 {marker} **[{f.severity.upper()}] {f.title}** (`{loc}`)\n\n"
         f"{f.body}\n\n"
         f"---\n*Reviewed by prxref · model={model}*"
     )
