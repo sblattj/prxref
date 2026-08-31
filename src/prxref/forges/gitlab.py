@@ -9,7 +9,6 @@ from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from prxref.forges.base import (
     SUMMARY_MARKER,
@@ -20,6 +19,7 @@ from prxref.forges.base import (
     Thread,
     with_summary_marker,
 )
+from prxref.retry_logging import LoggingRetry
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ _GL_URL_RE = re.compile(
 def _make_retry_session() -> requests.Session:
     """Build a requests.Session with bounded retries for transient failures."""
     session = requests.Session()
-    retry = Retry(
+    retry = LoggingRetry(
         total=3,
         connect=3,
         read=3,
