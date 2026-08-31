@@ -310,7 +310,7 @@ class TestScenario2ModelFallback:
                 {
                     "file": "src/auth.py",
                     "line": 2,
-                    "severity": "note",
+                    "severity": "outofscope",
                     "confidence": 0.8,
                     "title": "Token validation note",
                     "body": "Token check is standard.",
