@@ -98,22 +98,41 @@ class FileDiff:
         }
 
 
-_DIFF_GIT_RE = re.compile(r'^diff --git a/(.*?) b/(.*)$')
+# Bitbucket Server / Data Center spells its diff prefixes ``src://`` and
+# ``dst://`` where git uses ``a/`` and ``b/``. Both spellings have to be
+# understood in two places -- the ``diff --git`` header and the ``---``/``+++``
+# operands -- or Server paths keep the prefix and every reported location reads
+# ``dst://pkg/mod.py`` instead of ``pkg/mod.py``.
+_DIFF_GIT_RES = (
+    re.compile(r'^diff --git a/(.*?) b/(.*)$'),
+    re.compile(r'^diff --git src://(.*?) dst://(.*)$'),
+)
+_PATH_PREFIXES = ("a/", "b/", "src://", "dst://")
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _RENAME_FROM_RE = re.compile(r"^rename from (.+)$")
 _RENAME_TO_RE = re.compile(r"^rename to (.+)$")
 
 
+def _match_diff_git(line: str) -> re.Match | None:
+    """Match a ``diff --git`` header in either the git or Bitbucket Server form."""
+    for pattern in _DIFF_GIT_RES:
+        m = pattern.match(line)
+        if m:
+            return m
+    return None
+
+
 def _clean_path(raw: str) -> str | None:
     """Normalize a ``---``/``+++`` path operand: strip quotes, timestamps,
-    and the a//b/ prefix; map /dev/null to None."""
+    and the a//b/ or src:////dst:// prefix; map /dev/null to None."""
     rest = raw.split("\t")[0].rstrip("\r")
     if len(rest) >= 2 and rest.startswith('"') and rest.endswith('"'):
         rest = rest[1:-1]
     if rest == "/dev/null":
         return None
-    if rest.startswith(("a/", "b/")):
-        rest = rest[2:]
+    for prefix in _PATH_PREFIXES:
+        if rest.startswith(prefix):
+            return rest[len(prefix):]
     return rest
 
 
@@ -203,7 +222,7 @@ def parse_unified_diff(diff: str) -> list[FileDiff]:
 
         if line.startswith("diff --git "):
             close_current()
-            m = _DIFF_GIT_RE.match(line)
+            m = _match_diff_git(line)
             old = m.group(1) if m else None
             new = m.group(2) if m else None
             cur = FileDiff(path=new or old or "", old_path=old, new_path=new)
