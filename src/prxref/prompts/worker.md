@@ -8,7 +8,7 @@ Verify every claim against the diff itself. Every finding must cite a file and l
 
 - `error` — the change will break at runtime or is a real bug: crash, wrong result, data loss, security hole, broken contract.
 - `warning` — risk or smell the diff introduces or worsens: race-prone pattern, resource leak, missing error handling, load-bearing duplication.
-- `note` — minor: misleading naming, a TODO without context, dead code the diff adds.
+- `outofscope` — minor: misleading naming, a TODO without context, dead code the diff adds.
 
 ## Confidence
 

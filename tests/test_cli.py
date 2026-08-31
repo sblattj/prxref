@@ -735,7 +735,7 @@ class TestFailOnExitPolicy:
         self, fake_runtime, monkeypatch, capsys
     ):
         monkeypatch.setenv("PRXREF_FAIL_ON", "error")
-        self._install_result(fake_runtime, ["error", "note"])
+        self._install_result(fake_runtime, ["error", "outofscope"])
         code = self._review()
         assert code == 1
         out, err = capsys.readouterr()
@@ -747,7 +747,7 @@ class TestFailOnExitPolicy:
         self, fake_runtime, monkeypatch
     ):
         monkeypatch.setenv("PRXREF_FAIL_ON", "error")
-        self._install_result(fake_runtime, ["warning", "note"])
+        self._install_result(fake_runtime, ["warning", "outofscope"])
         assert self._review() == 0
 
     def test_error_policy_matches_severity_exactly(
