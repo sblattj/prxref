@@ -7,6 +7,47 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-31
+
+The honesty release. What stands on a PR after a re-review now equals the
+latest review, and the summary keeps the promises its findings list makes.
+
+### Added
+
+- **Stale-inline pruning (#17).** A re-review updates the summary in place,
+  but the previous run's inline comments stayed standing — an Approved
+  summary could sit above stale ERROR comments from an earlier,
+  nondeterministic run. Forges may now implement
+  `prune_inline_comments(ref) -> int` (GitHub does; the others follow): the
+  orchestrator calls it before reading threads, so the dedup cannot suppress
+  this run's findings against comments that are about to disappear. Only
+  comments carrying the attribution marker (`Reviewed by prxref`) are ever
+  deleted — a human's comment is not a candidate — and the whole pass is
+  best-effort: a 403 from a different identity's comment, or an unreadable
+  feed, logs and continues rather than aborting the review.
+
+- **Inline accounting in the summary (#16).** The summary itemizes every
+  active finding, but the inline pass could silently post fewer — the
+  `PRXREF_MAX_INLINE_COMMENTS` cap, a forge that rejected the anchor (a 422
+  on a line outside the diff), or a failed batch — with nothing on the PR
+  saying so. When fewer inline comments land than findings are itemized, the
+  summary is re-posted (update-in-place) with a line naming the shortfall and
+  its reasons, e.g. `Inline comments: 13 of 21 findings (6 over the
+  15-comment cap · 2 anchors rejected by the forge).` A failed batch is
+  disclosed the same way.
+
+### Changed
+
+- **The inline slice is severity-ordered.** Findings previously became
+  comments in chunk order, so the cap and rejected anchors cost the run
+  whatever sat at the tail — including error-severity findings. The slice is
+  now error-first, then warning, then outofscope, confidence-descending
+  within each.
+
+- `post_inline_comments`'s return value — the number actually posted — was
+  computed by the forges and discarded by the orchestrator; it now drives
+  the accounting line and the posted-count trace event.
+
 ## [0.8.0] — 2026-08-31
 
 The severity-rename release. The blue bucket is now called `outofscope`.
