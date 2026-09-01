@@ -7,6 +7,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-01
+
+The audit release. Four fixes, every one traced to a live finding by the
+2026-08-31 review-the-reviews audit and verified against real PRs.
+
+### Fixed
+
+- **Truncation advances the fallback chain (#10, PR #23).** A completion cut
+  off by `max_tokens` comes back HTTP 200 with `finish_reason: "length"` and
+  returned as success, so the model chain never advanced. Truncation is now a
+  per-model failure inside the attempt loop; only chain exhaustion returns
+  the truncated result, as a last resort the reviewer already handles.
+
+- **Inline anchors are re-resolved against the diff (#19, PR #25).** A cited
+  line that was merely *an* added line passed alignment even when it belonged
+  to the wrong hunk — accurate claims anchored 10–420 lines from their code.
+  Anchors now snap within a 5-line tolerance, are re-resolved by content
+  overlap when refuted, and post file-level (`line=0`) when unresolvable.
+
+- **Consistent severities for the same pattern (#18, PR #22).** Per-chunk
+  workers decided severity in isolation, so one bug class could arrive as
+  error in one file and note in a sibling. A deterministic pass now
+  normalizes severity across findings sharing a normalized title — same file
+  or not — before the quality gate.
+
+### Changed
+
+- **Reviews are reproducible by default (#11, PR #24).** The effective
+  default sampling temperature is now `0.0` and is sent when the operator
+  sets nothing (an explicit `PRXREF_LLM_TEMPERATURE` still wins), and a new
+  `PRXREF_LLM_SEED` (int >= 0, unset = omitted) seeds OpenAI-compatible
+  requests. Identical diff + identical config now aims for identical
+  findings, which is what `PRXREF_FAIL_ON=error`'s exit code promises.
+
+
 ### Fixed
 
 - **The GitHub prune pass deleted nothing (0.9.0).** The delete route was
