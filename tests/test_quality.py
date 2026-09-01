@@ -11,7 +11,7 @@ from prxref.quality import (
     is_duplicate_of_existing,
     snap_line,
 )
-from prxref.triage import Finding
+from prxref.triage import Finding, added_lines_by_file, parse_unified_diff
 
 
 def _f(**kwargs) -> Finding:
@@ -64,6 +64,99 @@ class TestApplyLineAlign:
         finding = _f(file="a.py", line=10)
         aligned = apply_line_align([finding], {"a.py": {10}})
         assert aligned[0] is finding
+
+
+# The issue #19 drift shape: a multi-hunk file where the model adds the wrong
+# hunk's @@ start to an in-hunk offset. The emitted number is a real added
+# line — of the wrong hunk — so membership validation keeps it, and the posted
+# anchor lands ~170 lines from the code the finding describes.
+MULTI_HUNK_DIFF = """\
+diff --git a/src/functions.php b/src/functions.php
+--- a/src/functions.php
++++ b/src/functions.php
+@@ -1260,1 +1260,5 @@ function handle_request(array $input): void {
+     $stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id');
++    if (!array_key_exists('user_id', $input)) {
++        throw new InvalidArgumentException('user_id missing');
++    }
++    $stmt->execute(['id' => $input['user_id']]);
+@@ -1425,2 +1428,4 @@ function cache_prune(): void {
+     $keys = array_keys($this->items);
++    $ttl = $this->ttl;
++    $this->gc->collect();
+"""
+
+
+class TestHunkAwareAlignment:
+    """Exact added-line members are corroborated (or re-resolved) by content.
+
+    Membership alone cannot catch wrong-hunk citations, so when the parsed
+    hunks are supplied, a member anchor whose hunk shares no tokens with the
+    finding's title+body is refuted and re-resolved to the best token-
+    matching added line elsewhere in the file — or to file-level (0) when
+    nothing matches.
+    """
+
+    def _aligned(self, **kwargs) -> list[Finding]:
+        parsed = parse_unified_diff(MULTI_HUNK_DIFF)
+        defaults = {
+            "file": "src/functions.php",
+            "line": 1429,
+            "title": "user_id used without a guard",
+            "body": (
+                "The added code reads $input['user_id'] without an "
+                "array_key_exists or isset check; add the "
+                "InvalidArgumentException guard here."
+            ),
+        }
+        defaults.update(kwargs)
+        finding = _f(**defaults)
+        return apply_line_align(
+            [finding],
+            added_lines_by_file(parsed),
+            files=parsed,
+        )
+
+    def test_wrong_hunk_member_is_reresolved_by_content(self):
+        aligned = self._aligned()
+        assert aligned[0].line == 1261
+
+    def test_refuted_member_with_no_match_anywhere_drops_to_file_level(self):
+        aligned = self._aligned(
+            title="Unhandled edge",
+            body="This branch can crash when empty.",
+        )
+        assert aligned[0].line == 0
+
+    def test_corroborated_member_is_kept(self):
+        aligned = self._aligned(
+            title="ttl not applied to gc sweep",
+            body="cache_prune reads ttl but never passes it to collect().",
+        )
+        assert aligned[0].line == 1429
+
+    def test_alignment_without_files_keeps_membership_behavior(self):
+        finding = _f(file="src/functions.php", line=1429)
+        aligned = apply_line_align(
+            [finding], {"src/functions.php": {1429, 1261}}
+        )
+        assert aligned[0].line == 1429
+
+    def test_file_level_citation_stays_file_level(self):
+        finding = _f(file="src/functions.php", line=0)
+        parsed = parse_unified_diff(MULTI_HUNK_DIFF)
+        aligned = apply_line_align(
+            [finding], added_lines_by_file(parsed), files=parsed
+        )
+        assert aligned[0].line == 0
+
+
+class TestSnapTolerance:
+    def test_distance_four_snaps_at_default_tolerance(self):
+        assert snap_line(1426, {1430}) == 1430
+
+    def test_distance_six_drops_to_file_level(self):
+        assert snap_line(1424, {1430}) == 0
 
 
 class TestThreadDedup:

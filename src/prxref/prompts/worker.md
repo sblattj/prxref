@@ -59,4 +59,4 @@ Return exactly one JSON object, no prose, no fences:
 }
 ```
 
-`file` is a path from the diff headers. `line` is the 1-based line number in the NEW file. Emit `"findings": []` when the chunk is clean.
+`file` is a path from the diff headers. `line` is the 1-based line number in the NEW file: take it from the `@@` header of the hunk containing the cited code — that header's `+` start counted forward past context and `+` lines only — never from another hunk's header. Emit `"findings": []` when the chunk is clean.
