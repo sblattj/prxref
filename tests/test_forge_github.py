@@ -357,7 +357,13 @@ def test_prune_deletes_only_attributed_comments():
     removed = ForgeImpl(session=session).prune_inline_comments(_ref())
 
     assert removed == 2
-    deleted_ids = {c.args[0].rsplit("/", 1)[-1] for c in session.delete.call_args_list}
+    deleted_urls = [c.args[0] for c in session.delete.call_args_list]
+    # The delete route carries NO pull number: /pulls/comments/{id}. The
+    # listing URL does, and reusing it 404s every delete.
+    for url in deleted_urls:
+        assert "/repos/acme/api/pulls/comments/" in url
+        assert "/pulls/42/" not in url
+    deleted_ids = {url.rsplit("/", 1)[-1] for url in deleted_urls}
     assert deleted_ids == {"11", "13"}
 
 

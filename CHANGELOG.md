@@ -7,6 +7,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **The GitHub prune pass deleted nothing (0.9.0).** The delete route was
+  built from the listing URL, which carries the pull number
+  (`/pulls/N/comments/{id}`); the delete route lives outside that namespace
+  (`/pulls/comments/{id}`), so every DELETE 404'd while the run reported
+  partial success. Found live against a real PR; the mocked-session test
+  now pins the endpoint's shape.
+
 ## [0.9.0] — 2026-08-31
 
 The honesty release. What stands on a PR after a re-review now equals the
