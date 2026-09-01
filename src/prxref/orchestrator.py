@@ -377,7 +377,7 @@ def orchestrate_review(
         logger.warning("list_threads failed (best-effort): %s", e)
         threads = []
 
-    findings = apply_line_align(findings, added_lines_by_file(files))
+    findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
