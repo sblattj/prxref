@@ -18,8 +18,15 @@ LLM / pipeline:
                                 next model, so a run can exceed it. Must be
                                 greater than 0 (default 45.0)
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
-                                >= 0, no upper bound (provider-specific);
-                                empty = omit from the request
+                                >= 0, no upper bound (provider-specific).
+                                Unset or empty sends the built-in default
+                                0.0 rather than omitting the parameter, so
+                                an identical diff reviews identically by
+                                default; an operator-set value wins
+  PRXREF_LLM_SEED               Optional integer sampling seed handed to
+                                OpenAI-compatible backends as top-level
+                                "seed" in the request; >= 0 (0 is a valid
+                                seed); empty or unset omits it entirely
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped;
                                 a probability in [0.0, 1.0] (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -135,6 +142,11 @@ _DEFAULTS: dict[str, object] = {
     "llm_max_tokens": 4096,
     "llm_timeout": 45.0,
     "llm_temperature": "",
+    # ``None`` is the declared unset: no seed is configured, so none is sent.
+    # Unlike ``llm_temperature`` (whose "" marker survives to the backend that
+    # owns the wire decision), the seed is a first-class int key — coerced and
+    # range-checked here — because "no seed" is representable in its own type.
+    "llm_seed": None,
     "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
@@ -168,7 +180,7 @@ _DEFAULTS: dict[str, object] = {
 }
 
 _INT_KEYS = frozenset({
-    "max_error_findings", "max_chunks", "llm_max_tokens",
+    "max_error_findings", "max_chunks", "llm_max_tokens", "llm_seed",
     "chunk_token_budget", "chunk_max_files", "chunk_context_lines",
     "max_workers", "max_inline_comments",
 })
@@ -206,8 +218,9 @@ class _Range(NamedTuple):
     empty completion), for a timeout (every request fails instantly), for a
     worker count (``ThreadPoolExecutor`` rejects it) and for a chunk count
     (``build_chunks`` raises on the overflow branch). Zero IS meaningful for the
-    error cap, where it means "report no errors", and for the context-line
-    count, where it means "emit the changed lines only".
+    error cap, where it means "report no errors", for the context-line count,
+    where it means "emit the changed lines only", and for the sampling seed,
+    where 0 is a perfectly valid seed.
     """
 
     low: float
@@ -246,6 +259,7 @@ _RANGES: dict[str, _Range] = {
     "chunk_max_files": _Range(0),
     "chunk_context_lines": _Range(0, low_inclusive=True),
     "max_error_findings": _Range(0, low_inclusive=True),
+    "llm_seed": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
 }
 
@@ -297,9 +311,16 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
     offending value. Naming the environment variable unconditionally sent an
     operator who typed ``--max-chunks 0`` to hunt for a ``PRXREF_MAX_CHUNKS``
     they had never set.
+
+    A ``None`` value is the declared unset for keys whose default omits them
+    from the request (``llm_seed``): there is no number to range-check, and
+    "not configured" is not a violation. Every value that is not ``None`` —
+    including one smuggled in through an override — is still checked.
     """
     for key, rng in sorted(_RANGES.items()):
         value = cfg[key]
+        if value is None:
+            continue
         finite = (
             isinstance(value, (int, float))
             and not isinstance(value, bool)

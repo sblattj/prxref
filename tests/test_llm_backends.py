@@ -100,7 +100,8 @@ class _PayloadCapturingSession:
 
 
 def _client_capturing_payload(
-    models=("m1",), reasoning_effort=None, fail_first=False, temperature=None
+    models=("m1",), reasoning_effort=None, fail_first=False, temperature=None,
+    seed=None,
 ):
     """Build an OpenAICompatClient whose session records posted payloads; returns (client, captured)."""
     captured: list[dict] = []
@@ -112,6 +113,7 @@ def _client_capturing_payload(
         default_timeout=45.0,
         reasoning_effort=reasoning_effort,
         temperature=temperature,
+        seed=seed,
     )
     return client, captured
 
@@ -261,6 +263,33 @@ class TestTemperature:
         assert [c.get("temperature") for c in captured] == [0.7, 0.7]
 
 
+class TestSeed:
+    """Constructor-level seed handling mirrors temperature: None omits the key,
+    and 0 is a real seed, never an omission."""
+
+    def test_absent_by_default(self):
+        client, captured = _client_capturing_payload()
+        client.invoke(system="s", user="u")
+        assert "seed" not in captured[0]
+
+    def test_sent_when_configured(self):
+        client, captured = _client_capturing_payload(seed=7)
+        client.invoke(system="s", user="u")
+        assert captured[0]["seed"] == 7
+
+    def test_zero_is_a_real_value_not_an_omission(self):
+        client, captured = _client_capturing_payload(seed=0)
+        client.invoke(system="s", user="u")
+        assert captured[0]["seed"] == 0
+
+    def test_applies_to_every_model_in_the_chain(self):
+        client, captured = _client_capturing_payload(
+            models=["a", "b"], seed=7, fail_first=True
+        )
+        client.invoke(system="s", user="u")
+        assert [c.get("seed") for c in captured] == [7, 7]
+
+
 class TestNoShippedDefaults:
     def test_unset_endpoint_raises_config_error(self, monkeypatch):
         for v in ("PRXREF_LLM_BASE_URL", "PRXREF_LLM_MODELS", "PRXREF_LLM_API_KEY"):
@@ -374,10 +403,19 @@ class TestBudgetKnobsFromConfig:
         # A deadline smaller than the connect budget clamps it.
         assert s.calls[0]["timeout"][0] <= 3.0
 
-    def test_temperature_unset_is_omitted_from_the_payload(self):
+    def test_default_temperature_is_sent_as_zero(self):
+        """The reproducibility default: an operator who configured nothing
+        still gets temperature 0.0 on the wire. This is the fix for the
+        vanished-finding report — identical diff, same model, same verdict —
+        and it only holds if the field actually reaches the request."""
         s = _ScriptedSession(_resp())
         create_llm_client(session=s).invoke("sys", "usr")
-        assert "temperature" not in s.calls[0]["json"]
+        assert s.calls[0]["json"]["temperature"] == 0.0
+
+    def test_the_factory_resolves_the_default_constant(self):
+        client = create_llm_client()
+        assert client.temperature == prxref.llm_backends.DEFAULT_TEMPERATURE == 0.0
+        assert client.seed is None
 
     def test_temperature_from_env_reaches_the_payload(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "0.35")
@@ -385,11 +423,49 @@ class TestBudgetKnobsFromConfig:
         create_llm_client(session=s).invoke("sys", "usr")
         assert s.calls[0]["json"]["temperature"] == 0.35
 
-    def test_empty_temperature_string_is_still_an_omission(self, monkeypatch):
+    def test_empty_temperature_env_reads_as_the_default(self, monkeypatch):
+        """The same rule as every other env read: empty = unset, and unset now
+        resolves to the 0.0 default rather than an omission."""
         monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "   ")
         s = _ScriptedSession(_resp())
         create_llm_client(session=s).invoke("sys", "usr")
-        assert "temperature" not in s.calls[0]["json"]
+        assert s.calls[0]["json"]["temperature"] == 0.0
+
+    def test_seed_unset_is_omitted_from_the_payload(self):
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert "seed" not in s.calls[0]["json"]
+
+    def test_seed_from_env_reaches_the_payload_as_an_int(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_SEED", "42")
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert s.calls[0]["json"]["seed"] == 42
+        assert isinstance(s.calls[0]["json"]["seed"], int)
+
+    def test_zero_seed_is_legal_and_reaches_the_payload(self, monkeypatch):
+        """0 is a valid seed; only an absent value means "omit the key"."""
+        monkeypatch.setenv("PRXREF_LLM_SEED", "0")
+        s = _ScriptedSession(_resp())
+        create_llm_client(session=s).invoke("sys", "usr")
+        assert s.calls[0]["json"]["seed"] == 0
+
+    def test_seed_from_cfg_beats_env(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_SEED", "3")
+        s = _ScriptedSession(_resp())
+        create_llm_client({"llm_seed": 9}, session=s).invoke("sys", "usr")
+        assert s.calls[0]["json"]["seed"] == 9
+
+    def test_malformed_seed_names_the_variable(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_SEED", "deterministic")
+        with pytest.raises(ConfigError, match="PRXREF_LLM_SEED"):
+            create_llm_client()
+
+    def test_negative_seed_rejected_at_the_factory_too(self, monkeypatch):
+        """Config already rejects it; the factory re-checks for standalone use."""
+        monkeypatch.setenv("PRXREF_LLM_SEED", "-1")
+        with pytest.raises(ConfigError, match="PRXREF_LLM_SEED"):
+            create_llm_client()
 
     def test_malformed_temperature_names_the_variable(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "hot")
@@ -449,6 +525,26 @@ class TestBudgetKnobsFromConfig:
         create_llm_client().invoke("sys", "usr")
         assert captured[0]["timeout"] == 7.5
         assert captured[0]["temperature"] == 0.4
+
+    def test_litellm_call_kwargs_carry_the_configured_seed_too(self, monkeypatch):
+        """The seed shares the temperature's path: factory -> client -> kwargs."""
+        captured: list[dict] = []
+
+        def fake_completion(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=None,
+                model="m",
+            )
+
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "litellm")
+        monkeypatch.setenv("PRXREF_LLM_SEED", "77")
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        create_llm_client().invoke("sys", "usr")
+        assert captured[0]["seed"] == 77
 
 
 class TestLiteLLMClient:
@@ -519,6 +615,23 @@ class TestLiteLLMClient:
         )
         LiteLLMClient(models=["p"], temperature=0.25).invoke("sys", "usr")
         assert captured[0]["temperature"] == 0.25
+
+    def test_seed_sent_when_configured(self, monkeypatch):
+        captured = []
+
+        def fake_completion(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="lit-ok"))],
+                usage=None,
+                model="m",
+            )
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        LiteLLMClient(models=["p"], seed=11).invoke("sys", "usr")
+        assert captured[0]["seed"] == 11
 
 
 _ABSENT = object()
