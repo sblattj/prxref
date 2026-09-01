@@ -622,9 +622,12 @@ class TestLLMBudgetKnobsEndToEnd:
         )
         cli._run_review(self.PR_URL, post=False)
 
-    def test_defaults_send_todays_budget_and_no_temperature(
+    def test_defaults_send_budget_temperature_0_and_no_seed(
         self, monkeypatch
     ):
+        """The reproducibility contract, end to end: with nothing configured,
+        temperature 0.0 IS on the wire (that is the fix for the vanished
+        error-severity finding) and no seed is sent."""
         server = MockOpenAIServer()
         base_url = server.start()
         try:
@@ -632,7 +635,8 @@ class TestLLMBudgetKnobsEndToEnd:
             assert len(server.requests) == 1
             payload = server.requests[0]["payload"]
             assert payload["max_tokens"] == 4096
-            assert "temperature" not in payload
+            assert payload["temperature"] == 0.0
+            assert "seed" not in payload
         finally:
             server.stop()
 
@@ -678,6 +682,17 @@ class TestLLMBudgetKnobsEndToEnd:
             payload = server.requests[0]["payload"]
             assert payload["max_tokens"] == 8192
             assert payload["temperature"] == 0.3
+        finally:
+            server.stop()
+
+    def test_configured_seed_reaches_the_request(self, monkeypatch):
+        server = MockOpenAIServer()
+        base_url = server.start()
+        try:
+            self._run(monkeypatch, base_url, {"PRXREF_LLM_SEED": "1234"})
+            payload = server.requests[0]["payload"]
+            assert payload["seed"] == 1234
+            assert isinstance(payload["seed"], int)
         finally:
             server.stop()
 

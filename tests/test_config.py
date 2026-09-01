@@ -37,6 +37,7 @@ class TestLoadConfigDefaults:
         assert cfg["llm_max_tokens"] == 4096
         assert cfg["llm_timeout"] == 45.0
         assert cfg["llm_temperature"] == ""
+        assert cfg["llm_seed"] is None
         assert cfg["bitbucket_token"] == ""
         assert cfg["github_token"] == ""
         assert cfg["gitlab_token"] == ""
@@ -157,6 +158,67 @@ class TestLLMBudgetKnobs:
         assert cfg["llm_max_tokens"] == 1024
         assert cfg["llm_timeout"] == 5.0
         assert cfg["llm_temperature"] == "0.9"
+
+
+class TestLLMSeedConfig:
+    """PRXREF_LLM_SEED: an int key whose unset state is a first-class value.
+
+    Unlike ``llm_temperature`` (whose "" unset marker survives to the backend
+    that owns the wire decision), "no seed" is representable in the seed's
+    own type — ``None`` — so the seed is coerced and range-checked here, and
+    ``_check_ranges`` skips it only while it is unset.
+    """
+
+    def test_default_is_none_the_declared_unset(self):
+        assert config._DEFAULTS["llm_seed"] is None
+        assert load_config()["llm_seed"] is None
+
+    def test_env_coercion_yields_an_int(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_SEED", "42")
+        cfg = load_config()
+        assert cfg["llm_seed"] == 42
+        assert isinstance(cfg["llm_seed"], int)
+
+    def test_zero_is_a_legal_seed(self, monkeypatch):
+        """0 is a valid provider seed; the inclusive low bound exists for it."""
+        monkeypatch.setenv("PRXREF_LLM_SEED", "0")
+        assert load_config()["llm_seed"] == 0
+
+    @pytest.mark.parametrize("raw", ["-1", "-42"])
+    def test_negative_seed_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_LLM_SEED", raw)
+        with pytest.raises(ConfigError, match="PRXREF_LLM_SEED"):
+            load_config()
+
+    @pytest.mark.parametrize("raw", ["deterministic", "7.5"])
+    def test_malformed_seed_names_the_variable(self, monkeypatch, raw):
+        """Non-int input is the exit-2 configuration error, not a crash —
+        and ``7.5`` is rejected here rather than silently truncated."""
+        monkeypatch.setenv("PRXREF_LLM_SEED", raw)
+        with pytest.raises(ConfigError, match="PRXREF_LLM_SEED"):
+            load_config()
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_SEED", "   ")
+        assert load_config()["llm_seed"] is None
+
+    def test_no_upper_bound_is_invented(self, monkeypatch):
+        """A ceiling would be provider-specific; a huge seed is simply a seed."""
+        monkeypatch.setenv("PRXREF_LLM_SEED", "2147483647")
+        assert load_config()["llm_seed"] == 2_147_483_647
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_SEED", "1")
+        assert load_config(llm_seed=9)["llm_seed"] == 9
+
+    def test_an_override_cannot_smuggle_a_negative_seed(self):
+        """Still rejected, and reported as the override it came from."""
+        with pytest.raises(ConfigError, match="llm_seed") as exc:
+            load_config(llm_seed=-1)
+        assert "PRXREF_LLM_SEED" not in str(exc.value)
+
+    def test_the_env_name_is_derived_for_the_suite_wide_clear(self):
+        assert "PRXREF_LLM_SEED" in prxref_env_names()
 
 
 class TestBudgetKnobRanges:
@@ -496,14 +558,16 @@ class TestPreExistingNumericRanges:
         sets, written down here so the next reader does not file it as an
         oversight and "fix" it.
 
-        It is stored as a string because "unset" and "0.0" are different
-        requests: an empty value omits ``temperature`` from the payload
-        entirely — some endpoints reject it alongside reasoning parameters —
-        and no float can encode "omit me". Coercing it would force a numeric
-        default and destroy that distinction. Its parse and its bound are not
-        skipped, only moved: ``llm_backends._float_setting`` performs both when
-        the client is built, and raises the same ``ConfigError`` naming the
-        same variable.
+        It is stored as a string because the config layer records only what
+        the operator supplied: "" is the unset marker, and the wire decision
+        belongs to ``llm_backends.create_llm_client``, which owns payload
+        construction. Since the reproducibility default that client now
+        resolves an unset value to ``DEFAULT_TEMPERATURE`` (0.0, SENT), the
+        distinction the string preserves is "the operator said nothing" —
+        which no float can encode, and which is what lets an explicit value
+        win verbatim. Its parse and its bound are not skipped, only moved:
+        ``llm_backends._float_setting`` performs both when the client is
+        built, and raises the same ``ConfigError`` naming the same variable.
         """
         assert config._DEFAULTS["llm_temperature"] == ""
         assert "llm_temperature" not in config._INT_KEYS | config._FLOAT_KEYS
