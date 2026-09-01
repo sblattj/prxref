@@ -56,7 +56,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import reviewer
-from .forges.base import Forge, InlineComment, PRData, PRRef
+from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import active, apply_line_align, apply_quality_gate, apply_thread_dedup
 from .trace import Tracer, get_tracer
@@ -89,6 +89,11 @@ POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 MAX_REPORTED_REASONS = 3
 
 _SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "outofscope": "🟦"}
+
+# Inline-comment priority: the most severe findings get the anchor first, so
+# a cap or a rejected anchor costs the run its least-important comments
+# rather than whatever happened to sit at the tail of chunk order.
+_SEVERITY_RANK = {"error": 0, "warning": 1, "outofscope": 2}
 
 _REDACTED = "[redacted]"
 
@@ -363,6 +368,9 @@ def orchestrate_review(
 
     findings = [f for r in results if not r["error"] for f in r["findings"]]
 
+    if post and post_mode in POST_INLINE_MODES:
+        _prune_stale_inline_comments(forge, ref)
+
     try:
         threads = forge.list_threads(ref)
     except Exception as e:  # noqa: BLE001
@@ -416,21 +424,53 @@ def orchestrate_review(
             logger.error("post_summary failed: %s", e)
     # A summary-mode run still requires the summary to have landed before the
     # inline batch rides on it; an inline-mode run has no summary to gate on.
+    inline_attempted = 0
+    inline_failed = False
     if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
+        ordered = sorted(
+            findings_active,
+            key=lambda f: (_SEVERITY_RANK.get(f.severity, 3), -f.confidence),
+        )
         comments = [
             InlineComment(
                 path=f.file,
                 line=f.line,
                 body=_format_finding(f, model),
             )
-            for f in findings_active[:max_inline_comments]
+            for f in ordered[:max_inline_comments]
         ]
+        inline_attempted = len(comments)
         try:
-            forge.post_inline_comments(ref, comments)
+            inline_posted = forge.post_inline_comments(ref, comments)
             posted = True
-            inline_posted = len(comments)
         except Exception as e:  # noqa: BLE001
             logger.error("post_inline_comments failed: %s", e)
+            inline_failed = True
+
+    # The summary itemizes every active finding, so when the inline pass left
+    # some of them without an anchor the summary has to say so — otherwise it
+    # promises a per-finding comment the PR never received. The counts only
+    # exist after posting, so the disclosure rides a second post_summary call,
+    # which the forges already implement as an update-in-place.
+    if (
+        post_summary_wanted and posted and post_inline_wanted
+        and len(findings_active) > inline_posted
+    ):
+        refreshed = _render_summary(
+            pr, files, verdict, findings_active, model,
+            input_tokens, output_tokens, elapsed_ms,
+            chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
+            failure_reasons=[r["error"] for r in results if r["error"]],
+            include_verdict=post_verdict,
+            inline_accounting=_inline_accounting(
+                len(findings_active), inline_attempted, inline_posted,
+                failed=inline_failed, cap=max_inline_comments,
+            ),
+        )
+        try:
+            forge.post_summary(ref, refreshed)
+        except Exception as e:  # noqa: BLE001
+            logger.error("summary re-post with inline accounting failed: %s", e)
 
     if post and (post_summary_wanted or post_inline_wanted):
         tracer.event(
@@ -462,7 +502,56 @@ def _elapsed_ms(t0: float) -> int:
 
 
 def _attribution(model: str, tokens: int, elapsed_ms: int) -> str:
-    return f"Reviewed by prxref · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
+    return f"{ATTRIBUTION_MARKER} · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
+
+
+def _prune_stale_inline_comments(forge: Forge, ref: PRRef) -> None:
+    """Call the forge's optional stale-inline cleanup, before dedup reads threads.
+
+    The order is load-bearing: pruning after ``list_threads`` would let the
+    thread dedup suppress this run's findings as already-discussed and then
+    delete the very comments it suppressed them against, removing the finding
+    from the PR entirely. The capability is optional — forges without it and
+    the duck-typed test fakes are skipped via getattr — and best-effort: a
+    prune failure is logged, never raised, because cleanup must not abort the
+    review that follows it.
+    """
+    prune = getattr(forge, "prune_inline_comments", None)
+    if not callable(prune):
+        return
+    try:
+        removed = prune(ref)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("prune_inline_comments failed (best-effort): %s", e)
+        return
+    if removed:
+        logger.info("pruned %d stale inline comment(s) before posting", removed)
+
+
+def _inline_accounting(
+    active: int, attempted: int, posted: int, *, failed: bool, cap: int
+) -> str:
+    """Render the claimed-vs-posted inline reconciliation line.
+
+    The summary itemizes every active finding; when the inline pass leaves
+    some of them without an anchor — the cap, a forge that rejected the
+    position, or a failed batch — this line keeps the summary's promise
+    honest instead of silently itemizing comments that never landed.
+    """
+    if failed:
+        return (
+            f"Inline comments: posting failed — 0 of {active} findings have one."
+        )
+    reasons: list[str] = []
+    capped = max(0, active - attempted)
+    rejected = max(0, attempted - posted)
+    if capped:
+        reasons.append(f"{capped} over the {cap}-comment cap")
+    if rejected:
+        plural = "s" if rejected != 1 else ""
+        reasons.append(f"{rejected} anchor{plural} rejected by the forge")
+    detail = " · ".join(reasons) if reasons else "unposted"
+    return f"Inline comments: {posted} of {active} findings ({detail})."
 
 
 HEARTBEAT_SECONDS = 30.0
@@ -643,6 +732,7 @@ def _render_summary(
     chunks_failed: int = 0,
     failure_reasons: Sequence[str] = (),
     include_verdict: bool = True,
+    inline_accounting: str | None = None,
 ) -> str:
     try:
         template = reviewer.load_prompt("summary")
@@ -664,6 +754,8 @@ def _render_summary(
         )
     else:
         bullets = "No findings — nice work."
+    if inline_accounting:
+        bullets = f"{bullets}\n\n{inline_accounting}"
 
     attribution = _attribution(
         model, input_tokens + output_tokens, elapsed_ms,
