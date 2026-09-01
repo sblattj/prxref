@@ -13,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from prxref.retry_logging import LoggingRetry
 
 from .base import (
+    ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
     FeedReadError,
     InlineComment,
@@ -333,3 +334,50 @@ class ForgeImpl:
             )
 
         return threads
+
+    def prune_inline_comments(self, ref: PRRef) -> int:
+        """Delete prxref-attributed inline comments; returns the count removed.
+
+        A re-review updates the summary in place, but the previous run's
+        inline comments stayed standing — so a PR could carry an Approved
+        summary above stale ERROR-severity comments from an earlier,
+        nondeterministic run. Deleting our own comments first keeps what
+        stands on the PR equal to the latest review.
+
+        Only comments whose body carries the attribution marker are
+        candidates, so a human's comment is never touched. A delete the token
+        is not allowed to perform (403 from a different identity's comment)
+        is logged and skipped, and a feed that cannot be read ends the prune
+        with what it already removed: best-effort, because a cleanup must
+        never abort the review that follows it.
+        """
+        list_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
+        headers = self._headers(ref.host)
+        removed = 0
+        try:
+            for comments in self._iter_comment_pages(ref, list_url, headers):
+                for comment in comments:
+                    if ATTRIBUTION_MARKER not in (comment.get("body") or ""):
+                        continue
+                    comment_id = comment.get("id")
+                    if comment_id is None:
+                        continue
+                    resp = self.session.delete(
+                        f"{list_url}/{comment_id}", headers=headers
+                    )
+                    if resp.ok:
+                        removed += 1
+                    else:
+                        logger.warning(
+                            "could not prune inline comment %s on %s/%s#%s "
+                            "(HTTP %s): %s",
+                            comment_id, ref.owner, ref.repo, ref.number,
+                            resp.status_code, _response_detail(resp),
+                        )
+        except FeedReadError as e:
+            logger.warning(
+                "prune of review comments on %s/%s#%s ended early after %d "
+                "removals (best-effort): %s",
+                ref.owner, ref.repo, ref.number, removed, e,
+            )
+        return removed
