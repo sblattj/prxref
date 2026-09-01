@@ -6,7 +6,10 @@ Four passes run before posting:
    then corroborate exact ``+``-line members against the file's hunks by
    content, so an anchor that is a valid added line of the WRONG hunk
    (issue #19's drift shape) is re-resolved or demoted to file-level
-   instead of posting at a wrong position.
+   instead of posting at a wrong position. Corroboration is line-level:
+   an anchor survives only when it ties the file's best evidence match
+   or sits within tolerance of it, and a blank or pure-punctuation
+   anchor never survives while any token-bearing added line exists.
 2. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive tokens).
 3. ``apply_severity_consistency``: findings sharing one normalized title —
@@ -29,7 +32,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 from .forges.base import Thread
-from .triage import FileDiff, Finding, Hunk
+from .triage import DiffLine, FileDiff, Finding, Hunk
 
 SEVERITIES: frozenset[str] = frozenset({"error", "warning", "outofscope"})
 
@@ -70,10 +73,6 @@ def snap_line(
     return 0
 
 
-def _hunk_text(hunk: Hunk) -> str:
-    return "\n".join(ln.text for ln in hunk.lines)
-
-
 def _hunk_containing(hunks: Sequence[Hunk], line: int) -> Hunk | None:
     """The hunk whose new-file span holds ``line``, or None."""
     for h in hunks:
@@ -82,58 +81,137 @@ def _hunk_containing(hunks: Sequence[Hunk], line: int) -> Hunk | None:
     return None
 
 
-def _realign_member(finding: Finding, hunks: Sequence[Hunk]) -> int:
+def _line_at(hunk: Hunk, line: int) -> DiffLine | None:
+    """The hunk body line rendered at new-file ``line``, or None."""
+    for ln in hunk.lines:
+        if ln.kind != "-" and ln.new_line == line:
+            return ln
+    return None
+
+
+def _line_tokens(ln: DiffLine) -> set[str]:
+    return _tokens(ln.text, split_compounds=True)
+
+
+_PUNCT_RE = re.compile(r"[A-Za-z0-9]")
+
+
+def _is_blankish(ln: DiffLine) -> bool:
+    """True for blank or pure-punctuation lines (no alphanumeric at all).
+
+    Deliberately narrower than "no content tokens": a real code line whose
+    identifiers are below the 4-char token floor (``$ttl = $this->ttl;``)
+    is not a blank anchor and stays eligible for the tolerance reprieve.
+    """
+    return _PUNCT_RE.search(ln.text) is None
+
+
+def _line_is_blankish(hunks: Sequence[Hunk], line: int) -> bool:
+    for h in hunks:
+        ln = _line_at(h, line)
+        if ln is not None:
+            return _is_blankish(ln)
+    return False
+
+
+def _file_has_token_bearing_add(hunks: Sequence[Hunk]) -> bool:
+    return any(
+        ln.kind == "+" and ln.new_line is not None and _line_tokens(ln)
+        for h in hunks
+        for ln in h.lines
+    )
+
+
+def _realign_member(
+    finding: Finding,
+    hunks: Sequence[Hunk],
+    tolerance: int = DEFAULT_LINE_TOLERANCE,
+) -> int:
     """Re-resolve an exact ``+``-line member anchor by content, or keep it.
 
-    Membership alone cannot catch issue #19's drift: a model that adds the
-    wrong hunk's ``@@`` start to an in-hunk offset emits a number that IS a
-    valid added line, of the wrong hunk. The one checkable property left is
-    content correspondence — the finding's own evidence tokens (title +
-    body, minus stopwords) must occur in the anchor hunk's text. Zero
-    overlap refutes the anchor: it re-anchors to the best token-matching
-    added line elsewhere in the file (context lines score too; the target
-    is the nearest ``+`` line to the best match), or drops to file-level 0
-    when no line matches anywhere. Non-empty overlap corroborates the
-    anchor and the citation stands.
+    Membership alone cannot catch drift: a model that adds the wrong
+    hunk's ``@@`` start to an in-hunk offset emits a number that IS a
+    valid added line, of the wrong hunk or of the wrong construct. The
+    checkable property is line-level content correspondence. A blank or
+    pure-punctuation anchor never survives while any token-bearing added
+    line exists in the file. Any other anchor survives only when it ties
+    the file's best evidence match — the non-removed line sharing the
+    most claim evidence — or sits within ``tolerance`` of that line, so
+    the cited code is still visible in the posted comment card.
+    Otherwise the anchor is re-resolved to the best-matching added line,
+    ranked by breadth of shared evidence tokens, then by the most
+    specific (longest) shared token, then by proximity to the citation;
+    the anchor's own hunk competes like any other. When no line matches
+    the evidence anywhere, the finding drops to file-level 0.
+
+    Evidence tokens come from title + body with backticked-style
+    ``path:line`` citation strings stripped (so a ``file.js:31`` mention
+    cannot collide with path words) and compound identifiers split into
+    their snake/camel parts (so ``wp_ajax_nopriv_avatar_upload`` can
+    answer a claim about "nopriv avatar upload").
     """
-    ftoks = _tokens(f"{finding.title} {finding.body}")
+    ftoks = _evidence_tokens(f"{finding.title} {finding.body}")
     if not ftoks:
         return finding.line
     anchor = _hunk_containing(hunks, finding.line)
-    if anchor is not None and ftoks & _tokens(_hunk_text(anchor)):
+    anchor_ln = _line_at(anchor, finding.line) if anchor else None
+    if (
+        anchor_ln is not None
+        and _is_blankish(anchor_ln)
+        and not _file_has_token_bearing_add(hunks)
+    ):
         return finding.line
-    best_line, best_key = 0, (0, 0)
-    for h in hunks:
-        if h is anchor:
-            continue
-        scored = [
-            (len(ftoks & _tokens(ln.text)), -abs((ln.new_line or 0) - finding.line), ln)
-            for ln in h.lines
-            if ln.kind != "-" and ln.new_line is not None
-        ]
-        scored = [s for s in scored if s[0] > 0]
-        if not scored:
-            continue
-        _, _, best = max(scored, key=lambda s: (s[0], s[1]))
-        if best.kind == "+":
-            target = best
-        else:
-            adds = [
-                ln for ln in h.lines
-                if ln.kind == "+" and ln.new_line is not None
-            ]
-            if not adds:
-                continue
-            target = min(
-                adds, key=lambda a: abs((a.new_line or 0) - (best.new_line or 0))
-            )
-        key = (
-            len(ftoks & _tokens(best.text)),
-            -abs((target.new_line or 0) - finding.line),
+    best = _best_candidate(hunks, ftoks, finding.line)
+    if anchor_ln is not None and not _is_blankish(anchor_ln) and best is not None:
+        anchor_shared = ftoks & _line_tokens(anchor_ln)
+        anchor_key = (
+            (len(anchor_shared), max(map(len, anchor_shared)))
+            if anchor_shared
+            else (0, 0)
         )
-        if key > best_key:
-            best_key, best_line = key, target.new_line or 0
-    return best_line
+        if anchor_key >= best[0] or abs(
+            (anchor_ln.new_line or 0) - (best[1].new_line or 0)
+        ) <= tolerance:
+            return finding.line
+    if best is None:
+        return 0
+    target = best[1]
+    if target.kind == "+":
+        return target.new_line or 0
+    adds = [
+        ln for h in hunks for ln in h.lines
+        if ln.kind == "+" and ln.new_line is not None
+    ]
+    if not adds:
+        return 0
+    return min(
+        adds, key=lambda a: abs((a.new_line or 0) - (target.new_line or 0))
+    ).new_line or 0
+
+
+def _best_candidate(
+    hunks: Sequence[Hunk], ftoks: set[str], citation: int
+) -> tuple[tuple[int, int], DiffLine] | None:
+    """The non-removed line sharing the most claim evidence.
+
+    Ranked by shared-token breadth, then longest shared token, then
+    proximity to the citation line. Context lines can win; callers move
+    a context winner to its nearest added line before anchoring.
+    """
+    candidates: list[tuple[tuple[int, int], int, DiffLine]] = []
+    for h in hunks:
+        for ln in h.lines:
+            if ln.kind == "-" or ln.new_line is None:
+                continue
+            shared = ftoks & _line_tokens(ln)
+            if not shared:
+                continue
+            key = (len(shared), max(map(len, shared)))
+            candidates.append((key, -abs(ln.new_line - citation), ln))
+    if not candidates:
+        return None
+    top = max(candidates, key=lambda c: (c[0], c[1]))
+    return top[0], top[2]
 
 
 def apply_line_align(
@@ -149,9 +227,12 @@ def apply_line_align(
     to file-level (0) — the summary still carries the finding, at an
     honest location. Content pass: an exact ``+``-line member is
     corroborated against the file's hunks when ``files`` is supplied
-    (see :func:`_realign_member`) — that is the only way a wrong-hunk
-    citation becomes visible, and it is corrected or demoted instead of
-    posted at a wrong position.
+    (see :func:`_realign_member`) — that is the only way a wrong-hunk or
+    wrong-construct citation becomes visible, and it is corrected or
+    demoted instead of posted at a wrong position. A citation that snaps
+    onto a blank or pure-punctuation added line is re-resolved the same
+    way whenever the file also carries token-bearing added lines, so a
+    blank line never outranks the line the evidence lives on.
 
     When ``added_lines_by_file`` is omitted or has no entry for a file,
     the finding's line is dropped to 0 (file-level). A file-level
@@ -164,9 +245,16 @@ def apply_line_align(
         added = by_file.get(f.file, set())
         hunks = hunks_by_file.get(f.file)
         if hunks and f.line > 0 and f.line in added:
-            new_line = _realign_member(f, hunks)
+            new_line = _realign_member(f, hunks, tolerance=tolerance)
         else:
             new_line = snap_line(f.line, added, tolerance=tolerance)
+            if (
+                hunks
+                and new_line > 0
+                and _line_is_blankish(hunks, new_line)
+                and _file_has_token_bearing_add(hunks)
+            ):
+                new_line = _realign_member(f, hunks, tolerance=tolerance)
         if new_line != f.line:
             result.append(replace(f, line=new_line))
         else:
@@ -191,14 +279,51 @@ _STOPWORDS: frozenset[str] = frozenset({
 })
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]{4,}")
+_CAMEL_PART_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+_CITATION_RE = re.compile(
+    r"\b[\w./\\-]+\.(?:php|phtml|inc|js|cjs|mjs|jsx|ts|tsx|py|pyi|rb|go|rs"
+    r"|java|kt|kts|swift|c|h|cpp|hpp|cc|cs|fs|css|scss|less|sass|html?|htm"
+    r"|vue|svelte|json|ya?ml|toml|ini|cfg|conf|md|markdown|txt|sh|bash|zsh"
+    r"|fish|sql|xml|env|lock|csv|tsv|log)(?::\d+)?"
+    r"|\S+/\S+\.\w{1,8}",
+    re.IGNORECASE,
+)
 
 
-def _tokens(text: str) -> set[str]:
-    return {
-        t.lower()
-        for t in _TOKEN_RE.findall(text)
-        if t.lower() not in _STOPWORDS
-    }
+def _tokens(text: str, *, split_compounds: bool = False) -> set[str]:
+    """Lowercased content tokens, stopwords dropped.
+
+    With ``split_compounds`` each token is accompanied by its snake_case
+    and camelCase parts (each still length- and stopword-filtered), so
+    ``wp_ajax_nopriv_avatar_upload`` also yields {ajax, nopriv, avatar,
+    upload} and claims can match the constructs they name.
+    """
+    tokens: set[str] = set()
+    for raw in _TOKEN_RE.findall(text):
+        lowered = raw.lower()
+        if lowered in _STOPWORDS:
+            continue
+        tokens.add(lowered)
+        if not split_compounds:
+            continue
+        for part in raw.split("_"):
+            for piece in _CAMEL_PART_RE.findall(part):
+                piece = piece.lower()
+                if len(piece) >= 4 and piece not in _STOPWORDS:
+                    tokens.add(piece)
+    return tokens
+
+
+def _evidence_tokens(text: str) -> set[str]:
+    """Content tokens for claim-to-code correspondence.
+
+    Path-like citation strings (``functions.php:1520``, ``src/a/b.py``,
+    ``assets/exercise-library-el.js:31``) are stripped first so a
+    backticked file reference in the claim cannot collide with path or
+    module words inside unrelated hunks.
+    """
+    return _tokens(_CITATION_RE.sub(" ", text), split_compounds=True)
 
 
 def is_duplicate_of_existing(
