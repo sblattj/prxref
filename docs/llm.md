@@ -20,13 +20,14 @@ The primary and default backend communicates via plain HTTP requests with any Op
 
 ### Request Budget
 
-Three variables shape the request itself. All are optional, and a bad value exits `2` naming the variable rather than degrading the review. `PRXREF_LLM_MAX_TOKENS` and `PRXREF_LLM_TIMEOUT` are range-checked when the config loads; `PRXREF_LLM_TEMPERATURE` is validated later, when the LLM client is constructed (`create_llm_client`) — same operator-visible outcome, just a later checkpoint.
+Four variables shape the request itself. All are optional, and a bad value exits `2` naming the variable rather than degrading the review. `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, and `PRXREF_LLM_SEED` are range-checked when the config loads; `PRXREF_LLM_TEMPERATURE` is validated later, when the LLM client is constructed (`create_llm_client`) — same operator-visible outcome, just a later checkpoint.
 
 | Variable | Default | Effect on the request |
 |---|---|---|
 | `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call. Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
 | `PRXREF_LLM_TIMEOUT` | `45.0` | The client's default request timeout, in seconds. Must be > 0. It is a **per-model** deadline: a model that exceeds it is abandoned and the next in the chain is tried immediately, so a chain of three can take up to three timeouts. |
-| `PRXREF_LLM_TEMPERATURE` | *(omitted)* | `temperature` in the payload. Must be finite and >= 0; no upper bound, since the maximum is provider-specific. Unset omits the field **entirely** rather than sending a numeric default — some endpoints reject `temperature` alongside reasoning parameters, and omitting it also keeps `0.0` usable as a real temperature. `PRXREF_LLM_REASONING_EFFORT` is handled the same way. |
+| `PRXREF_LLM_TEMPERATURE` | `0.0` (sent) | `temperature` in the payload. Must be finite and >= 0; no upper bound, since the maximum is provider-specific. Unset or empty sends the default `0.0` rather than omitting the field, so an identical diff reviews identically by default; a set value wins. `PRXREF_LLM_REASONING_EFFORT` keeps its own pass-through-unvalidated rule. |
+| `PRXREF_LLM_SEED` | *(omitted)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset omits the field **entirely**, leaving the provider's own seed behaviour in place. |
 
 ### Configuration Example
 
@@ -66,7 +67,7 @@ For environments running without a centralized inference gateway, `prxref` suppo
 
 - **Backend Setting:** `PRXREF_LLM_BACKEND=litellm`
 - **Installation:** `pip install 'prxref[litellm]'`
-- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, and `PRXREF_LLM_TEMPERATURE` apply here too, with the same omit-when-unset rule for temperature. `PRXREF_LLM_REASONING_EFFORT` is openai-compat only.
+- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and a configured seed is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is openai-compat only.
 
 ### Configuration Example
 
