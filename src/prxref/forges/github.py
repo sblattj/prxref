@@ -362,9 +362,16 @@ class ForgeImpl:
                     comment_id = comment.get("id")
                     if comment_id is None:
                         continue
-                    resp = self.session.delete(
-                        f"{list_url}/{comment_id}", headers=headers
+                    # The delete route lives outside the pull-number
+                    # namespace — /pulls/comments/{id}, not /pulls/N/
+                    # comments/{id} — so the listing URL and the delete URL
+                    # differ in shape, and the listing-shaped one 404s for
+                    # every comment.
+                    delete_url = (
+                        f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+                        f"/pulls/comments/{comment_id}"
                     )
+                    resp = self.session.delete(delete_url, headers=headers)
                     if resp.ok:
                         removed += 1
                     else:
