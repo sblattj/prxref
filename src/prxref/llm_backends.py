@@ -30,6 +30,11 @@ DEFAULT_BASE_URL = ""
 DEFAULT_API_KEY = ""
 DEFAULT_MODELS = ""
 DEFAULT_TIMEOUT = 45.0
+# Sent, not just a fallback: temperature 0 is the reproducibility default —
+# identical diff, same model, same verdict — and it only works if the field
+# actually reaches the wire. Resolved by create_llm_client when the operator
+# left PRXREF_LLM_TEMPERATURE unset or empty.
+DEFAULT_TEMPERATURE = 0.0
 logger = logging.getLogger(__name__)
 # Connecting is not generating: a reachable endpoint answers the TCP/TLS
 # handshake in well under this, so a separate, much smaller connect budget
@@ -50,11 +55,12 @@ class OpenAICompatClient(LLMClient):
     fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
     error, a timeout, or a malformed body — the next model is tried at once,
     and exhausting the chain raises :class:`LLMError` with per-model reasons.
-    ``temperature`` is omitted from the payload entirely when unset (like
-    ``reasoning_effort``), never sent as a numeric default: some endpoints
-    reject it alongside reasoning parameters. The choice's ``finish_reason``
-    is carried through verbatim so the reviewer can name truncation as the
-    cause of an unparseable response.
+    ``temperature`` and ``seed`` are omitted from the payload entirely when
+    ``None`` (like ``reasoning_effort``); the factory resolves temperature's
+    configured default of 0.0 — sent, so reviews are reproducible by default —
+    and passes a seed only when one is configured. The choice's
+    ``finish_reason`` is carried through verbatim so the reviewer can name
+    truncation as the cause of an unparseable response.
     """
 
     def __init__(
@@ -66,6 +72,7 @@ class OpenAICompatClient(LLMClient):
         default_timeout: float = DEFAULT_TIMEOUT,
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        seed: int | None = None,
     ):
         if not models:
             raise ValueError("models must be a non-empty list")
@@ -76,6 +83,7 @@ class OpenAICompatClient(LLMClient):
         self.default_timeout = default_timeout
         self.reasoning_effort = reasoning_effort or None
         self.temperature = temperature
+        self.seed = seed
 
     def _post_within_deadline(
         self,
@@ -149,6 +157,8 @@ class OpenAICompatClient(LLMClient):
             payload["reasoning_effort"] = self.reasoning_effort
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.seed is not None:
+            payload["seed"] = self.seed
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         failures: list[str] = []
@@ -244,7 +254,9 @@ class LiteLLMClient(LLMClient):
     ``num_retries=0`` keeps failover fast; the chain itself is delegated to
     litellm via ``fallbacks=``. Usage and the choice's ``finish_reason`` are
     mapped into InvokeResult; a response carrying neither yields zeros and
-    ``""``. ``temperature`` is omitted entirely when unset, never defaulted.
+    ``""``. ``temperature`` and ``seed`` are omitted entirely when ``None``,
+    never defaulted; the factory resolves temperature's configured default
+    of 0.0 before this client is built.
     """
 
     def __init__(
@@ -252,6 +264,7 @@ class LiteLLMClient(LLMClient):
         models: list[str],
         default_timeout: float = DEFAULT_TIMEOUT,
         temperature: float | None = None,
+        seed: int | None = None,
     ):
         if not models:
             raise ValueError("models must be a non-empty list")
@@ -265,6 +278,7 @@ class LiteLLMClient(LLMClient):
         self.models = list(models)
         self.default_timeout = default_timeout
         self.temperature = temperature
+        self.seed = seed
         self._completion = litellm.completion
 
     def invoke(
@@ -293,6 +307,8 @@ class LiteLLMClient(LLMClient):
             kwargs["response_format"] = {"type": "json_object"}
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
+        if self.seed is not None:
+            kwargs["seed"] = self.seed
         t0 = time.perf_counter()
         response = self._completion(**kwargs)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
@@ -317,9 +333,10 @@ def _float_setting(
     """Parse one numeric setting from cfg-or-env, or ``None`` when unset.
 
     ``None``, empty, or whitespace-only means "unset" and yields ``None`` — the
-    same reading ``config.load_config`` gives those values — so the caller keeps
-    its built-in default (timeout) or omits the field from the payload entirely
-    (temperature). A malformed, non-finite, or out-of-range value raises
+    same reading ``config.load_config`` gives those values — so the caller
+    keeps its built-in default (the timeout) or resolves the reproducibility
+    default (temperature → ``DEFAULT_TEMPERATURE``). A malformed,
+    non-finite, or out-of-range value raises
     :class:`~prxref.llm.ConfigError` naming the variable, so the CLI reports it
     as a configuration error (exit 2) instead of a mid-review failure.
     """
@@ -335,6 +352,27 @@ def _float_setting(
         bound = "greater than" if exclusive else "at least"
         raise ConfigError(
             f"{env}: must be a finite number {bound} {minimum}, got {text!r}"
+        )
+    return value
+
+
+def _int_setting(raw: str | None, env: str, *, minimum: int) -> int | None:
+    """Parse one integer setting from cfg-or-env, or ``None`` when unset.
+
+    Same unset/malformed/out-of-range contract as :func:`_float_setting`, but
+    for a whole number: the OpenAI ``seed`` field is an integer, and a
+    ``42.0`` on the wire is a provider-side type error waiting to happen.
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise ConfigError(f"{env}: {exc}") from exc
+    if value < minimum:
+        raise ConfigError(
+            f"{env}: must be an integer at least {minimum}, got {text!r}"
         )
     return value
 
@@ -356,12 +394,16 @@ def create_llm_client(
     openai-compat client for models that cannot disable reasoning
     (e.g. GLM-5.3-Flash's ``low``/``high``/``max``); empty omits it.
     PRXREF_LLM_TIMEOUT (seconds, default 45.0, must be > 0) becomes the
-    client's ``default_timeout``; PRXREF_LLM_TEMPERATURE is parsed to a float
-    (finite, >= 0 — no upper bound, since the maximum is provider-specific)
-    and omitted from the request entirely when unset, which keeps 0.0 usable
-    as a real temperature. A malformed or out-of-range value for either
-    raises :class:`~prxref.llm.ConfigError` naming the variable, so the CLI
-    exits 2 rather than degrading the review.
+    client's ``default_timeout``. PRXREF_LLM_TEMPERATURE is parsed to a
+    float (finite, >= 0 — no upper bound, since the maximum is
+    provider-specific); an unset or empty value resolves to
+    ``DEFAULT_TEMPERATURE`` (0.0), which IS sent — temperature 0 keeps
+    reviews reproducible by default, and an operator-set value wins.
+    PRXREF_LLM_SEED (integer >= 0, where 0 is a valid seed) is passed to
+    both backends as a top-level ``seed``; empty or unset omits it from
+    the request entirely. A malformed or out-of-range value for any of
+    these raises :class:`~prxref.llm.ConfigError` naming the variable, so
+    the CLI exits 2 rather than degrading the review.
     ``PRXREF_LLM_MAX_TOKENS`` is deliberately NOT read here: it is a
     per-call budget threaded cfg -> orchestrator -> reviewer -> ``invoke``,
     so a client-level copy could never win and would be dead config.
@@ -406,6 +448,11 @@ def create_llm_client(
         "PRXREF_LLM_TEMPERATURE",
         minimum=0.0,
     )
+    if temperature is None:
+        temperature = DEFAULT_TEMPERATURE
+    seed = _int_setting(
+        _get("LLM_SEED", "PRXREF_LLM_SEED"), "PRXREF_LLM_SEED", minimum=0
+    )
     if backend in ("openai-compat", "ferry", "http"):
         return OpenAICompatClient(
             base_url=base_url,
@@ -415,7 +462,10 @@ def create_llm_client(
             default_timeout=timeout,
             reasoning_effort=_get("LLM_REASONING_EFFORT", "PRXREF_LLM_REASONING_EFFORT"),
             temperature=temperature,
+            seed=seed,
         )
     if backend == "litellm":
-        return LiteLLMClient(models=models, default_timeout=timeout, temperature=temperature)
+        return LiteLLMClient(
+            models=models, default_timeout=timeout, temperature=temperature, seed=seed
+        )
     raise LLMError(f"unknown PRXREF_LLM_BACKEND {backend!r}; expected openai-compat|ferry|http|litellm")
