@@ -7,6 +7,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **Anchor re-resolution prefers token-bearing hunks (#19 follow-up, PR #27).**
+  The v0.10.0 pass was much better (14/19 on-target live) but five shapes
+  still drifted — including a 391-line miss into a hunk sharing zero claim
+  tokens and an anchor on a blank line. A hunk must now corroborate with a
+  non-generic evidence token, ties prefer the most-specific token's hunk
+  before nearest, and blank/context anchors never survive a token-bearing
+  line.
+
 ## [0.10.0] — 2026-09-01
 
 The audit release. Four fixes, every one traced to a live finding by the
