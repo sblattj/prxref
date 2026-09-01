@@ -55,6 +55,7 @@ jobs:
           PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
           PRXREF_LLM_MODELS: ${{ vars.PRXREF_LLM_MODELS }}
           PRXREF_LLM_REASONING_EFFORT: ${{ vars.PRXREF_LLM_REASONING_EFFORT }}
+          PRXREF_LLM_SEED: ${{ vars.PRXREF_LLM_SEED }}
           # Per-WORKER-CHUNK completion budget, not a per-run one: each chunk gets
           # its own call with this ceiling, so raising it does not multiply into a
           # single huge request. It needs a literal fallback where the neighbours
