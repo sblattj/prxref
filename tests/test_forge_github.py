@@ -333,6 +333,61 @@ def test_ref_round_trips_through_the_protocol_dataclass():
     assert ForgeImpl.parse_pr_url(ref.url) == ref
 
 
+# --- pruning stale inline comments -------------------------------------------
+
+
+ATTRIBUTION_BODY = (
+    "🤖 🟥 **[ERROR] x** (`a.py:1`)\n\nbody\n\n---\n"
+    "*Reviewed by prxref · model=m*"
+)
+
+
+def test_prune_deletes_only_attributed_comments():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        200,
+        json_data=[
+            {"id": 11, "body": ATTRIBUTION_BODY},
+            {"id": 12, "body": "a human's comment, never a candidate"},
+            {"id": 13, "body": "*Reviewed by prxref · model=other*"},
+        ],
+    )
+    session.delete.return_value = _mock_response(204)
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 2
+    deleted_ids = {c.args[0].rsplit("/", 1)[-1] for c in session.delete.call_args_list}
+    assert deleted_ids == {"11", "13"}
+
+
+def test_prune_counts_past_a_delete_the_token_cannot_perform():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        200,
+        json_data=[
+            {"id": 21, "body": ATTRIBUTION_BODY},
+            {"id": 22, "body": ATTRIBUTION_BODY},
+        ],
+    )
+    session.delete.side_effect = [_mock_response(204), _mock_response(403)]
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 1
+    assert session.delete.call_count == 2
+
+
+def test_prune_survives_an_unreadable_feed():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(500)
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 0
+    session.delete.assert_not_called()
+
+
 # --- retry policy -----------------------------------------------------------
 
 

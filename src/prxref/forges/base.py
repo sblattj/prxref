@@ -64,6 +64,13 @@ class PRData:
 
 SUMMARY_MARKER = "<!-- prxref-summary -->"
 
+# The attribution prefix every posted comment carries (the full line is
+# ``Reviewed by prxref · model=… · N tok · Xs``). The prune pass matches on
+# this prefix to recognise its own comments, so the constant lives beside the
+# summary marker it keeps company with: both are the tool's own fingerprints
+# on a forge's comment feed.
+ATTRIBUTION_MARKER = "Reviewed by prxref"
+
 
 class FeedReadError(RuntimeError):
     """A PR's comment/activity feed could not be read all the way to the end.
