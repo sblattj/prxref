@@ -151,6 +151,32 @@ class TestRenderChunk:
         rendered = render_chunk(parsed)
         assert "Binary files a/logo.png and b/logo.png differ" in rendered
 
+    def test_trimmed_multi_hunk_render_keeps_absolute_added_lines(self):
+        # Issue #19 half-diagnosis: the rendered chunk view is NOT the drift
+        # source — per-hunk @@ headers stay absolute after context trimming,
+        # so the model always has correct new-file numbers to cite from.
+        diff = (
+            "diff --git a/big.php b/big.php\n"
+            "--- a/big.php\n"
+            "+++ b/big.php\n"
+            "@@ -10,4 +10,6 @@\n"
+            " ctx\n"
+            "+added_one\n"
+            "+added_two\n"
+            " ctx\n"
+            " pad1\n"
+            " pad2\n"
+            "@@ -500,4 +502,4 @@\n"
+            " ctx\n"
+            "+added_three\n"
+            " ctx\n"
+            " ctx\n"
+        )
+        parsed = parse_unified_diff(diff)
+        rendered = render_chunk(parsed, context_lines=1)
+        reparsed = parse_unified_diff(rendered)
+        assert reparsed[0].added_lines == parsed[0].added_lines
+
 
 class TestReviewChunk:
     def _chunk(self):
