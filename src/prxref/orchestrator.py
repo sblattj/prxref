@@ -16,6 +16,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    accepted for test doubles.
 4. Quality passes in order: ``apply_line_align`` → thread dedup
    (existing threads fetched best-effort; failure means no threads) →
+   severity consistency (findings sharing a normalized title are raised
+   to the group's max severity) →
    ``apply_quality_gate(confidence_floor=, max_errors=)``. Dropped findings
    are retained in the result with ``drop_reason`` set, never silently
    discarded.
@@ -58,7 +60,13 @@ from typing import Any
 from . import reviewer
 from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
-from .quality import active, apply_line_align, apply_quality_gate, apply_thread_dedup
+from .quality import (
+    active,
+    apply_line_align,
+    apply_quality_gate,
+    apply_severity_consistency,
+    apply_thread_dedup,
+)
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
@@ -379,6 +387,18 @@ def orchestrate_review(
 
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
+    consistent = apply_severity_consistency(findings)
+    rewrites = sum(
+        1
+        for before, after in zip(findings, consistent, strict=True)
+        if before.severity != after.severity
+    )
+    if rewrites:
+        logger.info(
+            "severity consistency: raised %d finding(s) to their title group's max severity",
+            rewrites,
+        )
+    findings = consistent
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
     )
