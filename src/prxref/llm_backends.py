@@ -6,10 +6,16 @@ model chain: ``PRXREF_LLM_BASE_URL`` and ``PRXREF_LLM_MODELS`` are required,
 and an unset one raises ``ConfigError`` rather than guessing a host.
 
 Fallback is a caller-side loop over the model chain: a model that answers
-with HTTP >= 500, HTTP 429, a connection error, or a timeout is advanced
+with HTTP >= 500, HTTP 429, a connection error, a timeout, a malformed
+body, or a truncated completion (``finish_reason`` ``length``) is advanced
 past immediately — no same-model retry, fast failover is the product
-promise. The optional ``litellm`` extra wraps the in-process SDK and
-delegates the chain to its native ``fallbacks=`` mechanism.
+promise. A truncated answer arrives as HTTP 200, so it has to be caught
+here or the chain never advances; if every model truncates, the last
+truncated answer is returned rather than raised and the reviewer names the
+token budget as the cause. The optional ``litellm`` extra wraps the
+in-process SDK and delegates the chain to its native ``fallbacks=``
+mechanism (which advances on errors only — a truncated litellm answer
+still returns as success).
 
 Tenet: no provider credential is ever read and no env name is
 provider-specific — provider keys live behind the configured endpoint,
@@ -37,6 +43,11 @@ logger = logging.getLogger(__name__)
 # it. Clamped to the deadline itself when that is smaller.
 _CONNECT_TIMEOUT = 10.0
 _READ_CHUNK_BYTES = 8192
+# The truncation vocabulary, mirrored from reviewer.py's
+# _TRUNCATION_FINISH_REASONS: gateways disagree on casing and spelling, and a
+# truncated answer is a 200, so it must be caught HERE for the chain to
+# advance — the reviewer only sees what survives the chain.
+_TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
 
 
 class LLMError(Exception):
@@ -48,8 +59,13 @@ class OpenAICompatClient(LLMClient):
 
     Tries each model in ``models`` order (cheap first for speed). A model
     fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
-    error, a timeout, or a malformed body — the next model is tried at once,
-    and exhausting the chain raises :class:`LLMError` with per-model reasons.
+    error, a timeout, a malformed body, or a truncated completion
+    (``finish_reason`` ``length``/``max_tokens``) — the next model is tried
+    at once, and exhausting the chain raises :class:`LLMError` with
+    per-model reasons. The one exception is exhaustion by truncation: a
+    truncated answer is a real completion, so the last truncated result is
+    returned instead of raised and the reviewer downstream names the token
+    budget as the cause.
     ``temperature`` is omitted from the payload entirely when unset (like
     ``reasoning_effort``), never sent as a numeric default: some endpoints
     reject it alongside reasoning parameters. The choice's ``finish_reason``
@@ -134,7 +150,7 @@ class OpenAICompatClient(LLMClient):
         json_mode: bool = False,
         timeout_s: float | None = None,
     ) -> InvokeResult:
-        """POST /chat/completions per model until one answers; fast-fail the rest."""
+        """POST /chat/completions per model until one answers untruncated; fast-fail the rest."""
         request_timeout = self.default_timeout if timeout_s is None else timeout_s
         payload: dict = {
             "messages": [
@@ -152,6 +168,7 @@ class OpenAICompatClient(LLMClient):
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         failures: list[str] = []
+        last_truncated: InvokeResult | None = None
         for attempt, model in enumerate(self.models, start=1):
             t0 = time.perf_counter()
             logger.info(
@@ -215,10 +232,25 @@ class OpenAICompatClient(LLMClient):
                 )
                 failures.append(f"{model}: malformed response ({exc.__class__.__name__})")
                 continue
-            # finish_reason is logged on the SUCCESS path deliberately: a
-            # "length" stop is a 200 carrying a truncated body, so it never
-            # reaches any of the failure branches above, and without this line
-            # the only place it surfaces is the posted summary.
+            if finish_reason.strip().lower() in _TRUNCATION_FINISH_REASONS:
+                # A truncated completion is HTTP 200, so without this branch
+                # it returned as success and PRXREF_LLM_MODELS never advanced.
+                logger.warning(
+                    "llm attempt %d/%d truncated: model=%s finish_reason=%s after %dms out=%s",
+                    attempt, len(self.models), resp_model, finish_reason, elapsed_ms,
+                    usage.get("completion_tokens") or 0,
+                )
+                failures.append(f"{model}: truncated (finish_reason={finish_reason})")
+                last_truncated = InvokeResult(
+                    text=text,
+                    input_tokens=usage.get("prompt_tokens") or 0,
+                    output_tokens=usage.get("completion_tokens") or 0,
+                    model=resp_model,
+                    backend="openai-compat",
+                    elapsed_ms=elapsed_ms,
+                    finish_reason=finish_reason,
+                )
+                continue
             logger.info(
                 "llm attempt %d/%d ok: model=%s %dms in=%s out=%s finish=%s",
                 attempt, len(self.models), resp_model, elapsed_ms,
@@ -234,6 +266,11 @@ class OpenAICompatClient(LLMClient):
                 elapsed_ms=elapsed_ms,
                 finish_reason=finish_reason,
             )
+        # Exhausting the chain on truncation alone is a last resort, not a
+        # failure: the best answer anyone managed is still handed back, with
+        # finish_reason intact so the reviewer blames the token budget.
+        if last_truncated is not None:
+            return last_truncated
         raise LLMError("all models failed: " + "; ".join(failures))
 
 

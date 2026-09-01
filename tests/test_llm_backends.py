@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json as json_module
+import logging
 import pathlib
 import sys
 import time
@@ -523,7 +524,7 @@ class TestLiteLLMClient:
 _ABSENT = object()
 
 
-def _resp_with_finish(finish_reason, text="ok", status_code=200):
+def _resp_with_finish(finish_reason, text="ok", status_code=200, model="m1-resolved"):
     """A well-formed success body whose choice carries ``finish_reason``.
 
     ``_resp`` puts its ``**extra`` at the top level of the body; the stop
@@ -534,7 +535,7 @@ def _resp_with_finish(finish_reason, text="ok", status_code=200):
         choice["finish_reason"] = finish_reason
     payload = {
         "choices": [choice],
-        "model": "m1-resolved",
+        "model": model,
         "usage": {"prompt_tokens": 3, "completion_tokens": 2},
     }
     return SimpleNamespace(status_code=status_code, payload=payload, json=lambda: payload)
@@ -548,8 +549,11 @@ class TestFinishReasonOpenAICompat:
     """
 
     def test_length_is_carried_through(self):
+        """A lone model that truncates exhausts the chain into the last-resort
+        return, which is exactly where the carried-through reason is asserted."""
         s = _ScriptedSession(_resp_with_finish("length"))
-        assert _client(s).invoke("sys", "usr").finish_reason == "length"
+        r = _client(s, models=("m1",)).invoke("sys", "usr")
+        assert r.finish_reason == "length"
 
     def test_stop_is_carried_through_not_normalised_away(self):
         """Control for the test above: a clean stop must NOT read as 'length'."""
@@ -581,6 +585,82 @@ class TestFinishReasonOpenAICompat:
         """``_resp`` has no finish_reason; the field must default, not guess."""
         s = _ScriptedSession(_resp())
         assert _client(s).invoke("sys", "usr").finish_reason == ""
+
+
+class TestTruncationAdvancesTheChain:
+    """A truncated completion is HTTP 200, so it used to return as success and
+    PRXREF_LLM_MODELS never advanced (issue #10). The reviewer's truncation
+    handling only engages AFTER the chain has run, so the chain itself has to
+    refuse a ``length`` stop as a final answer.
+    """
+
+    def test_a_truncated_model_advances_to_the_next_model(self, caplog):
+        s = _ScriptedSession(
+            _resp_with_finish("length", text='{"findings": [{"ti'),
+            _resp_with_finish("stop", text="ok", model="m2-resolved"),
+        )
+        with caplog.at_level(logging.WARNING, logger="prxref.llm_backends"):
+            r = _client(s).invoke("sys", "usr")
+        assert r.text == "ok"
+        assert r.model == "m2-resolved"
+        assert r.finish_reason == "stop"
+        assert len(s.calls) == 2
+        assert s.calls[0]["json"]["model"] == "m1"
+        assert s.calls[1]["json"]["model"] == "m2"
+        messages = [rec.getMessage() for rec in caplog.records]
+        assert any("truncated" in m and "m1" in m for m in messages)
+
+    def test_all_models_truncated_returns_the_last_truncated_result(self):
+        """Last resort: exhaustion by truncation hands back the truncated
+        answer with its reason intact — never an exception — so the reviewer
+        downstream can still name the token budget as the cause."""
+        s = _ScriptedSession(
+            _resp_with_finish("length", text='{"a"'),
+            _resp_with_finish("length", text='{"b"', model="m2-resolved"),
+        )
+        r = _client(s).invoke("sys", "usr")
+        assert r.text == '{"b"'
+        assert r.model == "m2-resolved"
+        assert r.finish_reason == "length"
+        assert len(s.calls) == 2
+
+    def test_a_truncation_is_returned_even_when_a_later_model_hard_fails(self):
+        s = _ScriptedSession(_resp_with_finish("length", text='{"a"'), _resp(status_code=503))
+        r = _client(s).invoke("sys", "usr")
+        assert r.text == '{"a"'
+        assert r.finish_reason == "length"
+
+    def test_truncation_then_a_hard_failure_still_reaches_the_healthy_model(self):
+        s = _ScriptedSession(
+            _resp_with_finish("length"),
+            _resp(status_code=500),
+            _resp(model="m3-resolved"),
+        )
+        r = _client(s, models=("a", "b", "c")).invoke("sys", "usr")
+        assert r.text == "ok"
+        assert r.model == "m3-resolved"
+
+    @pytest.mark.parametrize("raw", ["length", "LENGTH", "max_tokens", "MAX_TOKENS", " Length "])
+    def test_every_truncation_spelling_the_reviewer_knows_advances(self, raw):
+        """Same casefolded vocabulary as reviewer._budget_stop_reason: a
+        gateway that logs MAX_TOKENS must fail over exactly like ``length``."""
+        s = _ScriptedSession(_resp_with_finish(raw), _resp(model="m2-resolved"))
+        assert _client(s).invoke("sys", "usr").model == "m2-resolved"
+
+    def test_a_clean_stop_still_returns_on_the_first_model(self):
+        """Control: a healthy answer must not be pushed off its model."""
+        s = _ScriptedSession(_resp_with_finish("stop", model="only-resolved"))
+        r = _client(s, models=("only",)).invoke("sys", "usr")
+        assert r.text == "ok"
+        assert len(s.calls) == 1
+
+    def test_a_non_truncation_stop_reason_still_returns_as_success(self):
+        """Control: not every unusual stop is a budget stop; unknown reasons
+        keep today's behaviour."""
+        s = _ScriptedSession(_resp_with_finish("content_filter", model="only-resolved"))
+        r = _client(s, models=("only",)).invoke("sys", "usr")
+        assert r.finish_reason == "content_filter"
+        assert len(s.calls) == 1
 
 
 class TestMalformedBodiesAdvanceTheChain:
