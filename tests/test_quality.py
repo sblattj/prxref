@@ -121,7 +121,9 @@ class TestHunkAwareAlignment:
 
     def test_wrong_hunk_member_is_reresolved_by_content(self):
         aligned = self._aligned()
-        assert aligned[0].line == 1261
+        # 1262 (the InvalidArgumentException throw) now outranks 1261: the
+        # claim's most specific evidence token lives on the throw line.
+        assert aligned[0].line == 1262
 
     def test_refuted_member_with_no_match_anywhere_drops_to_file_level(self):
         aligned = self._aligned(
@@ -422,3 +424,253 @@ class TestMaxErrorFindingsEnv:
     def test_explicit_argument_beats_both_env_names(self, monkeypatch):
         monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "2")
         assert _resolve_max_errors(7) == 7
+
+
+# The five shapes below reconstruct the live anchor misses from the v0.10.0
+# re-audit (14/19 on-target). Each fixture is a self-contained unified diff
+# whose cited line is a valid added line, so the drift survives membership
+# validation exactly the way the audited reviews did.
+SHAPE1_DIFF = """\
+diff --git a/src/functions.php b/src/functions.php
+--- a/src/functions.php
++++ b/src/functions.php
+@@ -1498,2 +1498,28 @@ function register_ajax_handlers(): void {
+     add_action('wp_ajax_avatar_upload', 'handle_legacy_upload');
++    add_action('wp_ajax_nopriv_avatar_upload', 'handle_avatar_upload');
++    add_action('wp_ajax_avatar_upload', 'handle_avatar_upload');
++    add_action('wp_ajax_fetch_notifications', 'handle_fetch_notifications');
++    add_action('wp_ajax_save_settings', 'handle_save_settings');
++    add_action('wp_ajax_load_settings', 'handle_load_settings');
++    add_action('admin_menu', 'register_settings_screen');
++    add_action('admin_enqueue_scripts', 'enqueue_settings_assets');
++    add_filter('plugin_action_links', 'add_settings_link');
++    add_action('plugins_loaded', 'bootstrap_settings');
++    add_action('admin_init', 'register_settings_group');
++    add_action('rest_api_init', 'register_rest_routes');
++
++    /**
++     * Renders the admin settings screen for the plugin.
++     */
++    function render_settings_screen(): void {
++        if (!current_user_can('manage_options')) {
++            wp_die(esc_html__('Insufficient permissions.'));
++        }
++        echo '<div class="wrap">';
++        echo '<form method="post">';
++        settings_fields('prxref_settings');
++        do_settings_sections('prxref_settings');
++        echo '</form>';
++        echo '</div>';
++    }
+ }
+"""
+
+SHAPE2_DIFF = """\
+diff --git a/src/functions.php b/src/functions.php
+--- a/src/functions.php
++++ b/src/functions.php
+@@ -2398,2 +2398,4 @@ function enqueue_badge_styles(): void {
+     $css = '<style>.badge { color: #333; }';
++    $css .= '.like-button .rating-star { font-weight: 600; }';
++    $css .= '.badge { padding: 12px 16px; }';
+     wp_add_inline_style('prxref', $css);
+@@ -3200,2 +3200,6 @@ function bp_like_get_rating(): int {
+     $post_id = intval($_POST['post_id']);
++    if (!isset($_POST['member_id'])) {
++        bp_core_add_message(__('Missing member id.'));
++    }
++    $member_id = intval($_POST['member_id']);
+     bp_like_register_vote($post_id, $member_id);
+"""
+
+SHAPE3_DIFF = """\
+diff --git a/src/components/ExerciseFeedbackDialog.tsx b/src/components/ExerciseFeedbackDialog.tsx
+--- a/src/components/ExerciseFeedbackDialog.tsx
++++ b/src/components/ExerciseFeedbackDialog.tsx
+@@ -20,3 +20,8 @@ export const ExerciseFeedbackDialog = observer(() => {
+     const [visible, setVisible] = useState(false);
++    const summary = useMemo(
++        () => computeSummary(feedback),
++        [feedback, store],
++    );
+     const theme = useTheme();
++    const dense = useDenseViewport();
+     return (
+@@ -40,2 +45,4 @@ function FeedbackBody(props) {
+     const dialog = useDialog();
++    const { rating, feedback } = exerciseStore.observables;
++    const canSubmit = rating !== null;
+     return (
+"""
+
+SHAPE4_DIFF = """\
+diff --git a/src/components/SessionDialog.tsx b/src/components/SessionDialog.tsx
+--- a/src/components/SessionDialog.tsx
++++ b/src/components/SessionDialog.tsx
+@@ -96,2 +96,34 @@ render() {
+     <div className="dialog-header">
++        <button
++            type="button"
++            className="btn-close"
++            aria-label="Close dialog"
++            onClick={this.handleClose}
++        >
++            ×
++        </button>
++    </div>
++    <div className="dialog-body">
++        <p>Review the session details below.</p>
++        <label htmlFor="session-topic">Topic</label>
++        <input id="session-topic" readOnly />
++        <label htmlFor="session-length">Length</label>
++        <select id="session-length">
++            <option value="30">30 minutes</option>
++            <option value="60">60 minutes</option>
++        </select>
++        <label htmlFor="session-notes">Notes</label>
++        <textarea id="session-notes" rows={4} />
++    </div>
++    <div className="dialog-footer">
++        <span className="footer-note">
++            Saved responses appear here.
++        </span>
++        <button className="btn-secondary" onClick={this.handleCancel}>
++            Cancel
++        </button>
++    </div>
++    <div className="dialog-preview">
++        <input placeholder={formatStamp(FIXED_EPOCH)} disabled />
++    </div>
+     )
+"""
+
+SHAPE5_DIFF = """\
+diff --git a/assets/js/el.js b/assets/js/el.js
+--- a/assets/js/el.js
++++ b/assets/js/el.js
+@@ -30,6 +30,11 @@ import boot from './boot.js';
+     const registry = new Map();
++
++    export function ready() {
+     startTimers();
+     }
++    const state = { ready: false };
+     function tick() {}
+     function idle() {}
++    const legacy = buildLegacyEntry();
++    const fs = require('fs');
+     export default ready;
+"""
+
+
+class TestLiveAnchorDriftShapes:
+    """One test per audited v0.10.0 anchor miss (live kzetxa PR shapes)."""
+
+    def _align(self, diff: str, path: str, **kwargs) -> list[Finding]:
+        parsed = parse_unified_diff(diff)
+        defaults = {
+            "file": path,
+            "severity": "warning",
+            "confidence": 0.8,
+        }
+        defaults.update(kwargs)
+        finding = _f(**defaults)
+        return apply_line_align(
+            [finding], added_lines_by_file(parsed), files=parsed
+        )[0]
+
+    def test_shape1_docblock_near_miss_resolves_to_registration_line(self):
+        # Live: functions.php:1520 — a claim about the nopriv avatar upload
+        # registration anchored on an unrelated docblock inside the right
+        # hunk, ~15 lines from the real add_action line.
+        aligned = self._align(
+            SHAPE1_DIFF,
+            "src/functions.php",
+            line=1512,
+            title="Unauthenticated avatar upload handler registered for nopriv",
+            body=(
+                "The upload callback runs with no capability check, so any "
+                "visitor can upload a file through the avatar endpoint."
+            ),
+        )
+        assert aligned.line == 1499
+
+    def test_shape2_far_hunk_generic_overlap_resolves_to_evidence_hunk(self):
+        # Live: functions.php:2400 — a member_id claim corroborated by a far
+        # CSS-tweak hunk purely because its like/rating class names overlap
+        # the title; the evidence hunk is ~800 lines away.
+        aligned = self._align(
+            SHAPE2_DIFF,
+            "src/functions.php",
+            line=2400,
+            title="Like/rating handlers trust client-supplied member_id",
+            body=(
+                "The vote callback reads member_id straight from the "
+                "request, so one member can act as another."
+            ),
+        )
+        assert aligned.line == 3204
+
+    def test_shape3_deps_line_resolves_to_actual_destructure(self):
+        # Live: ExerciseFeedbackDialog.tsx:30 — a destructuring claim
+        # anchored on the related-but-wrong useMemo deps line, 12+ lines
+        # above the actual destructure.
+        aligned = self._align(
+            SHAPE3_DIFF,
+            "src/components/ExerciseFeedbackDialog.tsx",
+            line=23,
+            title="Destructured MobX observables read before store hydration",
+            body=(
+                "rating and feedback come straight off the root store "
+                "before it finishes hydrating, so both can be undefined "
+                "on first paint."
+            ),
+        )
+        assert aligned.line == 46
+
+    def test_shape4_click_handler_resolves_to_placeholder_timestamp(self):
+        # Live: ExerciseFeedbackDialog.tsx:101 — a placeholder-timestamp
+        # claim anchored on an unrelated close-button onClick, ~26 lines
+        # from the code the claim describes.
+        aligned = self._align(
+            SHAPE4_DIFF,
+            "src/components/SessionDialog.tsx",
+            line=101,
+            title="Placeholder timestamp shows a fixed epoch",
+            body=(
+                "The field placeholder renders a frozen timestamp instead "
+                "of the current local time, so the sample reads as stale."
+            ),
+        )
+        assert aligned.line == 127
+
+    def test_shape5_blank_added_line_never_beats_token_bearing_line(self):
+        # Live: el.js:31 — the claim text itself cited a line that is a
+        # blank added line; the require("fs") evidence sits 8 lines lower.
+        aligned = self._align(
+            SHAPE5_DIFF,
+            "assets/js/el.js",
+            line=31,
+            title="require used in ES module",
+            body=(
+                'require("fs") is CommonJS and will crash the ES module '
+                "build; see assets/exercise-library-el.js:31."
+            ),
+        )
+        assert aligned.line == 39
+
+    def test_blank_landing_from_snap_pass_also_resolves_to_tokens(self):
+        # The blank-anchor rule must hold on the snap path too: a citation
+        # that snaps onto a blank added line re-resolves to the nearest
+        # token-bearing evidence instead of posting on the blank line.
+        aligned = self._align(
+            SHAPE5_DIFF,
+            "assets/js/el.js",
+            line=30,
+            title="require used in ES module",
+            body=(
+                'require("fs") is CommonJS and will crash the ES module '
+                "build; see assets/exercise-library-el.js:31."
+            ),
+        )
+        assert aligned.line == 39
