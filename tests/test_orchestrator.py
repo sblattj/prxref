@@ -27,7 +27,7 @@ SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
-    "🟧 {warning_count} warning · 🟦 {outofscope_count} note\n\n"
+    "🟧 {warning_count} warning · 🟦 {outofscope_count} outofscope\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -300,6 +300,82 @@ class TestHappyPath:
         assert len(forge.inline_batches) == 1
         assert len(forge.inline_batches[0]) == 15
         assert res["posted"] is True
+
+    def test_inline_batch_is_severity_ordered(self):
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": 3, "severity": "warning",
+                 "confidence": 0.9, "title": "warn high", "body": "b"},
+                {"file": "src/app.py", "line": 5, "severity": "warning",
+                 "confidence": 0.8, "title": "warn low", "body": "b"},
+                {"file": "src/app.py", "line": 7, "severity": "error",
+                 "confidence": 0.7, "title": "the error", "body": "b"},
+            ],
+        }
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM(findings_by_path=findings))
+
+        bodies = [c.body for c in forge.inline_batches[0]]
+        error_positions = [i for i, b in enumerate(bodies) if "[ERROR] the error" in b]
+        assert error_positions == [0]
+
+    def test_cap_shortfall_is_disclosed_in_the_summary(self):
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": 3, "severity": "error",
+                 "confidence": 0.9, "title": "kept", "body": "b"},
+                {"file": "src/app.py", "line": 5, "severity": "warning",
+                 "confidence": 0.9, "title": "capped out", "body": "b"},
+            ],
+        }
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=findings),
+            max_inline_comments=1,
+        )
+
+        assert len(forge.summaries) == 2
+        assert "Inline comments:" not in forge.summaries[0]
+        assert "Inline comments: 1 of 2 findings (1 over the 1-comment cap)." in (
+            forge.summaries[1]
+        )
+
+    def test_rejected_anchors_are_disclosed_in_the_summary(self):
+        class RejectingForge(FakeForge):
+            def post_inline_comments(self, ref, comments) -> int:
+                self.inline_batches.append(list(comments))
+                return max(0, len(comments) - 1)
+
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": 3, "severity": "error",
+                 "confidence": 0.9, "title": "posted", "body": "b"},
+                {"file": "src/app.py", "line": 5, "severity": "warning",
+                 "confidence": 0.9, "title": "rejected", "body": "b"},
+            ],
+        }
+        forge = RejectingForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM(findings_by_path=findings))
+
+        assert "Inline comments: 1 of 2 findings (1 anchor rejected by the forge)." in (
+            forge.summaries[-1]
+        )
+
+    def test_failed_inline_batch_is_disclosed_in_the_summary(self):
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": 3, "severity": "error",
+                 "confidence": 0.9, "title": "lost", "body": "b"},
+            ],
+        }
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.add("post_inline")
+        orchestrate_review(forge, REF, FakeLLM(findings_by_path=findings))
+
+        assert (
+            "Inline comments: posting failed — 0 of 1 findings have one."
+            in forge.summaries[-1]
+        )
 
 
 class TestParallelFanOut:
@@ -1407,6 +1483,61 @@ class TestMultiLineReasonsStayInTheBlockquote:
     def test_the_continuation_text_is_still_reported(self, monkeypatch):
         forge, _res = self._run(monkeypatch, self.MULTILINE)
         assert "second line of the reason" in forge.summaries[0]
+
+
+class TestStaleInlinePrune:
+    """A re-review clears its own prior inline comments before it reads threads.
+
+    Order is the whole point: prune must precede ``list_threads`` or the dedup
+    would suppress this run's findings as already-discussed and then delete the
+    comments it suppressed them against. And a clean re-review (zero findings)
+    still prunes, so an Approved summary cannot keep standing above the stale
+    ERROR comments of an earlier, nondeterministic run.
+    """
+
+    class PruningForge(FakeForge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.calls: list[str] = []
+            self.pruned = 0
+
+        def prune_inline_comments(self, ref) -> int:
+            self.calls.append("prune")
+            self.pruned += 3
+            return 3
+
+        def list_threads(self, ref):
+            self.calls.append("list_threads")
+            return super().list_threads(ref)
+
+    def test_prune_precedes_thread_listing(self):
+        forge = self.PruningForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert forge.calls.index("prune") < forge.calls.index("list_threads")
+
+    def test_a_clean_rerun_still_prunes(self):
+        forge = self.PruningForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path={}))
+        assert res["verdict"] == "Approved"
+        assert forge.calls[0] == "prune"
+        assert forge.inline_batches == []
+
+    def test_a_prune_failure_never_aborts_the_review(self):
+        class ExplodingPrune(self.PruningForge):
+            def prune_inline_comments(self, ref) -> int:
+                self.calls.append("prune")
+                raise RuntimeError("boom prune")
+
+        forge = ExplodingPrune(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert res["posted"] is True
+        assert len(forge.inline_batches) == 1
+
+    def test_forges_without_the_capability_are_skipped(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
+        assert res["posted"] is True
+        assert len(forge.summaries) == 1
 
 
 class TestPostModeKnobs:
