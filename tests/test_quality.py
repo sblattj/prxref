@@ -7,8 +7,10 @@ from prxref.quality import (
     active,
     apply_line_align,
     apply_quality_gate,
+    apply_severity_consistency,
     apply_thread_dedup,
     is_duplicate_of_existing,
+    normalize_title,
     snap_line,
 )
 from prxref.triage import Finding
@@ -170,6 +172,80 @@ class TestThreadDedup:
         assert result[0].drop_reason == "duplicate of existing thread"
         assert result[1].drop_reason is None
         assert active(result) == [f2]
+
+
+class TestSeverityConsistency:
+    def test_same_file_same_title_warning_and_note_both_raise_to_warning(self):
+        # The live issue #18 case: per-chunk workers flagged the same
+        # read-modify-write pattern warning at one anchor, note at another.
+        warning = _f(
+            file="src/supabase.ts", line=42, severity="warning", confidence=0.8,
+            title="Race when updating config",
+            body="Read-modify-write is not atomic.",
+        )
+        note = _f(
+            file="src/supabase.ts", line=88, severity="outofscope", confidence=0.7,
+            title="`race` when updating config.",
+            body="Same pattern, softer call.",
+        )
+        result = apply_severity_consistency([warning, note])
+        assert result[0].severity == "warning"
+        assert result[1].severity == "warning"
+
+    def test_rewritten_finding_keeps_its_own_identity(self):
+        warning = _f(
+            file="src/supabase.ts", line=42, severity="warning", confidence=0.8,
+            title="Race when updating config", body="Own body.",
+        )
+        note = _f(
+            file="src/supabase.ts", line=88, severity="outofscope", confidence=0.7,
+            title="`race` when updating config.", body="Other body.",
+        )
+        result = apply_severity_consistency([warning, note])
+        assert (result[1].file, result[1].line) == ("src/supabase.ts", 88)
+        assert result[1].body == "Other body."
+        assert result[1].confidence == 0.7
+        assert result[1].drop_reason is None
+        # Unmodified finding keeps object identity, matching the other passes
+        assert result[0] is warning
+
+    def test_cross_file_same_title_error_and_warning_both_error(self):
+        error = _f(
+            file="functions/a.ts", line=10, severity="error", confidence=0.9,
+            title="Hardcoded secret in serverless handler", body="",
+        )
+        warning = _f(
+            file="functions/b.ts", line=10, severity="warning", confidence=0.8,
+            title="hardcoded secret in serverless handler", body="",
+        )
+        result = apply_severity_consistency([error, warning])
+        assert result[0].severity == "error"
+        assert result[1].severity == "error"
+
+    def test_different_titles_never_merge(self):
+        # One title mentioning the other's words is still a different pattern
+        short = _f(severity="warning", confidence=0.8, title="Null deref")
+        long = _f(
+            severity="outofscope", confidence=0.7,
+            title="Null deref in the config loader fallback path",
+        )
+        result = apply_severity_consistency([short, long])
+        assert result[0].severity == "warning"
+        assert result[1].severity == "outofscope"
+
+    def test_dropped_findings_neither_join_nor_get_rewritten(self):
+        dropped = _f(severity="error", confidence=0.9, title="Shared title",
+                     drop_reason="duplicate of existing thread")
+        note = _f(severity="outofscope", confidence=0.7, title="Shared title")
+        result = apply_severity_consistency([dropped, note])
+        assert result[0] is dropped
+        assert result[0].severity == "error"
+        assert result[1].severity == "outofscope"
+
+    def test_backtick_and_punctuation_variants_normalize_together(self):
+        assert normalize_title("`foo` bar") == normalize_title("foo bar")
+        assert normalize_title('"Quoted" title!') == normalize_title("quoted title")
+        assert normalize_title("  Mixed   CASE  ") == "mixed case"
 
 
 class TestQualityGate:

@@ -1,12 +1,17 @@
 """Deterministic quality passes over worker findings.
 
-Three passes run before posting:
+Four passes run before posting:
 1. ``apply_line_align``: snap each finding's cited line to the nearest
    actual ``+`` line in that file's diff (within tolerance, else line=0).
 2. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive tokens).
-3. ``apply_quality_gate``: drop findings below the confidence floor, cap
-   errors per review, and enforce the {error, warning, note} severity vocabulary.
+3. ``apply_severity_consistency``: findings sharing one normalized title —
+   within a file or across sibling files — are all raised to the group's
+   maximum severity, so per-chunk workers cannot disagree about how
+   serious the same pattern is.
+4. ``apply_quality_gate``: drop findings below the confidence floor, cap
+   errors per review, and enforce the {error, warning, outofscope} severity
+   vocabulary.
 
 Every dropped finding retains its identity with ``drop_reason`` populated,
 so review runstores and logs can explain every filter decision. Use
@@ -172,6 +177,61 @@ def apply_thread_dedup(
             result.append(replace(f, drop_reason="duplicate of existing thread"))
         else:
             result.append(f)
+    return result
+
+
+_SEVERITY_RANK: dict[str, int] = {"error": 0, "warning": 1, "outofscope": 2}
+
+_TITLE_PUNCT_RE = re.compile(r"[`*\"'\u2018\u2019\u201c\u201d]")
+
+
+def normalize_title(title: str) -> str:
+    """Canonical form used to group findings that restate the same pattern.
+
+    Lowercase; backticks, quotes, and emphasis marks removed; edge
+    punctuation trimmed; whitespace runs collapsed to one space. Grouping
+    is exact-match on this form, so a title that merely mentions another's
+    words stays its own pattern.
+    """
+    lowered = _TITLE_PUNCT_RE.sub("", title.lower())
+    trimmed = lowered.strip(" .:;,!?-")
+    return " ".join(trimmed.split())
+
+
+def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
+    """Raise every finding in a normalized-title group to the group's max severity.
+
+    Per-chunk workers decide severity in isolation, so the same pattern can
+    surface as an error in one file and a warning in a sibling, or as a
+    warning at one anchor and a note at another in the same file. Findings
+    sharing one :func:`normalize_title` form — within a file or across
+    files — are all rewritten to the group's highest severity
+    (error > warning > outofscope). A rewritten finding keeps its own file,
+    line, body, and confidence; only severity changes. Findings carrying a
+    ``drop_reason`` or a severity outside the vocabulary pass through
+    untouched.
+    """
+    group_max: dict[str, str] = {}
+    for f in findings:
+        if f.drop_reason is not None:
+            continue
+        severity = (f.severity or "").strip().lower()
+        if severity not in _SEVERITY_RANK:
+            continue
+        key = normalize_title(f.title)
+        current = group_max.get(key)
+        if current is None or _SEVERITY_RANK[severity] < _SEVERITY_RANK[current]:
+            group_max[key] = severity
+
+    result: list[Finding] = []
+    for f in findings:
+        severity = (f.severity or "").strip().lower()
+        if f.drop_reason is None and severity in _SEVERITY_RANK:
+            target = group_max.get(normalize_title(f.title), severity)
+            if severity != target:
+                result.append(replace(f, severity=target))
+                continue
+        result.append(f)
     return result
 
 

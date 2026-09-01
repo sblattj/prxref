@@ -441,6 +441,43 @@ class TestDedup:
         assert len(forge.inline_batches) == 1
 
 
+class TestSeverityConsistency:
+    def test_normalized_title_raises_warning_to_error_before_the_error_cap(self, monkeypatch):
+        # Issue #18: identical pattern, sibling files, split severities. The
+        # consistency pass must run BEFORE apply_quality_gate so the cap
+        # counts the normalized error: with PRXREF_MAX_ERROR_FINDINGS=1 the
+        # now-two errors cap to one. If the pass ran after the gate, the
+        # warning would sail past the cap uncapped and both would survive.
+        monkeypatch.setenv("PRXREF_MAX_ERROR_FINDINGS", "1")
+        diff = _added_file_diff("functions/a.ts", 10) + _added_file_diff("functions/b.ts", 10)
+        findings = {
+            "functions/a.ts": [
+                {"file": "functions/a.ts", "line": 3, "severity": "error",
+                 "confidence": 0.9, "title": "Hardcoded secret in serverless handler",
+                 "body": "VITE_ key committed."},
+            ],
+            "functions/b.ts": [
+                {"file": "functions/b.ts", "line": 3, "severity": "warning",
+                 "confidence": 0.8, "title": "hardcoded secret in serverless handler",
+                 "body": "Same VITE_ pattern."},
+            ],
+        }
+        forge = FakeForge(diff=diff)
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=findings), post=False)
+
+        assert len(res["findings_active"]) == 1
+        kept = res["findings_active"][0]
+        assert kept.title == "Hardcoded secret in serverless handler"
+        assert kept.severity == "error"
+        assert kept.file == "functions/a.ts"
+        assert len(res["findings_dropped"]) == 1
+        dropped = res["findings_dropped"][0]
+        assert dropped.file == "functions/b.ts"
+        assert dropped.severity == "error"
+        assert dropped.drop_reason == "error cap exceeded (max 1)"
+        assert res["verdict"] == "Request-Changes"
+
+
 class TestErrorPaths:
     def test_total_llm_failure_error_verdict_and_notice_posted(self):
         forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
