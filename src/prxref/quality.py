@@ -2,7 +2,11 @@
 
 Three passes run before posting:
 1. ``apply_line_align``: snap each finding's cited line to the nearest
-   actual ``+`` line in that file's diff (within tolerance, else line=0).
+   actual ``+`` line in that file's diff (within tolerance, else line=0),
+   then corroborate exact ``+``-line members against the file's hunks by
+   content, so an anchor that is a valid added line of the WRONG hunk
+   (issue #19's drift shape) is re-resolved or demoted to file-level
+   instead of posting at a wrong position.
 2. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive tokens).
 3. ``apply_quality_gate``: drop findings below the confidence floor, cap
@@ -20,12 +24,19 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 from .forges.base import Thread
-from .triage import Finding
+from .triage import FileDiff, Finding, Hunk
 
 SEVERITIES: frozenset[str] = frozenset({"error", "warning", "outofscope"})
 
 DEFAULT_CONFIDENCE_FLOOR: float = 0.6
 DEFAULT_MAX_ERRORS: int = 10
+
+# Positional snap radius for cited lines. Inline comment cards render only a
+# handful of surrounding lines, so a nudge of up to 5 keeps the cited code
+# visible in the posted comment; past that the comment separates from its
+# evidence. 5 also sits below the smallest drift the issue #19 audit measured
+# on real reviews (10 lines), so no observed-failure distance survives.
+DEFAULT_LINE_TOLERANCE: int = 5
 
 
 def active(findings: Sequence[Finding]) -> list[Finding]:
@@ -33,11 +44,17 @@ def active(findings: Sequence[Finding]) -> list[Finding]:
     return [f for f in findings if f.drop_reason is None]
 
 
-def snap_line(line: int, added: set[int], tolerance: int = 3) -> int:
+def snap_line(
+    line: int, added: set[int], tolerance: int = DEFAULT_LINE_TOLERANCE
+) -> int:
     """Snap a cited line to the nearest ``+`` line within tolerance, else 0.
 
-    A returned 0 denotes a file-level anchor (no ``+`` line close enough).
+    A returned 0 denotes a file-level anchor (no ``+`` line close enough,
+    or the citation was already file-level: ``line <= 0`` never snatches a
+    file-level finding onto an inline line).
     """
+    if line <= 0:
+        return 0
     if line in added:
         return line
     if not added:
@@ -48,21 +65,103 @@ def snap_line(line: int, added: set[int], tolerance: int = 3) -> int:
     return 0
 
 
+def _hunk_text(hunk: Hunk) -> str:
+    return "\n".join(ln.text for ln in hunk.lines)
+
+
+def _hunk_containing(hunks: Sequence[Hunk], line: int) -> Hunk | None:
+    """The hunk whose new-file span holds ``line``, or None."""
+    for h in hunks:
+        if h.new_start <= line < h.new_start + h.new_count:
+            return h
+    return None
+
+
+def _realign_member(finding: Finding, hunks: Sequence[Hunk]) -> int:
+    """Re-resolve an exact ``+``-line member anchor by content, or keep it.
+
+    Membership alone cannot catch issue #19's drift: a model that adds the
+    wrong hunk's ``@@`` start to an in-hunk offset emits a number that IS a
+    valid added line, of the wrong hunk. The one checkable property left is
+    content correspondence — the finding's own evidence tokens (title +
+    body, minus stopwords) must occur in the anchor hunk's text. Zero
+    overlap refutes the anchor: it re-anchors to the best token-matching
+    added line elsewhere in the file (context lines score too; the target
+    is the nearest ``+`` line to the best match), or drops to file-level 0
+    when no line matches anywhere. Non-empty overlap corroborates the
+    anchor and the citation stands.
+    """
+    ftoks = _tokens(f"{finding.title} {finding.body}")
+    if not ftoks:
+        return finding.line
+    anchor = _hunk_containing(hunks, finding.line)
+    if anchor is not None and ftoks & _tokens(_hunk_text(anchor)):
+        return finding.line
+    best_line, best_key = 0, (0, 0)
+    for h in hunks:
+        if h is anchor:
+            continue
+        scored = [
+            (len(ftoks & _tokens(ln.text)), -abs((ln.new_line or 0) - finding.line), ln)
+            for ln in h.lines
+            if ln.kind != "-" and ln.new_line is not None
+        ]
+        scored = [s for s in scored if s[0] > 0]
+        if not scored:
+            continue
+        _, _, best = max(scored, key=lambda s: (s[0], s[1]))
+        if best.kind == "+":
+            target = best
+        else:
+            adds = [
+                ln for ln in h.lines
+                if ln.kind == "+" and ln.new_line is not None
+            ]
+            if not adds:
+                continue
+            target = min(
+                adds, key=lambda a: abs((a.new_line or 0) - (best.new_line or 0))
+            )
+        key = (
+            len(ftoks & _tokens(best.text)),
+            -abs((target.new_line or 0) - finding.line),
+        )
+        if key > best_key:
+            best_key, best_line = key, target.new_line or 0
+    return best_line
+
+
 def apply_line_align(
     findings: Sequence[Finding],
     added_lines_by_file: dict[str, set[int]] | None = None,
-    tolerance: int = 3,
+    tolerance: int = DEFAULT_LINE_TOLERANCE,
+    files: Sequence[FileDiff] | None = None,
 ) -> list[Finding]:
-    """Snap each finding's line number to the nearest ``+`` line in that file.
+    """Snap each finding's line to a defensible anchor in that file's diff.
+
+    Positional pass: within ``tolerance`` of the nearest ``+`` line the
+    citation snaps there; beyond it the citation is not trusted and drops
+    to file-level (0) — the summary still carries the finding, at an
+    honest location. Content pass: an exact ``+``-line member is
+    corroborated against the file's hunks when ``files`` is supplied
+    (see :func:`_realign_member`) — that is the only way a wrong-hunk
+    citation becomes visible, and it is corrected or demoted instead of
+    posted at a wrong position.
 
     When ``added_lines_by_file`` is omitted or has no entry for a file,
-    the finding's line is dropped to 0 (file-level).
+    the finding's line is dropped to 0 (file-level). A file-level
+    citation stays file-level.
     """
     by_file = added_lines_by_file or {}
+    hunks_by_file = {f.path: f.hunks for f in files} if files else {}
     result: list[Finding] = []
     for f in findings:
         added = by_file.get(f.file, set())
-        new_line = snap_line(f.line, added, tolerance=tolerance)
+        hunks = hunks_by_file.get(f.file)
+        if hunks and f.line > 0 and f.line in added:
+            new_line = _realign_member(f, hunks)
+        else:
+            new_line = snap_line(f.line, added, tolerance=tolerance)
         if new_line != f.line:
             result.append(replace(f, line=new_line))
         else:

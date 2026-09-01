@@ -105,7 +105,10 @@ def make_pr(title: str = "Add widget") -> PRData:
 
 
 def _added_file_diff(path: str, n_lines: int) -> str:
-    body = "\n".join(f"+line {i}" for i in range(1, n_lines + 1))
+    # ``data`` is the hunk's one tokenizer-visible token: findings citing this
+    # fixture corroborate only if their text mentions it, mirroring how the
+    # content pass validates real anchors (issue #19).
+    body = "\n".join(f"+data {i}" for i in range(1, n_lines + 1))
     return (
         f"diff --git a/{path} b/{path}\n"
         "new file mode 100644\n"
@@ -235,9 +238,9 @@ def _contract_stubs(monkeypatch):
 HAPPY_FINDINGS = {
     "src/app.py": [
         {"file": "src/app.py", "line": 3, "severity": "error", "confidence": 0.9,
-         "title": "Null deref", "body": "x may be None when config is missing."},
+         "title": "Null deref", "body": "x may be None when config is missing; data loss follows."},
         {"file": "src/app.py", "line": 7, "severity": "outofscope", "confidence": 0.8,
-         "title": "Typo", "body": "recieve -> receive."},
+         "title": "Typo", "body": "recieve -> receive in data text."},
     ],
 }
 
