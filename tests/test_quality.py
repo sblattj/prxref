@@ -1,6 +1,8 @@
 """Tests for prxref.quality: line alignment, thread dedup, and quality gate."""
 from __future__ import annotations
 
+import logging
+
 from prxref.forges.base import Thread
 from prxref.quality import (
     _body_cited_lines,
@@ -383,6 +385,174 @@ class TestSeverityConsistency:
         assert normalize_title("`foo` bar") == normalize_title("foo bar")
         assert normalize_title('"Quoted" title!') == normalize_title("quoted title")
         assert normalize_title("  Mixed   CASE  ") == "mixed case"
+
+
+class TestSeverityTokenGrouping:
+    def test_shared_rare_token_binds_different_phrasings_across_files(self):
+        # The live issue #30 shape (v0.10.1): the same unescaped Airtable
+        # interpolation bug, two phrasings, two files. Title equality (#18)
+        # cannot bind these; the shared rare tokens + common injection
+        # class must.
+        error = _f(
+            file="src/airtable-video-processor.ts", line=80, severity="error",
+            confidence=0.9,
+            title="Airtable formula injection via unescaped vimeo_code in filterByFormula",
+            body="filterByFormula({vimeo_code}) lets a crafted code break out of the quote.",
+        )
+        warning = _f(
+            file="src/get-video-feedbacks.ts", line=72, severity="warning",
+            confidence=0.8,
+            title="Formula interpolation of vimeo_code allows filter manipulation",
+            body="vimeo_code is interpolated into filterByFormula without escaping.",
+        )
+        result = apply_severity_consistency([error, warning])
+        assert result[0].severity == "error"
+        assert result[1].severity == "error"
+
+    def test_shared_token_different_problem_classes_never_merges(self):
+        inject = _f(
+            file="src/deploy.ts", line=10, severity="error", confidence=0.9,
+            title="Command injection building the deploy_script shell command",
+            body="child_process.exec concatenates deploy_script with user input.",
+        )
+        ratelimit = _f(
+            file="src/hooks.ts", line=20, severity="warning", confidence=0.8,
+            title="Missing rate limit on the deploy_script webhook",
+            body="deploy_script triggers fire without throttling.",
+        )
+        result = apply_severity_consistency([inject, ratelimit])
+        assert result[0].severity == "error"
+        assert result[1].severity == "warning"
+
+    def test_shared_generic_token_never_merges(self):
+        # `handler` is on the code-token stopword list: a ubiquitous name
+        # cannot bind findings even when the guard would otherwise pass.
+        f1 = _f(
+            file="src/upload.ts", line=5, severity="error", confidence=0.9,
+            title="Missing rate limit on upload route",
+            body="The `handler` accepts unlimited uploads.",
+        )
+        f2 = _f(
+            file="src/export.ts", line=5, severity="warning", confidence=0.8,
+            title="Missing rate limit on export route",
+            body="The `handler` loops over every record.",
+        )
+        result = apply_severity_consistency([f1, f2])
+        assert result[0].severity == "error"
+        assert result[1].severity == "warning"
+
+    def test_token_in_three_or_more_findings_is_not_rare(self):
+        findings = [
+            _f(
+                file=f"f{i}.ts", line=1, severity=sev, confidence=0.8,
+                title=f"Formula injection via vimeo_code in filter {i}",
+                body="vimeo_code interpolated raw.",
+            )
+            for i, sev in enumerate(["error", "warning", "outofscope"])
+        ]
+        result = apply_severity_consistency(findings)
+        assert [f.severity for f in result] == ["error", "warning", "outofscope"]
+
+    def test_token_in_three_findings_still_merges_via_title_rule(self):
+        shared = "Formula injection via vimeo_code in filterByFormula"
+        err = _f(file="f1.ts", line=1, severity="error", confidence=0.9,
+                 title=shared, body="raw.")
+        warn = _f(file="f2.ts", line=1, severity="warning", confidence=0.8,
+                  title=shared, body="raw.")
+        third = _f(
+            file="f3.ts", line=1, severity="outofscope", confidence=0.7,
+            title="vimeo_code reused for cache keys",
+            body="unrelated rate limit note.",
+        )
+        result = apply_severity_consistency([err, warn, third])
+        assert result[0].severity == "error"
+        assert result[1].severity == "error"
+        assert result[2].severity == "outofscope"
+
+    def test_token_groups_are_transitive(self):
+        # A shares vimeo_code with B, B shares sort_field with C, A and C
+        # share nothing directly: the component still groups all three.
+        a = _f(
+            file="f1.ts", line=1, severity="error", confidence=0.9,
+            title="Formula injection via unescaped vimeo_code",
+            body="vimeo_code builds the filter string.",
+        )
+        b = _f(
+            file="f2.ts", line=1, severity="warning", confidence=0.8,
+            title="Formula injection via unescaped vimeo_code and sort_field",
+            body="vimeo_code and sort_field are concatenated.",
+        )
+        c = _f(
+            file="f3.ts", line=1, severity="outofscope", confidence=0.7,
+            title="Formula injection through sort_field interpolation",
+            body="sort_field interpolated raw.",
+        )
+        result = apply_severity_consistency([a, b, c])
+        assert all(f.severity == "error" for f in result)
+
+    def test_same_file_sharing_rare_token_merges_without_class_keyword(self):
+        f1 = _f(
+            file="src/checkout.ts", line=10, severity="error", confidence=0.9,
+            title="checkout_session_id persists after the tenant is deleted",
+            body="stale row lingers.",
+        )
+        f2 = _f(
+            file="src/checkout.ts", line=40, severity="warning", confidence=0.8,
+            title="checkout_session_id may exceed the schema limit",
+            body="no guard before insert.",
+        )
+        result = apply_severity_consistency([f1, f2])
+        assert result[0].severity == "error"
+        assert result[1].severity == "error"
+
+    def test_shared_rare_token_alone_without_same_file_or_class_never_merges(self):
+        f1 = _f(
+            file="src/a.ts", line=10, severity="error", confidence=0.9,
+            title="checkout_session_id persists after the tenant is deleted",
+            body="stale row.",
+        )
+        f2 = _f(
+            file="src/b.ts", line=40, severity="warning", confidence=0.8,
+            title="checkout_session_id may exceed the schema limit",
+            body="no guard.",
+        )
+        result = apply_severity_consistency([f1, f2])
+        assert result[0].severity == "error"
+        assert result[1].severity == "warning"
+
+    def test_rewritten_via_token_keeps_identity_and_logs_binding_tokens(self, caplog):
+        from prxref.quality import logger as quality_logger
+
+        error = _f(
+            file="src/a.ts", line=80, severity="error", confidence=0.9,
+            title="Airtable formula injection via unescaped vimeo_code",
+            body="filterByFormula({vimeo_code}).",
+        )
+        warning = _f(
+            file="src/b.ts", line=72, severity="warning", confidence=0.8,
+            title="Formula interpolation of vimeo_code allows filter manipulation",
+            body="vimeo_code interpolated.",
+        )
+        with caplog.at_level(logging.INFO, logger=quality_logger.name):
+            result = apply_severity_consistency([error, warning])
+        assert result[1].severity == "error"
+        assert (result[1].file, result[1].line, result[1].body) == ("src/b.ts", 72, "vimeo_code interpolated.")
+        assert result[1].confidence == 0.8
+        lines = [r for r in caplog.records if r.name == quality_logger.name]
+        assert len(lines) == 1
+        assert "1 finding(s)" in lines[0].getMessage()
+        assert "vimeo_code" in lines[0].getMessage()
+
+    def test_no_token_rewrites_logs_nothing(self, caplog):
+        from prxref.quality import logger as quality_logger
+
+        f1 = _f(file="src/a.ts", line=1, severity="error", confidence=0.9,
+                title="Command injection in deploy_script", body="")
+        f2 = _f(file="src/b.ts", line=2, severity="warning", confidence=0.8,
+                title="Missing rate limit on deploy_script webhook", body="")
+        with caplog.at_level(logging.INFO, logger=quality_logger.name):
+            apply_severity_consistency([f1, f2])
+        assert not [r for r in caplog.records if r.name == quality_logger.name]
 
 
 class TestQualityGate:
