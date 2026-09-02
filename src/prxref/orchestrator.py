@@ -14,7 +14,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    reason otherwise; dict findings are coerced to ``triage.Finding``. A
    legacy dict-shaped stub (``{"findings": ..., "error": ...}``) is still
    accepted for test doubles.
-4. Quality passes in order: ``apply_line_align`` → thread dedup
+4. Quality passes in order: location validation (a ``file`` naming no
+   path of the parsed diff is dropped, not rendered) →
+   ``apply_line_align`` → thread dedup
    (existing threads fetched best-effort; failure means no threads) →
    severity consistency (findings sharing a normalized title are raised
    to the group's max severity) →
@@ -24,9 +26,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 5. Verdict: ``"Error"`` when no chunk was reviewed successfully;
    ``"Request-Changes"`` iff any active error-severity finding survives;
    else ``"Approved"``. A partial failure keeps the verdict but the summary
-   declares reduced coverage AND names the distinct reasons (deduplicated,
-   capped, redacted, inside the same blockquote) — a partial review reads as a
-   successful one, so a reason left only in the logs reaches nobody.
+   declares reduced coverage AND itemizes each failed chunk with the files
+   it took unreviewed plus its reason (capped, redacted, inside the same
+   blockquote) — a partial review reads as a successful one, so a failure
+   left only in the logs reaches nobody, and a file list left out of it
+   leaves the operator guessing which files went unreviewed.
 6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {outofscope_count} {findings} {attribution}`` filled, plus
@@ -63,6 +67,7 @@ from .llm import LLMClient
 from .quality import (
     active,
     apply_line_align,
+    apply_location_validation,
     apply_quality_gate,
     apply_severity_consistency,
     apply_thread_dedup,
@@ -90,10 +95,10 @@ POST_MODES = frozenset({"summary+inline", "summary", "inline"})
 POST_SUMMARY_MODES = frozenset({"summary+inline", "summary"})
 POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 
-# How many DISTINCT chunk-failure reasons the partial-review banner names before
-# it starts counting the rest. Three is enough to show a mixed failure (say, a
-# starved budget plus a timeout) without letting a pathological run bury the
-# findings under its own diagnostics.
+# How many failed chunks the partial-review banner itemizes — each with its
+# file list and redacted reason — before it starts counting the rest. Three is
+# enough to show a mixed failure (say, a starved budget plus a timeout) without
+# letting a pathological run bury the findings under its own diagnostics.
 MAX_REPORTED_REASONS = 3
 
 _SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "outofscope": "🟦"}
@@ -376,6 +381,15 @@ def orchestrate_review(
 
     findings = [f for r in results if not r["error"] for f in r["findings"]]
 
+    # Futures were submitted in chunk order, so results[i] is chunk[i]'s
+    # outcome: the zip is what pairs each failed review with the files it
+    # took down, which the partial banner now names (issue #31).
+    failed_chunks = [
+        (r["error"], [f.path for f in chunk])
+        for chunk, r in zip(chunks, results, strict=True)
+        if r["error"]
+    ]
+
     if post and post_mode in POST_INLINE_MODES:
         _prune_stale_inline_comments(forge, ref)
 
@@ -385,6 +399,7 @@ def orchestrate_review(
         logger.warning("list_threads failed (best-effort): %s", e)
         threads = []
 
+    findings = apply_location_validation(findings, [f.path for f in files])
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
     consistent = apply_severity_consistency(findings)
@@ -431,10 +446,9 @@ def orchestrate_review(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
-            # Every failed chunk already carries its reason here; withholding it
-            # left the one person able to act on "raise PRXREF_LLM_MAX_TOKENS"
-            # reading a banner that said only "findings may be incomplete".
-            failure_reasons=[r["error"] for r in results if r["error"]],
+            # Each failed chunk's reason AND file list reach the banner:
+            # "findings may be incomplete" without which-files acts on nothing.
+            failed_chunks=failed_chunks,
             include_verdict=post_verdict,
         )
         try:
@@ -480,7 +494,7 @@ def orchestrate_review(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
-            failure_reasons=[r["error"] for r in results if r["error"]],
+            failed_chunks=failed_chunks,
             include_verdict=post_verdict,
             inline_accounting=_inline_accounting(
                 len(findings_active), inline_attempted, inline_posted,
@@ -750,7 +764,7 @@ def _render_summary(
     *,
     chunks_reviewed: int = 0,
     chunks_failed: int = 0,
-    failure_reasons: Sequence[str] = (),
+    failed_chunks: Sequence[tuple[str, Sequence[str]]] = (),
     include_verdict: bool = True,
     inline_accounting: str | None = None,
 ) -> str:
@@ -804,40 +818,62 @@ def _render_summary(
         # because a partial review looks like a successful one and nobody goes
         # looking. The total-failure notice has always posted its reason
         # verbatim; staying silent here was the inconsistency, not the safety.
-        reason_lines = _failure_reason_lines(failure_reasons)
+        reason_lines = _failure_reason_lines(failed_chunks)
         if reason_lines:
             rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
     return rendered
 
 
-def _failure_reason_lines(reasons: Sequence[str]) -> list[str]:
-    """Render distinct chunk-failure reasons as blockquote-ready lines.
+def _chunk_files_label(files: Sequence[str]) -> str:
+    """``chunk of 3 files (a.py, b.py, c.py)``, first three then a count."""
+    listing = ", ".join(files[:3])
+    if len(files) > 3:
+        listing = f"{listing}, +{len(files) - 3} more"
+    plural = "s" if len(files) != 1 else ""
+    return f"chunk of {len(files)} file{plural} ({listing})"
 
-    Redacted first (:func:`redact_for_post`), because this text is posted onto
-    a pull request. Redaction runs BEFORE the dedup so that two reasons
-    differing only in a stripped detail collapse into the one fact they are.
 
-    Deduplicated, because seven chunks starved by the same budget is one fact
-    and not seven; capped at :data:`MAX_REPORTED_REASONS`, because a
-    pathological run must not flood the comment. The overflow is counted out
-    loud rather than dropped — a silent truncation here would repeat the very
-    failure this banner exists to fix.
+def _failure_reason_lines(
+    failed_chunks: Sequence[tuple[str, Sequence[str]]],
+) -> list[str]:
+    """Render each failed chunk as a blockquote-ready line naming its files.
 
-    Returns one entry per RENDERED LINE, not one per reason. The caller
+    Each entry is one failed chunk: ``(reason, files)``. The reason is
+    redacted first (:func:`redact_for_post`), because this text is posted
+    onto a pull request; the file list is not, because paths are not
+    secrets — and naming the files is the banner's whole point (issue
+    #31): "7 of 8 chunks were reviewed; 1 failed" told the operator nothing
+    about which files went unreviewed.
+
+    Identical chunk-and-reason pairs collapse to one line, and the list is
+    capped at :data:`MAX_REPORTED_REASONS` chunks, because a pathological
+    run must not flood the comment. The overflow is counted out loud rather
+    than dropped — a silent truncation here would repeat the very failure
+    this banner exists to fix.
+
+    Returns one entry per RENDERED LINE, not one per chunk. The caller
     prefixes ``"> "`` per entry, so a reason containing a newline used to put
     every line after the first outside the blockquote and mangle the rest of
     the comment; continuation lines are indented under their bullet instead.
     """
-    distinct = sorted({redact_for_post(reason) for reason in reasons if reason})
+    distinct: list[tuple[tuple[str, ...], str]] = []
+    seen: set[tuple[tuple[str, ...], str]] = set()
+    for reason, files in failed_chunks:
+        if not reason:
+            continue
+        key = (tuple(files), redact_for_post(reason))
+        if key not in seen:
+            seen.add(key)
+            distinct.append(key)
     lines: list[str] = []
-    for reason in distinct[:MAX_REPORTED_REASONS]:
+    for files, reason in distinct[:MAX_REPORTED_REASONS]:
         first, *rest = reason.splitlines() or [""]
-        lines.append(f"- {first}")
+        lines.append(f"- {_chunk_files_label(files)}: {first}")
         lines.extend(f"  {line}" for line in rest)
     hidden = max(0, len(distinct) - MAX_REPORTED_REASONS)
     if hidden:
         plural = "s" if hidden > 1 else ""
-        lines.append(f"- …and {hidden} more distinct reason{plural} (see logs)")
+        lines.append(f"- …and {hidden} more failed chunk{plural} (see logs)")
     return lines
 
 

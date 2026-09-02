@@ -6,6 +6,7 @@ from prxref.quality import (
     _resolve_max_errors,
     active,
     apply_line_align,
+    apply_location_validation,
     apply_quality_gate,
     apply_severity_consistency,
     apply_thread_dedup,
@@ -43,6 +44,46 @@ class TestSnapLine:
 
     def test_drops_to_file_level_when_no_added_lines(self):
         assert snap_line(10, set()) == 0
+
+
+class TestApplyLocationValidation:
+    """Issue #32: ``file: "package."`` rendered as ``- 🟧 `package.:—```.
+    A location that names no path of the diff is not a review; it drops."""
+
+    def test_a_file_in_the_diff_is_never_dropped(self):
+        finding = _f(file="src/app.py")
+        result = apply_location_validation([finding], ["src/app.py", "other.py"])
+        assert result[0] is finding
+        assert result[0].drop_reason is None
+
+    def test_an_empty_file_field_is_dropped(self):
+        result = apply_location_validation([_f(file="")], ["src/app.py"])
+        assert result[0].drop_reason == "malformed location: ''"
+
+    def test_a_non_path_shape_is_dropped(self):
+        result = apply_location_validation([_f(file="package.")], ["src/app.py"])
+        assert result[0].drop_reason == "malformed location: 'package.'"
+
+    def test_a_plausible_path_missing_from_the_diff_is_dropped(self):
+        result = apply_location_validation([_f(file="src/ghost.py")], ["src/app.py"])
+        assert result[0].drop_reason == "malformed location: 'src/ghost.py'"
+
+    def test_already_dropped_findings_keep_their_reason(self):
+        finding = _f(file="src/ghost.py", drop_reason="confidence 0.10 below floor 0.60")
+        result = apply_location_validation([finding], ["src/app.py"])
+        assert result[0].drop_reason == "confidence 0.10 below floor 0.60"
+
+    def test_the_input_is_not_mutated(self):
+        finding = _f(file="package.")
+        apply_location_validation([finding], ["src/app.py"])
+        assert finding.drop_reason is None
+
+    def test_survivors_and_drops_keep_their_order(self):
+        findings = [_f(file="src/app.py"), _f(file="package."), _f(file="src/app.py")]
+        result = apply_location_validation(findings, ["src/app.py"])
+        assert [f.drop_reason for f in result] == [
+            None, "malformed location: 'package.'", None,
+        ]
 
 
 class TestApplyLineAlign:

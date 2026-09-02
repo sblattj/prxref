@@ -1144,7 +1144,7 @@ class TestPartialBannerNamesTheReasons:
         """Subordinate to the findings, not a second block competing with them."""
         forge, _res = self._with({"a/one.py": TRUNCATED_REASON})
         tail = self._banner(forge)
-        assert f"> - {TRUNCATED_REASON}" in tail
+        assert f"> - chunk of 1 file (a/one.py): {TRUNCATED_REASON}" in tail
         # Line 0 is the rest of the "Partial review:" sentence itself; every
         # line after it must still carry the blockquote marker, or the reasons
         # have escaped into a block of their own.
@@ -1160,15 +1160,24 @@ class TestPartialBannerNamesTheReasons:
             "Findings may be incomplete." in forge.summaries[0]
         )
 
-    def test_identical_reasons_are_reported_once(self):
-        """Three chunks starved by the same budget is one fact, not three."""
+    def test_identical_reasons_still_name_each_failed_chunks_files(self):
+        """The reason is one fact; the file lists are not (issue #31).
+
+        Three chunks starved by the same budget used to collapse into one
+        reason line, leaving the operator to guess which files went
+        unreviewed. Each failed chunk now names its own files, so the same
+        reason appears once per chunk, each line carrying a different list.
+        """
         forge, res = self._with({
             "a/one.py": TRUNCATED_REASON,
             "b/two.py": TRUNCATED_REASON,
             "c/three.py": TRUNCATED_REASON,
         })
         assert res["chunks_failed"] == 3
-        assert forge.summaries[0].count(TRUNCATED_REASON) == 1
+        tail = self._banner(forge)
+        for path in ("a/one.py", "b/two.py", "c/three.py"):
+            assert path in tail
+        assert tail.count("\n> - ") == 3
 
     def test_distinct_reasons_are_all_reported(self):
         forge, _res = self._with({
@@ -1212,7 +1221,7 @@ class TestPartialBannerNamesTheReasons:
         )
         assert res["chunks_failed"] == 4
         tail = self._banner(forge)
-        assert "…and 1 more distinct reason (see logs)" in tail
+        assert "…and 1 more failed chunk (see logs)" in tail
         assert tail.count("\n> - ") == orchestrator.MAX_REPORTED_REASONS + 1
 
     def test_exactly_the_cap_reports_every_reason_and_no_overflow_line(self):
@@ -1416,7 +1425,10 @@ class TestPostedFailureReasonsAreSanitised:
     def test_a_clean_reason_is_posted_unchanged(self, monkeypatch):
         """Control: redaction must not fire on a reason carrying no secret."""
         forge, _res = self._partial(monkeypatch, "RuntimeError: connection reset")
-        assert "- RuntimeError: connection reset" in forge.summaries[0]
+        assert (
+            "- chunk of 1 file (a/one.py): RuntimeError: connection reset"
+            in forge.summaries[0]
+        )
         assert "[redacted]" not in forge.summaries[0]
 
 
@@ -1523,6 +1535,190 @@ class TestMultiLineReasonsStayInTheBlockquote:
     def test_the_continuation_text_is_still_reported(self, monkeypatch):
         forge, _res = self._run(monkeypatch, self.MULTILINE)
         assert "second line of the reason" in forge.summaries[0]
+
+
+class TestChunkFilesLabel:
+    """The per-chunk file list rendered into the banner's reason line."""
+
+    def test_a_single_file_chunk_says_file(self):
+        assert orchestrator._chunk_files_label(("a/one.py",)) == (
+            "chunk of 1 file (a/one.py)"
+        )
+
+    def test_up_to_three_files_are_listed_in_full(self):
+        assert orchestrator._chunk_files_label(("a.py", "b.py", "c.py")) == (
+            "chunk of 3 files (a.py, b.py, c.py)"
+        )
+
+    def test_beyond_three_the_rest_are_counted(self):
+        assert orchestrator._chunk_files_label(("a.py", "b.py", "c.py", "d.py", "e.py")) == (
+            "chunk of 5 files (a.py, b.py, c.py, +2 more)"
+        )
+
+
+class TestFailureReasonLinesCarryTheChunk:
+    """Unit coverage for the per-chunk shape of the banner's reason lines."""
+
+    def test_the_reason_is_redacted_but_the_files_are_not(self):
+        lines = orchestrator._failure_reason_lines([(LEAKY_REASON, ["a/one.py"])])
+        assert len(lines) == 1
+        assert lines[0].startswith("- chunk of 1 file (a/one.py): ")
+        assert LEAKY_SECRET not in lines[0]
+        assert "ConnectionError" in lines[0]
+
+    def test_multiline_reasons_keep_their_continuation_indented(self):
+        lines = orchestrator._failure_reason_lines([
+            ("boom\nsecond line", ["a/one.py"]),
+        ])
+        assert lines == [
+            "- chunk of 1 file (a/one.py): boom",
+            "  second line",
+        ]
+
+    def test_the_cap_counts_chunk_lines_and_the_overflow_counts_chunks(self):
+        failed = [(f"reason {n}", [f"{n}.py"]) for n in ("a", "b", "c", "d")]
+        lines = orchestrator._failure_reason_lines(failed)
+        bullets = [line for line in lines if line.startswith("- ")]
+        assert len(bullets) == orchestrator.MAX_REPORTED_REASONS + 1
+        assert bullets[-1] == "- …and 1 more failed chunk (see logs)"
+
+    def test_identical_chunk_and_reason_pairs_collapse(self):
+        pair = ("same reason", ["a/one.py"])
+        assert orchestrator._failure_reason_lines([pair, pair]) == [
+            "- chunk of 1 file (a/one.py): same reason",
+        ]
+
+    def test_empty_reasons_are_skipped(self):
+        assert orchestrator._failure_reason_lines([("", ["a/one.py"])]) == []
+
+
+class TestPartialBannerNamesTheFailedChunksFiles:
+    """Issue #31: "7 of 8 chunks were reviewed; 1 failed" never said WHICH,
+    so the operator could not tell which files went unreviewed. The
+    orchestrator knows each chunk's file list at failure time; the banner
+    now carries it on the chunk's reason line."""
+
+    def _run(self, monkeypatch, errors_by_path, *, diff, **kwargs):
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _review_chunk_failing(errors_by_path),
+        )
+        forge = FakeForge(diff=diff)
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=True, **kwargs)
+        return forge, res
+
+    def _banner(self, forge):
+        return forge.summaries[0].split("> ⚠️ Partial review:")[1]
+
+    def test_the_banner_line_carries_the_failed_chunks_files(self, monkeypatch):
+        forge, _res = self._run(
+            monkeypatch,
+            {"a/one.py": "LLMError: timeout"},
+            diff=FOUR_FILE_DIFF, max_chunks=4, token_budget=1000,
+        )
+        assert (
+            "> - chunk of 1 file (a/one.py): LLMError: timeout"
+            in self._banner(forge)
+        )
+
+    def test_a_multi_file_chunk_lists_three_then_counts_the_rest(self, monkeypatch):
+        five = "".join(
+            _added_file_diff(path, 3)
+            for path in ("a/1.py", "b/2.py", "c/3.py", "d/4.py", "e/5.py")
+        )
+        forge, res = self._run(
+            monkeypatch,
+            {"a/1.py": "LLMError: timeout"},
+            diff=five, max_chunks=5, token_budget=100_000, max_files_per_chunk=4,
+        )
+        assert res["chunks_failed"] == 1
+        assert res["chunks_reviewed"] == 1
+        assert (
+            "> - chunk of 4 files (a/1.py, b/2.py, c/3.py, +1 more): "
+            "LLMError: timeout" in self._banner(forge)
+        )
+
+    def test_the_unreviewed_files_are_not_redacted(self, monkeypatch):
+        """Paths are not secrets: the file list renders verbatim even while
+        the reason beside it is redacted."""
+        forge, _res = self._run(
+            monkeypatch,
+            {"a/one.py": LEAKY_REASON},
+            diff=FOUR_FILE_DIFF, max_chunks=4, token_budget=1000,
+        )
+        body = forge.summaries[0]
+        assert "a/one.py" in body
+        assert LEAKY_SECRET not in body
+        assert LEAKY_HOST not in body
+
+
+class TestMalformedLocationsAreDropped:
+    """Issue #32: a worker answering ``file: "package."`` used to render as
+    ``- 🟧 `package.:—```. A finding whose file names no path of the diff is
+    dropped into the audit record with a reason, and the summary only shows
+    findings anchored to files the diff actually touches."""
+
+    PAYLOAD = [
+        {"file": "package.", "line": 0, "severity": "warning",
+         "confidence": 0.9, "title": "Bad location", "body": "data"},
+        {"file": "src/app.py", "line": 3, "severity": "warning",
+         "confidence": 0.9, "title": "Good location", "body": "data"},
+    ]
+
+    def _run(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF,
+            FakeLLM(findings_by_path={"src/app.py": self.PAYLOAD}),
+        )
+        return forge, res
+
+    def test_a_file_outside_the_diff_is_dropped_with_a_reason(self):
+        _forge, res = self._run()
+        assert [f.file for f in res["findings_active"]] == ["src/app.py"]
+        assert len(res["findings_dropped"]) == 1
+        dropped = res["findings_dropped"][0]
+        assert dropped.file == "package."
+        assert dropped.drop_reason == "malformed location: 'package.'"
+
+    def test_the_malformed_bullet_never_reaches_the_summary(self):
+        forge, _res = self._run()
+        assert "package." not in forge.summaries[0]
+        assert "Good location" in forge.summaries[0]
+
+    def test_the_drop_reaches_the_dropped_findings_audit_section(self, monkeypatch):
+        """End to end into the formatter: the dropped section tallies the
+        reason and tables the finding the summary bullets omit. The formatter's
+        own default template carries the dropped section; the reviewer stub
+        this module installs only knows the orchestrator's template name."""
+        from prxref import formatter
+        from prxref.formatter import format_summary
+
+        monkeypatch.setattr(
+            formatter, "_load_summary_template",
+            lambda: formatter._DEFAULT_SUMMARY_TEMPLATE,
+        )
+        _forge, res = self._run()
+        rendered = format_summary(
+            res["verdict"], res["findings_active"], res["findings_dropped"],
+            chunk_count=res["chunk_count"], elapsed_ms=res["elapsed_ms"],
+            input_tokens=res["input_tokens"], output_tokens=res["output_tokens"],
+            model="test-model-1",
+        )
+        assert "- 1 × malformed location: 'package.'" in rendered
+        assert "Bad location" in rendered
+
+    def test_an_empty_file_field_is_dropped_too(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF,
+            FakeLLM(findings_by_path={"src/app.py": [
+                {"file": "", "line": 3, "severity": "warning",
+                 "confidence": 0.9, "title": "No location", "body": "data"},
+            ]}),
+        )
+        assert res["findings_active"] == []
+        assert res["findings_dropped"][0].drop_reason == "malformed location: ''"
 
 
 class TestStaleInlinePrune:
