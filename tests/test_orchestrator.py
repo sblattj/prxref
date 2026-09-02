@@ -2341,8 +2341,9 @@ class TestSystemicSweep:
         assert "## src/supabase.ts" in digest
         assert "## src/plain.ts" in digest
         assert "+2| const supabase = createClient(" in digest
-        # The plain.ts changed lines match no pattern and are excluded.
-        assert "+1| data 1" not in digest
+        # plain.ts matches no pattern, but at 3 added lines it is a small
+        # file: the digest renders its full added content.
+        assert "+1| data 1" in digest
         # Both files fit one chunk; +1 for the sweep unit.
         assert res["chunk_count"] == 2
         assert res["chunks_reviewed"] == 2
