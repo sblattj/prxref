@@ -5,11 +5,18 @@ Five passes run before posting:
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-2. ``apply_line_align``: snap each finding's cited line to the nearest
-   actual ``+`` line in that file's diff (within tolerance, else line=0),
-   then corroborate exact ``+``-line members against the file's hunks by
+2. ``apply_line_align``: a line explicitly cited in the finding's own
+   title or body (``line 553``, ``at line 553``, an own-file
+   ``path:line``) outranks a drifted ``line`` field whenever the cited
+   line lands on an added line — or a context line within tolerance of
+   one — of that file's diff and its hunk corroborates against the claim;
+   a non-corroborating citation is ignored. Then snap each finding's
+   cited line to the nearest actual ``+`` line in that file's diff
+   (within tolerance, else line=0), then corroborate exact ``+``-line
+   members against the file's hunks by
    content, so an anchor that is a valid added line of the WRONG hunk
-   (issue #19's drift shape) is re-resolved or demoted to file-level
+   (issue #19's drift shape) is
+   re-resolved or demoted to file-level
    instead of posting at a wrong position. Corroboration is line-level:
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
@@ -244,6 +251,97 @@ def _best_candidate(
     return top[0], top[2]
 
 
+_BODY_LINE_CITE_RE = re.compile(
+    r"(?P<path>[\w./\\-]+\.(?:php|phtml|inc|js|cjs|mjs|jsx|ts|tsx|py|pyi|rb|go"
+    r"|rs|java|kt|kts|swift|c|h|cpp|hpp|cc|cs|fs|css|scss|less|sass|html?|htm"
+    r"|vue|svelte|json|ya?ml|toml|ini|cfg|conf|md|markdown|txt|sh|bash|zsh"
+    r"|fish|sql|xml|env|lock|csv|tsv|log)|\S+/\S+\.\w{1,8}):(?P<num>\d+)"
+    r"|\bline\s+(?P<prose>\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_own_file_citation(path: str, file: str) -> bool:
+    """True when a ``path:line`` citation names the finding's own file.
+
+    Exact, or a suffix at a directory separator in either direction, so
+    ``sync.ts:553`` answers a finding filed against ``src/sync.ts`` while
+    a sibling file's ``other.ts:12`` never does. A bare path with no
+    ``:line`` never reaches this check.
+    """
+    cited = path.replace("\\", "/").lower()
+    own = file.replace("\\", "/").lower()
+    if cited.startswith("./"):
+        cited = cited[2:]
+    return cited == own or own.endswith("/" + cited) or cited.endswith("/" + own)
+
+
+def _body_cited_lines(finding: Finding) -> list[int]:
+    """Line numbers the finding's own title+body cite, in document order.
+
+    Grammar: an own-file ``path:line`` citation (``sync.ts:553``,
+    backticked or bare, any known extension or slash path) and prose
+    ``line N`` (``at line 553``, ``Line 553.``). A bare path mention
+    (``sync.ts``) cites no line, and another file's ``path:line`` is
+    ignored.
+    """
+    text = f"{finding.title} {finding.body}"
+    hits: list[tuple[int, int]] = []
+    for m in _BODY_LINE_CITE_RE.finditer(text):
+        if m.group("path") is not None:
+            if _is_own_file_citation(m.group("path"), finding.file):
+                hits.append((m.start(), int(m.group("num"))))
+        else:
+            hits.append((m.start(), int(m.group("prose"))))
+    hits.sort()
+    return [num for _, num in hits]
+
+
+def _hunk_tokens(hunk: Hunk) -> set[str]:
+    """Union of content tokens over the hunk's non-removed lines."""
+    tokens: set[str] = set()
+    for ln in hunk.lines:
+        if ln.kind != "-" and ln.new_line is not None:
+            tokens |= _line_tokens(ln)
+    return tokens
+
+
+def _resolve_body_cited_anchor(
+    finding: Finding,
+    hunks: Sequence[Hunk],
+    added: set[int],
+    tolerance: int = DEFAULT_LINE_TOLERANCE,
+) -> int | None:
+    """The anchor a corroborated in-body line citation demands, or None.
+
+    Issue #28: the model's ``line`` field drifts while its own body still
+    names the right line. The first body citation — ``line N`` or an
+    own-file ``path:line`` — whose cited line sits on an added line (or a
+    context line within ``tolerance`` of one) of this file AND whose
+    containing hunk shares a non-generic evidence token with the claim
+    wins; its snapped anchor outranks the ``line`` field. A citation that
+    fails either check is skipped (later citations still try), and None
+    sends the caller down the shipped resolution path unchanged. A
+    citation never lands on a blank or pure-punctuation anchor while the
+    file carries token-bearing added lines.
+    """
+    evidence = _evidence_tokens(f"{finding.title} {finding.body}")
+    if not evidence:
+        return None
+    blank_guard = _file_has_token_bearing_add(hunks)
+    for cited in _body_cited_lines(finding):
+        anchor = snap_line(cited, added, tolerance=tolerance)
+        if anchor <= 0:
+            continue
+        hunk = _hunk_containing(hunks, cited)
+        if hunk is None or not (_hunk_tokens(hunk) & evidence):
+            continue
+        if blank_guard and _line_is_blankish(hunks, anchor):
+            continue
+        return anchor
+    return None
+
+
 def apply_line_align(
     findings: Sequence[Finding],
     added_lines_by_file: dict[str, set[int]] | None = None,
@@ -251,6 +349,17 @@ def apply_line_align(
     files: Sequence[FileDiff] | None = None,
 ) -> list[Finding]:
     """Snap each finding's line to a defensible anchor in that file's diff.
+
+    Body-citation precedence: when the parsed hunks are supplied, a line
+    cited in the finding's own title or body for this file (``line 553``,
+    ``at line 553``, ``sync.ts:553``) outranks the ``line`` field
+    whenever the cited line lands on an added line — or a context line
+    within ``tolerance`` of one — of this file's diff and the hunk
+    containing the cited line shares a non-generic evidence token with
+    the claim (:func:`_resolve_body_cited_anchor`). The first
+    corroborating citation wins; a citation outside the diff, with no
+    corroborating hunk, or landing on a blank anchor is ignored and the
+    shipped rules below apply unchanged.
 
     Positional pass: within ``tolerance`` of the nearest ``+`` line the
     citation snaps there; beyond it the citation is not trusted and drops
@@ -274,17 +383,23 @@ def apply_line_align(
     for f in findings:
         added = by_file.get(f.file, set())
         hunks = hunks_by_file.get(f.file)
-        if hunks and f.line > 0 and f.line in added:
-            new_line = _realign_member(f, hunks, tolerance=tolerance)
-        else:
-            new_line = snap_line(f.line, added, tolerance=tolerance)
-            if (
-                hunks
-                and new_line > 0
-                and _line_is_blankish(hunks, new_line)
-                and _file_has_token_bearing_add(hunks)
-            ):
+        new_line = (
+            _resolve_body_cited_anchor(f, hunks, added, tolerance=tolerance)
+            if hunks
+            else None
+        )
+        if new_line is None:
+            if hunks and f.line > 0 and f.line in added:
                 new_line = _realign_member(f, hunks, tolerance=tolerance)
+            else:
+                new_line = snap_line(f.line, added, tolerance=tolerance)
+                if (
+                    hunks
+                    and new_line > 0
+                    and _line_is_blankish(hunks, new_line)
+                    and _file_has_token_bearing_add(hunks)
+                ):
+                    new_line = _realign_member(f, hunks, tolerance=tolerance)
         if new_line != f.line:
             result.append(replace(f, line=new_line))
         else:
