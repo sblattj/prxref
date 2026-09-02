@@ -13,21 +13,39 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    with ``meta["error"]`` the empty string on success and the failure
    reason otherwise; dict findings are coerced to ``triage.Finding``. A
    legacy dict-shaped stub (``{"findings": ..., "error": ...}``) is still
-   accepted for test doubles.
-4. Quality passes in order: ``apply_line_align`` → thread dedup
+   accepted for test doubles. A chunk whose failure is an LLM deadline
+   overrun (``timeout`` in the error) is retried ONCE with
+   ``context_lines=0`` rendering — a strictly smaller prompt attacks the
+   prefill-side share of the wall clock, and a truncated completion (the
+   response-side budget) is not a timeout and never reaches this retry.
+4. Systemic sweep: after the chunk workers, ONE more worker-style
+   single-shot call over the whole-PR digest built by
+   ``systemic.build_digest`` (every file, hunk headers, plus only the
+   high-signal added/removed lines, capped inside ``token_budget``). It
+   hunts the cross-file classes no single chunk seat can see, joins the
+   chunk results, and counts as one more review unit: ``chunk_count`` is
+   ``len(chunks) + 1`` whenever the sweep ran, and a sweep failure is one
+   failed chunk in the partial-review banner.
+5. Quality passes in order: ``apply_line_align`` → thread dedup
    (existing threads fetched best-effort; failure means no threads) →
    severity consistency (findings sharing a normalized title are raised
-   to the group's max severity) →
-   ``apply_quality_gate(confidence_floor=, max_errors=)``. Dropped findings
+   to the group's max severity — the sweep's corroborating title counts
+   toward its group) → ``apply_quality_gate(confidence_floor=,
+   max_errors=)`` → sweep dedup (``apply_sweep_dedup`` drops a sweep
+   finding that restates a chunk finding that SURVIVED the gate, on file
+   + normalized title; running it last is what keeps a sub-floor chunk
+   finding from suppressing its higher-confidence sweep duplicate and
+   then dying at the gate itself). Dropped findings
    are retained in the result with ``drop_reason`` set, never silently
    discarded.
-5. Verdict: ``"Error"`` when no chunk was reviewed successfully;
-   ``"Request-Changes"`` iff any active error-severity finding survives;
+6. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
+   on a dead worker pool cannot carry the run); ``"Request-Changes"``
+   iff any active error-severity finding survives;
    else ``"Approved"``. A partial failure keeps the verdict but the summary
    declares reduced coverage AND names the distinct reasons (deduplicated,
    capped, redacted, inside the same blockquote) — a partial review reads as a
    successful one, so a reason left only in the logs reaches nobody.
-6. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
+7. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {outofscope_count} {findings} {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
@@ -57,7 +75,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import reviewer
+from . import reviewer, systemic
 from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import (
@@ -65,6 +83,7 @@ from .quality import (
     apply_line_align,
     apply_quality_gate,
     apply_severity_consistency,
+    apply_sweep_dedup,
     apply_thread_dedup,
 )
 from .trace import Tracer, get_tracer
@@ -262,6 +281,11 @@ def orchestrate_review(
     notice when ``post`` is true. Degenerate arguments are part of that: a
     caller passing ``max_chunks=0`` gets an error run, not a ``ValueError``.
 
+    ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
+    the systemic sweep, which runs whenever at least one chunk exists (an
+    empty diff returns before any review unit runs). ``chunks_reviewed`` +
+    ``chunks_failed`` always equals it.
+
     ``max_tokens`` is the per-chunk completion budget handed to every worker;
     ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. ``token_budget`` sizes
     each diff chunk, ``max_files_per_chunk`` caps the files placed in one,
@@ -357,16 +381,32 @@ def orchestrate_review(
         context_lines=context_lines, tracer=tracer,
     )
 
+    # One more worker-style unit, not inside the pool: the sweep digests the
+    # WHOLE diff, so it only has something to say once every chunk result —
+    # including which files each chunk saw — is final. Appended to the same
+    # results list, so coverage accounting, token sums, the all-failed
+    # check, and the failure banner treat it exactly like a chunk.
+    results.append(
+        _run_sweep(
+            llm, files, pr, max_tokens=max_tokens,
+            token_budget=token_budget, tracer=tracer,
+        )
+    )
+
     input_tokens = sum(r["input_tokens"] for r in results)
     output_tokens = sum(r["output_tokens"] for r in results)
     model = next((r["model"] for r in results if r["model"]), "unknown")
 
-    if all(r["error"] for r in results):
-        reason = f"all {len(results)} worker reviews failed ({results[0]['error']})"
+    # Total failure is about the CHUNKS, deliberately: the sweep sees only a
+    # pattern digest, so a sweep success on a dead worker pool is one unit of
+    # pattern coverage over a review that never happened — it must not turn
+    # that into an "Approved, no findings" run.
+    if all(r["error"] for r in results[:-1]):
+        reason = f"all {len(chunks)} worker reviews failed ({results[0]['error']})"
         logger.error("Total LLM failure: %s", reason)
         tracer.event("run", "fail")
         return _error_run(
-            forge, ref, post, len(chunks), reason, t0, tracer=tracer,
+            forge, ref, post, len(chunks) + 1, reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
             post_mode=post_mode,
         )
@@ -374,6 +414,12 @@ def orchestrate_review(
     chunks_failed = sum(1 for r in results if r["error"])
     chunks_reviewed = len(results) - chunks_failed
 
+    # Sweep findings trail the chunk findings by construction (results[:-1]
+    # are the chunk workers), which is the boundary the sweep-dedup pass
+    # needs after line alignment has settled every anchor.
+    sweep_start = sum(
+        len(r["findings"]) for r in results[:-1] if not r["error"]
+    )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
 
     if post and post_mode in POST_INLINE_MODES:
@@ -402,6 +448,11 @@ def orchestrate_review(
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
     )
+    # AFTER the gate, deliberately: the duplicate set is built from chunk
+    # findings that survived it, so a sub-floor chunk finding cannot suppress
+    # its higher-confidence sweep duplicate and then die at the gate itself —
+    # that would lose the recall the sweep exists to add.
+    findings = apply_sweep_dedup(findings, sweep_start=sweep_start)
 
     findings_active = active(findings)
     findings_dropped = [f for f in findings if f.drop_reason is not None]
@@ -507,7 +558,7 @@ def orchestrate_review(
         "verdict": verdict,
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
-        "chunk_count": len(chunks),
+        "chunk_count": len(chunks) + 1,
         "chunks_reviewed": chunks_reviewed,
         "chunks_failed": chunks_failed,
         "elapsed_ms": elapsed_ms,
@@ -636,6 +687,77 @@ def _run_workers(
             done.set()
 
 
+def _is_timeout_error(error: str) -> bool:
+    """True when a worker's failure reason is an LLM deadline overrun.
+
+    The OpenAI-compat chain spells every deadline failure ``<model>: timeout
+    (<exc>)``, so this is a substring test against that vocabulary,
+    case-insensitive. Deliberately NOT matched: truncation. A completion cut
+    off by the response-side budget (``finish_reason=length``) is an HTTP 200,
+    not a timeout — it degrades gracefully upstream and names
+    ``PRXREF_LLM_MAX_TOKENS`` — so shrinking the prompt for it would be the
+    wrong lever.
+    """
+    return "timeout" in (error or "").lower()
+
+
+# The deadline (PRXREF_LLM_TIMEOUT) is wall clock over prefill AND decode, so
+# a chunk can lose it to prompt size alone; rendering with zero context lines
+# attacks exactly that share, keeping every changed line.
+_TIMEOUT_RETRY_CONTEXT_LINES = 0
+
+
+def _invoke_chunk(
+    llm: LLMClient, chunk, pr: PRData,
+    max_tokens: int | None, context_lines: int | None,
+) -> dict:
+    """One normalized :func:`reviewer.review_chunk` call; never raises.
+
+    Returns the worker result shape — findings coerced to ``Finding``,
+    ``error`` always a string — for both the original attempt and the
+    timeout retry in :func:`_run_worker`. Legacy dict-shaped stubs are
+    accepted exactly as before.
+    """
+    try:
+        res = reviewer.review_chunk(
+            llm, chunk, pr_title=pr.title, pr_description=pr.description,
+            max_tokens=max_tokens, context_lines=context_lines,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {
+            "findings": [], "error": str(e),
+            "input_tokens": 0, "output_tokens": 0, "model": "",
+            "elapsed_ms": 0,
+        }
+
+    # reviewer returns (findings, meta); legacy dict stubs still accepted.
+    if isinstance(res, tuple):
+        findings_raw, meta = res
+        res = {
+            "findings": findings_raw,
+            "input_tokens": meta.get("input_tokens", 0),
+            "output_tokens": meta.get("output_tokens", 0),
+            "model": meta.get("model", ""),
+            "elapsed_ms": meta.get("elapsed_ms", 0),
+            "error": meta.get("error", ""),
+        }
+
+    findings = []
+    for item in res.get("findings") or []:
+        finding = _coerce_finding(item)
+        if finding is not None:
+            findings.append(finding)
+
+    return {
+        "findings": findings,
+        "error": str(res.get("error") or ""),
+        "input_tokens": res.get("input_tokens", 0),
+        "output_tokens": res.get("output_tokens", 0),
+        "model": res.get("model", ""),
+        "elapsed_ms": res.get("elapsed_ms", 0),
+    }
+
+
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
@@ -654,66 +776,125 @@ def _run_worker(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
     )
-    try:
-        res = reviewer.review_chunk(
-            llm, chunk, pr_title=pr.title, pr_description=pr.description,
-            max_tokens=max_tokens, context_lines=context_lines,
+    res = _invoke_chunk(llm, chunk, pr, max_tokens, context_lines)
+    if (
+        res["error"]
+        and _is_timeout_error(res["error"])
+        and context_lines != _TIMEOUT_RETRY_CONTEXT_LINES
+    ):
+        # Issue #29's timeout half: a chunk that outruns the deadline took the
+        # whole chunk's findings with it. One deterministic retry with the
+        # context trimmed to the changed lines — same chunk, same budget,
+        # strictly smaller prompt. The caller's own 0 skips it: an identical
+        # prompt would meet an identical fate.
+        logger.warning(
+            "[chunk %d/%d] timed out; retrying once with context_lines=0",
+            index, total,
         )
-    except Exception as e:  # noqa: BLE001
-        logger.error("[chunk %d/%d] worker raised: %s", index, total, e)
         tracer.event(
-            "chunk", "fail", index=index, total=total,
-            elapsed_ms=_elapsed_ms(t0), error=e.__class__.__name__,
+            "chunk", "retry", index=index, total=total, reason="timeout",
         )
-        return {
-            "findings": [], "error": str(e),
-            "input_tokens": 0, "output_tokens": 0, "model": "",
-            "elapsed_ms": _elapsed_ms(t0),
-        }
+        res = _invoke_chunk(llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES)
 
-    # reviewer returns (findings, meta); legacy dict stubs still accepted.
-    if isinstance(res, tuple):
-        findings_raw, meta = res
-        res = {
-            "findings": findings_raw,
-            "input_tokens": meta.get("input_tokens", 0),
-            "output_tokens": meta.get("output_tokens", 0),
-            "model": meta.get("model", ""),
-            "elapsed_ms": meta.get("elapsed_ms", _elapsed_ms(t0)),
-            "error": meta.get("error", ""),
-        }
-
-    findings = []
-    for item in res.get("findings") or []:
-        finding = _coerce_finding(item)
-        if finding is not None:
-            findings.append(finding)
-
-    error = res.get("error")
+    error = res["error"]
     if error:
         logger.error("[chunk %d/%d] worker reported error: %s", index, total, error)
         tracer.event(
             "chunk", "fail", index=index, total=total,
-            elapsed_ms=_elapsed_ms(t0), error=str(error)[:200],
+            elapsed_ms=_elapsed_ms(t0), error=error[:200],
         )
     else:
         logger.info(
             "[chunk %d/%d] %d findings in %d ms",
-            index, total, len(findings), _elapsed_ms(t0),
+            index, total, len(res["findings"]), _elapsed_ms(t0),
         )
         tracer.event(
             "chunk", "ok", index=index, total=total,
-            elapsed_ms=_elapsed_ms(t0), findings=len(findings),
-            model=res.get("model", ""),
-            input_tokens=res.get("input_tokens", 0),
-            output_tokens=res.get("output_tokens", 0),
+            elapsed_ms=_elapsed_ms(t0), findings=len(res["findings"]),
+            model=res["model"],
+            input_tokens=res["input_tokens"],
+            output_tokens=res["output_tokens"],
+        )
+    return {
+        "findings": res["findings"],
+        "error": error,
+        "input_tokens": res["input_tokens"],
+        "output_tokens": res["output_tokens"],
+        "model": res["model"],
+        "elapsed_ms": _elapsed_ms(t0),
+    }
+
+
+def _run_sweep(
+    llm: LLMClient, files, pr: PRData, *,
+    max_tokens: int | None = None,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    tracer: Tracer | None = None,
+) -> dict:
+    """Run the whole-PR systemic sweep as one worker-style review unit.
+
+    Builds the digest (:func:`prxref.systemic.build_digest`, capped inside
+    ``token_budget``), makes ONE single-shot call through
+    :func:`reviewer.review_systemic` — so ``PRXREF_LLM_MAX_TOKENS``, the
+    timeout, and the model fallback chain all apply as to any chunk — and
+    returns the same result shape a chunk worker does. A failure is that
+    shape with ``error`` set prefixed ``systemic sweep:``, so the
+    partial-review banner names the unit that failed; it counts as one
+    failed chunk in the caller's coverage accounting.
+    """
+    tracer = tracer if tracer is not None else get_tracer()
+    t0 = time.perf_counter()
+    digest = systemic.build_digest(files, token_budget)
+    logger.info(
+        "[sweep] start: %d files, digest %d chars", len(files), len(digest),
+    )
+    tracer.event("sweep", "start", files=len(files), digest_chars=len(digest))
+    try:
+        findings_raw, meta = reviewer.review_systemic(
+            llm, digest, pr_title=pr.title, pr_description=pr.description,
+            max_tokens=max_tokens,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("[sweep] raised: %s", e)
+        tracer.event(
+            "sweep", "fail", elapsed_ms=_elapsed_ms(t0),
+            error=e.__class__.__name__,
+        )
+        return {
+            "findings": [], "error": f"systemic sweep: {e}",
+            "input_tokens": 0, "output_tokens": 0, "model": "",
+            "elapsed_ms": _elapsed_ms(t0),
+        }
+
+    findings = []
+    for item in findings_raw:
+        finding = _coerce_finding(item)
+        if finding is not None:
+            findings.append(finding)
+
+    error = str(meta.get("error") or "")
+    if error:
+        error = f"systemic sweep: {error}"
+        logger.error("[sweep] failed: %s", error)
+        tracer.event(
+            "sweep", "fail", elapsed_ms=_elapsed_ms(t0), error=error[:200],
+        )
+    else:
+        logger.info(
+            "[sweep] %d findings in %d ms", len(findings), _elapsed_ms(t0),
+        )
+        tracer.event(
+            "sweep", "ok", elapsed_ms=_elapsed_ms(t0), findings=len(findings),
+            model=meta.get("model", ""),
+            input_tokens=meta.get("input_tokens", 0),
+            output_tokens=meta.get("output_tokens", 0),
         )
     return {
         "findings": findings,
         "error": error,
-        "input_tokens": res.get("input_tokens", 0),
-        "output_tokens": res.get("output_tokens", 0),
-        "model": res.get("model", ""),
+        "input_tokens": meta.get("input_tokens", 0),
+        "output_tokens": meta.get("output_tokens", 0),
+        "model": meta.get("model", ""),
         "elapsed_ms": _elapsed_ms(t0),
     }
 
