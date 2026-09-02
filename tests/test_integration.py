@@ -270,10 +270,22 @@ class TestScenario1HappyPath:
             assert result["findings_active"][0].title == "Uncaught token decode exception"
             assert result["findings_active"][0].severity == "error"
 
-            assert len(result["findings_dropped"]) == 1
-            dropped = result["findings_dropped"][0]
-            assert dropped.title == "Missing audit log"
-            assert "below floor" in dropped.drop_reason
+            assert len(result["findings_dropped"]) == 3
+            # The chunk's own sub-floor finding is retained with its reason...
+            assert "below floor" in result["findings_dropped"][0].drop_reason
+            assert result["findings_dropped"][0].title == "Missing audit log"
+            # ...the sweep re-found both chunk findings (the mock serves every
+            # request the same payload): its low-confidence copy died at the
+            # gate like the chunk's, and its surviving copy of the posted
+            # finding was retained as a duplicate of the chunk finding.
+            assert sum(
+                f.drop_reason == "duplicate of chunk finding"
+                for f in result["findings_dropped"]
+            ) == 1
+            assert sum(
+                "below floor" in f.drop_reason
+                for f in result["findings_dropped"]
+            ) == 2
 
             assert len(forge.summaries) == 1
             summary = forge.summaries[0]
@@ -290,7 +302,8 @@ class TestScenario1HappyPath:
             assert "Uncaught token decode exception" in comments[0].body
             assert "Reviewed by prxref · model=fast" in comments[0].body
 
-            assert [r["model"] for r in server.requests] == ["fast"]
+            # One chunk review plus the systemic-sweep digest review.
+            assert [r["model"] for r in server.requests] == ["fast", "fast"]
         finally:
             server.stop()
 
@@ -370,7 +383,10 @@ class TestScenario2ModelFallback:
             assert result["verdict"] == "Approved"
             assert len(result["findings_active"]) == 1
 
-            assert [r["model"] for r in server.requests] == ["fast", "strong"]
+            # Chunk (fast 500s, strong answers) plus the sweep unit (same chain).
+            assert [r["model"] for r in server.requests] == [
+                "fast", "strong", "fast", "strong",
+            ]
 
             assert len(forge.summaries) == 1
             assert "model=strong" in forge.summaries[0]
@@ -586,7 +602,8 @@ class TestScenario5CliEndToEnd:
             assert rc == 0
             captured = capsys.readouterr()
             assert "verdict: Request-Changes" in captured.out
-            assert [r["model"] for r in server.requests] == ["fast"]
+            # One chunk review plus the systemic-sweep digest review.
+            assert [r["model"] for r in server.requests] == ["fast", "fast"]
         finally:
             server.stop()
 
@@ -632,7 +649,9 @@ class TestLLMBudgetKnobsEndToEnd:
         base_url = server.start()
         try:
             self._run(monkeypatch, base_url, {})
-            assert len(server.requests) == 1
+            # The chunk review plus the systemic-sweep digest review; the
+            # reproducibility contract is asserted on the FIRST (chunk) call.
+            assert len(server.requests) == 2
             payload = server.requests[0]["payload"]
             assert payload["max_tokens"] == 4096
             assert payload["temperature"] == 0.0
@@ -827,9 +846,9 @@ class TestDryRunEndToEnd:
             assert result["posted"] is False
             assert harness.forge.summaries == []
             assert harness.forge.inline_batches == []
-            # The review itself still ran: the model was called and the finding
-            # survived the quality gate.
-            assert len(server.requests) == 1
+            # The review itself still ran: the model was called (chunk plus
+            # the systemic sweep) and the finding survived the quality gate.
+            assert len(server.requests) == 2
             assert len(result["findings_active"]) == 1
         finally:
             server.stop()
@@ -871,13 +890,20 @@ class TestPartialFailureIsExplainedOnThePR:
         return big("src/one.py") + big("src/two.py")
 
     def _run(self, monkeypatch, second_finish_reason: str):
-        """First chunk answers cleanly, second stops with the given reason."""
+        """First chunk answers cleanly, second stops with the given reason.
+
+        The third request is the systemic-sweep digest review, answered clean:
+        this class pins the CHUNK truncation banner, and a sweep failure here
+        would only repeat the same finding under a second reason.
+        """
         state = {"n": 0}
 
         def route(payload):
             state["n"] += 1
             if state["n"] == 1:
                 return 200, _completion(_GOOD_CONTENT, "stop")
+            if state["n"] >= 3:
+                return 200, _completion(json.dumps({"findings": []}), "stop")
             return 200, _completion(_TRUNCATED_CONTENT, second_finish_reason)
 
         server = MockOpenAIServer(routes={"fast": route})
@@ -906,11 +932,12 @@ class TestPartialFailureIsExplainedOnThePR:
     def test_the_truncation_reason_lands_on_the_pr(self, monkeypatch):
         forge, result, server = self._run(monkeypatch, "length")
 
-        assert len(server.requests) == 2
-        assert result["chunks_reviewed"] == 1
+        # 2 chunk reviews + 1 systemic-sweep review.
+        assert len(server.requests) == 3
+        assert result["chunks_reviewed"] == 2
         assert result["chunks_failed"] == 1
         summary = forge.summaries[0]
-        assert "⚠️ Partial review: 1 of 2 chunks were reviewed" in summary
+        assert "⚠️ Partial review: 2 of 3 chunks were reviewed" in summary
         assert (
             "> - response truncated at max_tokens=256 (finish_reason=length); "
             "raise PRXREF_LLM_MAX_TOKENS" in summary
@@ -923,7 +950,7 @@ class TestPartialFailureIsExplainedOnThePR:
 
         assert result["chunks_failed"] == 1
         summary = forge.summaries[0]
-        assert "⚠️ Partial review: 1 of 2 chunks were reviewed" in summary
+        assert "⚠️ Partial review: 2 of 3 chunks were reviewed" in summary
         assert "PRXREF_LLM_MAX_TOKENS" not in summary
         assert "JSONDecodeError" in summary
 

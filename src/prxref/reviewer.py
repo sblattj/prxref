@@ -1,11 +1,13 @@
-"""Worker-review layer: one LLM call per diff chunk.
+"""Worker-review layer: one LLM call per diff chunk, plus the systemic sweep.
 
 The reviewer renders ``prompts/worker.md`` with the chunk's unified diff,
 makes a single :meth:`LLMClient.invoke` call (no retries — the model
 fallback chain handles transient failures), and maps the JSON response
 onto :class:`prxref.triage.Finding` records. Unparseable or malformed
 responses degrade to ``([], [])`` with a logged warning; this layer
-never raises.
+never raises. :func:`review_systemic` is the same contract over the
+whole-PR digest built by :mod:`prxref.systemic`, for the second-order
+classes no single chunk seat can see.
 
 When a response is unparseable *because* the model ran out of completion
 budget (``finish_reason == "length"``), the reported error names the budget
@@ -137,6 +139,30 @@ def _render_prompt(
     return head.strip(), user.strip()
 
 
+def _render_systemic_prompt(
+    digest: str,
+    pr_title: str,
+    pr_description: str,
+    repo_hint: str,
+) -> tuple[str, str]:
+    template = load_prompt("systemic.md")
+    head, marker, tail = template.partition(_CONTEXT_MARKER)
+    if not marker:
+        raise ValueError(f"systemic.md is missing the {_CONTEXT_MARKER!r} split marker")
+    user = (
+        marker + tail
+    ).replace(
+        "{pr_title}", pr_title.strip() or "(untitled)"
+    ).replace(
+        "{pr_description}", pr_description.strip() or "(none)"
+    ).replace(
+        "{repo_hint}", repo_hint.strip() or "(unspecified)"
+    ).replace(
+        "{digest}", digest.strip() or "(empty digest)"
+    )
+    return head.strip(), user.strip()
+
+
 def _as_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -162,6 +188,98 @@ def _finding_from(raw: Any) -> Finding | None:
         title=str(raw.get("title") or "").strip(),
         body=str(raw.get("body") or "").strip(),
     )
+
+
+def _invoke_and_parse(
+    llm: LLMClient, system: str, user: str, *, budget: int, label: str,
+) -> tuple[list[Finding], dict]:
+    """One single-shot invoke plus lenient JSON parse, shared by both reviewers.
+
+    ``label`` names the caller in log lines (``chunk of 2 files``, ``systemic
+    sweep``). The contract is the one :func:`review_chunk` documents: never
+    raises, empty findings and zeros on failure, and truncation named as the
+    cause — with the budget lever — when the budget is why the response was
+    unusable.
+    """
+    t0 = time.perf_counter()
+    meta = {
+        "escalations": [],
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "model": "",
+        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+        "error": "",
+    }
+
+    # The invoke and the parse are caught separately on purpose: only the
+    # invoke's result knows WHY generation stopped, and the parse failure is
+    # exactly where that reason has to be spoken. Neither is allowed to raise
+    # out of this function — the never-raise contract is unchanged.
+    try:
+        result = llm.invoke(
+            system=system,
+            user=user,
+            max_tokens=budget,
+            json_mode=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("worker review failed for %s: %s", label, e)
+        meta["error"] = f"{type(e).__name__}: {e}"
+        meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+        return [], meta
+
+    meta["input_tokens"] = result.input_tokens
+    meta["output_tokens"] = result.output_tokens
+    meta["model"] = result.model
+
+    stop_reason = _budget_stop_reason(result)
+    truncated_error = _TRUNCATED_ERROR.format(budget=budget, reason=stop_reason)
+
+    try:
+        parsed = loads_lenient(result.text)
+    except Exception as e:  # noqa: BLE001
+        # A truncated completion and a model that simply refused to emit JSON
+        # produce the same JSONDecodeError, and only one of them has a lever
+        # the operator can pull. Say which one this is.
+        reason = truncated_error if stop_reason else f"{type(e).__name__}: {e}"
+        logger.warning("worker review failed for %s: %s", label, reason)
+        meta["error"] = reason
+        meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+        return [], meta
+
+    meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+
+    if not isinstance(parsed, dict):
+        # Valid JSON of the wrong shape is just as unusable as none, so it gets
+        # the same treatment: if the budget is why it came out that way, say so
+        # rather than reporting the shape and leaving the cause unspoken.
+        detail = f"worker review JSON is not an object: {type(parsed).__name__}"
+        logger.warning(detail)
+        meta["error"] = truncated_error if stop_reason else detail
+        return [], meta
+
+    if stop_reason:
+        # Parseable and usable, so the review still counts — but the model was
+        # cut off mid-answer and the tail of its findings is gone. Loud, not
+        # fatal. Logged only from here, where the response was actually used.
+        logger.warning(
+            "worker review for %s hit the completion budget "
+            "(max_tokens=%d, finish_reason=%s); findings may be incomplete — "
+            "raise %s",
+            label, budget, stop_reason, _MAX_TOKENS_ENV,
+        )
+
+    raw_findings = parsed.get("findings")
+    if not isinstance(raw_findings, list):
+        raw_findings = []
+    findings = [f for f in (_finding_from(r) for r in raw_findings) if f is not None]
+
+    raw_esc = parsed.get("escalations")
+    if not isinstance(raw_esc, list):
+        raw_esc = []
+    meta["escalations"] = [e for e in raw_esc if isinstance(e, dict)]
+
+    return findings, meta
 
 
 def review_chunk(
@@ -213,83 +331,41 @@ def review_chunk(
         repo_hint=repo_hint,
         context_lines=context_lines,
     )
-    t0 = time.perf_counter()
-    meta = {
-        "escalations": [],
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "model": "",
-        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
-        "error": "",
-    }
     budget = MAX_TOKENS if max_tokens is None else max_tokens
+    return _invoke_and_parse(
+        llm, system, user, budget=budget, label=f"chunk of {len(chunk)} files",
+    )
 
-    # The invoke and the parse are caught separately on purpose: only the
-    # invoke's result knows WHY generation stopped, and the parse failure is
-    # exactly where that reason has to be spoken. Neither is allowed to raise
-    # out of this function — the never-raise contract is unchanged.
-    try:
-        result = llm.invoke(
-            system=system,
-            user=user,
-            max_tokens=budget,
-            json_mode=True,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("worker review failed for chunk of %d files: %s", len(chunk), e)
-        meta["error"] = f"{type(e).__name__}: {e}"
-        meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
-        return [], meta
 
-    meta["input_tokens"] = result.input_tokens
-    meta["output_tokens"] = result.output_tokens
-    meta["model"] = result.model
+def review_systemic(
+    llm: LLMClient,
+    digest: str,
+    *,
+    pr_title: str = "",
+    pr_description: str = "",
+    repo_hint: str = "",
+    max_tokens: int | None = None,
+) -> tuple[list[Finding], dict]:
+    """Review the whole-PR systemic digest with a single LLM call.
 
-    stop_reason = _budget_stop_reason(result)
-    truncated_error = _TRUNCATED_ERROR.format(budget=budget, reason=stop_reason)
+    The second-order complement to :func:`review_chunk`: chunk workers each
+    see one slice of the diff, so cross-file classes — an unauthenticated
+    handler, a secret in a client-exposed constant, a migration with no
+    policy — have no seat that sees enough to name them. ``digest`` is the
+    deterministic whole-PR text built by
+    :func:`prxref.systemic.build_digest`; the prompt
+    (``prompts/systemic.md``) restricts findings to those systemic classes.
 
-    try:
-        parsed = loads_lenient(result.text)
-    except Exception as e:  # noqa: BLE001
-        # A truncated completion and a model that simply refused to emit JSON
-        # produce the same JSONDecodeError, and only one of them has a lever
-        # the operator can pull. Say which one this is.
-        reason = truncated_error if stop_reason else f"{type(e).__name__}: {e}"
-        logger.warning("worker review failed for chunk of %d files: %s", len(chunk), reason)
-        meta["error"] = reason
-        meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
-        return [], meta
-
-    meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
-
-    if not isinstance(parsed, dict):
-        # Valid JSON of the wrong shape is just as unusable as none, so it gets
-        # the same treatment: if the budget is why it came out that way, say so
-        # rather than reporting the shape and leaving the cause unspoken.
-        detail = f"worker review JSON is not an object: {type(parsed).__name__}"
-        logger.warning(detail)
-        meta["error"] = truncated_error if stop_reason else detail
-        return [], meta
-
-    if stop_reason:
-        # Parseable and usable, so the review still counts — but the model was
-        # cut off mid-answer and the tail of its findings is gone. Loud, not
-        # fatal. Logged only from here, where the response was actually used.
-        logger.warning(
-            "worker review for chunk of %d files hit the completion budget "
-            "(max_tokens=%d, finish_reason=%s); findings may be incomplete — "
-            "raise %s",
-            len(chunk), budget, stop_reason, _MAX_TOKENS_ENV,
-        )
-
-    raw_findings = parsed.get("findings")
-    if not isinstance(raw_findings, list):
-        raw_findings = []
-    findings = [f for f in (_finding_from(r) for r in raw_findings) if f is not None]
-
-    raw_esc = parsed.get("escalations")
-    if not isinstance(raw_esc, list):
-        raw_esc = []
-    meta["escalations"] = [e for e in raw_esc if isinstance(e, dict)]
-
-    return findings, meta
+    Returns ``(findings, meta)`` under exactly the :func:`review_chunk`
+    contract — never raises, ``meta["error"]`` empty on success, truncation
+    named when the budget is why — so the orchestrator can treat the sweep
+    as one more worker-style unit for coverage accounting.
+    """
+    system, user = _render_systemic_prompt(
+        digest=digest,
+        pr_title=pr_title,
+        pr_description=pr_description,
+        repo_hint=repo_hint,
+    )
+    budget = MAX_TOKENS if max_tokens is None else max_tokens
+    return _invoke_and_parse(llm, system, user, budget=budget, label="systemic sweep")
