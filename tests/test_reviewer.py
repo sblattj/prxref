@@ -7,7 +7,13 @@ import logging
 import pytest
 
 from prxref.llm import InvokeResult
-from prxref.reviewer import MAX_TOKENS, load_prompt, render_chunk, review_chunk
+from prxref.reviewer import (
+    MAX_TOKENS,
+    load_prompt,
+    render_chunk,
+    review_chunk,
+    review_systemic,
+)
 from prxref.triage import Finding, parse_unified_diff
 
 MINI_DIFF = """\
@@ -581,3 +587,75 @@ class TestReviewChunkThreadsContextLines:
         )
         assert len(findings) == 2
         assert meta["error"] == ""
+
+
+class TestReviewSystemic:
+    """review_systemic: the review_chunk contract over the whole-PR digest."""
+
+    DIGEST = "## src/app.py\n@@ -1,2 +1,2 @@\n+2| const KEY = process.env.TOKEN;"
+
+    def test_a_clean_response_maps_onto_findings(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        findings, meta = review_systemic(llm, self.DIGEST)
+        assert meta["error"] == ""
+        assert len(findings) == 2
+        assert findings[0].file == "src/app.py"
+        assert meta["escalations"] != []
+
+    def test_the_digest_reaches_the_prompt_and_the_placeholders_fill(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_systemic(
+            llm, self.DIGEST, pr_title="Add billing", pr_description="charges",
+        )
+        call = llm.calls[0]
+        assert "+2| const KEY = process.env.TOKEN;" in call["user"]
+        assert "Add billing" in call["user"]
+        assert "charges" in call["user"]
+        assert "{digest}" not in call["user"]
+        assert call["json_mode"] is True
+        assert call["max_tokens"] == MAX_TOKENS
+
+    def test_the_shipped_template_has_the_split_marker(self):
+        template = load_prompt("systemic.md")
+        assert template.count("## Review Context") == 1
+        assert "{digest}" in template
+
+    def test_the_shipped_prompt_carries_the_systemic_classes(self):
+        template = load_prompt("systemic.md")
+        for phrase in (
+            "no authentication", "client-exposed", "swallowed error",
+            "row level security", "destructive",
+        ):
+            assert phrase in template
+
+    def test_an_llm_failure_yields_empty_findings_and_the_error(self):
+        llm = _RaisingLLM()
+        findings, meta = review_systemic(llm, self.DIGEST)
+        assert findings == []
+        assert "RuntimeError" in meta["error"]
+        assert meta["input_tokens"] == 0
+
+    def test_a_truncated_digest_review_names_the_budget(self):
+        llm = FakeLLM("", finish_reason="length")
+        _findings, meta = review_systemic(llm, self.DIGEST, max_tokens=256)
+        assert "response truncated at max_tokens=256" in meta["error"]
+        assert "PRXREF_LLM_MAX_TOKENS" in meta["error"]
+
+    def test_a_wrong_shaped_response_keeps_the_shape_message(self):
+        llm = FakeLLM("[1, 2]")
+        _findings, meta = review_systemic(llm, self.DIGEST)
+        assert meta["error"] == "worker review JSON is not an object: list"
+
+    def test_max_tokens_none_uses_the_module_default(self):
+        llm = FakeLLM('{"findings": []}')
+        review_systemic(llm, self.DIGEST)
+        assert llm.calls[0]["max_tokens"] == MAX_TOKENS
+        llm = FakeLLM('{"findings": []}')
+        review_systemic(llm, self.DIGEST, max_tokens=1234)
+        assert llm.calls[0]["max_tokens"] == 1234
+
+
+class _RaisingLLM:
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
+               timeout_s=60.0):
+        raise RuntimeError("provider down")
