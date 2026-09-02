@@ -7,6 +7,60 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-02
+
+The recall release. The 2026-09-01 re-audit of v0.10.1 found precision and
+mechanics fixed but recall weak (27% on the big PR's known bugs) and one
+anchor shape surviving; all five findings are addressed here.
+
+### Added
+
+- **A systemic sweep pass (#29, PR #36).** After the chunk workers, one more
+  single-shot call reviews a deterministic digest of the WHOLE PR — the file
+  list, hunk headers, and the added/removed lines matching six high-signal
+  patterns (entry points, env/secret refs, auth checks, error-swallows,
+  migration DDL, console/logs), capped per-file and inside the chunk token
+  budget. It hunts the classes no single chunk seat can see: missing auth on
+  entry points reaching paid APIs, secrets in client-exposed variables,
+  swallowed errors in billing/persistence paths, migrations missing RLS or
+  backfills, destructive ops without guards. Sweep findings flow through the
+  full pipeline; duplicates of chunk findings drop with
+  `duplicate of chunk finding` — after the quality gate, so a sub-floor
+  chunk finding cannot suppress its higher-confidence sweep twin. The sweep
+  counts as one review unit in coverage accounting and in the partial banner.
+
+- **Timed-out chunks retry once with zero context lines (#29, PR #36).**
+  Deadline overruns are dominated by prompt prefill (the response-side
+  hypothesis was investigated and refuted — truncation already degrades
+  gracefully as of 0.10.0), so a timed-out chunk retries once with
+  `context_lines=0` before failing.
+
+- **The partial-review banner names the failed chunks' files (#31, PR #35).**
+  `> - chunk of 4 files (a/1.py, b/2.py, c/3.py, +1 more): LLMError: timeout`
+  — file paths verbatim, reason redacted, identical chunk+reason pairs
+  collapse, cap semantics kept.
+
+- **Severity groups bind on shared rare code tokens (#30, PR #34).**
+  Findings phrased differently but sharing a rare code token
+  (`vimeo_code`, `filterByFormula`) now join the same severity group —
+  with an over-merging guard: same file, or both titles in a common
+  problem-class family. The #18 title-equality rule is unchanged.
+
+### Fixed
+
+- **A line cited in the finding's own body outranks a drifted line field
+  (#28, PR #33).** Live shape: anchored at sync.ts:15 while the body said
+  "line 553" — the actual code was at 553. Own-file `path:line` and prose
+  `line N` citations, corroborated by the hunk's evidence tokens, now win
+  over the model's `line` field; a corroborated citation also promotes a
+  file-level finding to its real anchor.
+
+- **Malformed finding locations are dropped, not rendered (#32, PR #35).**
+  A `file` field matching no path of the diff (empty, non-path shape,
+  invented) drops with `malformed location: '<file>'` into the
+  dropped-findings audit section, instead of rendering `- 🟧 `package.:—``.
+
+
 ### Fixed
 
 - **Anchor re-resolution prefers token-bearing hunks (#19 follow-up, PR #27).**
