@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from prxref.forges.base import Thread
 from prxref.quality import (
+    _body_cited_lines,
     _resolve_max_errors,
     active,
     apply_line_align,
@@ -674,3 +675,192 @@ class TestLiveAnchorDriftShapes:
             ),
         )
         assert aligned.line == 39
+
+
+# Issue #28 live shapes: the model's line field drifts while its own body
+# still names the right line. SYNC_TS_DIFF is the sync.ts:15-vs-553 shape
+# (added `debugger` lines at 15 and 553); CLI_TS_DIFF is the el.js:3-vs-46
+# shape (added `await init` at 47, citation one line above it).
+SYNC_TS_DIFF = """\
+diff --git a/src/sync.ts b/src/sync.ts
+--- a/src/sync.ts
++++ b/src/sync.ts
+@@ -14,2 +14,3 @@ export async function sync() {
+   const ready = prepare();
++  debugger;
+   await send(ready);
+@@ -553,2 +553,3 @@ export function flushQueue() {
++  debugger;
+   const stale = queue.filter(isDone);
+   persist(stale);
+"""
+
+CLI_TS_DIFF = """\
+diff --git a/src/cli.ts b/src/cli.ts
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -44,4 +44,5 @@ function banner() {
+   const opts = parse(argv);
+   applyDefaults(opts);
+   main(opts);
++  await init(opts);
+   return 0;
+"""
+
+WORKER_TS_DIFF = """\
+diff --git a/src/worker.ts b/src/worker.ts
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ -14,1 +15,2 @@ export function tick() {
++  debugger;
+   const ready = prepare();
+@@ -553,1 +553,2 @@ export function report() {
++  retryBudget = maxRetries;
+   audit(log);
+"""
+
+
+class TestBodyCitedAnchor:
+    """A corroborated body citation outranks a drifted line field."""
+
+    def _align(self, diff: str, path: str, **kwargs) -> Finding:
+        parsed = parse_unified_diff(diff)
+        defaults = {
+            "file": path,
+            "severity": "warning",
+            "confidence": 0.8,
+        }
+        defaults.update(kwargs)
+        return apply_line_align(
+            [_f(**defaults)], added_lines_by_file(parsed), files=parsed
+        )[0]
+
+    def test_body_line_citation_outranks_drifted_field(self):
+        # Live sync.ts shape: field said 15, body said line 553, the
+        # actual `debugger` sits at 553.
+        aligned = self._align(
+            SYNC_TS_DIFF,
+            "src/sync.ts",
+            line=15,
+            title="Leftover debugger statement",
+            body=(
+                "A debugger statement ships in the queue flush; remove "
+                "the debugger before merging (line 553)."
+            ),
+        )
+        assert aligned.line == 553
+
+    def test_backticked_path_citation_resolves_within_tolerance(self):
+        # Live el.js shape: field said 3, body cited `cli.ts:46`, the
+        # actual added line is 47 (one below the cited context line).
+        aligned = self._align(
+            CLI_TS_DIFF,
+            "src/cli.ts",
+            line=3,
+            title="main() entry point never awaits init",
+            body=(
+                "The main() entry point never awaits initialization; "
+                "see `cli.ts:46`."
+            ),
+        )
+        assert aligned.line == 47
+
+    def test_citation_outside_the_diff_is_ignored(self):
+        aligned = self._align(
+            SYNC_TS_DIFF,
+            "src/sync.ts",
+            line=15,
+            title="Leftover debugger statement",
+            body="A debugger statement ships in the flush; see line 999.",
+        )
+        assert aligned.line == 15
+
+    def test_uncorroborated_citation_is_ignored(self):
+        # The cited hunk (retryBudget) shares zero evidence tokens with a
+        # claim about the debugger statement, so the citation is dropped
+        # and the shipped content rules keep the corroborated member 15.
+        aligned = self._align(
+            WORKER_TS_DIFF,
+            "src/worker.ts",
+            line=15,
+            title="Leftover debugger statement",
+            body=(
+                "A debugger statement ships in the tick path; remove "
+                "it, see line 553."
+            ),
+        )
+        assert aligned.line == 15
+
+    def test_first_corroborating_citation_wins(self):
+        # line 553 names the retryBudget hunk (zero shared tokens) and is
+        # skipped; line 15 corroborates.
+        aligned = self._align(
+            WORKER_TS_DIFF,
+            "src/worker.ts",
+            line=15,
+            title="Leftover debugger statement",
+            body=(
+                "Check line 553 first; the debugger statement itself "
+                "sits at line 15."
+            ),
+        )
+        assert aligned.line == 15
+
+    def test_earlier_citation_wins_when_both_corroborate(self):
+        aligned = self._align(
+            SYNC_TS_DIFF,
+            "src/sync.ts",
+            line=15,
+            title="Leftover debugger statement",
+            body=(
+                "The debugger statement at line 553 matters more than "
+                "the one at line 15."
+            ),
+        )
+        assert aligned.line == 553
+
+    def test_file_level_finding_promoted_by_corroborated_citation(self):
+        aligned = self._align(
+            SYNC_TS_DIFF,
+            "src/sync.ts",
+            line=0,
+            title="Leftover debugger statement",
+            body="A debugger statement remains at line 553.",
+        )
+        assert aligned.line == 553
+
+    def test_bare_path_mention_never_overrides(self):
+        aligned = self._align(
+            SYNC_TS_DIFF,
+            "src/sync.ts",
+            line=15,
+            title="Leftover debugger statement",
+            body="See sync.ts for the debugger statement left in flush.",
+        )
+        assert aligned.line == 15
+
+
+class TestBodyCitationGrammar:
+    def test_backticked_own_file_path_line(self):
+        f = _f(file="a/b/sync.ts", body="see `sync.ts:553` for the leak.")
+        assert _body_cited_lines(f) == [553]
+
+    def test_at_line_prose_form(self):
+        f = _f(body="The bug appears at line 46 of the entry path.")
+        assert _body_cited_lines(f) == [46]
+
+    def test_bare_path_cites_nothing(self):
+        f = _f(file="a/b/sync.ts", body="See sync.ts for details.")
+        assert _body_cited_lines(f) == []
+
+    def test_other_file_path_line_ignored(self):
+        f = _f(file="a/b/sync.ts", body="Mirrors other.ts:12 behavior.")
+        assert _body_cited_lines(f) == []
+
+    def test_document_order_across_title_and_body(self):
+        f = _f(
+            file="src/cli.ts",
+            title="Entry at cli.ts:40",
+            body="Also line 55 matters.",
+        )
+        assert _body_cited_lines(f) == [40, 55]
