@@ -731,6 +731,25 @@ _GOOD_CONTENT = json.dumps({
 })
 
 
+def _good_content(path: str) -> str:
+    """A clean finding citing ``path`` — a finding naming no path of the
+    diff under review is dropped by location validation (issue #32), so
+    each scenario cites a file its own diff touches."""
+    return json.dumps({
+        "findings": [
+            {
+                "file": path,
+                "line": 4,
+                "severity": "error",
+                "confidence": 0.95,
+                "title": "Uncaught token decode exception",
+                "body": "decode(token) can raise JWTError if malformed.",
+            }
+        ],
+        "escalations": [],
+    })
+
+
 class _CLIHarness:
     """Runs the real CLI review path against a mock LLM, keeping the forge."""
 
@@ -877,7 +896,7 @@ class TestPartialFailureIsExplainedOnThePR:
         def route(payload):
             state["n"] += 1
             if state["n"] == 1:
-                return 200, _completion(_GOOD_CONTENT, "stop")
+                return 200, _completion(_good_content("src/one.py"), "stop")
             return 200, _completion(_TRUNCATED_CONTENT, second_finish_reason)
 
         server = MockOpenAIServer(routes={"fast": route})
@@ -912,7 +931,8 @@ class TestPartialFailureIsExplainedOnThePR:
         summary = forge.summaries[0]
         assert "⚠️ Partial review: 1 of 2 chunks were reviewed" in summary
         assert (
-            "> - response truncated at max_tokens=256 (finish_reason=length); "
+            "> - chunk of 1 file (src/two.py): "
+            "response truncated at max_tokens=256 (finish_reason=length); "
             "raise PRXREF_LLM_MAX_TOKENS" in summary
         )
 
