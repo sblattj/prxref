@@ -1,7 +1,11 @@
 """Deterministic quality passes over worker findings.
 
-Four passes run before posting:
-1. ``apply_line_align``: snap each finding's cited line to the nearest
+Five passes run before posting:
+1. ``apply_location_validation``: drop findings whose ``file`` names no
+   path of the parsed diff — an empty, non-path, or invented location is
+   retained with ``drop_reason`` for the audit instead of rendering a
+   bullet anchored to nothing.
+2. ``apply_line_align``: snap each finding's cited line to the nearest
    actual ``+`` line in that file's diff (within tolerance, else line=0),
    then corroborate exact ``+``-line members against the file's hunks by
    content, so an anchor that is a valid added line of the WRONG hunk
@@ -10,13 +14,13 @@ Four passes run before posting:
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-2. ``apply_thread_dedup``: drop findings that duplicate an already-open
+3. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive tokens).
-3. ``apply_severity_consistency``: findings sharing one normalized title —
+4. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is.
-4. ``apply_quality_gate``: drop findings below the confidence floor, cap
+5. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
 
@@ -50,6 +54,32 @@ DEFAULT_LINE_TOLERANCE: int = 5
 def active(findings: Sequence[Finding]) -> list[Finding]:
     """Return only the findings that survived every quality pass."""
     return [f for f in findings if f.drop_reason is None]
+
+
+def apply_location_validation(
+    findings: Sequence[Finding],
+    diff_paths: Sequence[str],
+) -> list[Finding]:
+    """Drop findings whose ``file`` does not name a path of the diff.
+
+    A worker that answers ``file: "package."`` — or invents a path the
+    diff never touches — used to survive every pass and render as a
+    summary bullet like ``- 🟧 `package.:—```. A finding is reviewable
+    only at a location the diff actually contains, so the accepted set is
+    exactly the diff's own paths: an empty ``file``, a non-path shape,
+    and a plausible-but-absent path all fail the membership check and are
+    retained with ``drop_reason="malformed location: '<file>'"`` for the
+    dropped-findings audit. A file that IS in the diff is never dropped,
+    and findings already carrying a ``drop_reason`` keep it.
+    """
+    known = set(diff_paths)
+    result: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None or f.file in known:
+            result.append(f)
+            continue
+        result.append(replace(f, drop_reason=f"malformed location: {f.file!r}"))
+    return result
 
 
 def snap_line(
