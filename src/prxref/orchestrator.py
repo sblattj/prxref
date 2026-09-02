@@ -20,8 +20,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    response-side budget) is not a timeout and never reaches this retry.
 4. Systemic sweep: after the chunk workers, ONE more worker-style
    single-shot call over the whole-PR digest built by
-   ``systemic.build_digest`` (every file, hunk headers, plus only the
-   high-signal added/removed lines, capped inside ``token_budget``). It
+   ``systemic.build_digest`` (every file with hunk headers; short files and
+   migrations render their full added content, the rest only the
+   high-signal matched lines — all capped inside ``token_budget``). It
    hunts the cross-file classes no single chunk seat can see, joins the
    chunk results, and counts as one more review unit: ``chunk_count`` is
    ``len(chunks) + 1`` whenever the sweep ran, and a sweep failure is one
