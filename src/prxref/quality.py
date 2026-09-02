@@ -15,7 +15,9 @@ Four passes run before posting:
 3. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
-   serious the same pattern is.
+   serious the same pattern is. Findings phrased differently but bound
+   by a shared rare code token, with a shared problem class or file,
+   join the same group (issue #30).
 4. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
@@ -26,8 +28,10 @@ so review runstores and logs can explain every filter decision. Use
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -422,36 +426,224 @@ def normalize_title(title: str) -> str:
     return " ".join(trimmed.split())
 
 
-def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
-    """Raise every finding in a normalized-title group to the group's max severity.
+logger = logging.getLogger(__name__)
 
-    Per-chunk workers decide severity in isolation, so the same pattern can
-    surface as an error in one file and a warning in a sibling, or as a
-    warning at one anchor and a note at another in the same file. Findings
-    sharing one :func:`normalize_title` form — within a file or across
-    files — are all rewritten to the group's highest severity
-    (error > warning > outofscope). A rewritten finding keeps its own file,
-    line, body, and confidence; only severity changes. Findings carrying a
-    ``drop_reason`` or a severity outside the vocabulary pass through
-    untouched.
+
+def _problem_classes(title: str) -> set[str]:
+    """Canonical problem classes a title names, e.g. ``{"injection"}``.
+
+    Two titles share a verdict class when their sets intersect. Several
+    phrasings map to one class on purpose: the live issue #30 family says
+    "injection", "interpolation", "unescaped", and "filter manipulation"
+    for the same bug, so all four sit in ``injection`` — a guard keyed on
+    literal keyword equality would never bind them, which is the failure
+    this pass fixes.
     """
-    group_max: dict[str, str] = {}
-    for f in findings:
-        if f.drop_reason is not None:
+    return {name for name, pattern in _PROBLEM_CLASSES if pattern.search(title)}
+
+
+def _code_tokens(claim: str) -> set[str]:
+    """Code-identifier tokens in a finding's title+body claim.
+
+    Three shapes qualify: backticked identifier pieces (floor of 3
+    chars, since backticks already mark them as code), bare compound
+    identifiers — snake_case, UPPER_SNAKE_CASE, camelCase — at 6+ chars,
+    and dotted paths as whole lowercase paths. File-path citations are
+    stripped first (a path names a location, not a shared construct),
+    and generic vocabulary is excluded via :data:`_CODE_STOPWORDS`.
+
+    Whole identifiers only: unlike the evidence tokens above, compounds
+    are never split, because grouping binds on the construct itself —
+    ``vimeo_code`` must not match a claim that merely says "code".
+    """
+    text = _CITATION_RE.sub(" ", claim)
+    tokens: set[str] = set()
+    for span in _BACKTICK_RE.findall(text):
+        for piece in _CODE_PIECE_RE.findall(span):
+            tok = piece.lower().strip("._-")
+            if len(tok) >= 3 and tok not in _CODE_STOPWORDS:
+                tokens.add(tok)
+    text = _BACKTICK_RE.sub(" ", text)
+    for pattern in (_SNAKE_RE, _UPPER_SNAKE_RE, _CAMEL_RE, _DOTTED_RE):
+        for raw in pattern.findall(text):
+            if len(raw) >= 6:
+                tokens.add(raw.lower())
+    return tokens
+
+
+CODE_TOKEN_RARITY_MAX: int = 2
+"""Largest claim count a code token may have and still bind a group.
+
+A token appearing in the claims of at most 2 findings names a construct
+specific to one bug family; the same name in 3+ claims is systemic
+vocabulary (an API used everywhere, a framework type), and binding on it
+would chain unrelated findings into one severity. Tuned so the live
+issue #30 pair (each token in exactly 2 claims) binds while the
+3-claim sweep in the tests does not.
+"""
+
+_CODE_STOPWORDS: frozenset[str] = frozenset({
+    "api", "app", "args", "attr", "attrs", "body", "callback", "case",
+    "check", "class", "code", "component", "config", "const", "constant",
+    "content", "context", "count", "create", "ctx", "data", "db",
+    "default", "delete", "element", "err", "error", "example", "field",
+    "file", "find", "func", "function", "get", "global", "handler",
+    "handling", "helper", "id", "impl", "index", "init", "input",
+    "instance", "issue", "item", "key", "length", "line", "list", "load",
+    "local", "log", "logic", "manager", "message", "meta", "method",
+    "mode", "model", "module", "msg", "name", "node", "null", "num",
+    "number", "obj", "object", "option", "options", "output", "param",
+    "params", "pattern", "process", "prop", "property", "record",
+    "req", "request", "res", "response", "result", "return", "review",
+    "route", "schema", "service", "set", "settings", "spec", "state",
+    "store", "str", "string", "temp", "test", "text", "tmp", "type",
+    "update", "util", "utils", "val", "value", "values", "var",
+    "variable", "warning", "worker",
+})
+
+_BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+_CODE_PIECE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
+_SNAKE_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+_UPPER_SNAKE_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+_CAMEL_RE = re.compile(r"\b[a-z]+(?:[A-Z][a-z0-9]+)+\b")
+_DOTTED_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_\-]*(?:\.[A-Za-z_][A-Za-z0-9_\-]+)+\b")
+
+_PROBLEM_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("injection", re.compile(
+        r"inject|interpolat|escap|sanitiz|manipulat", re.IGNORECASE)),
+    ("secret", re.compile(
+        r"secret|credential|password|\bapi[ -]?key|\btoken\b|hard[ -]?cod",
+        re.IGNORECASE)),
+    ("auth", re.compile(
+        r"\bauth|unauthori|permission|privilege|access control", re.IGNORECASE)),
+    ("race", re.compile(
+        r"\brace\b|non-?atomic|deadlock|concurren", re.IGNORECASE)),
+    ("leak", re.compile(r"\bleak|expos|disclos", re.IGNORECASE)),
+    ("truncation", re.compile(r"truncat|overflow", re.IGNORECASE)),
+    ("null", re.compile(r"\bnull\b|\bnil\b|nonetype|undefined", re.IGNORECASE)),
+    ("duplicate", re.compile(r"duplicat|redundan", re.IGNORECASE)),
+    ("timeout", re.compile(r"timeout|unbounded|infinite", re.IGNORECASE)),
+    ("ratelimit", re.compile(r"rate[ -]?limit|throttl|\b429\b", re.IGNORECASE)),
+    ("validation", re.compile(r"validat|malformed|invalid", re.IGNORECASE)),
+)
+
+
+def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
+    """Raise every finding in a severity group to the group's max severity.
+
+    Two grouping mechanisms union into one component graph:
+
+    1. Normalized-title equality (issue #18): findings sharing one
+       :func:`normalize_title` form restate the same pattern and always
+       merge — the strictly stronger rule.
+    2. Shared rare code token (issue #30): the same construct phrased
+       differently across claims — ``vimeo_code`` interpolated into
+       ``filterByFormula``, reported once as injection and once as
+       manipulation — merges only when both a rarity rule and a
+       verdict-class guard hold. Rarity: the token appears in the claims
+       of at most :data:`CODE_TOKEN_RARITY_MAX` findings in this review
+       (see that constant). Verdict-class guard: the pair sits in the
+       same file, or both titles name a common problem class (injection,
+       secret, auth, race, leak, truncation, null, duplicate, timeout,
+       rate limit, validation — see :func:`_problem_classes`). The guard
+       is the over-merging brake: two findings sharing a token but
+       describing different problems stay apart.
+
+    Components bind transitively (A shares a token with B, B with C, so
+    all three group). Each component is rewritten to its highest
+    severity (error > warning > outofscope). A rewritten finding keeps
+    its own file, line, body, and confidence; only severity changes.
+    Findings carrying a ``drop_reason`` or a severity outside the
+    vocabulary pass through untouched. One summary line is logged when
+    token-driven rewrites happen, naming the count and the binding
+    tokens; silent otherwise.
+    """
+    idx = [
+        i for i, f in enumerate(findings)
+        if f.drop_reason is None
+        and (f.severity or "").strip().lower() in _SEVERITY_RANK
+    ]
+    if not idx:
+        return list(findings)
+
+    parent = {i: i for i in idx}
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    by_title: dict[str, int] = {}
+    for i in idx:
+        key = normalize_title(findings[i].title)
+        seen = by_title.get(key)
+        if seen is not None:
+            union(seen, i)
+        else:
+            by_title[key] = i
+
+    claims = [f"{findings[i].title} {findings[i].body}" for i in idx]
+    tok_sets = [_code_tokens(claim) for claim in claims]
+    counts: Counter[str] = Counter()
+    for tokens in tok_sets:
+        counts.update(tokens)
+    rare = {tok for tok, n in counts.items() if n <= CODE_TOKEN_RARITY_MAX}
+    classes = [_problem_classes(findings[i].title) for i in idx]
+
+    token_edges: dict[tuple[int, int], set[str]] = {}
+    for a in range(len(idx)):
+        for b in range(a + 1, len(idx)):
+            shared = tok_sets[a] & tok_sets[b] & rare
+            if not shared:
+                continue
+            if findings[idx[a]].file == findings[idx[b]].file or classes[a] & classes[b]:
+                union(idx[a], idx[b])
+                token_edges[(idx[a], idx[b])] = shared
+
+    components: dict[int, list[int]] = {}
+    for i in idx:
+        components.setdefault(find(i), []).append(i)
+
+    target_of: dict[int, str] = {}
+    token_rewrites = 0
+    binding: set[str] = set()
+    for members in components.values():
+        sevs = {(findings[i].severity or "").strip().lower() for i in members}
+        if len(sevs) < 2:
             continue
-        severity = (f.severity or "").strip().lower()
-        if severity not in _SEVERITY_RANK:
-            continue
-        key = normalize_title(f.title)
-        current = group_max.get(key)
-        if current is None or _SEVERITY_RANK[severity] < _SEVERITY_RANK[current]:
-            group_max[key] = severity
+        top = min(sevs, key=lambda s: _SEVERITY_RANK[s])
+        member = set(members)
+        edges_here = [
+            tokens for (a, b), tokens in token_edges.items()
+            if a in member and b in member
+        ]
+        rewritten_here = 0
+        for i in members:
+            target_of[i] = top
+            if (findings[i].severity or "").strip().lower() != top:
+                rewritten_here += 1
+        if edges_here and rewritten_here:
+            token_rewrites += rewritten_here
+            for tokens in edges_here:
+                binding |= tokens
+
+    if token_rewrites and binding:
+        logger.info(
+            "severity consistency: raised %d finding(s) via shared rare code token(s): %s",
+            token_rewrites, ", ".join(sorted(binding)),
+        )
 
     result: list[Finding] = []
-    for f in findings:
+    for pos, f in enumerate(findings):
         severity = (f.severity or "").strip().lower()
         if f.drop_reason is None and severity in _SEVERITY_RANK:
-            target = group_max.get(normalize_title(f.title), severity)
+            target = target_of.get(pos, severity)
             if severity != target:
                 result.append(replace(f, severity=target))
                 continue

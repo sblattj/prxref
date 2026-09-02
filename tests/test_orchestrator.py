@@ -480,6 +480,43 @@ class TestSeverityConsistency:
         assert dropped.drop_reason == "error cap exceeded (max 1)"
         assert res["verdict"] == "Request-Changes"
 
+    def test_shared_rare_code_token_raises_sibling_file_warning_to_error(self, caplog):
+        # Issue #30 live shape end to end: per-chunk workers phrase the
+        # same unescaped-interpolation bug differently, so normalized-title
+        # equality (#18) never binds. The rare-token pass must raise both
+        # to error before the gate, and log the binding token.
+        diff = (
+            _added_file_diff("src/airtable-video-processor.ts", 10)
+            + _added_file_diff("src/get-video-feedbacks.ts", 10)
+        )
+        findings = {
+            "src/airtable-video-processor.ts": [
+                {"file": "src/airtable-video-processor.ts", "line": 3,
+                 "severity": "error", "confidence": 0.9,
+                 "title": "Airtable formula injection via unescaped vimeo_code in filterByFormula",
+                 "body": "filterByFormula({vimeo_code}) allows filter manipulation."},
+            ],
+            "src/get-video-feedbacks.ts": [
+                {"file": "src/get-video-feedbacks.ts", "line": 3,
+                 "severity": "warning", "confidence": 0.8,
+                 "title": "Formula interpolation of vimeo_code allows filter manipulation",
+                 "body": "vimeo_code interpolated into filterByFormula."},
+            ],
+        }
+        forge = FakeForge(diff=diff)
+        with caplog.at_level(logging.INFO, logger="prxref.quality"):
+            res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=findings), post=False)
+
+        assert len(res["findings_active"]) == 2
+        assert all(f.severity == "error" for f in res["findings_active"])
+        assert res["verdict"] == "Request-Changes"
+        token_lines = [
+            r for r in caplog.records
+            if r.name == "prxref.quality" and "shared rare code token" in r.getMessage()
+        ]
+        assert len(token_lines) == 1
+        assert "vimeo_code" in token_lines[0].getMessage()
+
 
 class TestErrorPaths:
     def test_total_llm_failure_error_verdict_and_notice_posted(self):
