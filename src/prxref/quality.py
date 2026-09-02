@@ -574,6 +574,48 @@ def normalize_title(title: str) -> str:
 logger = logging.getLogger(__name__)
 
 
+def apply_sweep_dedup(
+    findings: Sequence[Finding], sweep_start: int
+) -> list[Finding]:
+    """Drop systemic-sweep findings that restate a chunk finding.
+
+    ``findings[sweep_start:]`` came from the whole-PR systemic sweep; the
+    entries before it came from the per-chunk workers. A sweep finding whose
+    (file, :func:`normalize_title` title) pair matches a surviving chunk
+    finding adds no recall — it is the same pattern the chunk seat already
+    reported — and is dropped with ``drop_reason="duplicate of chunk
+    finding"``, the same retained-not-silenced convention every other pass
+    uses. Chunk findings are never dropped by this pass, even when the sweep
+    phrased the pattern first: the chunk seat cited the exact line.
+
+    Runs after :func:`apply_quality_gate`, so the duplicate set is built
+    from chunk findings that SURVIVED it — a sub-floor chunk finding never
+    suppresses its sweep duplicate — and after
+    :func:`apply_severity_consistency`, so a restated pattern still agrees
+    on severity with its group before any of it is judged. ``sweep_start``
+    below zero is treated as zero (everything is sweep output); past the
+    end, nothing is deduplicated.
+    """
+    start = max(0, sweep_start)
+    chunk_keys = {
+        (f.file, normalize_title(f.title))
+        for f in findings[:start]
+        if f.drop_reason is None
+    }
+    result: list[Finding] = []
+    for i, f in enumerate(findings):
+        if (
+            i >= start
+            and f.drop_reason is None
+            and (f.file, normalize_title(f.title)) in chunk_keys
+        ):
+            result.append(replace(f, drop_reason="duplicate of chunk finding"))
+        else:
+            result.append(f)
+    return result
+
+
+
 def _problem_classes(title: str) -> set[str]:
     """Canonical problem classes a title names, e.g. ``{"injection"}``.
 
