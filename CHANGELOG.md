@@ -7,6 +7,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **The sweep digest reaches the four classes the 2026-09-02 re-audit found
+  missing (#29 residual, PR #38).** Migration-ddl-matched files render their
+  full added content (absence of RLS becomes a checkable fact); an added
+  lockfile coexisting with another lockfile or a `packageManager` pin emits a
+  deterministic repo-config note; `setInterval`/`setTimeout`-style loops are a
+  digest class so no-cap polling is visible; and within the per-file line cap,
+  must-see classes (entry points, secrets, auth checks) admit ahead of fill
+  classes, so a secret can never be capped out by console-log noise. Files of
+  60 or fewer added lines render full content within a 30% budget share.
+
 ## [0.11.0] — 2026-09-02
 
 The recall release. The 2026-09-01 re-audit of v0.10.1 found precision and
