@@ -64,6 +64,15 @@ def _contract_review_chunk(
     }
 
 
+def _contract_review_systemic(
+    llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
+):
+    return [], {
+        "escalations": [], "input_tokens": 0, "output_tokens": 0,
+        "model": "", "elapsed_ms": 0, "error": "",
+    }
+
+
 def _contract_load_prompt(name):
     assert name == "summary"
     return SUMMARY_TEMPLATE
@@ -230,8 +239,16 @@ class FakeForge:
 
 @pytest.fixture(autouse=True)
 def _contract_stubs(monkeypatch):
-    """Pin the reviewer contract. Env clearing lives in tests/conftest.py."""
+    """Pin the reviewer contract. Env clearing lives in tests/conftest.py.
+
+    The systemic sweep is stubbed to a clean no-findings success so the
+    sweep-specific classes below can monkeypatch their own doubles; the
+    chunk-count assertions in the older classes include the sweep unit.
+    """
     monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _contract_review_chunk)
+    monkeypatch.setattr(
+        orchestrator.reviewer, "review_systemic", _contract_review_systemic,
+    )
     monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _contract_load_prompt)
 
 
@@ -260,7 +277,8 @@ class TestHappyPath:
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
         assert res["findings_dropped"] == []
-        assert res["chunk_count"] == 1
+        # 1 chunk + 1 systemic-sweep unit.
+        assert res["chunk_count"] == 2
         assert res["input_tokens"] == 100
         assert res["output_tokens"] == 50
         assert res["elapsed_ms"] >= 0
@@ -404,7 +422,8 @@ class TestParallelFanOut:
         forge = FakeForge(diff=diff)
         res = orchestrate_review(forge, REF, FakeLLM())
 
-        assert res["chunk_count"] == 3
+        # 3 chunks + 1 systemic-sweep unit.
+        assert res["chunk_count"] == 4
         assert res["verdict"] == "Approved"
         assert len(res["findings_active"]) == 3
         assert {f.file for f in res["findings_active"]} == set(paths)
@@ -491,7 +510,8 @@ class TestErrorPaths:
         assert res["verdict"] == "Error"
         assert res["findings_active"] == []
         assert res["findings_dropped"] == []
-        assert res["chunk_count"] == 1
+        # 1 chunk + 1 systemic-sweep unit.
+        assert res["chunk_count"] == 2
         assert res["posted"] is True
         assert len(forge.summaries) == 1
         notice = forge.summaries[0]
@@ -594,7 +614,7 @@ class TestCoverageAwareVerdict:
             if next(counter) == 1:
                 return [], {
                     "escalations": [], "input_tokens": 0, "output_tokens": 0,
-                    "model": "", "elapsed_ms": 0, "error": "LLMError: timeout",
+                    "model": "", "elapsed_ms": 0, "error": "LLMError: malformed response",
                 }
             return [], {
                 "escalations": [], "input_tokens": 5, "output_tokens": 5,
@@ -605,8 +625,9 @@ class TestCoverageAwareVerdict:
         forge = FakeForge(diff=TWO_FILE_DIFF)
         result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False, max_chunks=2)
         assert result["verdict"] == "Approved"
+        # The failed chunk counts as failed; the sweep unit reviewed.
         assert result["chunks_failed"] == 1
-        assert result["chunks_reviewed"] == 1
+        assert result["chunks_reviewed"] == 2
         assert result["chunks_reviewed"] + result["chunks_failed"] == result["chunk_count"]
 
     def test_clean_run_reports_full_coverage(self):
@@ -623,7 +644,7 @@ class TestCoverageAwareVerdict:
             if next(counter) == 1:
                 return [], {
                     "escalations": [], "input_tokens": 0, "output_tokens": 0,
-                    "model": "", "elapsed_ms": 0, "error": "LLMError: timeout",
+                    "model": "", "elapsed_ms": 0, "error": "LLMError: malformed response",
                 }
             return [], {
                 "escalations": [], "input_tokens": 5, "output_tokens": 5,
@@ -634,7 +655,8 @@ class TestCoverageAwareVerdict:
         forge = FakeForge(diff=TWO_FILE_DIFF)
         orchestrate_review(forge, REF, FakeLLM("{}"), post=True, max_chunks=2)
         assert "Partial review" in forge.summaries[0]
-        assert "1 of 2" in forge.summaries[0]
+        # 2 of 3 units reviewed: the good chunk plus the systemic sweep.
+        assert "2 of 3" in forge.summaries[0]
 
 
 class TestMaxTokensThreading:
@@ -733,8 +755,9 @@ class TestChunkTokenBudget:
             FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
             token_budget=35_000,
         )
-        assert at_default["chunk_count"] == at_constant["chunk_count"] == 4
-        assert at_wider["chunk_count"] == 2
+        # chunk_count includes the systemic-sweep unit (+1).
+        assert at_default["chunk_count"] == at_constant["chunk_count"] == 5
+        assert at_wider["chunk_count"] == 3
 
     @pytest.mark.parametrize("budget,expected_chunks", [
         (70_000, 1),
@@ -746,8 +769,8 @@ class TestChunkTokenBudget:
         res = orchestrate_review(
             forge, REF, FakeLLM("{}"), post=False, token_budget=budget,
         )
-        assert res["chunk_count"] == expected_chunks
-        assert res["chunks_reviewed"] == expected_chunks
+        assert res["chunk_count"] == expected_chunks + 1
+        assert res["chunks_reviewed"] == expected_chunks + 1
 
 
 class TestChunkFileCapAndContextKnobs:
@@ -792,9 +815,9 @@ class TestChunkFileCapAndContextKnobs:
             FakeForge(diff=six), REF, FakeLLM("{}"), post=False,
             max_files_per_chunk=2,
         )
-        assert wide["chunk_count"] == 1
-        assert capped["chunk_count"] == 3
-        assert capped["chunks_reviewed"] == 3
+        assert wide["chunk_count"] == 2
+        assert capped["chunk_count"] == 4
+        assert capped["chunks_reviewed"] == 4
 
     def test_context_lines_reach_the_worker_prompt(self, monkeypatch):
         """The trim is observable in what the LLM is sent, the changed lines
@@ -822,7 +845,9 @@ class TestChunkFileCapAndContextKnobs:
             FakeForge(diff=FAT_CONTEXT_DIFF), REF, RecordingLLM(), post=False,
             context_lines=1,
         )
-        assert res["chunks_reviewed"] == 1
+        # The contract fixture stubs the sweep, so the only LLM prompt here is
+        # the chunk's; the sweep prompt is covered by the systemic-sweep tests.
+        assert res["chunks_reviewed"] == 2
         assert len(prompts) == 1
         assert " lead1" not in prompts[0]
         assert " lead6" in prompts[0]
@@ -869,8 +894,8 @@ class TestMaxWorkers:
             post=False, max_workers=1,
         )
         assert seen == [1]
-        assert res["chunk_count"] == 4
-        assert res["chunks_reviewed"] == 4
+        assert res["chunk_count"] == 5
+        assert res["chunks_reviewed"] == 5
         assert res["chunks_failed"] == 0
 
     def test_width_never_exceeds_the_chunk_count(self, monkeypatch):
@@ -1071,7 +1096,7 @@ class TestNoStageRaisesOutOfOrchestrateReview:
             post=False, max_chunks=1,
         )
         assert res["verdict"] == "Request-Changes"
-        assert res["chunk_count"] == 1
+        assert res["chunk_count"] == 2
 
 
 TRUNCATED_REASON = (
@@ -1137,7 +1162,7 @@ class TestPartialBannerNamesTheReasons:
     def test_the_truncation_reason_reaches_the_posted_comment(self):
         forge, res = self._with({"a/one.py": TRUNCATED_REASON})
         assert res["chunks_failed"] == 1
-        assert res["chunks_reviewed"] == 3
+        assert res["chunks_reviewed"] == 4
         assert TRUNCATED_REASON in forge.summaries[0]
 
     def test_it_stays_inside_the_existing_blockquote(self):
@@ -1156,7 +1181,7 @@ class TestPartialBannerNamesTheReasons:
     def test_the_existing_coverage_sentence_is_untouched(self):
         forge, _res = self._with({"a/one.py": TRUNCATED_REASON})
         assert (
-            "> ⚠️ Partial review: 3 of 4 chunks were reviewed; 1 failed. "
+            "> ⚠️ Partial review: 4 of 5 chunks were reviewed; 1 failed. "
             "Findings may be incomplete." in forge.summaries[0]
         )
 
@@ -1229,7 +1254,7 @@ class TestPartialBannerNamesTheReasons:
             "c/three.py": "reason C",
         })
         assert res["chunks_failed"] == orchestrator.MAX_REPORTED_REASONS
-        assert res["chunks_reviewed"] == 1
+        assert res["chunks_reviewed"] == 2
         tail = self._banner(forge)
         for reason in ("reason A", "reason B", "reason C"):
             assert reason in tail
@@ -1350,7 +1375,7 @@ class TestPostedFailureReasonsAreSanitised:
         self, monkeypatch,
     ):
         forge, res = self._partial(monkeypatch, LEAKY_REASON)
-        assert res["chunks_failed"] == 1 and res["chunks_reviewed"] == 3
+        assert res["chunks_failed"] == 1 and res["chunks_reviewed"] == 4
         body = forge.summaries[0]
         assert "Partial review" in body
         assert LEAKY_SECRET not in body
@@ -1825,7 +1850,7 @@ class TestRunTrace:
         _, events = self._run(tmp_path, forge, FakeLLM(findings_by_path=HAPPY_FINDINGS))
         assert self._run_phases(events) == ["start", "ok"]
         closing = [e for e in events if e["node"] == "run" and e["phase"] == "ok"][0]
-        assert closing["meta"]["chunks_reviewed"] == 1
+        assert closing["meta"]["chunks_reviewed"] == 2
         assert closing["meta"]["findings"] == 2
 
     def test_the_stages_of_a_completed_review_are_all_there(self, tmp_path):
@@ -1835,11 +1860,11 @@ class TestRunTrace:
         opened = {e["node"] for e in events if e["phase"] == "start"}
         assert opened == {
             "run", "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks",
-            "chunk", "post",
+            "chunk", "sweep", "post",
         }
         assert {e["node"] for e in events if e["phase"] == "ok"} >= {
             "forge.get_pr", "forge.get_diff", "parse_diff", "build_chunks",
-            "chunk", "post", "run",
+            "chunk", "sweep", "post", "run",
         }
 
     def test_posting_that_was_turned_off_says_so_rather_than_looking_unreached(
@@ -2015,3 +2040,296 @@ class TestRunTrace:
         forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
         orchestrate_review(forge, REF, FakeLLM(findings_by_path=HAPPY_FINDINGS))
         assert list(tmp_path.iterdir()) == []
+
+
+SWEEP_SIGNAL_DIFF = (
+    "diff --git a/src/supabase.ts b/src/supabase.ts\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    "+++ b/src/supabase.ts\n"
+    "@@ -0,0 +1,3 @@\n"
+    "+import { createClient } from '@supabase/supabase-js';\n"
+    "+const supabase = createClient(process.env.SUPABASE_URL, 'service-key');\n"
+    "+export default supabase;\n"
+    + _added_file_diff("src/plain.ts", 3)
+)
+
+
+def _sweep_double(results: list, **meta_overrides):
+    """A review_systemic double that pops one scripted result per call.
+
+    Each entry is either ``("findings", [payload dicts])`` or
+    ``("error", "reason")``; telemetry defaults apply unless overridden.
+    """
+    calls: list[dict] = []
+
+    def _review_systemic(
+        llm, digest, *, pr_title="", pr_description="", repo_hint="",
+        max_tokens=None,
+    ):
+        calls.append({"digest": digest, "max_tokens": max_tokens})
+        kind, payload = results.pop(0)
+        meta = {
+            "escalations": [], "input_tokens": 7, "output_tokens": 3,
+            "model": "sweep-model", "elapsed_ms": 1, "error": "",
+        }
+        meta.update(meta_overrides)
+        if kind == "error":
+            meta["error"] = payload
+            return [], meta
+        return [Finding(
+            file=item["file"], line=item["line"], severity=item["severity"],
+            confidence=item["confidence"], title=item["title"],
+            body=item["body"],
+        ) for item in payload], meta
+
+    return _review_systemic, calls
+
+
+class TestSystemicSweep:
+    """The whole-PR sweep: one extra worker-style unit per review."""
+
+    SWEEP_FINDING = [{
+        "file": "src/supabase.ts", "line": 2, "severity": "warning",
+        "confidence": 0.85, "title": "Service key in client bundle",
+        "body": "The client is built from a literal service key; the token data leaks.",
+    }]
+
+    def test_the_sweep_runs_once_and_receives_the_whole_pr_digest(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF)
+        res = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert len(calls) == 1
+        digest = calls[0]["digest"]
+        assert "## src/supabase.ts" in digest
+        assert "## src/plain.ts" in digest
+        assert "+2| const supabase = createClient(" in digest
+        # The plain.ts changed lines match no pattern and are excluded.
+        assert "+1| data 1" not in digest
+        # Both files fit one chunk; +1 for the sweep unit.
+        assert res["chunk_count"] == 2
+        assert res["chunks_reviewed"] == 2
+
+    def test_sweep_findings_flow_to_active_inline_and_summary(self, monkeypatch):
+        double, _calls = _sweep_double([("findings", self.SWEEP_FINDING)])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF)
+        res = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'))
+
+        assert [f.title for f in res["findings_active"]] == [
+            "Service key in client bundle",
+        ]
+        # A warning-severity finding approves; it still posts inline.
+        assert res["verdict"] == "Approved"
+        comments = forge.inline_batches[0]
+        assert [c.line for c in comments] == [2]
+        assert "Service key in client bundle" in comments[0].body
+        assert "Service key in client bundle" in forge.summaries[0]
+
+    def test_sweep_tokens_and_model_reach_the_totals(self, monkeypatch):
+        double, _calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF)
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+        # 1 chunk x (100+50) from FakeLLM + the sweep's (7+3).
+        assert res["input_tokens"] == 107
+        assert res["output_tokens"] == 53
+
+    def test_a_max_tokens_override_reaches_the_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        orchestrate_review(
+            FakeForge(diff=SWEEP_SIGNAL_DIFF), REF, FakeLLM("{}"),
+            post=False, max_tokens=9001,
+        )
+        assert calls[0]["max_tokens"] == 9001
+
+    def test_a_sweep_finding_restating_a_surviving_chunk_finding_is_dropped(
+        self, monkeypatch,
+    ):
+        double, _calls = _sweep_double([("findings", [dict(self.SWEEP_FINDING[0])])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF)
+        res = orchestrate_review(forge, REF, FakeLLM(
+            '{"findings": [{"file": "src/supabase.ts", "line": 2, '
+            '"severity": "warning", "confidence": 0.9, '
+            '"title": "Service key in client bundle", "body": "data token leaks"}]}'
+        ), post=False)
+        assert len(res["findings_active"]) == 1
+        assert res["findings_active"][0].confidence == 0.9
+        dupes = [f for f in res["findings_dropped"]
+                 if f.drop_reason == "duplicate of chunk finding"]
+        assert len(dupes) == 1
+        assert dupes[0].file == "src/supabase.ts"
+
+    def test_a_dying_chunk_finding_cannot_suppress_its_sweep_duplicate(
+        self, monkeypatch,
+    ):
+        """The dedup pass runs AFTER the quality gate on purpose: a chunk
+        finding below the floor must not suppress the sweep's higher-
+        confidence restatement and then die at the gate itself."""
+        double, _calls = _sweep_double([("findings", [dict(
+            self.SWEEP_FINDING[0], confidence=0.9,
+        )])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        res = orchestrate_review(
+            FakeForge(diff=SWEEP_SIGNAL_DIFF), REF, FakeLLM(
+                '{"findings": [{"file": "src/supabase.ts", "line": 2, '
+                '"severity": "warning", "confidence": 0.3, '
+                '"title": "Service key in client bundle", "body": "data token leaks"}]}'
+            ),
+            post=False, confidence_floor=0.6,
+        )
+        assert len(res["findings_active"]) == 1
+        assert res["findings_active"][0].confidence == 0.9
+
+    def test_a_sweep_failure_counts_as_one_failed_chunk(self, monkeypatch):
+        double, _calls = _sweep_double([("error", "LLMError: all models failed")])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'))
+
+        assert res["chunk_count"] == 2
+        assert res["chunks_reviewed"] == 1
+        assert res["chunks_failed"] == 1
+        assert res["verdict"] == "Approved"
+        summary = forge.summaries[0]
+        assert "Partial review: 1 of 2 chunks were reviewed; 1 failed." in summary
+        assert "systemic sweep" in summary
+
+    def test_all_chunks_failing_is_still_a_total_failure_even_if_the_sweep_answers(
+        self, monkeypatch,
+    ):
+        """The sweep sees only a pattern digest; it cannot carry a review
+        whose every chunk died into an "Approved, no findings" verdict."""
+        double, _calls = _sweep_double([("findings", self.SWEEP_FINDING)])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+
+        def _all_fail(llm, files, **kwargs):
+            return [], {
+                "escalations": [], "input_tokens": 0, "output_tokens": 0,
+                "model": "", "elapsed_ms": 0, "error": "LLMError: provider down",
+            }
+
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _all_fail)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=True)
+        assert res["verdict"] == "Error"
+        assert res["chunks_failed"] == 2
+        assert "Partial review" not in forge.summaries[0]
+
+    def test_an_empty_diff_runs_no_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        res = orchestrate_review(FakeForge(diff=""), REF, FakeLLM("{}"), post=False)
+        assert calls == []
+        assert res["chunk_count"] == 0
+
+
+class TestChunkTimeoutRetry:
+    """A chunk that outruns the LLM deadline gets ONE smaller-prompt retry."""
+
+    TIMEOUT = "LLMError: m1: timeout (ReadTimeout)"
+
+    @staticmethod
+    def _scripted_double(outcomes: list[dict]):
+        """A review_chunk double popping one outcome dict per call."""
+        calls: list[dict] = []
+
+        def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
+                max_tokens=None, context_lines=None):
+            calls.append({"context_lines": context_lines, "path": files[0].path})
+            outcome = outcomes.pop(0)
+            return [Finding(
+                file=files[0].path, line=1, severity="outofscope",
+                confidence=0.9, title="ok", body="b",
+            )] if outcome.get("findings") else [], {
+                "escalations": [], "input_tokens": 5, "output_tokens": 5,
+                "model": "m", "elapsed_ms": 1,
+                "error": outcome.get("error", ""),
+            }
+
+        return _rc, calls
+
+    def test_a_timed_out_chunk_is_retried_once_with_zero_context(self, monkeypatch):
+        double, calls = self._scripted_double([
+            {"error": self.TIMEOUT},
+            {"findings": True},
+        ])
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", double)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=False, context_lines=3)
+
+        assert [(c["context_lines"]) for c in calls] == [3, 0]
+        assert res["chunks_failed"] == 0
+        assert res["chunks_reviewed"] == 2
+
+    def test_a_persistent_timeout_still_fails_the_chunk(self, monkeypatch):
+        double, calls = self._scripted_double([
+            {"error": self.TIMEOUT}, {"error": self.TIMEOUT},
+        ])
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", double)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=True, context_lines=3,
+        )
+        assert len(calls) == 2
+        # The only chunk failed, so this is the total-failure notice path
+        # (both units counted failed), and the notice names the timeout.
+        assert res["verdict"] == "Error"
+        assert res["chunks_failed"] == 2
+        assert res["chunks_reviewed"] == 0
+        assert "timeout" in forge.summaries[0]
+
+    def test_a_non_timeout_error_is_not_retried(self, monkeypatch):
+        double, calls = self._scripted_double([
+            {"error": "LLMError: m1: HTTP 500"}, {"findings": True},
+        ])
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", double)
+        res = orchestrate_review(
+            FakeForge(diff=_added_file_diff("src/app.py", 20)), REF, FakeLLM("{}"),
+            post=False, context_lines=3,
+        )
+        assert len(calls) == 1
+        assert res["verdict"] == "Error"
+        assert res["chunks_failed"] == 2
+
+    def test_a_timeout_at_zero_context_is_not_retried(self, monkeypatch):
+        """context_lines=0 is already the smallest rendering; an identical
+        prompt would meet an identical fate."""
+        double, calls = self._scripted_double([
+            {"error": self.TIMEOUT}, {"findings": True},
+        ])
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", double)
+        res = orchestrate_review(
+            FakeForge(diff=_added_file_diff("src/app.py", 20)), REF, FakeLLM("{}"),
+            post=False, context_lines=0,
+        )
+        assert len(calls) == 1
+        assert res["verdict"] == "Error"
+        assert res["chunks_failed"] == 2
+
+    def test_truncation_is_never_retried(self, monkeypatch):
+        """finish_reason=length is the RESPONSE-side budget, not the deadline;
+        shrinking the prompt is not its lever."""
+        double, calls = self._scripted_double([
+            {"error": TRUNCATED_REASON}, {"findings": True},
+        ])
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", double)
+        res = orchestrate_review(
+            FakeForge(diff=_added_file_diff("src/app.py", 20)), REF, FakeLLM("{}"),
+            post=False, context_lines=3,
+        )
+        assert len(calls) == 1
+        assert res["verdict"] == "Error"
+        assert res["chunks_failed"] == 2
+
+    def test_the_retry_predicate_is_the_backend_timeout_vocabulary(self):
+        assert orchestrator._is_timeout_error(
+            "LLMError: m1: timeout (ReadTimeout)")
+        assert orchestrator._is_timeout_error("LLMError: m2: Timeout (read)")
+        assert not orchestrator._is_timeout_error("LLMError: m1: HTTP 500")
+        assert not orchestrator._is_timeout_error("JSONDecodeError: bad json")
+        assert not orchestrator._is_timeout_error("")
