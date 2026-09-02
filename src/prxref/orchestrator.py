@@ -395,7 +395,7 @@ def orchestrate_review(
     )
     if rewrites:
         logger.info(
-            "severity consistency: raised %d finding(s) to their title group's max severity",
+            "severity consistency: raised %d finding(s) to their severity group's max severity",
             rewrites,
         )
     findings = consistent
