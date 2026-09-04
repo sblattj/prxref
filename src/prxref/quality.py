@@ -46,9 +46,9 @@ emit is tabulated for operators in ``docs/quality.md``.
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-7. ``apply_removal_claim_check``: drop findings claiming a path was
-   removed or deleted when every path the claim names is still present in
-   the diff's post-image — the false positive a ``copy from``/``copy to``
+7. ``apply_removal_claim_check``: drop findings whose removal verb governs
+   a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
+   path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
    header produces when a worker reads a copy as a move (issue #03).
    Only a claim that NAMES a diff path is judged, so a finding about a
    removed guard or constant is untouched.
@@ -108,11 +108,16 @@ DEFAULT_LINE_TOLERANCE: int = 5
 # a version — not a sentence break — so the hedge rules may span it.
 _NO_SENTENCE_BREAK = r"(?:[^.;]|\.(?!\s))"
 
+# A comma ends the ``if`` clause, so the hedge word has to appear before it to
+# be hedging the CONDITION rather than asserting a defect in the independent
+# clause that follows ("If save() raises, the transaction remains open").
+_NO_CLAUSE_BREAK = r"(?:[^.;,]|\.(?!\s))"
+
 HEDGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "if-still",
         re.compile(
-            rf"\bif\b{_NO_SENTENCE_BREAK}{{0,80}}?\b(?:still|already|remains?)\b",
+            rf"\bif\b{_NO_CLAUSE_BREAK}{{0,80}}?\b(?:still|already|remains?)\b",
             re.IGNORECASE,
         ),
     ),
@@ -1317,6 +1322,62 @@ def _claimed_paths(finding: Finding, candidates: Sequence[str]) -> list[str]:
     return [path for _, path in hits]
 
 
+# Words that end a removal verb's object: a preposition or a conjunction after
+# the verb means the following path is the place something was removed FROM, or
+# a new clause, not the thing removed ("the removed null check in src/app.py").
+_OBJECT_STOP = (
+    r"in|from|by|to|at|on|of|for|with|into|onto|via|and|or|but|so"
+    r"|because|that|which|when|while|after|before|since"
+)
+# Up to three determiner/qualifier tokens may sit between the verb and its
+# object ("removed the ServiceNow package.json"), none of them a stop word.
+_OBJECT_FILLER = rf"(?:(?!(?:{_OBJECT_STOP})\b)[\w.'-]+\s+){{0,3}}"
+_REMOVAL_VERB_PRE = r"(?:removed|deleted|deletion of|removal of)"
+_REMOVAL_VERB_POST = (
+    r"(?:(?:was|were|has been|have been|is|are|gets|got)\s+(?:removed|deleted)"
+    r"|no longer exists?)"
+)
+
+
+def _path_forms(path: str) -> list[str]:
+    """How a body may spell one diff path: full, parent/basename, basename."""
+    norm = path.replace("\\", "/").lower()
+    forms = [norm]
+    if "/" in norm:
+        forms.append(_tail(norm, 2))
+        forms.append(_tail(norm, 1))
+    return forms
+
+
+def _governed_claimed_paths(
+    finding: Finding, candidates: Sequence[str]
+) -> list[str]:
+    """Diff paths a removal verb GOVERNS in the finding's own text.
+
+    A bare ``removed`` somewhere in a body and a path somewhere else in it
+    are not a removal claim: "the removed null check in ``src/app.py``"
+    says the check went, not the file. A path counts only when the verb
+    takes it as its object (``removed the file src/app.py``) or when the
+    path is the subject of the removal (``src/app.py was removed``, ``…no
+    longer exists``), with no sentence break between the two.
+    """
+    text = f"{finding.title} {finding.body}".replace("\\", "/").lower()
+    hits: list[tuple[int, str]] = []
+    for path in candidates:
+        alternation = "|".join(re.escape(form) for form in _path_forms(path))
+        anchored = rf"(?<![\w/-])`?(?:{alternation})`?(?![\w/-])"
+        pattern = re.compile(
+            rf"{_REMOVAL_VERB_PRE}\s+(?:the\s+)?(?:file\s+)?"
+            rf"{_OBJECT_FILLER}{anchored}"
+            rf"|{anchored}\s+{_REMOVAL_VERB_POST}"
+        )
+        m = pattern.search(text)
+        if m is not None:
+            hits.append((m.start(), path))
+    hits.sort()
+    return [path for _, path in hits]
+
+
 def apply_removal_claim_check(
     findings: Sequence[Finding], files: Sequence[FileDiff]
 ) -> list[Finding]:
@@ -1324,7 +1385,10 @@ def apply_removal_claim_check(
 
     A finding whose title or body asserts a file was removed, deleted, or
     no longer exists is dropped when every path it names is still present
-    after the PR lands. A copy's source is present unless a separate
+    after the PR lands. The removal verb has to GOVERN one of those paths:
+    "the removed null check in ``src/app.py``" removes a check, not the
+    file, so a bare removal word plus an unrelated path mention is left
+    active. A copy's source is present unless a separate
     section removes it, so a ``copy from``/``copy to`` header read as a
     move produces exactly this false positive. When any named path really
     is absent from the post-image, the claim is left active — the pass
@@ -1343,19 +1407,21 @@ def apply_removal_claim_check(
         if not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}"):
             out.append(f)
             continue
-        # Only a claim that NAMES a path is judged. Falling back to the
-        # finding's anchor file would drop every finding whose body merely
-        # says something was "removed" — a guard, a constant, a validator —
-        # on a file the PR still leaves in place, which is precisely the
-        # guard-removal class the systemic sweep exists to report.
+        # Only a claim whose removal verb GOVERNS a path is judged. Falling
+        # back to the finding's anchor file, or to any path merely mentioned
+        # somewhere in the body, would drop every finding that says something
+        # was "removed" — a guard, a constant, a validator — on a file the PR
+        # still leaves in place, which is precisely the guard-removal class
+        # the systemic sweep exists to report.
+        governed = _governed_claimed_paths(f, candidates)
         named = _claimed_paths(f, candidates)
-        if named and all(path in present for path in named):
+        if governed and all(path in present for path in named):
             out.append(
                 replace(
                     f,
                     drop_reason=(
                         "claims removal of a path present in the "
-                        f"post-image: {named[0]}"
+                        f"post-image: {governed[0]}"
                     ),
                 )
             )

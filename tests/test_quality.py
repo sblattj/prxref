@@ -28,7 +28,12 @@ from prxref.quality import (
     normalize_title,
     snap_line,
 )
-from prxref.triage import Finding, added_lines_by_file, parse_unified_diff
+from prxref.triage import (
+    FileDiff,
+    Finding,
+    added_lines_by_file,
+    parse_unified_diff,
+)
 
 
 def _f(**kwargs) -> Finding:
@@ -1658,3 +1663,141 @@ class TestApplyContainmentNote:
         f = _f(body="The handler throws when the payload is malformed.")
         result = apply_containment_note([f])
         assert result[0] is not f
+
+
+# --- RC precision corpora (release 0.12.0 pipeline review, risks R2/R3) ------
+#
+# Copied verbatim from the reviewer's probe corpus. Each gate must drop every
+# case in its "must drop" list and keep every case in its "must keep" list;
+# before the fix the removal check false-dropped 4 of 5 innocent bodies and
+# the hedge gate false-dropped 2 of 5 assertive bodies.
+
+RC_FILES = [
+    FileDiff(path="src/app/auth.py", old_path=None, new_path="src/app/auth.py"),
+    FileDiff(path="src/app/db.py", old_path=None, new_path="src/app/db.py"),
+    FileDiff(
+        path="web/package.json", old_path=None, new_path="web/package.json"
+    ),
+    FileDiff(
+        path="src/app/legacy.py",
+        old_path="src/app/legacy.py",
+        new_path=None,
+        status="removed",
+    ),
+]
+
+RC_REMOVAL_CLAIMS = [
+    ("broken-import",
+     "Broken import",
+     "This PR removed src/app/db.py, but auth.py still imports it."),
+    ("dangling-ref",
+     "Dangling ref",
+     "web/package.json was removed yet the build script references it."),
+    ("deleted-module",
+     "Deleted module",
+     "The deletion of src/app/db.py leaves callers unresolved."),
+    ("gone",
+     "Gone",
+     "src/app/auth.py no longer exists after this change."),
+    ("dropped",
+     "Dropped",
+     "app/db.py has been removed; the migration will fail."),
+]
+
+RC_REMOVAL_INNOCENT = [
+    ("missing-guard",
+     "Missing guard",
+     "The removed null check in src/app/auth.py let None reach the parser."),
+    ("stale-cache",
+     "Stale cache",
+     "Deleted rows are re-fetched by src/app/db.py because the cache is not "
+     "invalidated."),
+    ("guard-removal",
+     "Guard removal",
+     "This change removes the tool metadata guard in src/app/auth.py: "
+     "MAX_TOOL_NAME_LENGTH no longer bounds names."),
+    ("dep-bump",
+     "Dep bump",
+     "The `lodash` pin was removed from web/package.json without a "
+     "replacement range."),
+    ("cleanup-regression",
+     "Cleanup regression",
+     "src/app/db.py deleted the retry wrapper, so transient failures now "
+     "surface to callers."),
+]
+
+RC_HEDGED = [
+    ("leak",
+     "If figmaProxy.prepare still leases a client, the pool is never "
+     "drained."),
+    ("dup", "If the migration already ran, this insert will conflict."),
+    ("maybe", "This may still deadlock under concurrent writes."),
+    ("assume", "Assuming the caller holds the lock, this is safe."),
+    ("unverified", "I cannot verify whether the flag is set elsewhere."),
+]
+
+RC_ASSERTIVE = [
+    ("lock-leak",
+     "If the input is empty the function returns None, but the lock remains "
+     "held."),
+    ("retry",
+     "If the request fails, retry() is called; the counter still increments "
+     "past the cap."),
+    ("off-by-one",
+     "The loop still runs when n == 0 because the guard uses <= instead "
+     "of <."),
+    ("ordering",
+     "If save() raises, the transaction remains open and the connection is "
+     "leaked."),
+    ("dead-code",
+     "The legacy branch is already unreachable; if it were reached it would "
+     "divide by zero."),
+]
+
+
+class TestRemovalClaimCorpus:
+    """The verb must GOVERN the path before a removal claim is judged."""
+
+    @pytest.mark.parametrize(
+        "label,title,body",
+        RC_REMOVAL_CLAIMS,
+        ids=[c[0] for c in RC_REMOVAL_CLAIMS],
+    )
+    def test_genuine_removal_claim_is_dropped(self, label, title, body):
+        out = apply_removal_claim_check(
+            [_f(file="src/app/auth.py", title=title, body=body)], RC_FILES
+        )
+        assert (out[0].drop_reason or "").startswith(
+            "claims removal of a path present in the post-image"
+        ), f"{label}: {out[0].drop_reason!r}"
+
+    @pytest.mark.parametrize(
+        "label,title,body",
+        RC_REMOVAL_INNOCENT,
+        ids=[c[0] for c in RC_REMOVAL_INNOCENT],
+    )
+    def test_innocent_removal_prose_survives(self, label, title, body):
+        out = apply_removal_claim_check(
+            [_f(file="src/app/auth.py", title=title, body=body)], RC_FILES
+        )
+        assert out[0].drop_reason is None, f"{label}: {out[0].drop_reason!r}"
+
+
+class TestHedgeGateCorpus:
+    """The hedge word must sit inside the ``if`` clause it qualifies."""
+
+    @pytest.mark.parametrize(
+        "label,body", RC_HEDGED, ids=[c[0] for c in RC_HEDGED]
+    )
+    def test_hedged_body_is_dropped(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert (out[0].drop_reason or "").startswith(
+            'hedged: "'
+        ), f"{label}: {out[0].drop_reason!r}"
+
+    @pytest.mark.parametrize(
+        "label,body", RC_ASSERTIVE, ids=[c[0] for c in RC_ASSERTIVE]
+    )
+    def test_assertive_body_survives(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert out[0].drop_reason is None, f"{label}: {out[0].drop_reason!r}"
