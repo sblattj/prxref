@@ -30,6 +30,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Summary Comments:** `POST /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` with `{"content": {"raw": body}}`, or `PUT .../comments/{id}` when a previous prxref summary is found. The comment feed is scanned for the summary marker first, so a re-review updates its own summary rather than adding another one; inline comments and tombstoned deletions are skipped as update targets.
   - **Inline Comments:** `POST /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments` with `inline.path` and `inline.to`. Non-fatal 4xx errors on individual inline comments are skipped.
   - **Thread List:** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}/comments`, following the cursor until the feed is exhausted. A walk that stops early logs a warning naming the count rather than silently under-reporting.
+  - **File Content:** `GET /2.0/repositories/{owner}/{repo}/src/{sha}/{path}`, best-effort, read with the same token as everything else above (no extra scope beyond `pullrequest:write`/repository read). A 404, oversize, or binary body returns `None` and is logged at debug, never a hard error.
 - **Webhook Integration:**
   - **Event Header:** `X-Event-Key`
   - **Accepted Events:** `pullrequest:created`, `pullrequest:updated`
@@ -54,6 +55,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Summary Comments:** Managed on the issue comments endpoint (`/repos/{owner}/{repo}/issues/{number}/comments`). Summary deduplication is handled via the embedded hidden HTML marker `<!-- prxref-summary -->`. If an existing review comment contains this marker, it is updated via `PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}` instead of creating a duplicate comment.
   - **Inline Comments:** `POST /repos/{owner}/{repo}/pulls/{number}/comments` with `body`, `path`, `line`, and `side` (`RIGHT`). HTTP 422 errors (e.g. comment line not part of diff hunk) are gracefully skipped.
   - **Thread List:** `GET /repos/{owner}/{repo}/pulls/{number}/comments`.
+  - **File Content:** `GET /repos/{owner}/{repo}/contents/{path}?ref={sha}` with `Accept: application/vnd.github.raw+json`, best-effort, read with the same token as everything else above (no extra scope). A 403/404, a JSON body (directory or a file over the 1 MB raw ceiling), oversize, or binary body returns `None` and is logged at debug, never a hard error.
 - **Webhook Integration:**
   - **Event Header:** `X-GitHub-Event` (must equal `pull_request`)
   - **Accepted Actions:** `opened`, `synchronize`
@@ -76,6 +78,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Summary Comments:** Managed via `GET/POST/PUT /merge_requests/{number}/notes`. Searches for `<!-- prxref-summary -->` and updates existing note via `PUT` if found.
   - **Inline Comments:** Posted as discussions via `POST /merge_requests/{number}/discussions` with text position references (`base_sha`, `start_sha`, `head_sha`, `new_path`, `new_line`). If position anchoring fails with HTTP 400 (e.g. line outside diff or obsolete context), it automatically falls back to posting a plain note via `POST /merge_requests/{number}/notes` formatted with `file: {path}\n\n{body}`.
   - **Thread List:** `GET /merge_requests/{number}/discussions`.
+  - **File Content:** `GET /repository/files/{url_encoded_path}/raw?ref={sha}` (path percent-encoded including slashes), best-effort, read with the same `PRIVATE-TOKEN` as everything else above (no extra scope). A non-2xx, oversize, or binary body returns `None` and is logged at debug, never a hard error.
 - **Webhook Integration:**
   - **Event Header:** `X-Gitlab-Event` (normalized to `MergeRequestHook`)
   - **Accepted Actions:** `open`, `update`
@@ -145,6 +148,10 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     re-review ends up posting a second one.
   - **Resolution:** read from whichever of `state == "RESOLVED"`, `threadResolved`, or
     `resolvedDate` the deployment's version exposes.
+  - **File Content:** `GET {scheme}://{host}{context}/rest/api/1.0/projects/{key}/repos/{slug}/raw/{path}?at={sha}`
+    (the `~{slug}` personal-repository form of `{key}` too), best-effort, read with the same
+    token as everything else above (no extra scope). A non-2xx, oversize, or binary body
+    returns `None` and is logged at debug, never a hard error.
 - **Webhook Integration:**
   - **Event Header:** `X-Event-Key` (shared with Cloud; the two are told apart by event
     name and payload shape)

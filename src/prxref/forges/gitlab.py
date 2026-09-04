@@ -36,6 +36,10 @@ _MAX_PAGES = 50
 # page requests shifts every later window back by one. Ascending order appends
 # at the END, past the cursor, so a walk in progress cannot step over anything.
 _NOTE_ORDER = {"order_by": "created_at", "sort": "asc"}
+# get_file_content is best-effort context, not the review itself: a body past
+# this size (or one that looks binary) is worth skipping rather than shipping
+# hundreds of KB into a worker prompt.
+_MAX_FILE_CONTENT_BYTES = 512 * 1024
 
 _GL_URL_RE = re.compile(
     r"^https?://(?P<host>[^/]+)/(?P<path>.+?)/-/merge_requests/(?P<number>\d+)(?:/.*)?$",
@@ -482,3 +486,36 @@ class ForgeImpl:
             )
 
         return threads
+
+    def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
+        """Return the text of ``path`` at commit ``sha``, best-effort.
+
+        The path is percent-encoded including its slashes, the same
+        double-encoding GitLab's repository files API requires everywhere
+        else a file path is a URL segment. Never raises.
+        """
+        if not sha:
+            return None
+        headers = self._get_auth_headers()
+        base = self._api_base(ref)
+        url = f"{base}/repository/files/{quote(path, safe='')}/raw"
+        try:
+            resp = self._session.get(
+                url, headers=headers, params={"ref": sha}, timeout=_REQUEST_TIMEOUT
+            )
+        except requests.RequestException as e:
+            logger.debug("get_file_content failed for %s@%s: %s", path, sha, e)
+            return None
+        if not resp.ok:
+            logger.debug(
+                "get_file_content got HTTP %s for %s@%s", resp.status_code, path, sha
+            )
+            return None
+        content = resp.content
+        if len(content) > _MAX_FILE_CONTENT_BYTES:
+            logger.debug("get_file_content body over 512 KiB for %s@%s", path, sha)
+            return None
+        if b"\x00" in content:
+            logger.debug("get_file_content body looked binary for %s@%s", path, sha)
+            return None
+        return content.decode("utf-8", errors="replace")
