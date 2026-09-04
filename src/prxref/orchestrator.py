@@ -81,7 +81,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import reviewer, systemic
+from . import chunk_context, reviewer, systemic
 from .forges.base import (
     ATTRIBUTION_MARKER,
     Forge,
@@ -420,6 +420,7 @@ def orchestrate_review(
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
+        reader=_make_file_reader(forge, ref, pr),
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -711,10 +712,62 @@ def _inline_accounting(
 HEARTBEAT_SECONDS = 30.0
 
 
+def _make_file_reader(forge: Forge, ref: PRRef, pr: PRData):
+    """A cached ``read(path) -> str | None`` over the forge's optional reader.
+
+    Returns ``None`` when the forge has no ``get_file_content`` or the PR has
+    no head sha, which is the signal to skip context injection entirely.
+    Otherwise every path is fetched at most once per run at ``pr.source_sha``,
+    and any exception from the adapter degrades to ``None``.
+    """
+    reader = getattr(forge, "get_file_content", None)
+    sha = getattr(pr, "source_sha", "") or ""
+    if reader is None or not sha:
+        return None
+
+    cache: dict[tuple[str, str], str | None] = {}
+    lock = threading.Lock()
+
+    def read(path: str) -> str | None:
+        key = (path, sha)
+        with lock:
+            if key in cache:
+                return cache[key]
+        try:
+            value = reader(ref, path, sha=sha)
+        except Exception as e:  # noqa: BLE001 - context is never worth a failed review
+            logger.debug("get_file_content(%s) failed: %s", path, e)
+            value = None
+        if not isinstance(value, str):
+            value = None
+        with lock:
+            cache[key] = value
+        return value
+
+    return read
+
+
+def _context_blocks(chunk, reader, *, include_definitions: bool) -> str:
+    """Render the chunk's dependency and definition blocks; never raises."""
+    if reader is None:
+        return ""
+    try:
+        files = chunk_context.chunk_files(chunk)
+        deps = chunk_context.dependency_versions(files, reader)
+        defs = (
+            chunk_context.referenced_definitions(files, reader)
+            if include_definitions else []
+        )
+        return chunk_context.render_context_blocks(deps, defs)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("chunk context unavailable: %s", e)
+        return ""
+
+
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
-    tracer: Tracer | None = None,
+    tracer: Tracer | None = None, reader=None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -748,7 +801,7 @@ def _run_workers(
         futures = [
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
-                max_tokens, context_lines, tracer,
+                max_tokens, context_lines, tracer, reader,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -793,6 +846,7 @@ _TIMEOUT_RETRY_CONTEXT_LINES = 0
 def _invoke_chunk(
     llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None, context_lines: int | None,
+    reader=None, *, include_definitions: bool = True,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -800,11 +854,19 @@ def _invoke_chunk(
     ``error`` always a string — for both the original attempt and the
     timeout retry in :func:`_run_worker`. Legacy dict-shaped stubs are
     accepted exactly as before.
+
+    ``reader`` is the optional cached file reader from
+    :func:`_make_file_reader`; when present the chunk's dependency and
+    definition context blocks are built here, so both the original attempt and
+    the retry carry them. ``include_definitions`` is false on the timeout
+    retry, whose whole purpose is a smaller prompt.
     """
+    blocks = _context_blocks(chunk, reader, include_definitions=include_definitions)
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, context_lines=context_lines,
+            context_blocks=blocks,
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -844,7 +906,7 @@ def _invoke_chunk(
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
-    tracer: Tracer | None = None,
+    tracer: Tracer | None = None, reader=None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -859,7 +921,7 @@ def _run_worker(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
     )
-    res = _invoke_chunk(llm, chunk, pr, max_tokens, context_lines)
+    res = _invoke_chunk(llm, chunk, pr, max_tokens, context_lines, reader)
     if (
         res["error"]
         and _is_timeout_error(res["error"])
@@ -877,7 +939,13 @@ def _run_worker(
         tracer.event(
             "chunk", "retry", index=index, total=total, reason="timeout",
         )
-        res = _invoke_chunk(llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES)
+        # The dependency block is a handful of tokens and survives; the
+        # definitions block is the bulky one and is dropped, because shrinking
+        # the prompt is the entire point of this retry.
+        res = _invoke_chunk(
+            llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
+            include_definitions=False,
+        )
 
     error = res["error"]
     if error:

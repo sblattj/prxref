@@ -728,3 +728,41 @@ class TestSystemicDiscussionBlock:
         llm = FakeLLM(CLEAN_RESPONSE)
         review_systemic(llm, "## src/a.ts", threads=[self._thread("already settled")])
         assert "already settled" in llm.calls[0]["user"]
+
+class TestContextBlocks:
+    """Supplementary context lands in the ``user`` half or nowhere at all."""
+
+    def _chunk(self):
+        return parse_unified_diff(MINI_DIFF)
+
+    BLOCKS = "### Dependency versions\n\neffect@4.0.0"
+
+    def test_blocks_land_after_the_review_context_marker(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, self._chunk(), context_blocks=self.BLOCKS)
+        call = llm.calls[0]
+        assert self.BLOCKS in call["user"]
+        assert "effect@4.0.0" not in call["system"]
+
+    def test_blocks_follow_the_diff_fence(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, self._chunk(), context_blocks=self.BLOCKS)
+        user = llm.calls[0]["user"]
+        assert user.index("import sys") < user.index("### Dependency versions")
+        assert user.index("### Dependency versions") < user.index("## Output Format")
+
+    def test_the_empty_default_renders_no_placeholder_and_no_header(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, self._chunk())
+        user = llm.calls[0]["user"]
+        assert "{context_blocks}" not in user
+        assert "### Dependency versions" not in user
+        assert "### Definitions referenced by this chunk" not in user
+
+    def test_no_template_placeholder_is_left_unsubstituted(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, self._chunk(), context_blocks=self.BLOCKS)
+        rendered = llm.calls[0]["system"] + llm.calls[0]["user"]
+        for slot in ("{pr_title}", "{pr_description}", "{repo_hint}",
+                     "{diff}", "{context_blocks}"):
+            assert slot not in rendered
