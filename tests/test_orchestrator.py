@@ -2468,6 +2468,203 @@ class TestSystemicSweep:
         assert res["chunk_count"] == 0
 
 
+class TestReleaseShapeFoldIn:
+    """The release-shape finding is a CHUNK-side finding (issue #29
+    residual): ``apply_sweep_dedup`` only ever drops a SWEEP finding, so
+    folding the heuristic in AFTER the sweep's own findings would let a
+    chunk worker's restatement of the same (file, title) pair get the
+    deterministic finding dropped as a duplicate of ITSELF, keeping the
+    model's echo instead of the deterministic check.
+
+    The two offending files are the only non-binary files in this diff —
+    the eight machinery files are diffed as binary, which ``build_chunks``
+    skips (there is no reviewable text) — so the review is exactly one
+    chunk (the two offenders) plus the sweep, and both the chunk worker
+    and the sweep are scripted to restate the heuristic's own (file,
+    title) pair on every call, the worst case named by the concern this
+    fix closes.
+
+    Verified empirically against the pre-fix assembly order (heuristic
+    appended after the sweep's findings): that order drops the
+    deterministic finding as "duplicate of chunk finding" and leaves only
+    the chunk worker's non-deterministic echo active — i.e. this test
+    fails before the fix. ``apply_sweep_dedup`` never drops a chunk-side
+    finding by contract (see its own docstring), so once the heuristic is
+    chunk-side neither it nor the chunk worker's own echo can be that
+    pass's victim; only the sweep's echo — the actual duplicate — is
+    dropped. That is why exactly one model ECHO (not zero) survives
+    alongside the deterministic finding: this pass has never deduplicated
+    two chunk-side findings against each other, and this test does not
+    assert that it now does.
+    """
+
+    TITLE = "Release-shaped PR touches source: 2 non-release file(s)"
+    DETERMINISTIC_SUFFIX = " (deterministic check, no model)"
+    OFFENDER_A = "src/alpha.py"
+    OFFENDER_B = "src/beta.py"
+    ANCHOR = min(OFFENDER_A, OFFENDER_B)  # heuristic anchors on the first, sorted
+
+    MACHINERY_BASENAMES = (
+        "package.json", "pyproject.toml", "Cargo.toml", "setup.py",
+        "setup.cfg", "VERSION", "CHANGELOG.md", "poetry.lock",
+    )
+
+    @staticmethod
+    def _binary_file_diff(path: str) -> str:
+        return (
+            f"diff --git a/{path} b/{path}\n"
+            "index 111..222 100644\n"
+            f"Binary files a/{path} and b/{path} differ\n"
+        )
+
+    def _diff(self) -> str:
+        # 8 machinery (binary, so build_chunks skips them) + 2 source files:
+        # 8/10 = 80%, exactly the frozen release-shape ratio boundary.
+        machinery = "".join(self._binary_file_diff(p) for p in self.MACHINERY_BASENAMES)
+        offenders = (
+            _added_file_diff(self.OFFENDER_A, 5) + _added_file_diff(self.OFFENDER_B, 5)
+        )
+        return machinery + offenders
+
+    def _matching_finding(self, body: str) -> Finding:
+        return Finding(
+            file=self.ANCHOR, line=1, severity="warning", confidence=0.9,
+            title=self.TITLE, body=body,
+        )
+
+    def test_a_chunk_and_sweep_echo_never_drops_the_deterministic_finding(
+        self, monkeypatch,
+    ):
+        def _review_chunk(llm, files, *, pr_title="", pr_description="",
+                           repo_hint="", max_tokens=None, context_lines=None,
+                           context_blocks=""):
+            return [self._matching_finding("chunk worker restatement")], {
+                "input_tokens": 10, "output_tokens": 5, "model": "m",
+                "elapsed_ms": 1, "error": "",
+            }
+
+        def _review_systemic(llm, digest, *, pr_title="", pr_description="",
+                              repo_hint="", max_tokens=None, threads=()):
+            return [self._matching_finding("sweep restatement")], {
+                "input_tokens": 7, "output_tokens": 3, "model": "sweep-model",
+                "elapsed_ms": 1, "error": "",
+            }
+
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _review_chunk)
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", _review_systemic)
+
+        forge = FakeForge(diff=self._diff())
+        res = orchestrate_review(forge, REF, FakeLLM(), post=False)
+
+        # One chunk (the two offenders) plus the sweep.
+        assert res["chunk_count"] == 2
+
+        matching = [f for f in res["findings_active"] if f.title == self.TITLE]
+        deterministic = [f for f in matching if f.body.endswith(self.DETERMINISTIC_SUFFIX)]
+        echoes = [f for f in matching if not f.body.endswith(self.DETERMINISTIC_SUFFIX)]
+
+        # The deterministic finding survives — the whole point of the fix.
+        assert len(deterministic) == 1
+        assert deterministic[0].file == self.ANCHOR
+
+        # Exactly one model ECHO survives active — the chunk worker's own,
+        # which apply_sweep_dedup has never dropped and still must not.
+        assert len(echoes) == 1
+        assert echoes[0].body == "chunk worker restatement"
+
+        dropped_dupes = [
+            f for f in res["findings_dropped"]
+            if f.drop_reason == "duplicate of chunk finding"
+        ]
+        assert len(dropped_dupes) == 1
+        assert dropped_dupes[0].body == "sweep restatement"
+
+
+class TestReleaseShapeOnTheNoChunkPath:
+    """Concern #2: a diff that yields zero chunks skipped the deterministic
+    check entirely, because ``orchestrate_review`` returned via
+    ``_summary_only_run`` before ``heuristics.release_shape_findings`` was
+    ever called.
+
+    ``build_chunks`` skips a file for exactly one reason — it is binary,
+    ``"there is no reviewable text"`` (its own docstring; ``candidates =
+    [f for f in files if not f.is_binary]`` is the only filter) — so the
+    only diff shape that empties ``chunks`` while still exercising the
+    release-shape ratio is one where EVERY file, release machinery
+    included, is diffed as binary. A pure-text release PR (the realistic
+    case) always chunks normally and takes the path
+    ``TestReleaseShapeFoldIn`` already covers.
+    """
+
+    @staticmethod
+    def _binary_file_diff(path: str) -> str:
+        return (
+            f"diff --git a/{path} b/{path}\n"
+            "index 111..222 100644\n"
+            f"Binary files a/{path} and b/{path} differ\n"
+        )
+
+    # 9 release-machinery basenames, all binary, plus one binary
+    # non-machinery file: 9/10 = 90% >= the 80% ratio.
+    MACHINERY_BASENAMES = (
+        "package.json", "pyproject.toml", "Cargo.toml", "setup.py",
+        "setup.cfg", "VERSION", "CHANGELOG.md", "poetry.lock", "Cargo.lock",
+    )
+    OFFENDER = "src/logo.png"
+
+    def _diff(self) -> str:
+        return "".join(
+            self._binary_file_diff(p)
+            for p in (*self.MACHINERY_BASENAMES, self.OFFENDER)
+        )
+
+    def test_a_release_shaped_diff_with_zero_chunks_still_gets_the_finding(self):
+        forge = FakeForge(diff=self._diff())
+        res = orchestrate_review(forge, REF, FakeLLM(), post=True)
+
+        # Every file was binary: build_chunks skipped all of them, exactly
+        # the pre-fix condition that used to skip the heuristic too.
+        assert res["chunk_count"] == 0
+        assert res["chunks_reviewed"] == 0
+        assert res["chunks_failed"] == 0
+
+        active = res["findings_active"]
+        assert len(active) == 1
+        f = active[0]
+        assert f.title == "Release-shaped PR touches source: 1 non-release file(s)"
+        assert f.file == self.OFFENDER
+        assert f.line == 0
+        assert f.body.endswith(" (deterministic check, no model)")
+        assert res["verdict"] == "Approved"  # a warning-severity finding approves
+
+        assert len(forge.summaries) == 1
+        assert self.OFFENDER in forge.summaries[0]
+        assert "Release-shaped PR touches source" in forge.summaries[0]
+
+    def test_confidence_floor_still_applies_on_the_no_chunk_path(self):
+        """The caller's quality-gate knobs reach the heuristic finding here
+        exactly like they reach a chunk finding on the normal path."""
+        forge = FakeForge(diff=self._diff())
+        # The heuristic always emits confidence 1.0; a floor above 1.0 is
+        # unreachable and drops it, proving the gate actually ran here.
+        res = orchestrate_review(
+            forge, REF, FakeLLM(), post=False, confidence_floor=1.1,
+        )
+        assert res["findings_active"] == []
+        assert len(res["findings_dropped"]) == 1
+        assert "below floor" in res["findings_dropped"][0].drop_reason
+
+    def test_a_pure_release_diff_with_zero_chunks_yields_no_finding(self):
+        """The control: no offending file, no finding, same as before the fix."""
+        forge = FakeForge(
+            diff="".join(self._binary_file_diff(p) for p in self.MACHINERY_BASENAMES)
+        )
+        res = orchestrate_review(forge, REF, FakeLLM(), post=False)
+        assert res["chunk_count"] == 0
+        assert res["findings_active"] == []
+        assert res["verdict"] == "Approved"
+
+
 class TestChunkTimeoutRetry:
     """A chunk that outruns the LLM deadline gets ONE smaller-prompt retry."""
 

@@ -22,6 +22,13 @@ from an unmerged branch, or a hand edit smuggled into a release.
 
 The finding is folded into the raw results **before** the passes below, so it
 is validated, aligned, deduplicated and gated exactly like a model finding.
+It is spliced in at the chunk/sweep boundary — before the systemic sweep's
+own findings, never after — so `apply_sweep_dedup` always treats it as a
+CHUNK-side finding and can never drop it as a duplicate of a chunk worker's
+own restatement of the same file and title. It also runs on a diff that
+yields zero chunks (every file binary, or an empty diff): the heuristic
+needs no chunk to fire on, so it is computed and gated on that path too,
+not only when at least one chunk survives `build_chunks`.
 
 ## The passes, in the order they run
 
