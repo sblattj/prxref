@@ -87,6 +87,7 @@ from .quality import (
     active,
     apply_line_align,
     apply_location_validation,
+    apply_manifest_claim_check,
     apply_quality_gate,
     apply_severity_consistency,
     apply_sweep_dedup,
@@ -451,6 +452,10 @@ def orchestrate_review(
         threads = []
 
     findings = apply_location_validation(findings, [f.path for f in files])
+    # BEFORE apply_line_align, deliberately: the manifest check compares the
+    # model's raw anchor against the key and section it claims, and realignment
+    # can move a correctly anchored claim onto a neighbouring entry first.
+    findings = apply_manifest_claim_check(findings, files)
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
     consistent = apply_severity_consistency(findings)

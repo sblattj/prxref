@@ -1,11 +1,16 @@
 """Deterministic quality passes over worker findings.
 
-Five passes run before posting:
+Six passes run before posting:
 1. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-2. ``apply_line_align``: a line explicitly cited in the finding's own
+2. ``apply_manifest_claim_check``: for findings on a ``package.json``,
+   drop a claim whose named dependency is not the key on the anchored
+   line (``anchor mismatch:``) or sits under a different dependency
+   section than the claim asserts (``section mismatch:``). It runs
+   BEFORE ``apply_line_align`` so it reads the model's raw anchor.
+3. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
    line lands on an added line — or a context line within tolerance of
@@ -21,15 +26,15 @@ Five passes run before posting:
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-3. ``apply_thread_dedup``: drop findings that duplicate an already-open
+4. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive tokens).
-4. ``apply_severity_consistency``: findings sharing one normalized title —
+5. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-5. ``apply_quality_gate``: drop findings below the confidence floor, cap
+6. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
 
@@ -45,6 +50,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import PurePosixPath
 
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
@@ -90,6 +96,193 @@ def apply_location_validation(
             result.append(f)
             continue
         result.append(replace(f, drop_reason=f"malformed location: {f.file!r}"))
+    return result
+
+
+MANIFEST_BASENAME: str = "package.json"
+
+DEPENDENCY_SECTIONS: tuple[str, ...] = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+
+# Keys that name a manifest SECTION or the package itself rather than a
+# dependency, so they can never be the "claimed package" of a finding.
+_MANIFEST_NON_PACKAGE_KEYS: frozenset[str] = frozenset(
+    [s.lower() for s in DEPENDENCY_SECTIONS] + ["scripts", "engines", "name", "version"]
+)
+
+# Evidence tokens a manifest section header contributes (including the
+# camelCase split of the compound forms), which must not decide a
+# package.json realign — see ``_realign_member``.
+_MANIFEST_SECTION_TOKENS: frozenset[str] = frozenset(
+    {"dependencies", "devdependencies", "peerdependencies",
+     "optionaldependencies", "peer", "optional"}
+)
+
+_NPM_NAME_RE = re.compile(
+    r"(?:@[a-z0-9\-~][a-z0-9._~\-]*/)?[a-z0-9\-~][a-z0-9._~\-]*"
+)
+
+_JSON_KEY_RE = re.compile(r'"([^"\n]+)"\s*:')
+
+_SECTION_OPEN_RE = re.compile(
+    r'"(dependencies|devDependencies|peerDependencies|optionalDependencies)"'
+    r"\s*:\s*\{"
+)
+
+_CLAIMED_SECTION_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("devdependenc", "devDependencies"),
+    ("dev dependenc", "devDependencies"),
+    ("peerdependenc", "peerDependencies"),
+    ("peer dependenc", "peerDependencies"),
+    ("optionaldependenc", "optionalDependencies"),
+    ("optional dependenc", "optionalDependencies"),
+    ("runtime dependenc", "dependencies"),
+    ("production dependenc", "dependencies"),
+    ("under `dependencies`", "dependencies"),
+    ("in dependencies", "dependencies"),
+    ("to dependencies", "dependencies"),
+)
+
+
+def _manifest_keys(hunks: Sequence[Hunk]) -> set[str]:
+    """Every JSON key present on a post-image line of the file's hunks."""
+    keys: set[str] = set()
+    for h in hunks:
+        for ln in h.lines:
+            if ln.kind == "-":
+                continue
+            keys.update(_JSON_KEY_RE.findall(ln.text))
+    return keys
+
+
+def _line_json_key(ln: DiffLine) -> str | None:
+    """The dependency key declared on a manifest line, if any.
+
+    A section header or a bare brace declares no dependency, so both
+    answer None and leave the anchor-key check with nothing to compare.
+    """
+    m = _JSON_KEY_RE.search(ln.text)
+    if m is None or m.group(1).lower() in _MANIFEST_NON_PACKAGE_KEYS:
+        return None
+    return m.group(1)
+
+
+def _claimed_package(text: str, keys: set[str]) -> str | None:
+    """The first npm package name in ``text`` that is a key of the file."""
+    for m in _NPM_NAME_RE.finditer(_CITATION_RE.sub(" ", text.lower())):
+        name = m.group(0)
+        if len(name) < 2 or name in _MANIFEST_NON_PACKAGE_KEYS:
+            continue
+        for key in keys:
+            if key.lower() == name:
+                return key
+    return None
+
+
+def _claimed_section(text: str) -> str | None:
+    """The dependency section a claim asserts, by earliest phrasing."""
+    lowered = text.lower()
+    best: tuple[int, str] | None = None
+    for needle, section in _CLAIMED_SECTION_PATTERNS:
+        idx = lowered.find(needle)
+        if idx >= 0 and (best is None or idx < best[0]):
+            best = (idx, section)
+    return best[1] if best else None
+
+
+def _enclosing_section(hunks: Sequence[Hunk], line: int) -> str | None:
+    """The dependency section header above ``line`` in the post-image."""
+    for h in hunks:
+        body = [ln for ln in h.lines if ln.kind != "-"]
+        for i, ln in enumerate(body):
+            if ln.new_line != line:
+                continue
+            for prev in reversed(body[: i + 1]):
+                m = _SECTION_OPEN_RE.search(prev.text)
+                if m is not None:
+                    return m.group(1)
+            return None
+    return None
+
+
+def apply_manifest_claim_check(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff],
+) -> list[Finding]:
+    """Drop package.json findings that misname their key or their section.
+
+    A worker reading a manifest diff can name a real dependency and then
+    anchor the comment on an unrelated neighbouring entry, or read an
+    entry as a runtime dependency when the enclosing block is
+    ``devDependencies``. Both are checkable against the diff itself: the
+    claim names a package, the anchored line declares a key, and the
+    nearest section header above that line names the block it lives in.
+
+    A finding is dropped with ``drop_reason="anchor mismatch: claims
+    <claimed> but line <n> is <anchor>"`` when the anchored line declares
+    a different dependency, and with ``drop_reason="section mismatch:
+    claims <claimed> but <key> is under <actual>"`` when the anchor is
+    right but the asserted section is not. Findings on other files, on a
+    package.json whose claim names no key of the diff, and findings that
+    already carry a ``drop_reason`` pass through untouched. Order is
+    preserved.
+
+    Run this BEFORE :func:`apply_line_align`: it must read the model's
+    raw anchor, because realignment can move a correctly anchored claim
+    onto the very line this pass exists to catch.
+    """
+    hunks_by_file = {
+        f.path: f.hunks
+        for f in files
+        if PurePosixPath(f.path).name == MANIFEST_BASENAME
+    }
+    result: list[Finding] = []
+    for f in findings:
+        hunks = hunks_by_file.get(f.file)
+        if f.drop_reason is not None or not hunks:
+            result.append(f)
+            continue
+        claim = f"{f.title}\n{f.body}"
+        keys = _manifest_keys(hunks)
+        claimed = _claimed_package(f.title, keys) or _claimed_package(f.body, keys)
+        if claimed is None:
+            result.append(f)
+            continue
+        anchor_ln = next(
+            (ln for h in hunks for ln in h.lines
+             if ln.kind != "-" and ln.new_line == f.line),
+            None,
+        )
+        anchor_key = _line_json_key(anchor_ln) if anchor_ln is not None else None
+        if anchor_key is not None and anchor_key != claimed:
+            result.append(replace(
+                f,
+                drop_reason=(
+                    f"anchor mismatch: claims {claimed} but "
+                    f"line {f.line} is {anchor_key}"
+                ),
+            ))
+            continue
+        claimed_section = _claimed_section(claim)
+        actual_section = _enclosing_section(hunks, f.line)
+        if (
+            claimed_section is not None
+            and actual_section is not None
+            and claimed_section != actual_section
+        ):
+            result.append(replace(
+                f,
+                drop_reason=(
+                    f"section mismatch: claims {claimed_section} but "
+                    f"{claimed} is under {actual_section}"
+                ),
+            ))
+            continue
+        result.append(f)
     return result
 
 
@@ -190,8 +383,15 @@ def _realign_member(
     cannot collide with path words) and compound identifiers split into
     their snake/camel parts (so ``wp_ajax_nopriv_avatar_upload`` can
     answer a claim about "nopriv avatar upload").
+
+    On a ``package.json`` the manifest section words are dropped from the
+    evidence, because every dependency claim mentions one and the long
+    ``dependencies`` token would otherwise outrank the package name and
+    resolve the anchor onto a section header instead of the entry.
     """
     ftoks = _evidence_tokens(f"{finding.title} {finding.body}")
+    if PurePosixPath(finding.file).name == MANIFEST_BASENAME:
+        ftoks -= _MANIFEST_SECTION_TOKENS
     if not ftoks:
         return finding.line
     anchor = _hunk_containing(hunks, finding.line)

@@ -10,6 +10,7 @@ from prxref.quality import (
     active,
     apply_line_align,
     apply_location_validation,
+    apply_manifest_claim_check,
     apply_quality_gate,
     apply_severity_consistency,
     apply_thread_dedup,
@@ -1075,3 +1076,168 @@ class TestBodyCitationGrammar:
             body="Also line 55 matters.",
         )
         assert _body_cited_lines(f) == [40, 55]
+
+
+_MANIFEST_PATH = "web/package.json"
+
+# Post-image lines: 1 "{", 2 dependencies header, 3 express,
+# 4 +@acme/jenkins, 5 lodash, 6 "},", 7 devDependencies header,
+# 8-14 seven dev deps, 15 +vitest, 16 typescript, 17 "}", 18 "}".
+# vitest deliberately sits FARTHER from its own section header (8 lines)
+# than the jenkins entry does (3), which is what lets a header-ranked
+# realign pull a correct vitest anchor onto the jenkins line.
+_MANIFEST_DIFF = (
+    f"diff --git a/{_MANIFEST_PATH} b/{_MANIFEST_PATH}\n"
+    f"--- a/{_MANIFEST_PATH}\n"
+    f"+++ b/{_MANIFEST_PATH}\n"
+    "@@ -1,16 +1,18 @@\n"
+    "{\n"
+    '  "dependencies": {\n'
+    '    "express": "^4.18.0",\n'
+    '+    "@acme/jenkins": "*",\n'
+    '    "lodash": "^4.17.21"\n'
+    "  },\n"
+    '  "devDependencies": {\n'
+    '    "eslint": "^8.50.0",\n'
+    '    "prettier": "^3.0.0",\n'
+    '    "nodemon": "^3.0.0",\n'
+    '    "esbuild": "^0.19.0",\n'
+    '    "ts-node": "^10.9.0",\n'
+    '    "@types/node": "^20.0.0",\n'
+    '    "@types/jest": "^29.5.0",\n'
+    '+    "vitest": "^4.0.18",\n'
+    '    "typescript": "^5.2.0"\n'
+    "  }\n"
+    "}\n"
+)
+
+_MANIFEST_FILES = parse_unified_diff(_MANIFEST_DIFF)
+
+
+class TestManifestClaimCheck:
+    """apply_manifest_claim_check: a package.json claim must anchor on the
+    key and the dependency section it actually names."""
+
+    def test_anchor_mismatch_is_dropped(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="vitest added to runtime dependencies",
+            body="`vitest` is test-only but appears under `dependencies`.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert len(out) == 1
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("anchor mismatch:")
+        assert "vitest" in out[0].drop_reason
+        assert "@acme/jenkins" in out[0].drop_reason
+
+    def test_section_mismatch_is_dropped(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=15,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("section mismatch:")
+        assert "devDependencies" in out[0].drop_reason
+
+    def test_correct_claim_untouched(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=15,
+            title="vitest added to devDependencies",
+            body="A new test runner is pulled in.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_scoped_package_name_resolves(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="@acme/jenkins pinned to * in dependencies",
+            body="A wildcard version makes installs unreproducible.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_no_claimed_key_untouched(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="Manifest formatting is inconsistent",
+            body="Indentation mixes two and four spaces.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_claimed_key_absent_from_hunks_untouched(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="webpack should not be a runtime dependency",
+            body="`webpack` belongs in devDependencies.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_non_manifest_file_untouched(self):
+        f = _f(
+            file="src/index.ts", line=4,
+            title="vitest added to runtime dependencies",
+            body="`vitest` is test-only but appears under `dependencies`.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_anchor_on_brace_line_has_no_key_and_no_section(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=1,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None, out[0].drop_reason
+
+    def test_anchor_on_section_header_falls_through_to_section_check(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=7,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("section mismatch:")
+
+    def test_already_dropped_finding_passes_through(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="vitest added to runtime dependencies",
+            body="`vitest` is test-only but appears under `dependencies`.",
+            drop_reason="confidence 0.10 below floor 0.60",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason == "confidence 0.10 below floor 0.60"
+
+    def test_order_preserved(self):
+        a = _f(file=_MANIFEST_PATH, line=4, title="a", body="b")
+        b = _f(file="src/index.ts", line=1, title="c", body="d")
+        out = apply_manifest_claim_check([a, b], _MANIFEST_FILES)
+        assert [x.title for x in out] == ["a", "c"]
+
+
+class TestManifestRealignRegression:
+    """The section words must not decide a package.json realign: a claim
+    correctly anchored on the vitest entry stays there instead of being
+    pulled onto the nearest added line below the dependencies header."""
+
+    def test_correct_vitest_anchor_survives_line_align(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=15,
+            title="vitest added to runtime dependencies",
+            body=(
+                "vitest is a test-only tool but is added under `dependencies` "
+                "in web/package.json. This bloats production installs."
+            ),
+        )
+        out = apply_line_align(
+            [f], added_lines_by_file(_MANIFEST_FILES), files=_MANIFEST_FILES
+        )
+        assert out[0].line == 15

@@ -117,6 +117,23 @@ The trade-off is the whole difference: the advisory profile gives you the three 
 
 Neither knob affects the exit code — `PRXREF_FAIL_ON` is the only one that can. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build).
 
+## Quality Passes and Drop Reasons
+
+Before anything is posted, every finding runs the deterministic passes in `src/prxref/quality.py`. A finding that fails one is never deleted — it keeps its identity and gains a `drop_reason`, so a run store or a `--no-post` dry run can explain every filter decision. The reasons you will see:
+
+| `drop_reason` | Pass | Meaning |
+| --- | --- | --- |
+| `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches. |
+| `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A `package.json` finding names one dependency but is anchored on a different entry. |
+| `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A `package.json` finding calls an entry a runtime dependency when it lives under `devDependencies` (or vice versa). |
+| `duplicate of existing thread` | `apply_thread_dedup` | An open thread on the PR already says this. |
+| `duplicate of chunk finding` | `apply_sweep_dedup` | A whole-diff sweep finding restates a chunk finding that already survived. |
+| `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {error, warning, outofscope}. |
+| `confidence <x> below floor <y>` | `apply_quality_gate` | Below `PRXREF_CONFIDENCE_FLOOR`. |
+| `error cap exceeded (max <n>)` | `apply_quality_gate` | Beyond `PRXREF_MAX_ERROR_FINDINGS`, lowest confidence first. |
+
+The two manifest reasons are not tunable — they are correctness checks against the diff itself, not a noise knob.
+
 ## Environment Cross-Check & Defaults
 
 The tables above define all **35** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
