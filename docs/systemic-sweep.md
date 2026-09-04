@@ -52,15 +52,14 @@ comments it is about to delete.
 
 ## Drop reasons
 
-Every dropped finding keeps its identity and states why:
-
-| Reason | Pass |
-|---|---|
-| `malformed location: '<file>'` | `apply_location_validation` |
-| `duplicate of existing thread` | `apply_thread_dedup` — same path, line window, shared tokens |
-| `settled in thread: <author>` | `apply_settled_thread_suppression` — same path and 4+ shared tokens, NO line test |
-| `severity '<x>' not in vocabulary` / confidence floor / error cap | `apply_quality_gate` |
-| duplicate of a chunk finding | `apply_sweep_dedup` |
+A sweep finding runs the same deterministic passes as a chunk finding, and
+every `drop_reason` string is tabulated in
+[docs/quality.md](quality.md#drop-reasons). Two of them matter most here:
+`settled in thread: <author>` (`apply_settled_thread_suppression` — same path
+and 4+ shared tokens, with no line test) and `duplicate of chunk finding`
+(`apply_sweep_dedup`, which runs after the quality gate so a sub-floor chunk
+finding cannot suppress its higher-confidence sweep duplicate and then die at
+the gate itself).
 
 `settled in thread` is line-independent on purpose: `apply_line_align` has
 already demoted a file-level finding to line 0 by the time it runs, so a

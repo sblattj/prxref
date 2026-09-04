@@ -7,7 +7,18 @@ onto :class:`prxref.triage.Finding` records. Unparseable or malformed
 responses degrade to ``([], [])`` with a logged warning; this layer
 never raises. :func:`review_systemic` is the same contract over the
 whole-PR digest built by :mod:`prxref.systemic`, for the second-order
-classes no single chunk seat can see. Both ``prompts/worker.md`` and
+classes no single chunk seat can see.
+
+Both calls take optional supplementary context, and both degrade to the
+pre-existing prompt when it is absent: :func:`review_chunk` takes
+``context_blocks`` (the dependency-version and referenced-definition
+blocks the orchestrator builds from an optional forge
+``get_file_content``), and :func:`review_systemic` takes ``threads`` (the
+PR's existing review discussion, rendered by
+:func:`_render_discussion_block` under the ``DISCUSSION_MAX_*`` caps) so
+the sweep stops re-raising subjects the team already argued out.
+
+Both ``prompts/worker.md`` and
 ``prompts/systemic.md`` require a throw/panic/crash/unhandled-rejection
 finding to name its containment boundary; :func:`prxref.quality.apply_containment_note`
 enforces that deterministically on any finding that skips it.
