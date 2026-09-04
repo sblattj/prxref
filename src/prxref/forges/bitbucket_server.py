@@ -5,7 +5,7 @@ import logging
 import os
 import re
 from collections.abc import Iterator, Sequence
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -40,6 +40,11 @@ _BBS_URL_RE = re.compile(
     r"/pull-requests/(?P<number>\d+)(?:/.*)?$",
     re.IGNORECASE,
 )
+
+# get_file_content is best-effort context, not the review itself: a body past
+# this size (or one that looks binary) is worth skipping rather than shipping
+# hundreds of KB into a worker prompt.
+_MAX_FILE_CONTENT_BYTES = 512 * 1024
 
 # Data Center serves its REST API at /rest/api/<version> — 1.0 today, plus the
 # /latest alias — hanging directly off any deployment context path. A PR's REST
@@ -481,6 +486,45 @@ class ForgeImpl:
             )
 
         return threads
+
+    def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
+        """Return the text of ``path`` at commit ``sha``, best-effort.
+
+        Hits the repository-level ``/raw`` endpoint directly rather than a
+        pull-request-scoped one — this is a commit-addressed file read, not a
+        PR resource. ``ref.owner`` already carries the ``~slug`` form for a
+        personal repository, so this builds the same project path
+        ``_pr_url`` does. Never raises.
+        """
+        if not sha:
+            return None
+        headers, auth = self._get_auth()
+        context = self._context_path(ref)
+        url = (
+            f"{self._scheme(ref)}://{ref.host}{context}/rest/api/1.0"
+            f"/projects/{ref.owner}/repos/{ref.repo}/raw/{quote(path, safe='/')}"
+        )
+        try:
+            resp = self._session.get(
+                url, headers=headers, auth=auth, params={"at": sha},
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            logger.debug("get_file_content failed for %s@%s: %s", path, sha, e)
+            return None
+        if not resp.ok:
+            logger.debug(
+                "get_file_content got HTTP %s for %s@%s", resp.status_code, path, sha
+            )
+            return None
+        content = resp.content
+        if len(content) > _MAX_FILE_CONTENT_BYTES:
+            logger.debug("get_file_content body over 512 KiB for %s@%s", path, sha)
+            return None
+        if b"\x00" in content:
+            logger.debug("get_file_content body looked binary for %s@%s", path, sha)
+            return None
+        return content.decode("utf-8", errors="replace")
 
 
 def _is_resolved(comment: dict) -> bool:
