@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 
 import requests
@@ -53,10 +54,66 @@ _READ_CHUNK_BYTES = 8192
 # truncated answer is a 200, so it must be caught HERE for the chain to
 # advance — the reviewer only sees what survives the chain.
 _TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
+# A model that answers 4xx with one of these phrases is gone for the rest of
+# the run, not merely rate-limited or transiently unhappy — deprovisioned,
+# renamed, or never enabled for this integrator. Shared by both backends so a
+# deprovisioned model reads identically whichever client hits it.
+_UNAVAILABLE_PHRASES = (
+    "not available",
+    "not supported",
+    "does not exist",
+    "model_not_found",
+    "unknown model",
+    "no such model",
+    "deprecated",
+)
 
 
 class LLMError(Exception):
     """Every model in the fallback chain failed; the message carries per-model reasons."""
+
+
+def _looks_permanently_unavailable(text: str) -> bool:
+    """Case-insensitive match of ``text`` against the unavailable-phrase vocabulary."""
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _UNAVAILABLE_PHRASES)
+
+
+def _openai_error_message(resp: requests.Response) -> str:
+    """Best-effort extraction of a 4xx body's error text for phrase matching.
+
+    Prefers the OpenAI-style ``error.message``, falls back to a string
+    ``error`` field, and finally the raw response text when the body does
+    not parse as JSON or carries neither shape.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return getattr(resp, "text", "") or ""
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str):
+                return message
+        elif isinstance(error, str):
+            return error
+    return getattr(resp, "text", "") or ""
+
+
+def _mark_unavailable(model: str, unavailable: set[str], lock: threading.Lock) -> bool:
+    """Add ``model`` to ``unavailable`` under ``lock``; ``True`` only for the adding thread.
+
+    Guards the once-per-model "skipping for the rest of the run" WARNING
+    against a race: both backends run on one client instance shared across a
+    ``ThreadPoolExecutor``, so two chunk workers can observe the same
+    not-yet-marked model at the same moment.
+    """
+    with lock:
+        if model in unavailable:
+            return False
+        unavailable.add(model)
+        return True
 
 
 class OpenAICompatClient(LLMClient):
@@ -79,6 +136,10 @@ class OpenAICompatClient(LLMClient):
     and passes a seed only when one is configured. The choice's
     ``finish_reason`` is carried through verbatim so the reviewer can name
     truncation as the cause of an unparseable response.
+    A model whose 4xx body names it as permanently gone (deprovisioned,
+    renamed, never enabled) is cached in-memory for the client's lifetime:
+    every later ``invoke()`` skips it outright — no request, no log — and
+    the one time it is marked, a single WARNING records why.
     """
 
     def __init__(
@@ -102,6 +163,13 @@ class OpenAICompatClient(LLMClient):
         self.reasoning_effort = reasoning_effort or None
         self.temperature = temperature
         self.seed = seed
+        # Run-lifetime memory of models a 4xx body named as permanently gone
+        # (deprovisioned, renamed, never enabled) so a chunk fan-out backed by
+        # one shared client stops re-trying and re-logging a dead model on
+        # every chunk plus the sweep. The lock guards concurrent workers
+        # racing to be the one that logs the once-per-model WARNING.
+        self._unavailable: set[str] = set()
+        self._unavailable_lock = threading.Lock()
 
     def _post_within_deadline(
         self,
@@ -182,6 +250,9 @@ class OpenAICompatClient(LLMClient):
         failures: list[str] = []
         last_truncated: InvokeResult | None = None
         for attempt, model in enumerate(self.models, start=1):
+            if model in self._unavailable:
+                failures.append(f"{model}: skipped (unavailable)")
+                continue
             t0 = time.perf_counter()
             logger.info(
                 "llm attempt %d/%d: model=%s deadline=%.0fs",
@@ -217,6 +288,15 @@ class OpenAICompatClient(LLMClient):
                     attempt, len(self.models), model, resp.status_code, elapsed_ms,
                 )
                 failures.append(f"{model}: HTTP {resp.status_code}")
+                if 400 <= resp.status_code < 500:
+                    message = _openai_error_message(resp)
+                    if _looks_permanently_unavailable(message):
+                        if _mark_unavailable(model, self._unavailable, self._unavailable_lock):
+                            logger.warning(
+                                "model=%s marked unavailable (%s), skipping for the rest of "
+                                "the run",
+                                model, message,
+                            )
                 continue
             try:
                 body = resp.json()
@@ -296,6 +376,12 @@ class LiteLLMClient(LLMClient):
     ``""``. ``temperature`` and ``seed`` are omitted entirely when ``None``,
     never defaulted; the factory resolves temperature's configured default
     of 0.0 before this client is built.
+    A model litellm reports as permanently gone (a 4xx-shaped exception
+    naming it deprovisioned, renamed, or never enabled) is cached in-memory
+    for the client's lifetime, mirroring :class:`OpenAICompatClient`: it is
+    filtered out of both ``model`` and ``fallbacks`` on every later
+    ``invoke()``, and if every configured model is unavailable, ``invoke()``
+    raises :class:`LLMError` without calling litellm at all.
     """
 
     def __init__(
@@ -319,6 +405,10 @@ class LiteLLMClient(LLMClient):
         self.temperature = temperature
         self.seed = seed
         self._completion = litellm.completion
+        # Same run-lifetime memory as OpenAICompatClient (see its __init__),
+        # keyed on litellm's own exception shape instead of a status code.
+        self._unavailable: set[str] = set()
+        self._unavailable_lock = threading.Lock()
 
     def invoke(
         self,
@@ -329,10 +419,21 @@ class LiteLLMClient(LLMClient):
         json_mode: bool = False,
         timeout_s: float | None = None,
     ) -> InvokeResult:
-        """One litellm.completion call with the native fallback chain attached."""
+        """One litellm.completion call with the native fallback chain attached.
+
+        Models already marked unavailable are filtered out of both ``model``
+        and ``fallbacks`` before the call; if none are left, ``invoke()``
+        raises :class:`LLMError` without calling litellm.
+        """
         request_timeout = self.default_timeout if timeout_s is None else timeout_s
+        available = [m for m in self.models if m not in self._unavailable]
+        if not available:
+            raise LLMError(
+                "all models failed: "
+                + "; ".join(f"{m}: skipped (unavailable)" for m in self.models)
+            )
         kwargs: dict = {
-            "model": self.models[0],
+            "model": available[0],
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -340,7 +441,7 @@ class LiteLLMClient(LLMClient):
             "max_tokens": max_tokens,
             "num_retries": 0,
             "timeout": request_timeout,
-            "fallbacks": self.models[1:],
+            "fallbacks": available[1:],
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
@@ -349,7 +450,11 @@ class LiteLLMClient(LLMClient):
         if self.seed is not None:
             kwargs["seed"] = self.seed
         t0 = time.perf_counter()
-        response = self._completion(**kwargs)
+        try:
+            response = self._completion(**kwargs)
+        except Exception as exc:
+            self._maybe_mark_unavailable(exc, kwargs["model"], available)
+            raise
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         choice = response.choices[0]
         text = choice.message.content or ""
@@ -358,12 +463,53 @@ class LiteLLMClient(LLMClient):
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
-            model=getattr(response, "model", "") or self.models[0],
+            model=getattr(response, "model", "") or available[0],
             backend="litellm",
             elapsed_ms=elapsed_ms,
             # Absent on a provider that does not report one; never guessed.
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
         )
+
+    def _maybe_mark_unavailable(
+        self, exc: Exception, requested_model: str, available: list[str]
+    ) -> None:
+        """Cache ``requested_model`` (or the exception's own ``.model``) on a permanent 4xx.
+
+        litellm's own ``BadRequestError``/``NotFoundError`` usually carry a
+        ``.model`` naming which candidate in the internal fallback chain
+        actually failed; when that is missing or not one of the models this
+        call attempted, the model requested as primary is the best guess.
+        """
+        if not _litellm_error_signals_unavailable(exc):
+            return
+        failed_model = getattr(exc, "model", None)
+        if not isinstance(failed_model, str) or failed_model not in available:
+            failed_model = requested_model
+        if _mark_unavailable(failed_model, self._unavailable, self._unavailable_lock):
+            logger.warning(
+                "model=%s marked unavailable, skipping for the rest of the run",
+                failed_model,
+            )
+
+
+def _litellm_error_signals_unavailable(exc: Exception) -> bool:
+    """True when a raised litellm exception names a model as permanently gone.
+
+    Requires both a phrase match (the shared unavailable vocabulary, checked
+    against ``str(exc)`` and a ``.message`` attribute when litellm sets one)
+    AND a 4xx signal — litellm does not always set ``.status_code``, so the
+    exception class naming ``BadRequest``/``NotFound`` is the fallback
+    signal. A transient error (timeout, connection error, 5xx) must never be
+    cached, so both checks are required, not either.
+    """
+    text = " ".join(filter(None, [str(exc), str(getattr(exc, "message", "") or "")]))
+    if not _looks_permanently_unavailable(text):
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and 400 <= status_code < 500:
+        return True
+    class_name = exc.__class__.__name__
+    return "BadRequest" in class_name or "NotFound" in class_name
 
 
 def _float_setting(
