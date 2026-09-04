@@ -113,6 +113,10 @@ Temperature `0.0` and an optional `PRXREF_LLM_SEED` are sent on every call, but 
 
 See [docs/llm.md](docs/llm.md) for architecture, failover behavior, and backend setup, and [docs/env-vars.md](docs/env-vars.md#tuning-for-your-team) for tuning the confidence floor and finding caps to your team.
 
+## Deterministic Checks
+
+Most findings come from the LLM fallback chain, but a few are computed directly from the parsed diff, no model call involved. **Release-shaped PRs**: when a PR changes at least 2 files and at least 80% of them are release machinery (version manifests, `CHANGELOG`/`HISTORY`/`RELEASE_NOTES` files, lockfiles, `.changeset/` entries, the release-please manifest), any remaining non-machinery file is flagged with a warning naming every offending path — the body ends with `(deterministic check, no model)` so it reads distinctly from an LLM finding in the posted summary. This catches a release cut from an unmerged branch or a hand edit smuggled into a release, the way issue #10 first surfaced it.
+
 ## Forge Authentication
 
 Configure the authentication token matching your forge:
