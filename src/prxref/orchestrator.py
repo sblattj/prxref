@@ -76,6 +76,7 @@ import logging
 import re
 import threading
 import time
+from collections import Counter
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -91,6 +92,8 @@ from .quality import (
     apply_severity_consistency,
     apply_sweep_dedup,
     apply_thread_dedup,
+    finding_rank_key,
+    finding_sort_key,
 )
 from .trace import Tracer, get_tracer
 from .triage import (
@@ -317,7 +320,11 @@ def orchestrate_review(
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
-    tracer.event("run", "start", forge=ref.forge, url=ref.url, number=ref.number)
+    sampling = _sampling(llm)
+    tracer.event(
+        "run", "start", forge=ref.forge, url=ref.url, number=ref.number,
+        sampling=sampling,
+    )
 
     try:
         with tracer.span("forge.get_pr"):
@@ -327,7 +334,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"get_pr failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     try:
@@ -339,7 +346,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"get_diff failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     # Wrapped like every neighbouring stage. These two were the only ones that
@@ -357,7 +364,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     try:
@@ -372,7 +379,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"build_chunks failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     if not chunks:
@@ -380,6 +387,7 @@ def orchestrate_review(
         return _summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
+            sampling=sampling,
         )
 
     results = _run_workers(
@@ -414,7 +422,7 @@ def orchestrate_review(
         return _error_run(
             forge, ref, post, len(chunks) + 1, reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
-            post_mode=post_mode,
+            post_mode=post_mode, sampling=sampling,
         )
 
     chunks_failed = sum(1 for r in results if r["error"])
@@ -465,17 +473,36 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
+    # The sweep boundary is positional, and the gate now returns its findings
+    # in content order, so the boundary is re-derived from the identity of the
+    # sweep's own findings rather than carried across the gate as an index.
+    sweep_identities = Counter(
+        _origin_key(f) for f in findings[sweep_start:]
+    )
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
     )
+    chunk_part: list[Finding] = []
+    sweep_part: list[Finding] = []
+    for f in findings:
+        key = _origin_key(f)
+        if sweep_identities[key] > 0:
+            sweep_identities[key] -= 1
+            sweep_part.append(f)
+        else:
+            chunk_part.append(f)
     # AFTER the gate, deliberately: the duplicate set is built from chunk
     # findings that survived it, so a sub-floor chunk finding cannot suppress
     # its higher-confidence sweep duplicate and then die at the gate itself —
     # that would lose the recall the sweep exists to add.
-    findings = apply_sweep_dedup(findings, sweep_start=sweep_start)
+    findings = apply_sweep_dedup(
+        chunk_part + sweep_part, sweep_start=len(chunk_part)
+    )
 
-    findings_active = active(findings)
-    findings_dropped = [f for f in findings if f.drop_reason is not None]
+    findings_active = sorted(active(findings), key=finding_sort_key)
+    findings_dropped = sorted(
+        (f for f in findings if f.drop_reason is not None), key=finding_sort_key
+    )
 
     verdict = (
         "Request-Changes"
@@ -519,7 +546,7 @@ def orchestrate_review(
     if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
         ordered = sorted(
             findings_active,
-            key=lambda f: (_SEVERITY_RANK.get(f.severity, 3), -f.confidence),
+            key=lambda f: (_SEVERITY_RANK.get(f.severity, 3), *finding_rank_key(f)),
         )
         comments = [
             InlineComment(
@@ -584,6 +611,24 @@ def orchestrate_review(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "posted": posted,
+        "sampling": _sampling(llm),
+    }
+
+
+def _origin_key(finding: Finding) -> tuple:
+    return (finding.file, finding.line, finding.title, finding.body)
+
+
+def _sampling(llm: object) -> dict:
+    """Report the sampling knobs a client had in force, duck-typed.
+
+    A client that exposes none of them still yields the same three keys, so a
+    run record never has to be read as "absent means default".
+    """
+    return {
+        "temperature": getattr(llm, "temperature", None),
+        "seed": getattr(llm, "seed", None),
+        "models": list(getattr(llm, "models", []) or []),
     }
 
 
@@ -1103,7 +1148,7 @@ def _trace_post_end(
 def _summary_only_run(
     forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
-    tracer: Tracer | None = None,
+    tracer: Tracer | None = None, sampling: dict | None = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -1136,6 +1181,7 @@ def _summary_only_run(
         "input_tokens": 0,
         "output_tokens": 0,
         "posted": posted,
+        "sampling": sampling if sampling is not None else _sampling(None),
     }
 
 
@@ -1151,6 +1197,7 @@ def _error_run(
     output_tokens: int = 0,
     post_mode: str = "summary+inline",
     tracer: Tracer | None = None,
+    sampling: dict | None = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -1190,4 +1237,5 @@ def _error_run(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "posted": posted,
+        "sampling": sampling if sampling is not None else _sampling(None),
     }

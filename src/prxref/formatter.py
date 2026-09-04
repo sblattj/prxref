@@ -76,6 +76,7 @@ def _findings_table(findings: list[Finding]) -> str:
             -f.confidence,
             f.file,
             f.line,
+            f.title,
         ),
     )
     rows = [
@@ -97,7 +98,8 @@ def _dropped_section(findings_dropped: list[Finding]) -> str:
         return ""
     tally = Counter(f.drop_reason or "unspecified" for f in findings_dropped)
     tally_lines = "\n".join(
-        f"- {count} × {reason}" for reason, count in tally.most_common()
+        f"- {count} × {reason}"
+        for reason, count in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
     )
     return (
         "<details>\n"

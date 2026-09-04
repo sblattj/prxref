@@ -273,6 +273,7 @@ class TestHappyPath:
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
+            "sampling",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -735,6 +736,7 @@ class TestMaxTokensThreading:
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
+            "sampling",
         }
 
 
@@ -1046,13 +1048,14 @@ class TestQualityGateKnobsAreThreaded:
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
+            "sampling",
         }
 
 
 RESULT_KEYS = {
     "verdict", "findings_active", "findings_dropped", "chunk_count",
     "chunks_reviewed", "chunks_failed",
-    "elapsed_ms", "input_tokens", "output_tokens", "posted",
+    "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
 }
 
 
@@ -2569,3 +2572,42 @@ class TestChunkTimeoutRetry:
         assert not orchestrator._is_timeout_error("LLMError: m1: HTTP 500")
         assert not orchestrator._is_timeout_error("JSONDecodeError: bad json")
         assert not orchestrator._is_timeout_error("")
+
+
+class TestSamplingRecord:
+    """``sampling`` rides EVERY exit of ``orchestrate_review``.
+
+    The three exits are the normal return, ``_summary_only_run`` (empty
+    diff), and ``_error_run`` (five call sites); each is driven below.
+    """
+
+    class _Sampled(FakeLLM):
+        temperature = 0.0
+        seed = 11
+        models = ["fast", "slow"]
+
+    def test_normal_return_carries_the_client_knobs(self):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(forge, REF, self._Sampled(), post=False)
+        assert res["sampling"] == {
+            "temperature": 0.0, "seed": 11, "models": ["fast", "slow"],
+        }
+
+    def test_empty_diff_exit_carries_the_client_knobs(self):
+        forge = FakeForge(diff="")
+        res = orchestrate_review(forge, REF, self._Sampled(), post=False)
+        assert res["sampling"]["seed"] == 11
+
+    def test_error_exit_carries_the_client_knobs(self):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        forge.fail.add("get_diff")
+        res = orchestrate_review(forge, REF, self._Sampled(), post=False)
+        assert res["verdict"] == "Error"
+        assert res["sampling"]["models"] == ["fast", "slow"]
+
+    def test_a_silent_client_still_gets_all_three_keys(self):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(forge, REF, FakeLLM(), post=False)
+        assert res["sampling"] == {
+            "temperature": None, "seed": None, "models": [],
+        }
