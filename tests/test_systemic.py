@@ -423,3 +423,71 @@ class TestSweepPromptContract:
         from prxref.reviewer import _CONTEXT_MARKER
 
         assert _CONTEXT_MARKER in load_prompt("systemic.md")
+
+    def test_the_prompt_states_the_containment_boundary_rule(self):
+        assert "containment boundary" in load_prompt("systemic.md")
+
+
+class TestGuardRemoval:
+    """A deleted limit constant or validator is a class of its own (issue 06).
+
+    Removal-only by construction: the same text ADDED is a guard being put in
+    place, which is not a finding.
+    """
+
+    @pytest.mark.parametrize("line", [
+        "const MAX_TOOL_NAME_LENGTH = 128;",
+        "const MAX_TOOL_SCHEMA_BYTES = 100_000;",
+        "static final int REQUEST_TIMEOUT = 30;",
+        "MAX_UPLOAD_BYTES: int = 5_000",
+        "MAX_RETRIES_CAP = 3",
+    ])
+    def test_removed_limit_constants(self, line):
+        assert match_class(line, kind="-") == "guard-removal"
+
+    @pytest.mark.parametrize("line", [
+        "function isSupported(tool) {",
+        "function validateSchema(s) {",
+        "def sanitize_name(name):",
+        "def check_bounds(n):",
+        "fn escape_html(s: &str) {",
+        "func assertOwner(u User) {",
+        "const guardInput = (x) => {",
+        "public boolean isValidName(String n) {",
+    ])
+    def test_removed_validator_definitions(self, line):
+        assert match_class(line, kind="-") == "guard-removal"
+
+    @pytest.mark.parametrize("line", [
+        "const MAX_TOOL_NAME_LENGTH = 128;",
+        "function isSupported(tool) {",
+    ])
+    def test_the_same_line_added_is_not_guard_removal(self, line):
+        assert match_class(line, kind="+") != "guard-removal"
+
+    def test_a_removed_log_line_keeps_its_own_class(self):
+        assert match_class('console.log("x")', kind="-") == "console-log"
+
+    def test_default_kind_is_an_addition(self):
+        assert match_class("const MAX_TOOL_NAME_LENGTH = 128;") is None
+
+    def test_the_digest_renders_removals_with_their_minus_marker(self):
+        digest = _digest(_modified_file(
+            "src/tools/registry.ts",
+            ['import { z } from "zod";'],
+            ["const MAX_TOOL_NAME_LENGTH = 128;", "function isSupported(tool) {"],
+            ["  return raw.slice();"],
+        ))
+        assert "-2| const MAX_TOOL_NAME_LENGTH = 128;" in digest
+        assert "-3| function isSupported(tool) {" in digest
+
+    def test_guard_removal_survives_a_tight_per_file_cap(self):
+        noise = [f"console.log('noise {i}');" for i in range(MAX_LINES_PER_FILE + 5)]
+        diff = _modified_file(
+            "src/big.ts",
+            ["const a = 1;"],
+            [*noise, "const MAX_BODY_BYTES = 1024;"],
+            [f"const filler{i} = {i};" for i in range(FULL_CONTENT_MAX_ADDED_LINES + 5)],
+        )
+        digest = _digest(diff)
+        assert "MAX_BODY_BYTES" in digest

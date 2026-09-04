@@ -26,11 +26,17 @@ has no exit code and is unaffected by the knob.
 ``PRXREF_DRY_RUN=1`` suppresses every write to the forge on both paths — the
 one-shot review and the webhook daemon — and ``--no-post`` does the same for a
 single invocation.
+
+``--format {text,json}`` controls ``review``'s stdout shape. ``json`` (default
+``text``) emits exactly one JSON object and nothing else on stdout. In text
+mode, ``--no-post`` or ``-v`` additionally prints every active finding's
+location, title, and body, followed by any dropped findings and their reason.
 """
 from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
 import sys
 import time
@@ -83,6 +89,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="print timing, token, and findings breakdown to stdout",
+    )
+    rev.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help=(
+            "output format for review results (default text); json emits "
+            "exactly one JSON object on stdout"
+        ),
     )
 
     srv = sub.add_parser("serve", help="run webhook listener daemon")
@@ -156,6 +171,98 @@ def _print_summary(
     dropped = len(dropped) if isinstance(dropped, list) else 0
     print(f"counts: {_fmt_counts(result)} (dropped: {dropped})", file=target)
     print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)}", file=target)
+
+
+def _fmt_finding_line(f: Any) -> str:
+    """Render one active finding as ``<severity> <file>:<line> <title> (confidence 0.NN)``."""
+    severity = getattr(f, "severity", None) or ""
+    location = f"{getattr(f, 'file', '')}:{getattr(f, 'line', 0)}"
+    title = getattr(f, "title", None) or ""
+    confidence = getattr(f, "confidence", None) or 0.0
+    return f"{severity} {location} {title} (confidence {confidence:.2f})"
+
+
+def _fmt_indented_body(body: str) -> str:
+    """Indent every line of a finding's body by two spaces."""
+    return "\n".join(f"  {line}" for line in (body or "").splitlines())
+
+
+def _fmt_dropped_line(f: Any) -> str:
+    """Render one dropped finding as ``  <file>:<line> <title> -- <drop_reason>``."""
+    location = f"{getattr(f, 'file', '')}:{getattr(f, 'line', 0)}"
+    title = getattr(f, "title", None) or ""
+    reason = getattr(f, "drop_reason", None) or ""
+    return f"  {location} {title} -- {reason}"
+
+
+def _print_findings(result: Any, *, out=None) -> None:
+    """Print each active finding's body, then any dropped findings and why.
+
+    Text-mode only, gated by the caller on ``--no-post`` or ``-v``: the
+    frozen CLI contract (issue 08) makes finding bodies reachable from stdout
+    without importing ``prxref.cli._run_review`` directly.
+    """
+    target = sys.stdout if out is None else out
+    if not isinstance(result, dict):
+        return
+    for f in result.get("findings_active") or []:
+        print(_fmt_finding_line(f), file=target)
+        body = _fmt_indented_body(getattr(f, "body", None))
+        if body:
+            print(body, file=target)
+    dropped = result.get("findings_dropped") or []
+    if dropped:
+        print("dropped:", file=target)
+        for f in dropped:
+            print(_fmt_dropped_line(f), file=target)
+
+
+def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
+    """Build one JSON finding row explicitly (``Finding`` is a dataclass, not
+    JSON-serializable by default)."""
+    return {
+        "file": f.file,
+        "line": f.line,
+        "severity": f.severity,
+        "confidence": f.confidence,
+        "title": f.title,
+        "body": f.body,
+        "drop_reason": drop_reason,
+    }
+
+
+def _build_json_result(result: Any) -> dict:
+    """Build the single JSON payload for ``--format json``.
+
+    Tolerates an error-shaped or partial result (a dict missing keys, as an
+    incomplete or failed run may return): every key defaults to ``None`` and
+    ``findings`` defaults to ``[]`` rather than raising. ``sampling`` is
+    forwarded only when the result already carries it — a sibling feature's
+    key, not one this CLI invents.
+    """
+    if not isinstance(result, dict):
+        result = {}
+    findings = [
+        _finding_json(f, drop_reason=None) for f in result.get("findings_active") or []
+    ]
+    findings.extend(
+        _finding_json(f, drop_reason=getattr(f, "drop_reason", None))
+        for f in result.get("findings_dropped") or []
+    )
+    payload = {
+        "verdict": result.get("verdict"),
+        "findings": findings,
+        "chunk_count": result.get("chunk_count"),
+        "chunks_reviewed": result.get("chunks_reviewed"),
+        "chunks_failed": result.get("chunks_failed"),
+        "elapsed_ms": result.get("elapsed_ms"),
+        "input_tokens": result.get("input_tokens"),
+        "output_tokens": result.get("output_tokens"),
+        "posted": result.get("posted"),
+    }
+    if "sampling" in result:
+        payload["sampling"] = result["sampling"]
+    return payload
 
 
 def _run_review(
@@ -306,7 +413,12 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 0
 
     elapsed = time.perf_counter() - t0
-    _print_summary(result, elapsed, verbose=args.verbose)
+    if args.format == "json":
+        print(json.dumps(_build_json_result(result)))
+    else:
+        _print_summary(result, elapsed, verbose=args.verbose)
+        if args.no_post or args.verbose:
+            _print_findings(result)
     code, note = _fail_on_exit(result, fail_on)
     if note:
         print(note, file=sys.stderr)

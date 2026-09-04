@@ -1,23 +1,39 @@
 """Tests for prxref.quality: line alignment, thread dedup, and quality gate."""
 from __future__ import annotations
 
+import itertools
 import logging
+
+import pytest
 
 from prxref.forges.base import Thread
 from prxref.quality import (
+    CONTAINMENT_NOTE_SUFFIX,
     _body_cited_lines,
     _resolve_max_errors,
     active,
+    apply_containment_note,
+    apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
+    apply_manifest_claim_check,
     apply_quality_gate,
+    apply_removal_claim_check,
+    apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_thread_dedup,
+    finding_rank_key,
+    finding_sort_key,
     is_duplicate_of_existing,
     normalize_title,
     snap_line,
 )
-from prxref.triage import Finding, added_lines_by_file, parse_unified_diff
+from prxref.triage import (
+    FileDiff,
+    Finding,
+    added_lines_by_file,
+    parse_unified_diff,
+)
 
 
 def _f(**kwargs) -> Finding:
@@ -1075,3 +1091,713 @@ class TestBodyCitationGrammar:
             body="Also line 55 matters.",
         )
         assert _body_cited_lines(f) == [40, 55]
+
+
+class TestDeterministicCaps:
+    """The error cap and the gate's output order are content-derived."""
+
+    TIED = [
+        _f(file="src/a.py", line=1, severity="error", confidence=0.9, title="alpha"),
+        _f(file="src/a.py", line=2, severity="error", confidence=0.9, title="bravo"),
+        _f(file="src/a.py", line=3, severity="error", confidence=0.9, title="charlie"),
+    ]
+
+    def test_error_cap_survivors_do_not_depend_on_arrival_order(self):
+        seen = set()
+        for perm in itertools.permutations(self.TIED):
+            staged = apply_quality_gate(list(perm), confidence_floor=0.6, max_errors=2)
+            seen.add(frozenset(f.title for f in staged if f.drop_reason is None))
+        assert seen == {frozenset({"alpha", "bravo"})}
+
+    def test_gate_output_is_sorted_by_file_line_title(self):
+        staged = apply_quality_gate(
+            list(reversed(self.TIED)), confidence_floor=0.6, max_errors=3
+        )
+        assert [f.title for f in staged] == ["alpha", "bravo", "charlie"]
+
+    def test_confidence_outranks_content_in_the_rank_key(self):
+        low = _f(file="src/a.py", line=1, severity="error", confidence=0.7, title="aaa")
+        high = _f(file="src/z.py", line=9, severity="error", confidence=0.95, title="zzz")
+        assert finding_rank_key(high) < finding_rank_key(low)
+
+    def test_sort_key_tolerates_a_missing_line(self):
+        assert finding_sort_key(_f(line=None, title="t")) == ("src/app.py", -1, "t")
+
+class TestSettledThreadSuppression:
+    """Line-independent suppression of re-litigated subjects (issue 06)."""
+
+    SETTLED = Thread(
+        path="src/tools/registry.ts",
+        line=None,
+        resolved=False,
+        author="bob",
+        body_snippet=(
+            "This still feels too defensive, I don't think we need it imo — "
+            "Removed the defensive tool metadata guard in commit 917d1f4"
+        ),
+    )
+
+    def _finding(self, **kwargs):
+        fields = {
+            "file": "src/tools/registry.ts",
+            "line": 0,
+            "title": (
+                "Tool metadata guard removed: unbounded tool names from remote servers"
+            ),
+            "body": (
+                "This change removes the tool metadata guard: MAX_TOOL_NAME_LENGTH "
+                "and isSupported no longer bound names or schemas supplied by a "
+                "remote MCP server."
+            ),
+        }
+        fields.update(kwargs)
+        return _f(**fields)
+
+    def test_a_file_level_finding_is_dropped_against_a_file_level_thread(self):
+        out = apply_settled_thread_suppression([self._finding()], [self.SETTLED])
+        assert out[0].drop_reason == "settled in thread: bob"
+
+    def test_the_reason_names_the_author(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "author": "carol"})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason.endswith("carol")
+
+    def test_a_leading_dot_slash_path_still_matches(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "path": "./src/tools/registry.ts"})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is not None
+
+    def test_a_thread_on_another_file_never_suppresses(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "path": "src/other/cache.ts"})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is None
+
+    def test_a_same_file_thread_on_another_subject_never_suppresses(self):
+        thread = Thread(
+            path="src/tools/registry.ts", line=None, resolved=True, author="dave",
+            body_snippet="Please rename listTools to enumerateTools for consistency.",
+        )
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is None
+
+    def test_a_resolved_thread_still_settles_its_own_subject(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "resolved": True})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason == "settled in thread: bob"
+
+    def test_an_already_dropped_finding_keeps_its_first_reason(self):
+        dropped = self._finding(drop_reason="duplicate of existing thread")
+        out = apply_settled_thread_suppression([dropped], [self.SETTLED])
+        assert out[0].drop_reason == "duplicate of existing thread"
+
+    def test_no_threads_is_a_passthrough_preserving_order(self):
+        findings = [self._finding(), self._finding(line=7)]
+        out = apply_settled_thread_suppression(findings, [])
+        assert [f.line for f in out] == [0, 7]
+        assert all(f.drop_reason is None for f in out)
+
+    def test_an_empty_finding_body_cannot_match_anything(self):
+        out = apply_settled_thread_suppression(
+            [_f(file="src/tools/registry.ts", title="", body="")], [self.SETTLED],
+        )
+        assert out[0].drop_reason is None
+
+_MANIFEST_PATH = "web/package.json"
+
+# Post-image lines: 1 "{", 2 dependencies header, 3 express,
+# 4 +@acme/jenkins, 5 lodash, 6 "},", 7 devDependencies header,
+# 8-14 seven dev deps, 15 +vitest, 16 typescript, 17 "}", 18 "}".
+# vitest deliberately sits FARTHER from its own section header (8 lines)
+# than the jenkins entry does (3), which is what lets a header-ranked
+# realign pull a correct vitest anchor onto the jenkins line.
+_MANIFEST_DIFF = (
+    f"diff --git a/{_MANIFEST_PATH} b/{_MANIFEST_PATH}\n"
+    f"--- a/{_MANIFEST_PATH}\n"
+    f"+++ b/{_MANIFEST_PATH}\n"
+    "@@ -1,16 +1,18 @@\n"
+    "{\n"
+    '  "dependencies": {\n'
+    '    "express": "^4.18.0",\n'
+    '+    "@acme/jenkins": "*",\n'
+    '    "lodash": "^4.17.21"\n'
+    "  },\n"
+    '  "devDependencies": {\n'
+    '    "eslint": "^8.50.0",\n'
+    '    "prettier": "^3.0.0",\n'
+    '    "nodemon": "^3.0.0",\n'
+    '    "esbuild": "^0.19.0",\n'
+    '    "ts-node": "^10.9.0",\n'
+    '    "@types/node": "^20.0.0",\n'
+    '    "@types/jest": "^29.5.0",\n'
+    '+    "vitest": "^4.0.18",\n'
+    '    "typescript": "^5.2.0"\n'
+    "  }\n"
+    "}\n"
+)
+
+_MANIFEST_FILES = parse_unified_diff(_MANIFEST_DIFF)
+
+
+class TestManifestClaimCheck:
+    """apply_manifest_claim_check: a package.json claim must anchor on the
+    key and the dependency section it actually names."""
+
+    def test_anchor_mismatch_is_dropped(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="vitest added to runtime dependencies",
+            body="`vitest` is test-only but appears under `dependencies`.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert len(out) == 1
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("anchor mismatch:")
+        assert "vitest" in out[0].drop_reason
+        assert "@acme/jenkins" in out[0].drop_reason
+
+    def test_section_mismatch_is_dropped(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=15,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("section mismatch:")
+        assert "devDependencies" in out[0].drop_reason
+
+    def test_correct_claim_untouched(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=15,
+            title="vitest added to devDependencies",
+            body="A new test runner is pulled in.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_scoped_package_name_resolves(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="@acme/jenkins pinned to * in dependencies",
+            body="A wildcard version makes installs unreproducible.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_no_claimed_key_untouched(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="Manifest formatting is inconsistent",
+            body="Indentation mixes two and four spaces.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_claimed_key_absent_from_hunks_untouched(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="webpack should not be a runtime dependency",
+            body="`webpack` belongs in devDependencies.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_non_manifest_file_untouched(self):
+        f = _f(
+            file="src/index.ts", line=4,
+            title="vitest added to runtime dependencies",
+            body="`vitest` is test-only but appears under `dependencies`.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None
+
+    def test_anchor_on_brace_line_has_no_key_and_no_section(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=1,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is None, out[0].drop_reason
+
+    def test_anchor_on_section_header_falls_through_to_section_check(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=7,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("section mismatch:")
+
+    def test_already_dropped_finding_passes_through(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=4,
+            title="vitest added to runtime dependencies",
+            body="`vitest` is test-only but appears under `dependencies`.",
+            drop_reason="confidence 0.10 below floor 0.60",
+        )
+        out = apply_manifest_claim_check([f], _MANIFEST_FILES)
+        assert out[0].drop_reason == "confidence 0.10 below floor 0.60"
+
+    def test_order_preserved(self):
+        a = _f(file=_MANIFEST_PATH, line=4, title="a", body="b")
+        b = _f(file="src/index.ts", line=1, title="c", body="d")
+        out = apply_manifest_claim_check([a, b], _MANIFEST_FILES)
+        assert [x.title for x in out] == ["a", "c"]
+
+
+class TestManifestRealignRegression:
+    """The section words must not decide a package.json realign: a claim
+    correctly anchored on the vitest entry stays there instead of being
+    pulled onto the nearest added line below the dependencies header."""
+
+    def test_correct_vitest_anchor_survives_line_align(self):
+        f = _f(
+            file=_MANIFEST_PATH, line=15,
+            title="vitest added to runtime dependencies",
+            body=(
+                "vitest is a test-only tool but is added under `dependencies` "
+                "in web/package.json. This bloats production installs."
+            ),
+        )
+        out = apply_line_align(
+            [f], added_lines_by_file(_MANIFEST_FILES), files=_MANIFEST_FILES
+        )
+        assert out[0].line == 15
+
+COPY_DIFF = (
+    "diff --git src://pkg/servicenow/package.json dst://pkg/splunk/package.json\n"
+    "similarity index 53%\n"
+    "copy from pkg/servicenow/package.json\n"
+    "copy to pkg/splunk/package.json\n"
+    "@@ -1,1 +1,1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+DELETE_DIFF = (
+    "diff --git a/src/old.ts b/src/old.ts\n"
+    "deleted file mode 100644\n"
+    "--- a/src/old.ts\n"
+    "+++ /dev/null\n"
+    "@@ -1,1 +0,0 @@\n"
+    "-gone\n"
+)
+
+
+class TestRemovalClaimCheck:
+    """``apply_removal_claim_check`` drops removal claims the diff contradicts."""
+
+    def test_drops_claim_when_the_copy_source_is_still_present(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/splunk/package.json",
+            title="ServiceNow package.json removed by rename to splunk",
+            body="pkg/servicenow/package.json no longer exists after this PR.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert len(out) == 1
+        assert (out[0].drop_reason or "").startswith(
+            "claims removal of a path present in the post-image"
+        )
+        assert "pkg/servicenow/package.json" in out[0].drop_reason
+
+    def test_claim_named_only_in_prose_against_the_new_file_is_dropped(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/splunk/package.json",
+            title="Package moved",
+            body="The servicenow/package.json was removed in this change.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert (out[0].drop_reason or "").startswith(
+            "claims removal of a path present in the post-image"
+        )
+
+    def test_keeps_claim_about_a_genuinely_removed_path(self):
+        files = parse_unified_diff(DELETE_DIFF)
+        f = _f(
+            file="src/old.ts",
+            title="File removed",
+            body="src/old.ts was removed by this PR.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert out[0].drop_reason is None
+
+    def test_keeps_a_non_removal_finding(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/splunk/package.json",
+            title="Missing version field",
+            body="pkg/servicenow/package.json defines a version; the copy does not.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert out[0].drop_reason is None
+
+    def test_passes_through_already_dropped_findings(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/splunk/package.json",
+            title="ServiceNow package.json removed",
+            body="pkg/servicenow/package.json no longer exists.",
+            drop_reason="invalid severity: 'nope'",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert out[0].drop_reason == "invalid severity: 'nope'"
+
+    def test_preserves_input_order(self):
+        files = parse_unified_diff(COPY_DIFF)
+        findings = [
+            _f(title="First", body="nothing to see"),
+            _f(title="Second", body="pkg/servicenow/package.json was removed."),
+            _f(title="Third", body="still nothing"),
+        ]
+        out = apply_removal_claim_check(findings, files)
+        assert [x.title for x in out] == ["First", "Second", "Third"]
+        assert [x.drop_reason is None for x in out] == [True, False, True]
+
+HEDGED_CASES = [
+    ("if-still", "If figmaProxy.prepare still leases a client, the lease "
+                 "outlives the request."),
+    ("if-already", "If the migration already applied the default, this write "
+                   "is a no-op."),
+    ("modal-still", "The socket may still be held open by the outer pool."),
+    ("assuming", "Assuming the cache is keyed by tenant, this write clobbers "
+                 "another entry."),
+    ("unless-already", "Unless the backfill job already ran, this deploy "
+                       "fails."),
+    ("not-verified", "I cannot confirm whether the caller retries, so the "
+                     "request may fail permanently."),
+    ("not-in-diff", "The token refresh is not visible in the diff, so the "
+                    "credential goes stale."),
+    ("only-caller", "If this is the only call site the change is safe; "
+                    "otherwise every other caller breaks."),
+    ("membership", "If they are members of the root workspaces globs, "
+                   "`npm ci` will fail."),
+]
+
+LEGITIMATE_CASES = [
+    ("divisor", "size defaults to None and is used as a divisor on line 42."),
+    ("early-return", "Returns early if the list is empty, so the counter is "
+                     "never incremented."),
+    ("retry-spin", "The retry loop may spin forever because the deadline is "
+                   "never decremented."),
+    ("typeerror", "Throws TypeError if `opts` is undefined: line 12 "
+                  "dereferences opts.start."),
+    ("lodash-unless", "unless() from lodash is called with a string, which it "
+                      "does not accept."),
+    ("jwterror", "decode(token) can raise JWTError if malformed."),
+    ("null-deref", "x may be None when config is missing; data loss follows."),
+    ("concurrency", "Concurrent calls may corrupt state."),
+    ("assuming-noun", "The parser is assuming-safe only for ASCII; line 20 "
+                      "indexes bytes directly."),
+    ("may-return", "readFile may return a Buffer here and the caller "
+                   "concatenates it with a string."),
+    ("if-branch", "If retries is 0 the loop body never runs, so the initial "
+                  "request is skipped."),
+    ("unless-flag", "The endpoint is registered unless DEBUG is set, so "
+                    "production serves the unauthenticated route."),
+    ("already-plain", "The lock is already held here, so the second acquire "
+                      "deadlocks."),
+    ("may-plain", "The callback may be invoked twice, double-charging the "
+                  "customer."),
+    ("still-plain", "The temp file is still on disk after the handler "
+                    "returns."),
+    ("if-null", "If cfg is None line 30 raises AttributeError."),
+]
+
+
+class TestHedgeGate:
+    @pytest.mark.parametrize(
+        "label,body", HEDGED_CASES, ids=[c[0] for c in HEDGED_CASES]
+    )
+    def test_hedged_body_is_dropped(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert len(out) == 1
+        assert out[0].drop_reason is not None, label
+        assert out[0].drop_reason.startswith('hedged: "'), out[0].drop_reason
+        assert out[0].drop_reason.endswith('"')
+
+    @pytest.mark.parametrize(
+        "label,body", LEGITIMATE_CASES, ids=[c[0] for c in LEGITIMATE_CASES]
+    )
+    def test_legitimate_body_survives(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert out[0].drop_reason is None, f"{label}: {out[0].drop_reason}"
+
+    def test_hedge_in_title_is_dropped(self):
+        out = apply_hedge_gate(
+            [_f(title="Lease may still be held", body="Plain body.")]
+        )
+        assert out[0].drop_reason.startswith("hedged:")
+
+    def test_drop_reason_quotes_the_matched_span(self):
+        out = apply_hedge_gate(
+            [_f(body="The socket may still be held open by the pool.")]
+        )
+        assert out[0].drop_reason == 'hedged: "may still"'
+
+    def test_drop_reason_span_is_bounded(self):
+        body = "If " + "x" * 75 + " still leaks."
+        out = apply_hedge_gate([_f(body=body)])
+        assert out[0].drop_reason is not None
+        assert len(out[0].drop_reason) == len('hedged: ""') + 80
+
+    def test_span_beyond_the_window_is_not_a_hedge(self):
+        body = "If " + "x" * 200 + " still leaks."
+        assert apply_hedge_gate([_f(body=body)])[0].drop_reason is None
+
+    def test_already_dropped_passes_through(self):
+        pre = _f(body="If the router is still mounted, both fire.",
+                 drop_reason="invalid severity: 'nit'")
+        out = apply_hedge_gate([pre])
+        assert out[0].drop_reason == "invalid severity: 'nit'"
+
+    def test_order_preserved_and_input_not_mutated(self):
+        findings = [
+            _f(title="a", body="Plain bug."),
+            _f(title="b", body="If the flag is still set, the loop spins."),
+            _f(title="c", body="Another plain bug."),
+        ]
+        out = apply_hedge_gate(findings)
+        assert [f.title for f in out] == ["a", "b", "c"]
+        assert [f.drop_reason is None for f in out] == [True, False, True]
+        assert all(f.drop_reason is None for f in findings)
+
+    def test_empty_input(self):
+        assert apply_hedge_gate([]) == []
+
+    def test_hedged_finding_does_not_consume_error_cap(self):
+        hedged = apply_hedge_gate(
+            [_f(severity="error", confidence=0.9,
+                body="If the cache is still warm, this errors.")]
+        )
+        out = apply_quality_gate(hedged, max_errors=1)
+        assert out[0].drop_reason.startswith("hedged:")
+
+class TestApplyContainmentNote:
+    """Issue #07: a throw-class finding with no named boundary gets flagged."""
+
+    def test_throws_with_no_boundary_gets_suffixed(self):
+        f = _f(
+            title="Handler aborts on bad input",
+            body="The handler throws when the payload is malformed.",
+        )
+        result = apply_containment_note([f])
+        assert result[0].body == f.body + CONTAINMENT_NOTE_SUFFIX
+
+    def test_panics_with_no_boundary_gets_suffixed(self):
+        f = _f(body="Parser panics on empty input, killing the pipeline.")
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    def test_crashes_with_no_boundary_gets_suffixed(self):
+        f = _f(body="The scheduler crashes when two jobs collide.")
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    def test_unhandled_rejection_with_no_boundary_gets_suffixed(self):
+        f = _f(body="An unhandled rejection escapes the async handler.")
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    @pytest.mark.parametrize(
+        "boundary_phrase",
+        [
+            "but the exception is caught by the outer handler.",
+            "it is uncaught and propagates to serverFactory.",
+            "the catch block above swallows it silently.",
+            "wrapped in a try/catch at the call site.",
+            "wrapped in a try-catch at the call site.",
+            "the error is handled by the retry wrapper.",
+            "the rejection bubbles up to the caller.",
+            "it rejects the promise returned to the caller.",
+        ],
+    )
+    def test_throw_with_boundary_named_is_not_suffixed(self, boundary_phrase):
+        f = _f(body=f"The handler throws when malformed, {boundary_phrase}")
+        result = apply_containment_note([f])
+        assert result[0].body == f.body
+
+    def test_non_throw_finding_is_untouched(self):
+        f = _f(
+            title="computeTotal returns the wrong total",
+            body="The accumulator starts at undefined instead of 0.",
+        )
+        result = apply_containment_note([f])
+        assert result[0].body == f.body
+
+    def test_order_preserving(self):
+        findings = [
+            _f(title="a", body="throws on bad input, no boundary named."),
+            _f(title="b", body="totally unrelated body text."),
+            _f(title="c", body="panics under load, no boundary named."),
+        ]
+        result = apply_containment_note(findings)
+        assert [r.title for r in result] == ["a", "b", "c"]
+
+    def test_idempotent_does_not_double_suffix(self):
+        f = _f(body="The handler throws when the payload is malformed.")
+        once = apply_containment_note([f])
+        twice = apply_containment_note(once)
+        assert twice[0].body == once[0].body
+        assert twice[0].body.count(CONTAINMENT_NOTE_SUFFIX) == 1
+
+    def test_dropped_finding_is_also_decorated(self):
+        f = _f(
+            body="The handler throws when the payload is malformed.",
+            drop_reason="confidence 0.10 below floor 0.60",
+        )
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+        assert result[0].drop_reason == "confidence 0.10 below floor 0.60"
+
+    def test_original_finding_instance_is_not_mutated(self):
+        f = _f(body="The handler throws when the payload is malformed.")
+        original_body = f.body
+        apply_containment_note([f])
+        assert f.body == original_body
+
+    def test_returns_new_instance_when_suffixed(self):
+        f = _f(body="The handler throws when the payload is malformed.")
+        result = apply_containment_note([f])
+        assert result[0] is not f
+
+
+# --- RC precision corpora (release 0.12.0 pipeline review, risks R2/R3) ------
+#
+# Copied verbatim from the reviewer's probe corpus. Each gate must drop every
+# case in its "must drop" list and keep every case in its "must keep" list;
+# before the fix the removal check false-dropped 4 of 5 innocent bodies and
+# the hedge gate false-dropped 2 of 5 assertive bodies.
+
+RC_FILES = [
+    FileDiff(path="src/app/auth.py", old_path=None, new_path="src/app/auth.py"),
+    FileDiff(path="src/app/db.py", old_path=None, new_path="src/app/db.py"),
+    FileDiff(
+        path="web/package.json", old_path=None, new_path="web/package.json"
+    ),
+    FileDiff(
+        path="src/app/legacy.py",
+        old_path="src/app/legacy.py",
+        new_path=None,
+        status="removed",
+    ),
+]
+
+RC_REMOVAL_CLAIMS = [
+    ("broken-import",
+     "Broken import",
+     "This PR removed src/app/db.py, but auth.py still imports it."),
+    ("dangling-ref",
+     "Dangling ref",
+     "web/package.json was removed yet the build script references it."),
+    ("deleted-module",
+     "Deleted module",
+     "The deletion of src/app/db.py leaves callers unresolved."),
+    ("gone",
+     "Gone",
+     "src/app/auth.py no longer exists after this change."),
+    ("dropped",
+     "Dropped",
+     "app/db.py has been removed; the migration will fail."),
+]
+
+RC_REMOVAL_INNOCENT = [
+    ("missing-guard",
+     "Missing guard",
+     "The removed null check in src/app/auth.py let None reach the parser."),
+    ("stale-cache",
+     "Stale cache",
+     "Deleted rows are re-fetched by src/app/db.py because the cache is not "
+     "invalidated."),
+    ("guard-removal",
+     "Guard removal",
+     "This change removes the tool metadata guard in src/app/auth.py: "
+     "MAX_TOOL_NAME_LENGTH no longer bounds names."),
+    ("dep-bump",
+     "Dep bump",
+     "The `lodash` pin was removed from web/package.json without a "
+     "replacement range."),
+    ("cleanup-regression",
+     "Cleanup regression",
+     "src/app/db.py deleted the retry wrapper, so transient failures now "
+     "surface to callers."),
+]
+
+RC_HEDGED = [
+    ("leak",
+     "If figmaProxy.prepare still leases a client, the pool is never "
+     "drained."),
+    ("dup", "If the migration already ran, this insert will conflict."),
+    ("maybe", "This may still deadlock under concurrent writes."),
+    ("assume", "Assuming the caller holds the lock, this is safe."),
+    ("unverified", "I cannot verify whether the flag is set elsewhere."),
+]
+
+RC_ASSERTIVE = [
+    ("lock-leak",
+     "If the input is empty the function returns None, but the lock remains "
+     "held."),
+    ("retry",
+     "If the request fails, retry() is called; the counter still increments "
+     "past the cap."),
+    ("off-by-one",
+     "The loop still runs when n == 0 because the guard uses <= instead "
+     "of <."),
+    ("ordering",
+     "If save() raises, the transaction remains open and the connection is "
+     "leaked."),
+    ("dead-code",
+     "The legacy branch is already unreachable; if it were reached it would "
+     "divide by zero."),
+]
+
+
+class TestRemovalClaimCorpus:
+    """The verb must GOVERN the path before a removal claim is judged."""
+
+    @pytest.mark.parametrize(
+        "label,title,body",
+        RC_REMOVAL_CLAIMS,
+        ids=[c[0] for c in RC_REMOVAL_CLAIMS],
+    )
+    def test_genuine_removal_claim_is_dropped(self, label, title, body):
+        out = apply_removal_claim_check(
+            [_f(file="src/app/auth.py", title=title, body=body)], RC_FILES
+        )
+        assert (out[0].drop_reason or "").startswith(
+            "claims removal of a path present in the post-image"
+        ), f"{label}: {out[0].drop_reason!r}"
+
+    @pytest.mark.parametrize(
+        "label,title,body",
+        RC_REMOVAL_INNOCENT,
+        ids=[c[0] for c in RC_REMOVAL_INNOCENT],
+    )
+    def test_innocent_removal_prose_survives(self, label, title, body):
+        out = apply_removal_claim_check(
+            [_f(file="src/app/auth.py", title=title, body=body)], RC_FILES
+        )
+        assert out[0].drop_reason is None, f"{label}: {out[0].drop_reason!r}"
+
+
+class TestHedgeGateCorpus:
+    """The hedge word must sit inside the ``if`` clause it qualifies."""
+
+    @pytest.mark.parametrize(
+        "label,body", RC_HEDGED, ids=[c[0] for c in RC_HEDGED]
+    )
+    def test_hedged_body_is_dropped(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert (out[0].drop_reason or "").startswith(
+            'hedged: "'
+        ), f"{label}: {out[0].drop_reason!r}"
+
+    @pytest.mark.parametrize(
+        "label,body", RC_ASSERTIVE, ids=[c[0] for c in RC_ASSERTIVE]
+    )
+    def test_assertive_body_survives(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert out[0].drop_reason is None, f"{label}: {out[0].drop_reason!r}"

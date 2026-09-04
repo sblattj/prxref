@@ -1,11 +1,22 @@
 """Deterministic quality passes over worker findings.
 
-Five passes run before posting:
+Eleven passes run before posting, in the order ``orchestrate_review``
+applies them. A twelfth deterministic check, the release-shaped-PR
+heuristic, is not a pass at all: ``heuristics.release_shape_findings``
+ADDS a finding before pass 1 and it then flows through every pass below
+exactly like a model finding. Every ``drop_reason`` prefix these passes
+emit is tabulated for operators in ``docs/quality.md``.
+
 1. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-2. ``apply_line_align``: a line explicitly cited in the finding's own
+2. ``apply_manifest_claim_check``: for findings on a ``package.json``,
+   drop a claim whose named dependency is not the key on the anchored
+   line (``anchor mismatch:``) or sits under a different dependency
+   section than the claim asserts (``section mismatch:``). It runs
+   BEFORE ``apply_line_align`` so it reads the model's raw anchor.
+3. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
    line lands on an added line — or a context line within tolerance of
@@ -21,17 +32,48 @@ Five passes run before posting:
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-3. ``apply_thread_dedup``: drop findings that duplicate an already-open
-   or existing thread on the PR (path + line-window + shared distinctive tokens).
-4. ``apply_severity_consistency``: findings sharing one normalized title —
+4. ``apply_thread_dedup``: drop findings that duplicate an already-open
+   or existing thread on the PR (path + line-window + shared distinctive
+   tokens), with ``drop_reason`` ``duplicate of existing thread``.
+5. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+   subject an existing thread already argued out — same path plus shared
+   distinctive tokens, with NO line test, because line alignment has already
+   demoted a file-level finding to line 0 by this point
+   (``settled in thread: <author>``).
+6. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-5. ``apply_quality_gate``: drop findings below the confidence floor, cap
-   errors per review, and enforce the {error, warning, outofscope} severity
-   vocabulary.
+7. ``apply_removal_claim_check``: drop findings whose removal verb governs
+   a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
+   path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
+   header produces when a worker reads a copy as a move (issue #03).
+   Only a claim that NAMES a diff path is judged, so a finding about a
+   removed guard or constant is untouched.
+8. ``apply_hedge_gate``: drop findings whose title or body conditions the
+   defect on a precondition the worker never established from the diff
+   ("If X still leases a client", "unless the backfill already ran"),
+   with ``drop_reason`` ``hedged: "<matched span>"``.
+9. ``apply_quality_gate``: drop findings below the confidence floor
+   (``confidence 0.40 below floor 0.60``), cap errors per review
+   (``error cap exceeded (max N)``), and enforce the
+   {error, warning, outofscope} severity vocabulary
+   (``invalid severity: '<value>'``). It RETURNS its findings sorted by
+   ``finding_sort_key``, so the caller re-derives the chunk/sweep
+   boundary from finding identity rather than carrying an index across it.
+10. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+    finding which SURVIVED the gate, on file + normalized title
+    (``duplicate of chunk finding``). It runs after the gate so a
+    sub-floor chunk finding cannot suppress its higher-confidence sweep
+    duplicate and then die at the gate itself.
+11. ``apply_containment_note``: a finding that asserts a throw, panic,
+    crash, or unhandled rejection and never names where it is caught or
+    where it propagates to has its body suffixed with
+    ``" [containment boundary not stated]"`` — a purely textual
+    decoration, run on active and dropped findings alike, that never
+    changes ``drop_reason`` or severity.
 
 Every dropped finding retains its identity with ``drop_reason`` populated,
 so review runstores and logs can explain every filter decision. Use
@@ -45,6 +87,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import PurePosixPath
 
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
@@ -60,6 +103,69 @@ DEFAULT_MAX_ERRORS: int = 10
 # evidence. 5 also sits below the smallest drift the issue #19 audit measured
 # on real reviews (10 lines), so no observed-failure distance survives.
 DEFAULT_LINE_TOLERANCE: int = 5
+
+# A period that is not followed by whitespace is member access, a filename, or
+# a version — not a sentence break — so the hedge rules may span it.
+_NO_SENTENCE_BREAK = r"(?:[^.;]|\.(?!\s))"
+
+# A comma ends the ``if`` clause, so the hedge word has to appear before it to
+# be hedging the CONDITION rather than asserting a defect in the independent
+# clause that follows ("If save() raises, the transaction remains open").
+_NO_CLAUSE_BREAK = r"(?:[^.;,]|\.(?!\s))"
+
+HEDGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "if-still",
+        re.compile(
+            rf"\bif\b{_NO_CLAUSE_BREAK}{{0,80}}?\b(?:still|already|remains?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "modal-still",
+        re.compile(r"\b(?:may|might|could|likely|probably)\s+still\b", re.IGNORECASE),
+    ),
+    (
+        "assuming",
+        re.compile(
+            r"(?:^|[.;]\s+|,\s*)(?:assuming|presumably|apparently|seemingly)\b(?!-)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "unless-already",
+        re.compile(
+            rf"\bunless\b{_NO_SENTENCE_BREAK}{{0,60}}?\balready\b", re.IGNORECASE
+        ),
+    ),
+    (
+        "not-verified",
+        re.compile(
+            r"\b(?:I (?:can(?:no|')?t|cannot) (?:verify|tell|confirm|determine)"
+            r"|unable to (?:verify|tell|confirm|determine)"
+            r"|not visible in the diff"
+            r"|not shown in the diff"
+            r"|cannot be confirmed from the diff)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "only-caller",
+        re.compile(
+            r"\bif this is the only (?:caller|call site|usage|consumer)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "membership",
+        re.compile(
+            r"\bif (?:they|it|this|those|these) (?:are|is) (?:members?|part) of\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_HEDGE_SPAN_MAX: int = 80
 
 
 def active(findings: Sequence[Finding]) -> list[Finding]:
@@ -90,6 +196,193 @@ def apply_location_validation(
             result.append(f)
             continue
         result.append(replace(f, drop_reason=f"malformed location: {f.file!r}"))
+    return result
+
+
+MANIFEST_BASENAME: str = "package.json"
+
+DEPENDENCY_SECTIONS: tuple[str, ...] = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+
+# Keys that name a manifest SECTION or the package itself rather than a
+# dependency, so they can never be the "claimed package" of a finding.
+_MANIFEST_NON_PACKAGE_KEYS: frozenset[str] = frozenset(
+    [s.lower() for s in DEPENDENCY_SECTIONS] + ["scripts", "engines", "name", "version"]
+)
+
+# Evidence tokens a manifest section header contributes (including the
+# camelCase split of the compound forms), which must not decide a
+# package.json realign — see ``_realign_member``.
+_MANIFEST_SECTION_TOKENS: frozenset[str] = frozenset(
+    {"dependencies", "devdependencies", "peerdependencies",
+     "optionaldependencies", "peer", "optional"}
+)
+
+_NPM_NAME_RE = re.compile(
+    r"(?:@[a-z0-9\-~][a-z0-9._~\-]*/)?[a-z0-9\-~][a-z0-9._~\-]*"
+)
+
+_JSON_KEY_RE = re.compile(r'"([^"\n]+)"\s*:')
+
+_SECTION_OPEN_RE = re.compile(
+    r'"(dependencies|devDependencies|peerDependencies|optionalDependencies)"'
+    r"\s*:\s*\{"
+)
+
+_CLAIMED_SECTION_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("devdependenc", "devDependencies"),
+    ("dev dependenc", "devDependencies"),
+    ("peerdependenc", "peerDependencies"),
+    ("peer dependenc", "peerDependencies"),
+    ("optionaldependenc", "optionalDependencies"),
+    ("optional dependenc", "optionalDependencies"),
+    ("runtime dependenc", "dependencies"),
+    ("production dependenc", "dependencies"),
+    ("under `dependencies`", "dependencies"),
+    ("in dependencies", "dependencies"),
+    ("to dependencies", "dependencies"),
+)
+
+
+def _manifest_keys(hunks: Sequence[Hunk]) -> set[str]:
+    """Every JSON key present on a post-image line of the file's hunks."""
+    keys: set[str] = set()
+    for h in hunks:
+        for ln in h.lines:
+            if ln.kind == "-":
+                continue
+            keys.update(_JSON_KEY_RE.findall(ln.text))
+    return keys
+
+
+def _line_json_key(ln: DiffLine) -> str | None:
+    """The dependency key declared on a manifest line, if any.
+
+    A section header or a bare brace declares no dependency, so both
+    answer None and leave the anchor-key check with nothing to compare.
+    """
+    m = _JSON_KEY_RE.search(ln.text)
+    if m is None or m.group(1).lower() in _MANIFEST_NON_PACKAGE_KEYS:
+        return None
+    return m.group(1)
+
+
+def _claimed_package(text: str, keys: set[str]) -> str | None:
+    """The first npm package name in ``text`` that is a key of the file."""
+    for m in _NPM_NAME_RE.finditer(_CITATION_RE.sub(" ", text.lower())):
+        name = m.group(0)
+        if len(name) < 2 or name in _MANIFEST_NON_PACKAGE_KEYS:
+            continue
+        for key in keys:
+            if key.lower() == name:
+                return key
+    return None
+
+
+def _claimed_section(text: str) -> str | None:
+    """The dependency section a claim asserts, by earliest phrasing."""
+    lowered = text.lower()
+    best: tuple[int, str] | None = None
+    for needle, section in _CLAIMED_SECTION_PATTERNS:
+        idx = lowered.find(needle)
+        if idx >= 0 and (best is None or idx < best[0]):
+            best = (idx, section)
+    return best[1] if best else None
+
+
+def _enclosing_section(hunks: Sequence[Hunk], line: int) -> str | None:
+    """The dependency section header above ``line`` in the post-image."""
+    for h in hunks:
+        body = [ln for ln in h.lines if ln.kind != "-"]
+        for i, ln in enumerate(body):
+            if ln.new_line != line:
+                continue
+            for prev in reversed(body[: i + 1]):
+                m = _SECTION_OPEN_RE.search(prev.text)
+                if m is not None:
+                    return m.group(1)
+            return None
+    return None
+
+
+def apply_manifest_claim_check(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff],
+) -> list[Finding]:
+    """Drop package.json findings that misname their key or their section.
+
+    A worker reading a manifest diff can name a real dependency and then
+    anchor the comment on an unrelated neighbouring entry, or read an
+    entry as a runtime dependency when the enclosing block is
+    ``devDependencies``. Both are checkable against the diff itself: the
+    claim names a package, the anchored line declares a key, and the
+    nearest section header above that line names the block it lives in.
+
+    A finding is dropped with ``drop_reason="anchor mismatch: claims
+    <claimed> but line <n> is <anchor>"`` when the anchored line declares
+    a different dependency, and with ``drop_reason="section mismatch:
+    claims <claimed> but <key> is under <actual>"`` when the anchor is
+    right but the asserted section is not. Findings on other files, on a
+    package.json whose claim names no key of the diff, and findings that
+    already carry a ``drop_reason`` pass through untouched. Order is
+    preserved.
+
+    Run this BEFORE :func:`apply_line_align`: it must read the model's
+    raw anchor, because realignment can move a correctly anchored claim
+    onto the very line this pass exists to catch.
+    """
+    hunks_by_file = {
+        f.path: f.hunks
+        for f in files
+        if PurePosixPath(f.path).name == MANIFEST_BASENAME
+    }
+    result: list[Finding] = []
+    for f in findings:
+        hunks = hunks_by_file.get(f.file)
+        if f.drop_reason is not None or not hunks:
+            result.append(f)
+            continue
+        claim = f"{f.title}\n{f.body}"
+        keys = _manifest_keys(hunks)
+        claimed = _claimed_package(f.title, keys) or _claimed_package(f.body, keys)
+        if claimed is None:
+            result.append(f)
+            continue
+        anchor_ln = next(
+            (ln for h in hunks for ln in h.lines
+             if ln.kind != "-" and ln.new_line == f.line),
+            None,
+        )
+        anchor_key = _line_json_key(anchor_ln) if anchor_ln is not None else None
+        if anchor_key is not None and anchor_key != claimed:
+            result.append(replace(
+                f,
+                drop_reason=(
+                    f"anchor mismatch: claims {claimed} but "
+                    f"line {f.line} is {anchor_key}"
+                ),
+            ))
+            continue
+        claimed_section = _claimed_section(claim)
+        actual_section = _enclosing_section(hunks, f.line)
+        if (
+            claimed_section is not None
+            and actual_section is not None
+            and claimed_section != actual_section
+        ):
+            result.append(replace(
+                f,
+                drop_reason=(
+                    f"section mismatch: claims {claimed_section} but "
+                    f"{claimed} is under {actual_section}"
+                ),
+            ))
+            continue
+        result.append(f)
     return result
 
 
@@ -190,8 +483,15 @@ def _realign_member(
     cannot collide with path words) and compound identifiers split into
     their snake/camel parts (so ``wp_ajax_nopriv_avatar_upload`` can
     answer a claim about "nopriv avatar upload").
+
+    On a ``package.json`` the manifest section words are dropped from the
+    evidence, because every dependency claim mentions one and the long
+    ``dependencies`` token would otherwise outrank the package name and
+    resolve the anchor onto a section header instead of the entry.
     """
     ftoks = _evidence_tokens(f"{finding.title} {finding.body}")
+    if PurePosixPath(finding.file).name == MANIFEST_BASENAME:
+        ftoks -= _MANIFEST_SECTION_TOKENS
     if not ftoks:
         return finding.line
     anchor = _hunk_containing(hunks, finding.line)
@@ -553,6 +853,58 @@ def apply_thread_dedup(
     return result
 
 
+SETTLED_MIN_SHARED_TOKENS = 4
+
+
+def _normalised_path(path: str) -> str:
+    return path[2:] if path.startswith("./") else path
+
+
+def apply_settled_thread_suppression(
+    findings: Sequence[Finding],
+    threads: Sequence[Thread],
+    min_shared_tokens: int = SETTLED_MIN_SHARED_TOKENS,
+) -> list[Finding]:
+    """Drop findings that re-litigate a subject already argued out in a thread.
+
+    Line-INDEPENDENT, which is the whole point:
+    :func:`apply_thread_dedup` needs the thread and the finding to sit near
+    each other, and :func:`apply_line_align` has already demoted a
+    non-anchorable finding to line 0 by the time either runs. A settled
+    discussion is about a SUBJECT, not a line, so the test here is same path
+    plus at least ``min_shared_tokens`` distinct shared content tokens between
+    the finding's title+body and the thread's snippet.
+
+    ``resolved`` does not gate it: a resolved thread is still a decision the
+    reviewers made with more context than the review has. Order-preserving,
+    pure, and already-dropped findings pass through untouched so the reason
+    an earlier pass gave survives.
+    """
+    if not threads:
+        return list(findings)
+
+    result: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            result.append(f)
+            continue
+        finding_tokens = _tokens(f"{f.title} {f.body}")
+        author = ""
+        if finding_tokens:
+            for t in threads:
+                if _normalised_path(t.path) != _normalised_path(f.file):
+                    continue
+                body_tokens = _tokens(t.body_snippet or "")
+                if len(finding_tokens & body_tokens) >= min_shared_tokens:
+                    author = t.author or "unknown"
+                    break
+        if author:
+            result.append(replace(f, drop_reason=f"settled in thread: {author}"))
+        else:
+            result.append(f)
+    return result
+
+
 _SEVERITY_RANK: dict[str, int] = {"error": 0, "warning": 1, "outofscope": 2}
 
 _TITLE_PUNCT_RE = re.compile(r"[`*\"'\u2018\u2019\u201c\u201d]")
@@ -569,6 +921,35 @@ def normalize_title(title: str) -> str:
     lowered = _TITLE_PUNCT_RE.sub("", title.lower())
     trimmed = lowered.strip(" .:;,!?-")
     return " ".join(trimmed.split())
+
+
+def finding_sort_key(finding: Finding) -> tuple[str, int, str]:
+    """Content-derived ordering key for a finding: ``(file, line, title)``.
+
+    Every pass that emits or presents a list of findings sorts by this key so
+    the output of a review depends on WHAT was found, never on the order the
+    workers happened to return it in.
+    """
+    return (
+        finding.file or "",
+        finding.line if finding.line is not None else -1,
+        finding.title or "",
+    )
+
+
+def finding_rank_key(finding: Finding) -> tuple[float, str, int, str]:
+    """Tie-break key for caps: ``(-confidence, file, line, normalized title)``.
+
+    Confidence decides first; everything after it exists only so that two
+    equally confident findings are ranked by content rather than by arrival.
+    """
+    file, line, _ = finding_sort_key(finding)
+    return (
+        -float(finding.confidence or 0.0),
+        file,
+        line,
+        normalize_title(finding.title or ""),
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -614,6 +995,51 @@ def apply_sweep_dedup(
             result.append(f)
     return result
 
+
+_THROW_CLASS_RE = re.compile(
+    r"\bthrows?\b|\bthrowing\b|\bpanics?\b|\bcrash(es|ed)?\b"
+    r"|unhandled rejection|uncaught exception|\braises?\b",
+    re.IGNORECASE,
+)
+
+_CONTAINMENT_BOUNDARY_RE = re.compile(
+    r"\bcaught\b|\buncaught\b|propagat|catch block|catch\s*\(|try/catch"
+    r"|try-catch|\bswallow|handled by|bubbles? up"
+    r"|rejects the promise returned to",
+    re.IGNORECASE,
+)
+
+CONTAINMENT_NOTE_SUFFIX: str = " [containment boundary not stated]"
+
+
+def apply_containment_note(findings: Sequence[Finding]) -> list[Finding]:
+    """Suffix an un-boundaried throw-class finding's body with a note.
+
+    A finding whose title or body asserts a throw, panic, crash, or
+    unhandled rejection (:data:`_THROW_CLASS_RE`) but whose body never
+    names where that exception is caught or where it propagates to
+    (:data:`_CONTAINMENT_BOUNDARY_RE`) has its body suffixed with
+    :data:`CONTAINMENT_NOTE_SUFFIX`, once — a body already carrying the
+    suffix is left unchanged, so the pass is idempotent under repeated
+    application. Purely textual: order-preserving, runs on active and
+    dropped findings alike (it only decorates the text every downstream
+    consumer, including the dropped-findings audit, already carries),
+    and never touches ``drop_reason`` or ``severity``. Findings that do
+    not match, or already name a boundary, pass through as the same
+    instance.
+    """
+    result: list[Finding] = []
+    for f in findings:
+        claim = f"{f.title} {f.body}"
+        if (
+            f.body.endswith(CONTAINMENT_NOTE_SUFFIX)
+            or not _THROW_CLASS_RE.search(claim)
+            or _CONTAINMENT_BOUNDARY_RE.search(f.body)
+        ):
+            result.append(f)
+        else:
+            result.append(replace(f, body=f.body + CONTAINMENT_NOTE_SUFFIX))
+    return result
 
 
 def _problem_classes(title: str) -> set[str]:
@@ -838,6 +1264,172 @@ def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
     return result
 
 
+_REMOVAL_CLAIM_RE = re.compile(
+    r"\b(?:removed|deleted|dropped the file|no longer exists|was removed"
+    r"|is removed|has been removed|deletion of)\b",
+    re.IGNORECASE,
+)
+
+
+def _post_image_paths(files: Sequence[FileDiff]) -> set[str]:
+    """Every path the diff leaves present after the PR lands.
+
+    A file section with any status other than ``removed`` leaves its path
+    in place, and a ``copied`` section leaves its SOURCE in place too — a
+    copy reads the original without touching it, so only a separate
+    ``removed`` section can take that source away.
+    """
+    present: set[str] = set()
+    for f in files:
+        if f.status != "removed":
+            present.add(f.path)
+        if f.status == "copied" and f.old_path:
+            present.add(f.old_path)
+    return present
+
+
+def _diff_path_candidates(files: Sequence[FileDiff]) -> list[str]:
+    """Every path a finding could name: each section's path plus copy/rename sources."""
+    seen: list[str] = []
+    for f in files:
+        for path in (f.path, f.old_path if f.status in {"copied", "renamed"} else None):
+            if path and path not in seen:
+                seen.append(path)
+    return seen
+
+
+def _tail(path: str, parts: int) -> str:
+    return "/".join(path.replace("\\", "/").split("/")[-parts:])
+
+
+def _claimed_paths(finding: Finding, candidates: Sequence[str]) -> list[str]:
+    """Diff paths the finding's title+body name, in order of first mention.
+
+    A path counts as named by its full form or by its
+    basename-with-parent-directory (``servicenow/package.json``), which is
+    how a worker usually refers to a file inside a monorepo package.
+    """
+    text = f"{finding.title} {finding.body}".replace("\\", "/").lower()
+    hits: list[tuple[int, str]] = []
+    for path in candidates:
+        norm = path.replace("\\", "/").lower()
+        at = text.find(norm)
+        if at < 0 and "/" in norm:
+            at = text.find(_tail(norm, 2))
+        if at >= 0:
+            hits.append((at, path))
+    hits.sort()
+    return [path for _, path in hits]
+
+
+# Words that end a removal verb's object: a preposition or a conjunction after
+# the verb means the following path is the place something was removed FROM, or
+# a new clause, not the thing removed ("the removed null check in src/app.py").
+_OBJECT_STOP = (
+    r"in|from|by|to|at|on|of|for|with|into|onto|via|and|or|but|so"
+    r"|because|that|which|when|while|after|before|since"
+)
+# Up to three determiner/qualifier tokens may sit between the verb and its
+# object ("removed the ServiceNow package.json"), none of them a stop word.
+_OBJECT_FILLER = rf"(?:(?!(?:{_OBJECT_STOP})\b)[\w.'-]+\s+){{0,3}}"
+_REMOVAL_VERB_PRE = r"(?:removed|deleted|deletion of|removal of)"
+_REMOVAL_VERB_POST = (
+    r"(?:(?:was|were|has been|have been|is|are|gets|got)\s+(?:removed|deleted)"
+    r"|no longer exists?)"
+)
+
+
+def _path_forms(path: str) -> list[str]:
+    """How a body may spell one diff path: full, parent/basename, basename."""
+    norm = path.replace("\\", "/").lower()
+    forms = [norm]
+    if "/" in norm:
+        forms.append(_tail(norm, 2))
+        forms.append(_tail(norm, 1))
+    return forms
+
+
+def _governed_claimed_paths(
+    finding: Finding, candidates: Sequence[str]
+) -> list[str]:
+    """Diff paths a removal verb GOVERNS in the finding's own text.
+
+    A bare ``removed`` somewhere in a body and a path somewhere else in it
+    are not a removal claim: "the removed null check in ``src/app.py``"
+    says the check went, not the file. A path counts only when the verb
+    takes it as its object (``removed the file src/app.py``) or when the
+    path is the subject of the removal (``src/app.py was removed``, ``…no
+    longer exists``), with no sentence break between the two.
+    """
+    text = f"{finding.title} {finding.body}".replace("\\", "/").lower()
+    hits: list[tuple[int, str]] = []
+    for path in candidates:
+        alternation = "|".join(re.escape(form) for form in _path_forms(path))
+        anchored = rf"(?<![\w/-])`?(?:{alternation})`?(?![\w/-])"
+        pattern = re.compile(
+            rf"{_REMOVAL_VERB_PRE}\s+(?:the\s+)?(?:file\s+)?"
+            rf"{_OBJECT_FILLER}{anchored}"
+            rf"|{anchored}\s+{_REMOVAL_VERB_POST}"
+        )
+        m = pattern.search(text)
+        if m is not None:
+            hits.append((m.start(), path))
+    hits.sort()
+    return [path for _, path in hits]
+
+
+def apply_removal_claim_check(
+    findings: Sequence[Finding], files: Sequence[FileDiff]
+) -> list[Finding]:
+    """Drop removal claims the diff's post-image contradicts.
+
+    A finding whose title or body asserts a file was removed, deleted, or
+    no longer exists is dropped when every path it names is still present
+    after the PR lands. The removal verb has to GOVERN one of those paths:
+    "the removed null check in ``src/app.py``" removes a check, not the
+    file, so a bare removal word plus an unrelated path mention is left
+    active. A copy's source is present unless a separate
+    section removes it, so a ``copy from``/``copy to`` header read as a
+    move produces exactly this false positive. When any named path really
+    is absent from the post-image, the claim is left active — the pass
+    never blanket-drops removal language.
+
+    Input order is preserved and findings already carrying a
+    ``drop_reason`` pass through untouched.
+    """
+    present = _post_image_paths(files)
+    candidates = _diff_path_candidates(files)
+    out: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            out.append(f)
+            continue
+        if not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}"):
+            out.append(f)
+            continue
+        # Only a claim whose removal verb GOVERNS a path is judged. Falling
+        # back to the finding's anchor file, or to any path merely mentioned
+        # somewhere in the body, would drop every finding that says something
+        # was "removed" — a guard, a constant, a validator — on a file the PR
+        # still leaves in place, which is precisely the guard-removal class
+        # the systemic sweep exists to report.
+        governed = _governed_claimed_paths(f, candidates)
+        named = _claimed_paths(f, candidates)
+        if governed and all(path in present for path in named):
+            out.append(
+                replace(
+                    f,
+                    drop_reason=(
+                        "claims removal of a path present in the "
+                        f"post-image: {governed[0]}"
+                    ),
+                )
+            )
+            continue
+        out.append(f)
+    return out
+
+
 def _resolve_confidence_floor(explicit: float | None) -> float:
     if explicit is not None:
         return explicit
@@ -863,6 +1455,42 @@ def _resolve_max_errors(explicit: int | None) -> int:
     return DEFAULT_MAX_ERRORS
 
 
+def _hedge_span(text: str) -> str | None:
+    for _name, pattern in HEDGE_RULES:
+        m = pattern.search(text)
+        if m is None:
+            continue
+        span = m.group(0).strip(" \t\n,;.")
+        return span[:_HEDGE_SPAN_MAX]
+    return None
+
+
+def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
+    """Drop findings whose own text conditions the defect on an unverified fact.
+
+    A hedged finding ("If figmaProxy.prepare still leases a client", "If they
+    are members of the root workspaces globs") states a precondition the
+    worker had the whole diff to check and did not. Each rule in
+    ``HEDGE_RULES`` is anchored on an epistemic marker rather than a bare
+    ``if``/``may``/``unless``, which appear throughout legitimate findings.
+
+    Pure and order-preserving: already-dropped findings pass through
+    untouched, and a match sets ``drop_reason`` to ``hedged: "<span>"``
+    naming the matched text so the drop is auditable in the run record.
+    """
+    out: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            out.append(f)
+            continue
+        span = _hedge_span(f.title or "") or _hedge_span(f.body or "")
+        if span is None:
+            out.append(f)
+            continue
+        out.append(replace(f, drop_reason=f'hedged: "{span}"'))
+    return out
+
+
 def apply_quality_gate(
     findings: Sequence[Finding],
     *,
@@ -875,8 +1503,11 @@ def apply_quality_gate(
     1. Severity vocabulary: non-empty lowercase must be in {error, warning, note};
        case-mismatches are normalized; invalid severities are dropped.
     2. Confidence floor: drop findings below the threshold (default 0.6).
-    3. Error cap: among surviving errors, keep the top N by confidence and drop
-       the rest.
+    3. Error cap: among surviving errors, keep the top N ranked by
+       :func:`finding_rank_key` and drop the rest, so ties are broken by
+       content rather than by arrival order.
+
+    The returned list is sorted by :func:`finding_sort_key`.
     """
     floor = _resolve_confidence_floor(confidence_floor)
     cap = _resolve_max_errors(max_errors)
@@ -916,8 +1547,7 @@ def apply_quality_gate(
     if len(active_error_indices) > cap:
         ranked = sorted(
             active_error_indices,
-            key=lambda idx: (float(staged[idx].confidence or 0.0)),
-            reverse=True,
+            key=lambda idx: finding_rank_key(staged[idx]),
         )
         for dropped_idx in ranked[cap:]:
             staged[dropped_idx] = replace(
@@ -925,4 +1555,4 @@ def apply_quality_gate(
                 drop_reason=f"error cap exceeded (max {cap})",
             )
 
-    return staged
+    return sorted(staged, key=finding_sort_key)

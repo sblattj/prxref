@@ -9,6 +9,20 @@ never raises. :func:`review_systemic` is the same contract over the
 whole-PR digest built by :mod:`prxref.systemic`, for the second-order
 classes no single chunk seat can see.
 
+Both calls take optional supplementary context, and both degrade to the
+pre-existing prompt when it is absent: :func:`review_chunk` takes
+``context_blocks`` (the dependency-version and referenced-definition
+blocks the orchestrator builds from an optional forge
+``get_file_content``), and :func:`review_systemic` takes ``threads`` (the
+PR's existing review discussion, rendered by
+:func:`_render_discussion_block` under the ``DISCUSSION_MAX_*`` caps) so
+the sweep stops re-raising subjects the team already argued out.
+
+Both ``prompts/worker.md`` and
+``prompts/systemic.md`` require a throw/panic/crash/unhandled-rejection
+finding to name its containment boundary; :func:`prxref.quality.apply_containment_note`
+enforces that deterministically on any finding that skips it.
+
 When a response is unparseable *because* the model ran out of completion
 budget (``finish_reason == "length"``), the reported error names the budget
 and the variable that raises it rather than the bare ``JSONDecodeError`` the
@@ -19,9 +33,11 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from importlib import resources
 from typing import Any
 
+from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
 from .triage import FileDiff, Finding, trim_hunk_context
@@ -34,6 +50,13 @@ DEFAULT_CONFIDENCE = 0.5
 _CONTEXT_MARKER = "## Review Context"
 
 _MAX_TOKENS_ENV = "PRXREF_LLM_MAX_TOKENS"
+
+# Caps on the ``### Existing discussion`` block appended to the sweep prompt.
+# The sweep's measured input is 1878-3585 tokens, so the discussion is held to
+# roughly 300 tokens: it informs the sweep, it never rivals the digest.
+DISCUSSION_MAX_THREADS = 15
+DISCUSSION_MAX_SNIPPET_CHARS = 200
+DISCUSSION_MAX_CHARS = 1200
 
 # Every spelling that means "I stopped because I ran out of output budget".
 # ``length`` is the OpenAI vocabulary that litellm normalises to; a plain
@@ -87,6 +110,9 @@ def _render_file(f: FileDiff, context_lines: int | None = None) -> str:
     if f.status == "renamed" and f.old_path and f.new_path:
         out.append(f"rename from {f.old_path}")
         out.append(f"rename to {f.new_path}")
+    if f.status == "copied" and f.old_path and f.new_path:
+        out.append(f"copy from {f.old_path}")
+        out.append(f"copy to {f.new_path}")
     if f.is_binary:
         out.append(f"Binary files a/{old} and b/{new} differ")
         return "\n".join(out)
@@ -120,6 +146,7 @@ def _render_prompt(
     pr_description: str,
     repo_hint: str,
     context_lines: int | None = None,
+    context_blocks: str = "",
 ) -> tuple[str, str]:
     template = load_prompt("worker.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
@@ -134,9 +161,44 @@ def _render_prompt(
     ).replace(
         "{repo_hint}", repo_hint.strip() or "(unspecified)"
     ).replace(
+        "{context_blocks}", context_blocks.strip()
+    ).replace(
         "{diff}", render_chunk(chunk, context_lines) or "(empty chunk)"
     )
     return head.strip(), user.strip()
+
+
+def _render_discussion_block(threads: Sequence[Thread]) -> str:
+    """The ``### Existing discussion`` block for the sweep user prompt.
+
+    One ``- <path>: <author>: <snippet>`` line per thread, snippets truncated
+    to :data:`DISCUSSION_MAX_SNIPPET_CHARS`, the block capped at
+    :data:`DISCUSSION_MAX_THREADS` threads and
+    :data:`DISCUSSION_MAX_CHARS` characters so the discussion cannot rival the
+    digest for prompt budget. Returns ``""`` when there is nothing to say, so
+    an absent discussion prints no header at all.
+    """
+    lines: list[str] = []
+    used = 0
+    shown = 0
+    for t in threads[:DISCUSSION_MAX_THREADS]:
+        snippet = " ".join((t.body_snippet or "").split())
+        if not snippet:
+            continue
+        if len(snippet) > DISCUSSION_MAX_SNIPPET_CHARS:
+            snippet = snippet[:DISCUSSION_MAX_SNIPPET_CHARS].rstrip() + "…"
+        line = f"- {t.path}: {t.author or 'unknown'}: {snippet}"
+        if used + len(line) + 1 > DISCUSSION_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+        shown += 1
+    if not lines:
+        return ""
+    omitted = len([t for t in threads if (t.body_snippet or "").strip()]) - shown
+    if omitted > 0:
+        lines.append(f"… {omitted} more threads omitted")
+    return "### Existing discussion\n\n" + "\n".join(lines)
 
 
 def _render_systemic_prompt(
@@ -144,6 +206,7 @@ def _render_systemic_prompt(
     pr_title: str,
     pr_description: str,
     repo_hint: str,
+    threads: Sequence[Thread] = (),
 ) -> tuple[str, str]:
     template = load_prompt("systemic.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
@@ -160,7 +223,11 @@ def _render_systemic_prompt(
     ).replace(
         "{digest}", digest.strip() or "(empty digest)"
     )
-    return head.strip(), user.strip()
+    discussion = _render_discussion_block(threads)
+    user = user.strip()
+    if discussion:
+        user = f"{user}\n\n{discussion}"
+    return head.strip(), user
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -291,6 +358,7 @@ def review_chunk(
     repo_hint: str = "",
     max_tokens: int | None = None,
     context_lines: int | None = None,
+    context_blocks: str = "",
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -323,6 +391,11 @@ def review_chunk(
     unaffected here too. The forge's diff is the only source of context —
     rendering can trim what was received, never add what it did not. The
     orchestrator always passes this keyword as well.
+
+    ``context_blocks`` is pre-rendered supplementary context — dependency pins
+    and out-of-hunk definitions built by :mod:`prxref.chunk_context` — placed
+    after the diff, inside the ``user`` half of the prompt. The empty default
+    renders nothing at all, leaving no stray header for direct callers.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -330,6 +403,7 @@ def review_chunk(
         pr_description=pr_description,
         repo_hint=repo_hint,
         context_lines=context_lines,
+        context_blocks=context_blocks,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(
@@ -345,6 +419,7 @@ def review_systemic(
     pr_description: str = "",
     repo_hint: str = "",
     max_tokens: int | None = None,
+    threads: Sequence[Thread] = (),
 ) -> tuple[list[Finding], dict]:
     """Review the whole-PR systemic digest with a single LLM call.
 
@@ -366,6 +441,7 @@ def review_systemic(
         pr_title=pr_title,
         pr_description=pr_description,
         repo_hint=repo_hint,
+        threads=threads,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(llm, system, user, budget=budget, label="systemic sweep")
