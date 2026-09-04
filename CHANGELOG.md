@@ -7,6 +7,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **The settled-thread gate no longer crashes on a general PR comment** (#54).
+  A thread without a path — any unanchored comment, near-universal on
+  Bitbucket Server — raised `AttributeError` inside
+  `apply_settled_thread_suppression` on 0.12.0, and because the pass chain is
+  not guarded the whole review was lost (`review failed: ...`, nothing
+  posted). Such a thread is now skipped by that gate; same-path suppression
+  is unchanged.
+
 ## [0.12.0] — 2026-09-04
 
 The context release. A real-PR audit of 0.11.0/0.11.1 — two review passes over
