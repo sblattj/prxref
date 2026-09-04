@@ -4,11 +4,14 @@ from __future__ import annotations
 import itertools
 import logging
 
+import pytest
+
 from prxref.forges.base import Thread
 from prxref.quality import (
     _body_cited_lines,
     _resolve_max_errors,
     active,
+    apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
     apply_manifest_claim_check,
@@ -1446,3 +1449,122 @@ class TestRemovalClaimCheck:
         out = apply_removal_claim_check(findings, files)
         assert [x.title for x in out] == ["First", "Second", "Third"]
         assert [x.drop_reason is None for x in out] == [True, False, True]
+
+HEDGED_CASES = [
+    ("if-still", "If figmaProxy.prepare still leases a client, the lease "
+                 "outlives the request."),
+    ("if-already", "If the migration already applied the default, this write "
+                   "is a no-op."),
+    ("modal-still", "The socket may still be held open by the outer pool."),
+    ("assuming", "Assuming the cache is keyed by tenant, this write clobbers "
+                 "another entry."),
+    ("unless-already", "Unless the backfill job already ran, this deploy "
+                       "fails."),
+    ("not-verified", "I cannot confirm whether the caller retries, so the "
+                     "request may fail permanently."),
+    ("not-in-diff", "The token refresh is not visible in the diff, so the "
+                    "credential goes stale."),
+    ("only-caller", "If this is the only call site the change is safe; "
+                    "otherwise every other caller breaks."),
+    ("membership", "If they are members of the root workspaces globs, "
+                   "`npm ci` will fail."),
+]
+
+LEGITIMATE_CASES = [
+    ("divisor", "size defaults to None and is used as a divisor on line 42."),
+    ("early-return", "Returns early if the list is empty, so the counter is "
+                     "never incremented."),
+    ("retry-spin", "The retry loop may spin forever because the deadline is "
+                   "never decremented."),
+    ("typeerror", "Throws TypeError if `opts` is undefined: line 12 "
+                  "dereferences opts.start."),
+    ("lodash-unless", "unless() from lodash is called with a string, which it "
+                      "does not accept."),
+    ("jwterror", "decode(token) can raise JWTError if malformed."),
+    ("null-deref", "x may be None when config is missing; data loss follows."),
+    ("concurrency", "Concurrent calls may corrupt state."),
+    ("assuming-noun", "The parser is assuming-safe only for ASCII; line 20 "
+                      "indexes bytes directly."),
+    ("may-return", "readFile may return a Buffer here and the caller "
+                   "concatenates it with a string."),
+    ("if-branch", "If retries is 0 the loop body never runs, so the initial "
+                  "request is skipped."),
+    ("unless-flag", "The endpoint is registered unless DEBUG is set, so "
+                    "production serves the unauthenticated route."),
+    ("already-plain", "The lock is already held here, so the second acquire "
+                      "deadlocks."),
+    ("may-plain", "The callback may be invoked twice, double-charging the "
+                  "customer."),
+    ("still-plain", "The temp file is still on disk after the handler "
+                    "returns."),
+    ("if-null", "If cfg is None line 30 raises AttributeError."),
+]
+
+
+class TestHedgeGate:
+    @pytest.mark.parametrize(
+        "label,body", HEDGED_CASES, ids=[c[0] for c in HEDGED_CASES]
+    )
+    def test_hedged_body_is_dropped(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert len(out) == 1
+        assert out[0].drop_reason is not None, label
+        assert out[0].drop_reason.startswith('hedged: "'), out[0].drop_reason
+        assert out[0].drop_reason.endswith('"')
+
+    @pytest.mark.parametrize(
+        "label,body", LEGITIMATE_CASES, ids=[c[0] for c in LEGITIMATE_CASES]
+    )
+    def test_legitimate_body_survives(self, label, body):
+        out = apply_hedge_gate([_f(title="Finding", body=body)])
+        assert out[0].drop_reason is None, f"{label}: {out[0].drop_reason}"
+
+    def test_hedge_in_title_is_dropped(self):
+        out = apply_hedge_gate(
+            [_f(title="Lease may still be held", body="Plain body.")]
+        )
+        assert out[0].drop_reason.startswith("hedged:")
+
+    def test_drop_reason_quotes_the_matched_span(self):
+        out = apply_hedge_gate(
+            [_f(body="The socket may still be held open by the pool.")]
+        )
+        assert out[0].drop_reason == 'hedged: "may still"'
+
+    def test_drop_reason_span_is_bounded(self):
+        body = "If " + "x" * 75 + " still leaks."
+        out = apply_hedge_gate([_f(body=body)])
+        assert out[0].drop_reason is not None
+        assert len(out[0].drop_reason) == len('hedged: ""') + 80
+
+    def test_span_beyond_the_window_is_not_a_hedge(self):
+        body = "If " + "x" * 200 + " still leaks."
+        assert apply_hedge_gate([_f(body=body)])[0].drop_reason is None
+
+    def test_already_dropped_passes_through(self):
+        pre = _f(body="If the router is still mounted, both fire.",
+                 drop_reason="invalid severity: 'nit'")
+        out = apply_hedge_gate([pre])
+        assert out[0].drop_reason == "invalid severity: 'nit'"
+
+    def test_order_preserved_and_input_not_mutated(self):
+        findings = [
+            _f(title="a", body="Plain bug."),
+            _f(title="b", body="If the flag is still set, the loop spins."),
+            _f(title="c", body="Another plain bug."),
+        ]
+        out = apply_hedge_gate(findings)
+        assert [f.title for f in out] == ["a", "b", "c"]
+        assert [f.drop_reason is None for f in out] == [True, False, True]
+        assert all(f.drop_reason is None for f in findings)
+
+    def test_empty_input(self):
+        assert apply_hedge_gate([]) == []
+
+    def test_hedged_finding_does_not_consume_error_cap(self):
+        hedged = apply_hedge_gate(
+            [_f(severity="error", confidence=0.9,
+                body="If the cache is still warm, this errors.")]
+        )
+        out = apply_quality_gate(hedged, max_errors=1)
+        assert out[0].drop_reason.startswith("hedged:")
