@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-04
+
 The context release. A real-PR audit of 0.11.0/0.11.1 — two review passes over
 ten Bitbucket Server PRs — produced a twelve-issue bundle dated 2026-09-03/04,
 and this entry answers all of it. Four of the eleven verified findings were
@@ -117,6 +119,10 @@ GitHub issues.
   it happens. Applies to both the openai-compat and litellm backends; only a 4xx
   qualifies, never a 5xx.
 
+## [0.11.1] — 2026-09-02
+
+### Fixed
+
 - **The sweep digest reaches the four classes the 2026-09-02 re-audit found
   missing (#29 residual, PR #38).** Migration-ddl-matched files render their
   full added content (absence of RLS becomes a checkable fact); an added
@@ -180,6 +186,7 @@ anchor shape surviving; all five findings are addressed here.
   invented) drops with `malformed location: '<file>'` into the
   dropped-findings audit section, instead of rendering `- 🟧 `package.:—``.
 
+## [0.10.1] — 2026-09-01
 
 ### Fixed
 
@@ -738,7 +745,15 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.12.0...HEAD
+[0.11.1]: https://github.com/sblattj/prxref/releases/tag/v0.11.1
+[0.11.0]: https://github.com/sblattj/prxref/releases/tag/v0.11.0
+[0.10.1]: https://github.com/sblattj/prxref/releases/tag/v0.10.1
+[0.10.0]: https://github.com/sblattj/prxref/releases/tag/v0.10.0
+[0.9.0]: https://github.com/sblattj/prxref/releases/tag/v0.9.0
+[0.8.0]: https://github.com/sblattj/prxref/releases/tag/v0.8.0
+[0.7.0]: https://github.com/sblattj/prxref/releases/tag/v0.7.0
+[0.6.0]: https://github.com/sblattj/prxref/releases/tag/v0.6.0
 [0.5.0]: https://github.com/sblattj/prxref/releases/tag/v0.5.0
 [0.4.0]: https://github.com/sblattj/prxref/releases/tag/v0.4.0
 [0.3.0]: https://github.com/sblattj/prxref/releases/tag/v0.3.0
