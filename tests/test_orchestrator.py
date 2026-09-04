@@ -66,6 +66,7 @@ def _contract_review_chunk(
 
 def _contract_review_systemic(
     llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
+    threads=(),
 ):
     return [], {
         "escalations": [], "input_tokens": 0, "output_tokens": 0,
@@ -2303,9 +2304,9 @@ def _sweep_double(results: list, **meta_overrides):
 
     def _review_systemic(
         llm, digest, *, pr_title="", pr_description="", repo_hint="",
-        max_tokens=None,
+        max_tokens=None, threads=(),
     ):
-        calls.append({"digest": digest, "max_tokens": max_tokens})
+        calls.append({"digest": digest, "max_tokens": max_tokens, "threads": list(threads)})
         kind, payload = results.pop(0)
         meta = {
             "escalations": [], "input_tokens": 7, "output_tokens": 3,
@@ -2611,3 +2612,60 @@ class TestSamplingRecord:
         assert res["sampling"] == {
             "temperature": None, "seed": None, "models": [],
         }
+
+class TestSweepSeesTheDiscussion:
+    """Existing threads reach the sweep prompt, fetched once (issue 06)."""
+
+    THREAD = Thread(
+        path="src/supabase.ts", line=None, resolved=False, author="bob",
+        body_snippet="We already argued this one out on the earlier PR.",
+    )
+
+    def test_threads_for_digested_files_reach_the_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF, threads=[self.THREAD])
+
+        orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert [t.path for t in calls[0]["threads"]] == ["src/supabase.ts"]
+
+    def test_a_thread_on_an_undigested_file_is_filtered_out(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        elsewhere = Thread(
+            path="docs/notes.md", line=None, resolved=False, author="carol",
+            body_snippet="Unrelated.",
+        )
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF, threads=[elsewhere])
+
+        orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert calls[0]["threads"] == []
+
+    def test_a_list_threads_failure_still_runs_the_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF, threads=[self.THREAD])
+        forge.fail.add("list_threads")
+
+        res = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert len(calls) == 1
+        assert calls[0]["threads"] == []
+        assert res["chunks_failed"] == 0
+
+    def test_threads_are_fetched_once_for_the_sweep_and_the_dedup(self):
+        class CountingForge(FakeForge):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.thread_calls = 0
+
+            def list_threads(self, ref):
+                self.thread_calls += 1
+                return super().list_threads(ref)
+
+        forge = CountingForge(diff=SWEEP_SIGNAL_DIFF, threads=[self.THREAD])
+        orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert forge.thread_calls == 1
