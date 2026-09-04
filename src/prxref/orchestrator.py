@@ -706,7 +706,22 @@ def orchestrate_review(
 
 
 def _origin_key(finding: Finding) -> tuple:
-    return (finding.file, finding.line, finding.title, finding.body)
+    """Identity used to re-derive the chunk/sweep boundary across the gate.
+
+    ``severity`` and ``confidence`` are part of the key: without them a chunk
+    finding and a sweep finding that agree on file, line, title, and body
+    collide, ``finding_sort_key`` ties them, and the Counter walk hands the
+    first survivor to the sweep side — dropping the higher-confidence chunk
+    copy as a "duplicate of chunk finding".
+    """
+    return (
+        finding.file,
+        finding.line,
+        finding.title,
+        finding.body,
+        finding.severity,
+        finding.confidence,
+    )
 
 
 def _sampling(llm: object) -> dict:
