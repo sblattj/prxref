@@ -80,7 +80,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import reviewer, systemic
+from . import heuristics, reviewer, systemic
 from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import (
@@ -449,6 +449,12 @@ def orchestrate_review(
     except Exception as e:  # noqa: BLE001
         logger.warning("list_threads failed (best-effort): %s", e)
         threads = []
+
+    # A deterministic, non-LLM finding folded in before the quality passes so
+    # it flows through every one of them exactly like a model finding (issue
+    # #10): file-level (line=0) survives apply_line_align untouched, and
+    # warning/1.0 clears apply_quality_gate trivially.
+    findings = findings + heuristics.release_shape_findings(files)
 
     findings = apply_location_validation(findings, [f.path for f in files])
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
