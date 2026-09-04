@@ -49,6 +49,28 @@ prxref inspects pull and merge requests across the three major code hosting forg
                   └──────────────────────┘
 ```
 
+## Deterministic Quality Passes
+
+Every finding a worker returns runs the same deterministic passes before
+anything posts. A filtered finding is never discarded silently: it is kept
+with a `drop_reason` for the run log.
+
+| Pass | Drops findings that… |
+| --- | --- |
+| Location validation | name a file that is not in the diff (`malformed location`) |
+| Line alignment | cannot be anchored to a real added line of that file |
+| Thread dedup | duplicate an already-open thread on the PR |
+| Severity consistency | (rewrites only) disagree about the severity of one shared title |
+| Removal-claim check | claim a path was removed while it is still present in the post-image (`claims removal of a path present in the post-image: <path>`) |
+| Quality gate | use an invalid severity, fall below the confidence floor, or exceed the per-review error cap |
+| Sweep dedup | repeat a chunk finding the systemic sweep found again |
+
+The removal-claim check exists because a `copy from` / `copy to` diff header
+copies a file without touching its source. Diff sections are classified as
+`added`, `modified`, `removed`, `renamed`, or `copied`, and a `copied`
+section leaves its source file present — so a worker that reads the copy as
+a move and reports the source "deleted" is contradicted by the diff itself.
+
 ## Quickstart
 
 Run reviews instantly without local installation using `uvx`, or install the CLI globally:
