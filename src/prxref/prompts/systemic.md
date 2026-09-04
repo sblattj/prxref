@@ -10,9 +10,12 @@ Per-chunk reviewers each see one slice of the diff and reliably miss classes tha
 - A migration (DDL) that creates or alters a table without row level security or policies: a `CREATE TABLE` with no `ENABLE ROW LEVEL SECURITY` and no `CREATE POLICY` anywhere in the same migration file is itself the finding. Migration files appear in the digest with their full added content, so the absence of those statements is a fact you can assert, not a guess.
 - A destructive operation (drop, delete, overwrite, force-push style cleanup) with no guard or confirmation.
 - A recurring timer or poll (`setInterval`, `setTimeout`, `while (true)`) with no attempt cap, deadline, or termination on its failure path — e.g. a 404 response that resets status and re-queues the poll forever.
+- A removed guard: a deleted numeric limit constant (`MAX_*_LENGTH`, `*_SIZE`, `*_BYTES`, `*_TIMEOUT`) or a deleted validator/sanitiser definition (`isValid*`, `validate*`, `sanitize*`, `check*`, `assert*`, `escape*`) on a path that consumes remote or third-party input. The digest shows these as `-` lines; the code that remains says nothing about the bound that is gone, so the deletion itself is the finding.
 - Repo-config drift: two lockfiles for one package manager root — a lockfile newly added while another lockfile or a `packageManager` pin also appears in the PR. The digest states this collision on a `! repo-config:` line.
 
 Nothing else. Per-file bugs inside one chunk are the chunk workers' job; repeating them here only duplicates their findings, which are deduplicated away.
+
+Do not raise a subject the reviewers already argued out under `### Existing discussion` — that decision was made with more context than the digest carries. If you raise it anyway, say in the body why the discussion's conclusion is wrong.
 
 ## Severity Vocabulary
 

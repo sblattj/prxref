@@ -11,6 +11,7 @@ from prxref.quality import (
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
+    apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_thread_dedup,
     is_duplicate_of_existing,
@@ -1075,3 +1076,83 @@ class TestBodyCitationGrammar:
             body="Also line 55 matters.",
         )
         assert _body_cited_lines(f) == [40, 55]
+
+
+class TestSettledThreadSuppression:
+    """Line-independent suppression of re-litigated subjects (issue 06)."""
+
+    SETTLED = Thread(
+        path="src/tools/registry.ts",
+        line=None,
+        resolved=False,
+        author="bob",
+        body_snippet=(
+            "This still feels too defensive, I don't think we need it imo — "
+            "Removed the defensive tool metadata guard in commit 917d1f4"
+        ),
+    )
+
+    def _finding(self, **kwargs):
+        fields = {
+            "file": "src/tools/registry.ts",
+            "line": 0,
+            "title": (
+                "Tool metadata guard removed: unbounded tool names from remote servers"
+            ),
+            "body": (
+                "This change removes the tool metadata guard: MAX_TOOL_NAME_LENGTH "
+                "and isSupported no longer bound names or schemas supplied by a "
+                "remote MCP server."
+            ),
+        }
+        fields.update(kwargs)
+        return _f(**fields)
+
+    def test_a_file_level_finding_is_dropped_against_a_file_level_thread(self):
+        out = apply_settled_thread_suppression([self._finding()], [self.SETTLED])
+        assert out[0].drop_reason == "settled in thread: bob"
+
+    def test_the_reason_names_the_author(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "author": "carol"})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason.endswith("carol")
+
+    def test_a_leading_dot_slash_path_still_matches(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "path": "./src/tools/registry.ts"})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is not None
+
+    def test_a_thread_on_another_file_never_suppresses(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "path": "src/other/cache.ts"})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is None
+
+    def test_a_same_file_thread_on_another_subject_never_suppresses(self):
+        thread = Thread(
+            path="src/tools/registry.ts", line=None, resolved=True, author="dave",
+            body_snippet="Please rename listTools to enumerateTools for consistency.",
+        )
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is None
+
+    def test_a_resolved_thread_still_settles_its_own_subject(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "resolved": True})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason == "settled in thread: bob"
+
+    def test_an_already_dropped_finding_keeps_its_first_reason(self):
+        dropped = self._finding(drop_reason="duplicate of existing thread")
+        out = apply_settled_thread_suppression([dropped], [self.SETTLED])
+        assert out[0].drop_reason == "duplicate of existing thread"
+
+    def test_no_threads_is_a_passthrough_preserving_order(self):
+        findings = [self._finding(), self._finding(line=7)]
+        out = apply_settled_thread_suppression(findings, [])
+        assert [f.line for f in out] == [0, 7]
+        assert all(f.drop_reason is None for f in out)
+
+    def test_an_empty_finding_body_cannot_match_anything(self):
+        out = apply_settled_thread_suppression(
+            [_f(file="src/tools/registry.ts", title="", body="")], [self.SETTLED],
+        )
+        assert out[0].drop_reason is None
