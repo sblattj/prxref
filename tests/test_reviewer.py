@@ -6,9 +6,14 @@ import logging
 
 import pytest
 
+from prxref.forges.base import Thread
 from prxref.llm import InvokeResult
 from prxref.reviewer import (
+    DISCUSSION_MAX_CHARS,
+    DISCUSSION_MAX_SNIPPET_CHARS,
+    DISCUSSION_MAX_THREADS,
     MAX_TOKENS,
+    _render_systemic_prompt,
     load_prompt,
     render_chunk,
     review_chunk,
@@ -659,3 +664,67 @@ class _RaisingLLM:
     def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
                timeout_s=60.0):
         raise RuntimeError("provider down")
+
+
+class TestSystemicDiscussionBlock:
+    """The sweep prompt carries the PR's existing discussion (issue 06)."""
+
+    @staticmethod
+    def _thread(snippet: str, path: str = "src/a.ts", author: str = "bob") -> Thread:
+        return Thread(path=path, line=None, resolved=False, author=author,
+                      body_snippet=snippet)
+
+    def test_absent_threads_print_no_header(self):
+        _, user = _render_systemic_prompt("## src/a.ts", "t", "d", "r")
+        assert "### Existing discussion" not in user
+
+    def test_each_thread_renders_path_author_and_snippet(self):
+        _, user = _render_systemic_prompt(
+            "## src/a.ts", "t", "d", "r",
+            [self._thread("we decided the guard was unnecessary")],
+        )
+        assert "### Existing discussion" in user
+        assert "- src/a.ts: bob: we decided the guard was unnecessary" in user
+
+    def test_a_thread_without_an_author_is_named_unknown(self):
+        _, user = _render_systemic_prompt(
+            "## src/a.ts", "t", "d", "r", [self._thread("settled", author="")],
+        )
+        assert "- src/a.ts: unknown: settled" in user
+
+    def test_an_empty_snippet_contributes_no_line(self):
+        _, user = _render_systemic_prompt(
+            "## src/a.ts", "t", "d", "r", [self._thread("   ")],
+        )
+        assert "### Existing discussion" not in user
+
+    def test_a_long_snippet_is_truncated(self):
+        long = "x" * (DISCUSSION_MAX_SNIPPET_CHARS + 200)
+        _, user = _render_systemic_prompt(
+            "## src/a.ts", "t", "d", "r", [self._thread(long)],
+        )
+        assert "x" * DISCUSSION_MAX_SNIPPET_CHARS in user
+        assert "x" * (DISCUSSION_MAX_SNIPPET_CHARS + 1) not in user
+        assert "…" in user
+
+    def test_the_thread_count_is_capped_and_the_omission_stated(self):
+        threads = [
+            self._thread(f"decision number {i}")
+            for i in range(DISCUSSION_MAX_THREADS + 4)
+        ]
+        _, user = _render_systemic_prompt("## src/a.ts", "t", "d", "r", threads)
+        assert "decision number 0" in user
+        assert f"decision number {DISCUSSION_MAX_THREADS}" not in user
+        assert "… 4 more threads omitted" in user
+
+    def test_the_block_is_capped_in_characters(self):
+        threads = [self._thread("y" * 190) for _ in range(DISCUSSION_MAX_THREADS)]
+        _, user = _render_systemic_prompt("## src/a.ts", "t", "d", "r", threads)
+        block = user.split("### Existing discussion", 1)[1]
+        assert len(block) < DISCUSSION_MAX_CHARS + 200
+        assert "more threads omitted" in block
+
+    def test_review_systemic_passes_threads_through_to_the_prompt(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_systemic(llm, "## src/a.ts", threads=[self._thread("already settled")])
+        assert "already settled" in llm.calls[0]["user"]
