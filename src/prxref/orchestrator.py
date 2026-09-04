@@ -27,25 +27,45 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    chunk results, and counts as one more review unit: ``chunk_count`` is
    ``len(chunks) + 1`` whenever the sweep ran, and a sweep failure is one
    failed chunk in the partial-review banner.
-5. Quality passes in order: location validation (a ``file`` naming no
-   path of the parsed diff is dropped, not rendered) →
-   ``apply_line_align`` → thread dedup
-   (existing threads fetched best-effort; failure means no threads) →
-   severity consistency (findings sharing a normalized title are raised
-   to the group's max severity — the sweep's corroborating title counts
-   toward its group) → ``apply_quality_gate(confidence_floor=,
-   max_errors=)`` → sweep dedup (``apply_sweep_dedup`` drops a sweep
-   finding that restates a chunk finding that SURVIVED the gate, on file
-   + normalized title; running it last is what keeps a sub-floor chunk
+5. Deterministic checks and quality passes, in exactly this order — the
+   raw chunk + sweep findings first gain
+   ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
+   about a PR that is ≥80% release machinery yet also touches source),
+   folded in BEFORE the passes so it is filtered like any other finding:
+
+   ``apply_location_validation`` (a ``file`` naming no path of the parsed
+   diff is dropped, not rendered) → ``apply_manifest_claim_check`` (a
+   ``package.json`` claim whose dependency is not the key on the anchored
+   line, or whose asserted section disagrees with the actual one; it must
+   precede line align, which is what makes it read the model's RAW
+   anchor) → ``apply_line_align`` → ``apply_thread_dedup`` (existing
+   threads fetched best-effort BEFORE the workers run, and after the
+   stale-inline prune; failure means no threads) →
+   ``apply_settled_thread_suppression`` (a finding re-litigating a
+   subject an existing thread already argued out, line-independently) →
+   ``apply_severity_consistency`` (findings sharing a normalized title
+   are raised to the group's max severity — the sweep's corroborating
+   title counts toward its group) → ``apply_removal_claim_check`` (a
+   claim that a NAMED path was removed when the post-image still carries
+   it) → ``apply_hedge_gate`` (a finding whose own text conditions the
+   defect on something the worker never established) →
+   ``apply_quality_gate(confidence_floor=, max_errors=)``, which returns
+   its findings in content order, so the chunk/sweep boundary is
+   re-derived here from finding identity rather than carried across the
+   gate as an index → ``apply_sweep_dedup`` (drops a sweep finding that
+   restates a chunk finding that SURVIVED the gate, on file + normalized
+   title; running it after the gate is what keeps a sub-floor chunk
    finding from suppressing its higher-confidence sweep duplicate and
    then dying at the gate itself) → ``apply_containment_note`` (a throw
    / panic / crash / unhandled-rejection finding that never names its
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
    it touches both the active and dropped copies of chunk and sweep
-   findings alike). Dropped findings
-   are retained in the result with ``drop_reason`` set, never silently
-   discarded.
+   findings alike). Dropped findings are retained in the result with
+   ``drop_reason`` set, never silently discarded, and both lists come out
+   sorted by ``finding_sort_key``. Every result — including an error or
+   summary-only exit — carries a ``sampling`` record naming the
+   temperature, seed, and model chain actually in force.
 6. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;

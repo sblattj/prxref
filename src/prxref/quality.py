@@ -1,6 +1,12 @@
 """Deterministic quality passes over worker findings.
 
-Six passes run before posting:
+Eleven passes run before posting, in the order ``orchestrate_review``
+applies them. A twelfth deterministic check, the release-shaped-PR
+heuristic, is not a pass at all: ``heuristics.release_shape_findings``
+ADDS a finding before pass 1 and it then flows through every pass below
+exactly like a model finding. Every ``drop_reason`` prefix these passes
+emit is tabulated for operators in ``docs/quality.md``.
+
 1. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
@@ -27,37 +33,47 @@ Six passes run before posting:
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
 4. ``apply_thread_dedup``: drop findings that duplicate an already-open
-   or existing thread on the PR (path + line-window + shared distinctive tokens).
-4. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+   or existing thread on the PR (path + line-window + shared distinctive
+   tokens), with ``drop_reason`` ``duplicate of existing thread``.
+5. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing thread already argued out — same path plus shared
    distinctive tokens, with NO line test, because line alignment has already
-   demoted a file-level finding to line 0 by this point.
-
-5. ``apply_severity_consistency``: findings sharing one normalized title —
+   demoted a file-level finding to line 0 by this point
+   (``settled in thread: <author>``).
+6. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-
-5. ``apply_removal_claim_check``: drop findings claiming a path was
+7. ``apply_removal_claim_check``: drop findings claiming a path was
    removed or deleted when every path the claim names is still present in
    the diff's post-image — the false positive a ``copy from``/``copy to``
    header produces when a worker reads a copy as a move (issue #03).
-
-5. ``apply_hedge_gate``: drop findings whose title or body conditions the
+   Only a claim that NAMES a diff path is judged, so a finding about a
+   removed guard or constant is untouched.
+8. ``apply_hedge_gate``: drop findings whose title or body conditions the
    defect on a precondition the worker never established from the diff
    ("If X still leases a client", "unless the backfill already ran"),
    with ``drop_reason`` ``hedged: "<matched span>"``.
-6. ``apply_quality_gate``: drop findings below the confidence floor, cap
-   errors per review, and enforce the {error, warning, outofscope} severity
-   vocabulary.
-6. ``apply_containment_note``: a finding that asserts a throw, panic,
-   crash, or unhandled rejection and never names where it is caught or
-   where it propagates to has its body suffixed with
-   ``" [containment boundary not stated]"`` — a purely textual decoration,
-   run on active and dropped findings alike, that never changes
-   ``drop_reason`` or severity.
+9. ``apply_quality_gate``: drop findings below the confidence floor
+   (``confidence 0.40 below floor 0.60``), cap errors per review
+   (``error cap exceeded (max N)``), and enforce the
+   {error, warning, outofscope} severity vocabulary
+   (``invalid severity: '<value>'``). It RETURNS its findings sorted by
+   ``finding_sort_key``, so the caller re-derives the chunk/sweep
+   boundary from finding identity rather than carrying an index across it.
+10. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+    finding which SURVIVED the gate, on file + normalized title
+    (``duplicate of chunk finding``). It runs after the gate so a
+    sub-floor chunk finding cannot suppress its higher-confidence sweep
+    duplicate and then die at the gate itself.
+11. ``apply_containment_note``: a finding that asserts a throw, panic,
+    crash, or unhandled rejection and never names where it is caught or
+    where it propagates to has its body suffixed with
+    ``" [containment boundary not stated]"`` — a purely textual
+    decoration, run on active and dropped findings alike, that never
+    changes ``drop_reason`` or severity.
 
 Every dropped finding retains its identity with ``drop_reason`` populated,
 so review runstores and logs can explain every filter decision. Use

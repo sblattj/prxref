@@ -7,7 +7,115 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+The context release. A real-PR audit of 0.11.0/0.11.1 — two review passes over
+ten Bitbucket Server PRs — produced a twelve-issue bundle dated 2026-09-03/04,
+and this entry answers all of it. Four of the eleven verified findings were
+wrong for the same reason: the worker was reasoning about code it could not
+see, so it now receives the versions of the libraries a chunk imports and the
+definitions of the symbols it references. Around that sit five new
+deterministic gates that drop a claim the diff itself contradicts, a systemic
+sweep that finally sees deletions and the PR's own discussion, a stable
+finding order with a `sampling` record on every run, a run-lifetime cache for a
+model the provider has taken away, and machine-readable CLI output.
+
+Inbox issue numbers below refer to `docs/issues/inbox-2026-09-04/`, not to
+GitHub issues.
+
+### Added
+
+- **Workers see the versions of the third-party packages a chunk imports**
+  (inbox issue 01), resolved from the nearest `package.json`, `pyproject.toml`,
+  `go.mod`, or `Cargo.toml` at the PR head, so a review no longer guesses which
+  library major the code runs against. The audit's headline false positive was
+  Effect 3 semantics asserted against an Effect 4 repo, with a suggested fix
+  that would have created the bug it alleged.
+- **Workers see the definitions of same-file symbols a chunk references** whose
+  declaration sits outside the rendered hunk (inbox issue 02), so a finding is
+  no longer inferred from an identifier's name alone. Both blocks are best
+  effort, capped (40 entries / 6 lines / 8000 chars / 512 KiB), fetched at most
+  once per file per run, and a forge that cannot serve file content reviews
+  exactly as before.
+- **Forge adapters can serve a file's content at a commit** — a new optional
+  `get_file_content(ref, path, *, sha)` on all four adapters (GitHub, GitLab,
+  Bitbucket Cloud, Bitbucket Server), read-only and best effort, using the token
+  already configured for reviews. No new environment variable.
+- **A deterministic release-shaped-PR check** (inbox issue 10): a PR that is at
+  least 80% release machinery — manifests, changelogs, lockfiles, changesets —
+  yet still touches source flags every offending path, with no extra LLM call.
+  The body ends `(deterministic check, no model)`.
+- **`prxref review --format {text,json}`** (inbox issue 08). `json` prints
+  exactly one JSON object to stdout — verdict, active and dropped findings,
+  chunk and token counts, posted — for scriptable, diffable output. Default
+  remains `text`.
+- **Every review result carries a `sampling` record** (inbox issue 04) —
+  temperature, seed, and the model chain — including on a failed or empty-diff
+  run, and on the `run/start` trace event, so a report says which knobs were
+  actually in force.
+- **New file status `copied`** (inbox issue 03), rendered back into the worker
+  prompt as `copy from` / `copy to` so the model can tell a copy from a move.
+- **`docs/quality.md`**, the single reference for the deterministic checks, the
+  eleven quality passes, and every `drop_reason` string; plus
+  `docs/systemic-sweep.md` for the sweep's digest classes and caps.
+
+### Changed
+
+- **Five new deterministic gates run before posting**, all unconditional and
+  all named in the run record: `apply_manifest_claim_check`,
+  `apply_settled_thread_suppression`, `apply_removal_claim_check`,
+  `apply_hedge_gate`, and the decorating `apply_containment_note`. See
+  `docs/quality.md` for the full order and reasons.
+- **The systemic sweep now sees deleted guards** (inbox issue 06): a removed
+  numeric limit constant or validator/sanitiser definition is classed
+  `guard-removal` and admitted to the digest ahead of noisier matches, so a PR
+  whose only risk is a deletion no longer digests to nothing.
+- **The sweep prompt carries the PR's existing review discussion** (inbox issue
+  06), so it stops re-raising subjects the team already argued out. Existing
+  threads are fetched once per review, before the review units run rather than
+  after them, and still after the stale-inline prune.
+- **The worker prompt demands more of a finding**: a claim that turns on an
+  unlisted library version or an unshown definition caps confidence at 0.5 and
+  is phrased as a question (inbox issues 01, 02); a claim conditioned on a
+  precondition the diff never established must be omitted or filed as a
+  question (inbox issue 05); and a throw, panic, crash, or unhandled-rejection
+  claim must name its containment boundary (inbox issue 07).
+- **`--no-post` and `-v` now print the findings** in text mode — every active
+  finding's file, line, title, and body, plus dropped findings with their drop
+  reason (inbox issue 08).
+
 ### Fixed
+
+- **Findings are emitted in a stable `(file, line, title)` order** (inbox issue
+  04), and the error and inline-comment caps break ties by finding content
+  instead of by whichever worker answered first. The audit ran the same commit
+  twice and got 7 findings then 2 — the one that vanished was the security
+  finding. Documented in `docs/llm.md` and the README: temperature 0 and
+  `PRXREF_LLM_SEED` are sent but do **not** make a review bit-reproducible.
+- **A `copy from` / `copy to` diff header is parsed as a copied file** (inbox
+  issue 03), git or Bitbucket Server `src://`/`dst://` form, instead of being
+  mistaken for a rename — and a finding claiming a named path was removed is
+  dropped when that path is still present after the PR lands
+  (`claims removal of a path present in the post-image: <path>`). A claim about
+  a file that really was deleted still posts.
+- **Self-hedged findings are dropped before the confidence floor** (inbox
+  issues 05, 11) — "If X still leases a client", "unless the backfill already
+  ran", "I cannot verify" — with `drop_reason` `hedged: "<matched phrase>"`. A
+  hedged finding no longer consumes an error-cap slot ahead of a proven one.
+- **A `package.json` finding anchored on the wrong dependency is dropped**
+  (inbox issue 12) with `anchor mismatch:`, and one that calls a `devDependency`
+  a runtime dependency (or the reverse) with `section mismatch:`. Line
+  realignment on a manifest no longer lets the section word `dependencies`
+  outrank the package name and drag a correct comment onto its neighbour.
+- **A finding that re-litigates a settled thread is dropped** (inbox issue 06)
+  with `settled in thread: <author>`, regardless of whether it could be anchored
+  to a line. A resolved thread still settles its subject.
+- **A "this throws" finding that never names its containment boundary is
+  flagged inline** (inbox issue 07) with `[containment boundary not stated]`, so
+  a correct-but-underscoped finding cannot read as a smaller bug than it is.
+- **A model that reports itself permanently unavailable is skipped for the rest
+  of the run** (inbox issue 09) — deprovisioned, renamed, unsupported — instead
+  of being retried on every chunk and the sweep, with one warning the first time
+  it happens. Applies to both the openai-compat and litellm backends; only a 4xx
+  qualifies, never a 5xx.
 
 - **The sweep digest reaches the four classes the 2026-09-02 re-audit found
   missing (#29 residual, PR #38).** Migration-ddl-matched files render their

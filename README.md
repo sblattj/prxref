@@ -49,27 +49,20 @@ prxref inspects pull and merge requests across the three major code hosting forg
                   └──────────────────────┘
 ```
 
-## Deterministic Quality Passes
+## Deterministic Checks and Quality Passes
 
-Every finding a worker returns runs the same deterministic passes before
-anything posts. A filtered finding is never discarded silently: it is kept
-with a `drop_reason` for the run log.
+Not every finding comes from a model, and no finding posts unfiltered. prxref
+computes one class of finding directly from the parsed diff — the
+release-shaped-PR check — and then runs every finding, model-authored or not,
+through eleven deterministic passes: location validation, `package.json` claim
+checks, line alignment, thread dedup, settled-thread suppression, severity
+consistency, the removal-claim check, the hedge gate, the quality gate, sweep
+dedup, and the containment note. A filtered finding is never discarded
+silently — it is kept with a `drop_reason` for the run log, and visible in a
+`--no-post` dry run or under `--format json`.
 
-| Pass | Drops findings that… |
-| --- | --- |
-| Location validation | name a file that is not in the diff (`malformed location`) |
-| Line alignment | cannot be anchored to a real added line of that file |
-| Thread dedup | duplicate an already-open thread on the PR |
-| Severity consistency | (rewrites only) disagree about the severity of one shared title |
-| Removal-claim check | claim a path was removed while it is still present in the post-image (`claims removal of a path present in the post-image: <path>`) |
-| Quality gate | use an invalid severity, fall below the confidence floor, or exceed the per-review error cap |
-| Sweep dedup | repeat a chunk finding the systemic sweep found again |
-
-The removal-claim check exists because a `copy from` / `copy to` diff header
-copies a file without touching its source. Diff sections are classified as
-`added`, `modified`, `removed`, `renamed`, or `copied`, and a `copied`
-section leaves its source file present — so a worker that reads the copy as
-a move and reports the source "deleted" is contradicted by the diff itself.
+The passes, the checks, every `drop_reason` string, and which of them have a
+knob: [docs/quality.md](docs/quality.md).
 
 ## Quickstart
 
@@ -135,10 +128,6 @@ Temperature `0.0` and an optional `PRXREF_LLM_SEED` are sent on every call, but 
 
 See [docs/llm.md](docs/llm.md) for architecture, failover behavior, and backend setup, and [docs/env-vars.md](docs/env-vars.md#tuning-for-your-team) for tuning the confidence floor and finding caps to your team.
 
-## Deterministic Checks
-
-Most findings come from the LLM fallback chain, but a few are computed directly from the parsed diff, no model call involved. **Release-shaped PRs**: when a PR changes at least 2 files and at least 80% of them are release machinery (version manifests, `CHANGELOG`/`HISTORY`/`RELEASE_NOTES` files, lockfiles, `.changeset/` entries, the release-please manifest), any remaining non-machinery file is flagged with a warning naming every offending path — the body ends with `(deterministic check, no model)` so it reads distinctly from an LLM finding in the posted summary. This catches a release cut from an unmerged branch or a hand edit smuggled into a release, the way issue #10 first surfaced it.
-
 ## Forge Authentication
 
 Configure the authentication token matching your forge:
@@ -153,7 +142,7 @@ Configure the authentication token matching your forge:
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
 
-See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference, [docs/forges.md](docs/forges.md) for forge specifics, and [docs/systemic-sweep.md](docs/systemic-sweep.md) for the whole-PR sweep's digest classes and drop reasons.
+See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference, [docs/forges.md](docs/forges.md) for forge specifics, [docs/quality.md](docs/quality.md) for the deterministic checks and every drop reason, and [docs/systemic-sweep.md](docs/systemic-sweep.md) for the whole-PR sweep's digest classes.
 
 ## Webhook Server
 
