@@ -29,16 +29,18 @@ MARKER = "<!-- prxref-summary -->"
 PAGE_SIZE = 100
 
 
-def _mock_response(status_code=200, json_data=None, text=""):
+def _mock_response(status_code=200, json_data=None, text="", content=None, headers=None):
     resp = MagicMock(spec=requests.Response)
     resp.status_code = status_code
     resp.ok = 200 <= status_code < 300
+    resp.headers = headers or {}
     if json_data is not None:
         resp.json.return_value = json_data
         resp.text = json.dumps(json_data)
     else:
         resp.text = text
         resp.json.side_effect = ValueError("No JSON")
+    resp.content = content if content is not None else resp.text.encode("utf-8")
     resp.raise_for_status.side_effect = (
         None if resp.ok else requests.HTTPError(response=resp)
     )
@@ -504,3 +506,126 @@ def test_only_read_verbs_are_retryable():
     # it consults the status list, so holding a POST back on 502 holds it back
     # on 429 too. That trade is deliberate; see the comment on the policy.
     assert retry.is_retry("POST", 429) is False
+
+
+# --- get_file_content ---------------------------------------------------------
+
+
+def test_get_file_content_returns_text_on_200():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        200, text="print('hi')\n", headers={"Content-Type": "text/plain; charset=utf-8"}
+    )
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "src/app.py", sha="deadbeef"
+    )
+
+    assert result == "print('hi')\n"
+    url = session.get.call_args[0][0]
+    assert url == "https://api.github.com/repos/acme/api/contents/src/app.py"
+    assert session.get.call_args[1]["params"] == {"ref": "deadbeef"}
+    assert (
+        session.get.call_args[1]["headers"]["Accept"]
+        == "application/vnd.github.raw+json"
+    )
+
+
+def test_get_file_content_returns_none_on_404():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(404, json_data={"message": "Not Found"})
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "missing.py", sha="deadbeef"
+    )
+
+    assert result is None
+
+
+def test_get_file_content_returns_none_on_403():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(403, json_data={"message": "rate limited"})
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "src/app.py", sha="deadbeef"
+    )
+
+    assert result is None
+
+
+def test_get_file_content_returns_none_when_the_request_raises():
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = requests.ConnectionError("down")
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "src/app.py", sha="deadbeef"
+    )
+
+    assert result is None
+
+
+def test_get_file_content_returns_none_on_a_json_body():
+    """A directory, or a file over the 1 MB raw ceiling, comes back as JSON
+    even though the raw Accept header was sent."""
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        200,
+        json_data=[{"name": "app.py", "type": "file"}],
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "src", sha="deadbeef"
+    )
+
+    assert result is None
+
+
+def test_get_file_content_returns_none_on_binary_content():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        200, content=b"\x89PNG\x00\x01\x02", headers={"Content-Type": "text/plain"}
+    )
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "logo.png", sha="deadbeef"
+    )
+
+    assert result is None
+
+
+def test_get_file_content_returns_none_on_oversize_body():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        200,
+        content=b"a" * (github._MAX_FILE_CONTENT_BYTES + 1),
+        headers={"Content-Type": "text/plain"},
+    )
+
+    result = ForgeImpl(session=session).get_file_content(
+        _ref(), "big.txt", sha="deadbeef"
+    )
+
+    assert result is None
+
+
+def test_get_file_content_returns_none_on_empty_sha():
+    session = MagicMock(spec=requests.Session)
+
+    result = ForgeImpl(session=session).get_file_content(_ref(), "src/app.py", sha="")
+
+    assert result is None
+    session.get.assert_not_called()
+
+
+def test_get_file_content_never_logs_above_debug(caplog):
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(404, json_data={"message": "Not Found"})
+
+    with caplog.at_level(logging.DEBUG, logger="prxref.forges.github"):
+        result = ForgeImpl(session=session).get_file_content(
+            _ref(), "missing.py", sha="deadbeef"
+        )
+
+    assert result is None
+    assert all(record.levelno <= logging.DEBUG for record in caplog.records)
