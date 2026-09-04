@@ -115,6 +115,8 @@ export PRXREF_MAX_ERROR_FINDINGS=10
 
 The trade-off is the whole difference: the advisory profile gives you the three findings most likely to be real, and the thorough profile gives you ten that might be. Raising the floor does not make the reviewer smarter — it just moves where the cut falls, and everything below the cut is dropped unseen. A team that ignores prxref's comments should raise the floor before turning it off; a team reviewing machine-written code should leave it where it ships.
 
+One filter has no knob and always runs: the **hedge gate**, immediately before the confidence floor. A finding whose own title or body conditions the defect on a precondition the model never established from the diff ("If X still leases a client", "Unless the backfill already ran", "if they are members of the root workspaces") is dropped regardless of its confidence, with `drop_reason` `hedged: "<matched phrase>"` in the run record, and never consumes an error-cap slot.
+
 Neither knob affects the exit code — `PRXREF_FAIL_ON` is the only one that can. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build).
 
 ## Quality Passes and Drop Reasons

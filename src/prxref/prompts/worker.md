@@ -20,7 +20,7 @@ If a finding turns on the semantics of a named symbol whose definition is not sh
 
 ## No Speculation
 
-There is no downstream investigation pass that will confirm your suspicions. If you suspect an issue but the diff lacks the evidence to support it, do not emit it and do not escalate it — either find the evidence in the diff or drop the concern. The `escalations` array exists in the output schema for forward compatibility only: always emit it as an empty list.
+There is no downstream investigation pass that will confirm your suspicions. If you suspect an issue but the diff lacks the evidence to support it, do not emit it and do not escalate it — either find the evidence in the diff or drop the concern. The `escalations` array exists in the output schema for forward compatibility only: always emit it as an empty list. A finding whose truth depends on a precondition you could not establish from the diff ("if X is still mounted", "unless the migration already ran", "if they are members of the root workspaces") must not be reported as a defect: either phrase it as a question with `confidence` at or below 0.5, or omit it.
 
 ## Style
 
