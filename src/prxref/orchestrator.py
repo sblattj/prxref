@@ -93,6 +93,7 @@ from .forges.base import (
 from .llm import LLMClient
 from .quality import (
     active,
+    apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
     apply_manifest_claim_check,
@@ -506,6 +507,7 @@ def orchestrate_review(
         )
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
+    findings = apply_hedge_gate(findings)
     # The sweep boundary is positional, and the gate now returns its findings
     # in content order, so the boundary is re-derived from the identity of the
     # sweep's own findings rather than carried across the gate as an index.
