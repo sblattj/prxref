@@ -571,6 +571,35 @@ def normalize_title(title: str) -> str:
     return " ".join(trimmed.split())
 
 
+def finding_sort_key(finding: Finding) -> tuple[str, int, str]:
+    """Content-derived ordering key for a finding: ``(file, line, title)``.
+
+    Every pass that emits or presents a list of findings sorts by this key so
+    the output of a review depends on WHAT was found, never on the order the
+    workers happened to return it in.
+    """
+    return (
+        finding.file or "",
+        finding.line if finding.line is not None else -1,
+        finding.title or "",
+    )
+
+
+def finding_rank_key(finding: Finding) -> tuple[float, str, int, str]:
+    """Tie-break key for caps: ``(-confidence, file, line, normalized title)``.
+
+    Confidence decides first; everything after it exists only so that two
+    equally confident findings are ranked by content rather than by arrival.
+    """
+    file, line, _ = finding_sort_key(finding)
+    return (
+        -float(finding.confidence or 0.0),
+        file,
+        line,
+        normalize_title(finding.title or ""),
+    )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -875,8 +904,11 @@ def apply_quality_gate(
     1. Severity vocabulary: non-empty lowercase must be in {error, warning, note};
        case-mismatches are normalized; invalid severities are dropped.
     2. Confidence floor: drop findings below the threshold (default 0.6).
-    3. Error cap: among surviving errors, keep the top N by confidence and drop
-       the rest.
+    3. Error cap: among surviving errors, keep the top N ranked by
+       :func:`finding_rank_key` and drop the rest, so ties are broken by
+       content rather than by arrival order.
+
+    The returned list is sorted by :func:`finding_sort_key`.
     """
     floor = _resolve_confidence_floor(confidence_floor)
     cap = _resolve_max_errors(max_errors)
@@ -916,8 +948,7 @@ def apply_quality_gate(
     if len(active_error_indices) > cap:
         ranked = sorted(
             active_error_indices,
-            key=lambda idx: (float(staged[idx].confidence or 0.0)),
-            reverse=True,
+            key=lambda idx: finding_rank_key(staged[idx]),
         )
         for dropped_idx in ranked[cap:]:
             staged[dropped_idx] = replace(
@@ -925,4 +956,4 @@ def apply_quality_gate(
                 drop_reason=f"error cap exceeded (max {cap})",
             )
 
-    return staged
+    return sorted(staged, key=finding_sort_key)
