@@ -34,7 +34,7 @@ SUMMARY_TEMPLATE = (
 
 def _contract_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
-    max_tokens=None, context_lines=None,
+    max_tokens=None, context_lines=None, context_blocks="",
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -407,7 +407,7 @@ class TestParallelFanOut:
 
         def barrier_review_chunk(
             llm, files, *, pr_title="", pr_description="", repo_hint="",
-            max_tokens=None, context_lines=None,
+            max_tokens=None, context_lines=None, context_blocks="",
         ):
             barrier.wait()
             return [Finding(
@@ -2475,8 +2475,12 @@ class TestChunkTimeoutRetry:
         calls: list[dict] = []
 
         def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
-                max_tokens=None, context_lines=None):
-            calls.append({"context_lines": context_lines, "path": files[0].path})
+                max_tokens=None, context_lines=None, context_blocks=""):
+            calls.append({
+                "context_lines": context_lines,
+                "context_blocks": context_blocks,
+                "path": files[0].path,
+            })
             outcome = outcomes.pop(0)
             return [Finding(
                 file=files[0].path, line=1, severity="outofscope",
@@ -2569,3 +2573,105 @@ class TestChunkTimeoutRetry:
         assert not orchestrator._is_timeout_error("LLMError: m1: HTTP 500")
         assert not orchestrator._is_timeout_error("JSONDecodeError: bad json")
         assert not orchestrator._is_timeout_error("")
+
+
+TS_CONTEXT_DIFF_A = (
+    "diff --git a/src/a.ts b/src/a.ts\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    "+++ b/src/a.ts\n"
+    "@@ -0,0 +1,2 @@\n"
+    "+import { Effect } from 'effect';\n"
+    "+export const a = Effect;\n"
+)
+
+TS_CONTEXT_DIFF_B = TS_CONTEXT_DIFF_A.replace("src/a.ts", "src/b.ts")
+
+TS_PACKAGE_JSON = '{"dependencies": {"effect": "4.0.0"}}'
+
+
+class _ReaderForge(FakeForge):
+    """FakeForge with the optional ``get_file_content``, counting every call."""
+
+    def __init__(self, *args, raises: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.raises = raises
+        self.content_calls: list[tuple[str, str]] = []
+
+    def get_file_content(self, ref, path, *, sha):
+        self.content_calls.append((path, sha))
+        if self.raises:
+            raise RuntimeError("boom get_file_content")
+        return TS_PACKAGE_JSON if path == "package.json" else None
+
+
+class TestChunkContextInjection:
+    """Issues 01/02: dependency pins and definitions reach the worker prompt,
+    and every way that read can fail degrades to no block, never to a failure."""
+
+    def _recording_llm(self, prompts):
+        class RecordingLLM:
+            def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
+                       timeout_s=60.0):
+                prompts.append(f"{system}\n{user}")
+                return InvokeResult(
+                    text='{"findings": [], "escalations": []}',
+                    input_tokens=1, output_tokens=1,
+                    model="m", backend="b", elapsed_ms=1,
+                )
+        return RecordingLLM()
+
+    def _real_reviewer(self, monkeypatch):
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", REAL_REVIEW_CHUNK)
+        monkeypatch.setattr(orchestrator.reviewer, "load_prompt", REAL_LOAD_PROMPT)
+
+    def test_the_dependency_block_reaches_the_prompt(self, monkeypatch):
+        self._real_reviewer(monkeypatch)
+        prompts: list[str] = []
+        res = orchestrate_review(
+            _ReaderForge(diff=TS_CONTEXT_DIFF_A), REF,
+            self._recording_llm(prompts), post=False,
+        )
+        assert res["chunks_failed"] == 0
+        assert any("### Dependency versions" in p for p in prompts)
+        assert any("effect@4.0.0" in p for p in prompts)
+
+    def test_a_reader_that_raises_still_reviews_and_adds_no_block(self, monkeypatch):
+        self._real_reviewer(monkeypatch)
+        prompts: list[str] = []
+        forge = _ReaderForge(diff=TS_CONTEXT_DIFF_A, raises=True)
+        res = orchestrate_review(forge, REF, self._recording_llm(prompts), post=False)
+
+        assert res["verdict"] == "Approved"
+        assert res["chunks_failed"] == 0
+        assert forge.content_calls, "the reader was never consulted"
+        assert all("### Dependency versions" not in p for p in prompts)
+        assert all("### Definitions referenced by this chunk" not in p for p in prompts)
+
+    def test_one_manifest_is_read_once_across_two_chunks(self):
+        forge = _ReaderForge(diff=TS_CONTEXT_DIFF_A + TS_CONTEXT_DIFF_B)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=False, max_files_per_chunk=1,
+        )
+        assert res["chunk_count"] == 3  # two chunks plus the sweep
+        manifest_reads = [c for c in forge.content_calls if c[0] == "package.json"]
+        assert len(manifest_reads) == 1, forge.content_calls
+
+    def test_an_empty_head_sha_skips_the_reader_entirely(self):
+        pr = make_pr()
+        pr.source_sha = ""
+        forge = _ReaderForge(pr=pr, diff=TS_CONTEXT_DIFF_A)
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+
+        assert res["chunks_failed"] == 0
+        assert forge.content_calls == []
+
+    def test_every_read_uses_the_pr_head_sha(self):
+        forge = _ReaderForge(diff=TS_CONTEXT_DIFF_A)
+        orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+        assert forge.content_calls
+        assert all(sha == forge.pr.source_sha for _, sha in forge.content_calls)
+
+    def test_a_forge_without_the_method_builds_no_reader(self):
+        forge = FakeForge(diff=TS_CONTEXT_DIFF_A)
+        assert orchestrator._make_file_reader(forge, REF, forge.pr) is None

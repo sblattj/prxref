@@ -120,6 +120,7 @@ def _render_prompt(
     pr_description: str,
     repo_hint: str,
     context_lines: int | None = None,
+    context_blocks: str = "",
 ) -> tuple[str, str]:
     template = load_prompt("worker.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
@@ -133,6 +134,8 @@ def _render_prompt(
         "{pr_description}", pr_description.strip() or "(none)"
     ).replace(
         "{repo_hint}", repo_hint.strip() or "(unspecified)"
+    ).replace(
+        "{context_blocks}", context_blocks.strip()
     ).replace(
         "{diff}", render_chunk(chunk, context_lines) or "(empty chunk)"
     )
@@ -291,6 +294,7 @@ def review_chunk(
     repo_hint: str = "",
     max_tokens: int | None = None,
     context_lines: int | None = None,
+    context_blocks: str = "",
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -323,6 +327,11 @@ def review_chunk(
     unaffected here too. The forge's diff is the only source of context —
     rendering can trim what was received, never add what it did not. The
     orchestrator always passes this keyword as well.
+
+    ``context_blocks`` is pre-rendered supplementary context — dependency pins
+    and out-of-hunk definitions built by :mod:`prxref.chunk_context` — placed
+    after the diff, inside the ``user`` half of the prompt. The empty default
+    renders nothing at all, leaving no stray header for direct callers.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -330,6 +339,7 @@ def review_chunk(
         pr_description=pr_description,
         repo_hint=repo_hint,
         context_lines=context_lines,
+        context_blocks=context_blocks,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(
