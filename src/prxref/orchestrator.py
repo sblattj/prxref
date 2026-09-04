@@ -38,7 +38,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    finding that restates a chunk finding that SURVIVED the gate, on file
    + normalized title; running it last is what keeps a sub-floor chunk
    finding from suppressing its higher-confidence sweep duplicate and
-   then dying at the gate itself). Dropped findings
+   then dying at the gate itself) → ``apply_containment_note`` (a throw
+   / panic / crash / unhandled-rejection finding that never names its
+   catch or its propagation target gets its body suffixed with
+   ``" [containment boundary not stated]"``; textual only, runs last so
+   it touches both the active and dropped copies of chunk and sweep
+   findings alike). Dropped findings
    are retained in the result with ``drop_reason`` set, never silently
    discarded.
 6. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
@@ -85,6 +90,7 @@ from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import (
     active,
+    apply_containment_note,
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
@@ -473,6 +479,11 @@ def orchestrate_review(
     # its higher-confidence sweep duplicate and then die at the gate itself —
     # that would lose the recall the sweep exists to add.
     findings = apply_sweep_dedup(findings, sweep_start=sweep_start)
+    # Last, deliberately: it only decorates body text (never drop_reason or
+    # severity), so it must run after every pass that keys off title/body
+    # content, and running last means both the posted comment body and the
+    # dropped-audit copy carry the same suffixed text.
+    findings = apply_containment_note(findings)
 
     findings_active = active(findings)
     findings_dropped = [f for f in findings if f.drop_reason is not None]

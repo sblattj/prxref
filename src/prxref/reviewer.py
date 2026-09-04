@@ -7,7 +7,10 @@ onto :class:`prxref.triage.Finding` records. Unparseable or malformed
 responses degrade to ``([], [])`` with a logged warning; this layer
 never raises. :func:`review_systemic` is the same contract over the
 whole-PR digest built by :mod:`prxref.systemic`, for the second-order
-classes no single chunk seat can see.
+classes no single chunk seat can see. Both ``prompts/worker.md`` and
+``prompts/systemic.md`` require a throw/panic/crash/unhandled-rejection
+finding to name its containment boundary; :func:`prxref.quality.apply_containment_note`
+enforces that deterministically on any finding that skips it.
 
 When a response is unparseable *because* the model ran out of completion
 budget (``finish_reason == "length"``), the reported error names the budget
