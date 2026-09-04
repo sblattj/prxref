@@ -81,3 +81,24 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
 - The first model in `PRXREF_LLM_MODELS` is used as the primary model.
 - Remaining models in the list are passed to `litellm.completion` via the `fallbacks=` parameter.
 - `num_retries=0` is enforced to ensure immediate failover to backup models without blocking retries on failed endpoints.
+
+---
+
+## Determinism: what is pinned, and what still varies
+
+- `PRXREF_LLM_TEMPERATURE` defaults to `0.0`, and `0.0` is **sent** on the wire
+  rather than omitted.
+- `PRXREF_LLM_SEED` is sent whenever it is set, on both backends.
+- **Neither makes a review bit-reproducible.** Providers vary by system
+  fingerprint, load-balanced backends serve the same model from different
+  hardware, MoE routing shifts with batch composition, and many gateways accept
+  an unknown top-level `seed` and ignore it. Two identical runs may still return
+  different findings, and `prxref` cannot detect a gateway that dropped the seed.
+- The `sampling` field in the run record — `{"temperature", "seed", "models"}`,
+  present on every exit including a failed run — tells you which knobs were
+  actually in force for the run you are looking at.
+- What *is* deterministic is everything downstream of the model: findings are
+  ordered by `(file, line, title)`, and the error and inline-comment caps break
+  ties by finding content (confidence first, then file, line, and normalized
+  title), never by the order the workers happened to return in. The same
+  findings in any arrival order therefore produce the same review.

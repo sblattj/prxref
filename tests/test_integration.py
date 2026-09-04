@@ -272,8 +272,15 @@ class TestScenario1HappyPath:
 
             assert len(result["findings_dropped"]) == 3
             # The chunk's own sub-floor finding is retained with its reason...
-            assert "below floor" in result["findings_dropped"][0].drop_reason
-            assert result["findings_dropped"][0].title == "Missing audit log"
+            assert all(
+                "below floor" in f.drop_reason
+                for f in result["findings_dropped"]
+                if f.title == "Missing audit log"
+            )
+            assert sum(
+                f.title == "Missing audit log"
+                for f in result["findings_dropped"]
+            ) == 2
             # ...the sweep re-found both chunk findings (the mock serves every
             # request the same payload): its low-confidence copy died at the
             # gate like the chunk's, and its surviving copy of the posted
