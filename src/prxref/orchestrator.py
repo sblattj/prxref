@@ -97,6 +97,7 @@ from .quality import (
     apply_location_validation,
     apply_manifest_claim_check,
     apply_quality_gate,
+    apply_removal_claim_check,
     apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_sweep_dedup,
@@ -504,6 +505,7 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
+    findings = apply_removal_claim_check(findings, files)
     # The sweep boundary is positional, and the gate now returns its findings
     # in content order, so the boundary is re-derived from the identity of the
     # sweep's own findings rather than carried across the gate as an index.

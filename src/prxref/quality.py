@@ -39,6 +39,11 @@ Six passes run before posting:
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
+
+5. ``apply_removal_claim_check``: drop findings claiming a path was
+   removed or deleted when every path the claim names is still present in
+   the diff's post-image — the false positive a ``copy from``/``copy to``
+   header produces when a worker reads a copy as a move (issue #03).
 6. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
@@ -1122,6 +1127,111 @@ def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
                 continue
         result.append(f)
     return result
+
+
+_REMOVAL_CLAIM_RE = re.compile(
+    r"\b(?:removed|deleted|dropped the file|no longer exists|was removed"
+    r"|is removed|has been removed|deletion of)\b",
+    re.IGNORECASE,
+)
+
+
+def _post_image_paths(files: Sequence[FileDiff]) -> set[str]:
+    """Every path the diff leaves present after the PR lands.
+
+    A file section with any status other than ``removed`` leaves its path
+    in place, and a ``copied`` section leaves its SOURCE in place too — a
+    copy reads the original without touching it, so only a separate
+    ``removed`` section can take that source away.
+    """
+    present: set[str] = set()
+    for f in files:
+        if f.status != "removed":
+            present.add(f.path)
+        if f.status == "copied" and f.old_path:
+            present.add(f.old_path)
+    return present
+
+
+def _diff_path_candidates(files: Sequence[FileDiff]) -> list[str]:
+    """Every path a finding could name: each section's path plus copy/rename sources."""
+    seen: list[str] = []
+    for f in files:
+        for path in (f.path, f.old_path if f.status in {"copied", "renamed"} else None):
+            if path and path not in seen:
+                seen.append(path)
+    return seen
+
+
+def _tail(path: str, parts: int) -> str:
+    return "/".join(path.replace("\\", "/").split("/")[-parts:])
+
+
+def _claimed_paths(finding: Finding, candidates: Sequence[str]) -> list[str]:
+    """Diff paths the finding's title+body name, in order of first mention.
+
+    A path counts as named by its full form or by its
+    basename-with-parent-directory (``servicenow/package.json``), which is
+    how a worker usually refers to a file inside a monorepo package.
+    """
+    text = f"{finding.title} {finding.body}".replace("\\", "/").lower()
+    hits: list[tuple[int, str]] = []
+    for path in candidates:
+        norm = path.replace("\\", "/").lower()
+        at = text.find(norm)
+        if at < 0 and "/" in norm:
+            at = text.find(_tail(norm, 2))
+        if at >= 0:
+            hits.append((at, path))
+    hits.sort()
+    return [path for _, path in hits]
+
+
+def apply_removal_claim_check(
+    findings: Sequence[Finding], files: Sequence[FileDiff]
+) -> list[Finding]:
+    """Drop removal claims the diff's post-image contradicts.
+
+    A finding whose title or body asserts a file was removed, deleted, or
+    no longer exists is dropped when every path it names is still present
+    after the PR lands. A copy's source is present unless a separate
+    section removes it, so a ``copy from``/``copy to`` header read as a
+    move produces exactly this false positive. When any named path really
+    is absent from the post-image, the claim is left active — the pass
+    never blanket-drops removal language.
+
+    Input order is preserved and findings already carrying a
+    ``drop_reason`` pass through untouched.
+    """
+    present = _post_image_paths(files)
+    candidates = _diff_path_candidates(files)
+    out: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            out.append(f)
+            continue
+        if not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}"):
+            out.append(f)
+            continue
+        # Only a claim that NAMES a path is judged. Falling back to the
+        # finding's anchor file would drop every finding whose body merely
+        # says something was "removed" — a guard, a constant, a validator —
+        # on a file the PR still leaves in place, which is precisely the
+        # guard-removal class the systemic sweep exists to report.
+        named = _claimed_paths(f, candidates)
+        if named and all(path in present for path in named):
+            out.append(
+                replace(
+                    f,
+                    drop_reason=(
+                        "claims removal of a path present in the "
+                        f"post-image: {named[0]}"
+                    ),
+                )
+            )
+            continue
+        out.append(f)
+    return out
 
 
 def _resolve_confidence_floor(explicit: float | None) -> float:

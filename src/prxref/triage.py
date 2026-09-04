@@ -75,7 +75,7 @@ class FileDiff:
     path: str
     old_path: str | None
     new_path: str | None
-    status: str = "modified"  # added | modified | removed | renamed
+    status: str = "modified"  # added | modified | removed | renamed | copied
     is_binary: bool = False
     hunks: list[Hunk] = field(default_factory=list)
 
@@ -180,7 +180,7 @@ def _parse_hunk_body(diff_lines: list[str], i: int, hunk: Hunk) -> int:
 def parse_unified_diff(diff: str) -> list[FileDiff]:
     """Parse a raw unified diff into per-file FileDiff records.
 
-    Handles added/deleted/renamed files (via /dev/null operands and git
+    Handles added/deleted/renamed/copied files (via /dev/null operands and git
     extended headers), binary files (marked ``is_binary``, no hunks), and
     hunks whose body lines themselves begin with ``+``/``-``/``@@``.
     Non-git fragments lacking a ``---``/``+++`` header are ignored.
@@ -191,6 +191,7 @@ def parse_unified_diff(diff: str) -> list[FileDiff]:
     pending_old: str | None = None
     have_pending_old = False
     cur: FileDiff | None = None
+    copy_hint = False
     rename_hint = False
     added_hint = False
     removed_hint = False
@@ -199,7 +200,9 @@ def parse_unified_diff(diff: str) -> list[FileDiff]:
         nonlocal cur
         if cur is None:
             return
-        if rename_hint:
+        if copy_hint:
+            cur.status = "copied"
+        elif rename_hint:
             cur.status = "renamed"
         elif added_hint:
             cur.status = "added"
@@ -226,7 +229,7 @@ def parse_unified_diff(diff: str) -> list[FileDiff]:
             old = m.group(1) if m else None
             new = m.group(2) if m else None
             cur = FileDiff(path=new or old or "", old_path=old, new_path=new)
-            rename_hint = added_hint = removed_hint = False
+            copy_hint = rename_hint = added_hint = removed_hint = False
             i += 1
             continue
 
@@ -282,6 +285,24 @@ def parse_unified_diff(diff: str) -> list[FileDiff]:
             cur.new_path = line[len("rename to "):]
             cur.path = cur.new_path
             rename_hint = True
+            i += 1
+            continue
+        if line.startswith("copy from ") and cur is not None:
+            cur.old_path = _clean_path(line[len("copy from "):]) or cur.old_path
+            copy_hint = True
+            i += 1
+            continue
+        if line.startswith("copy to ") and cur is not None:
+            cleaned = _clean_path(line[len("copy to "):])
+            if cleaned:
+                cur.new_path = cleaned
+                cur.path = cleaned
+            copy_hint = True
+            i += 1
+            continue
+        if line.startswith("similarity index ") or line.startswith(
+            "dissimilarity index "
+        ):
             i += 1
             continue
         if line.startswith("new file mode"):
