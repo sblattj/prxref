@@ -41,7 +41,7 @@ it (noted in the table).
 | 2 | `apply_manifest_claim_check` | `package.json` only. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
 | 3 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
 | 4 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
-| 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. |
+| 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
 | 6 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
 | 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
 | 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. |
