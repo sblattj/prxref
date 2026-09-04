@@ -34,7 +34,7 @@ SUMMARY_TEMPLATE = (
 
 def _contract_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
-    max_tokens=None, context_lines=None,
+    max_tokens=None, context_lines=None, context_blocks="",
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -66,6 +66,7 @@ def _contract_review_chunk(
 
 def _contract_review_systemic(
     llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
+    threads=(),
 ):
     return [], {
         "escalations": [], "input_tokens": 0, "output_tokens": 0,
@@ -273,6 +274,7 @@ class TestHappyPath:
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
+            "sampling",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -407,7 +409,7 @@ class TestParallelFanOut:
 
         def barrier_review_chunk(
             llm, files, *, pr_title="", pr_description="", repo_hint="",
-            max_tokens=None, context_lines=None,
+            max_tokens=None, context_lines=None, context_blocks="",
         ):
             barrier.wait()
             return [Finding(
@@ -735,6 +737,7 @@ class TestMaxTokensThreading:
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
+            "sampling",
         }
 
 
@@ -1046,13 +1049,14 @@ class TestQualityGateKnobsAreThreaded:
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
+            "sampling",
         }
 
 
 RESULT_KEYS = {
     "verdict", "findings_active", "findings_dropped", "chunk_count",
     "chunks_reviewed", "chunks_failed",
-    "elapsed_ms", "input_tokens", "output_tokens", "posted",
+    "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
 }
 
 
@@ -2300,9 +2304,9 @@ def _sweep_double(results: list, **meta_overrides):
 
     def _review_systemic(
         llm, digest, *, pr_title="", pr_description="", repo_hint="",
-        max_tokens=None,
+        max_tokens=None, threads=(),
     ):
-        calls.append({"digest": digest, "max_tokens": max_tokens})
+        calls.append({"digest": digest, "max_tokens": max_tokens, "threads": list(threads)})
         kind, payload = results.pop(0)
         meta = {
             "escalations": [], "input_tokens": 7, "output_tokens": 3,
@@ -2421,6 +2425,32 @@ class TestSystemicSweep:
         assert len(res["findings_active"]) == 1
         assert res["findings_active"][0].confidence == 0.9
 
+    def test_byte_identical_copies_drop_the_sweep_one_not_the_chunk_one(
+        self, monkeypatch,
+    ):
+        """Two copies identical but for confidence must partition correctly.
+
+        The chunk/sweep boundary is re-derived after the quality gate from
+        ``_origin_key``. When that key ignored confidence the two copies
+        collided, ``finding_sort_key`` tied them, and the walk handed the
+        FIRST survivor to the sweep side — so the 0.95 chunk copy was dropped
+        as a "duplicate of chunk finding" and the 0.61 sweep copy survived.
+        """
+        double, _calls = _sweep_double([("findings", [dict(
+            self.SWEEP_FINDING[0], confidence=0.61,
+        )])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        res = orchestrate_review(
+            FakeForge(diff=SWEEP_SIGNAL_DIFF), REF, FakeLLM(json.dumps({
+                "findings": [dict(self.SWEEP_FINDING[0], confidence=0.95)],
+            })),
+            post=False, confidence_floor=0.6,
+        )
+        assert [f.confidence for f in res["findings_active"]] == [0.95]
+        dupes = [f for f in res["findings_dropped"]
+                 if f.drop_reason == "duplicate of chunk finding"]
+        assert [f.confidence for f in dupes] == [0.61]
+
     def test_a_sweep_failure_counts_as_one_failed_chunk(self, monkeypatch):
         double, _calls = _sweep_double([("error", "LLMError: all models failed")])
         monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
@@ -2464,6 +2494,203 @@ class TestSystemicSweep:
         assert res["chunk_count"] == 0
 
 
+class TestReleaseShapeFoldIn:
+    """The release-shape finding is a CHUNK-side finding (issue #29
+    residual): ``apply_sweep_dedup`` only ever drops a SWEEP finding, so
+    folding the heuristic in AFTER the sweep's own findings would let a
+    chunk worker's restatement of the same (file, title) pair get the
+    deterministic finding dropped as a duplicate of ITSELF, keeping the
+    model's echo instead of the deterministic check.
+
+    The two offending files are the only non-binary files in this diff —
+    the eight machinery files are diffed as binary, which ``build_chunks``
+    skips (there is no reviewable text) — so the review is exactly one
+    chunk (the two offenders) plus the sweep, and both the chunk worker
+    and the sweep are scripted to restate the heuristic's own (file,
+    title) pair on every call, the worst case named by the concern this
+    fix closes.
+
+    Verified empirically against the pre-fix assembly order (heuristic
+    appended after the sweep's findings): that order drops the
+    deterministic finding as "duplicate of chunk finding" and leaves only
+    the chunk worker's non-deterministic echo active — i.e. this test
+    fails before the fix. ``apply_sweep_dedup`` never drops a chunk-side
+    finding by contract (see its own docstring), so once the heuristic is
+    chunk-side neither it nor the chunk worker's own echo can be that
+    pass's victim; only the sweep's echo — the actual duplicate — is
+    dropped. That is why exactly one model ECHO (not zero) survives
+    alongside the deterministic finding: this pass has never deduplicated
+    two chunk-side findings against each other, and this test does not
+    assert that it now does.
+    """
+
+    TITLE = "Release-shaped PR touches source: 2 non-release file(s)"
+    DETERMINISTIC_SUFFIX = " (deterministic check, no model)"
+    OFFENDER_A = "src/alpha.py"
+    OFFENDER_B = "src/beta.py"
+    ANCHOR = min(OFFENDER_A, OFFENDER_B)  # heuristic anchors on the first, sorted
+
+    MACHINERY_BASENAMES = (
+        "package.json", "pyproject.toml", "Cargo.toml", "setup.py",
+        "setup.cfg", "VERSION", "CHANGELOG.md", "poetry.lock",
+    )
+
+    @staticmethod
+    def _binary_file_diff(path: str) -> str:
+        return (
+            f"diff --git a/{path} b/{path}\n"
+            "index 111..222 100644\n"
+            f"Binary files a/{path} and b/{path} differ\n"
+        )
+
+    def _diff(self) -> str:
+        # 8 machinery (binary, so build_chunks skips them) + 2 source files:
+        # 8/10 = 80%, exactly the frozen release-shape ratio boundary.
+        machinery = "".join(self._binary_file_diff(p) for p in self.MACHINERY_BASENAMES)
+        offenders = (
+            _added_file_diff(self.OFFENDER_A, 5) + _added_file_diff(self.OFFENDER_B, 5)
+        )
+        return machinery + offenders
+
+    def _matching_finding(self, body: str) -> Finding:
+        return Finding(
+            file=self.ANCHOR, line=1, severity="warning", confidence=0.9,
+            title=self.TITLE, body=body,
+        )
+
+    def test_a_chunk_and_sweep_echo_never_drops_the_deterministic_finding(
+        self, monkeypatch,
+    ):
+        def _review_chunk(llm, files, *, pr_title="", pr_description="",
+                           repo_hint="", max_tokens=None, context_lines=None,
+                           context_blocks=""):
+            return [self._matching_finding("chunk worker restatement")], {
+                "input_tokens": 10, "output_tokens": 5, "model": "m",
+                "elapsed_ms": 1, "error": "",
+            }
+
+        def _review_systemic(llm, digest, *, pr_title="", pr_description="",
+                              repo_hint="", max_tokens=None, threads=()):
+            return [self._matching_finding("sweep restatement")], {
+                "input_tokens": 7, "output_tokens": 3, "model": "sweep-model",
+                "elapsed_ms": 1, "error": "",
+            }
+
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _review_chunk)
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", _review_systemic)
+
+        forge = FakeForge(diff=self._diff())
+        res = orchestrate_review(forge, REF, FakeLLM(), post=False)
+
+        # One chunk (the two offenders) plus the sweep.
+        assert res["chunk_count"] == 2
+
+        matching = [f for f in res["findings_active"] if f.title == self.TITLE]
+        deterministic = [f for f in matching if f.body.endswith(self.DETERMINISTIC_SUFFIX)]
+        echoes = [f for f in matching if not f.body.endswith(self.DETERMINISTIC_SUFFIX)]
+
+        # The deterministic finding survives — the whole point of the fix.
+        assert len(deterministic) == 1
+        assert deterministic[0].file == self.ANCHOR
+
+        # Exactly one model ECHO survives active — the chunk worker's own,
+        # which apply_sweep_dedup has never dropped and still must not.
+        assert len(echoes) == 1
+        assert echoes[0].body == "chunk worker restatement"
+
+        dropped_dupes = [
+            f for f in res["findings_dropped"]
+            if f.drop_reason == "duplicate of chunk finding"
+        ]
+        assert len(dropped_dupes) == 1
+        assert dropped_dupes[0].body == "sweep restatement"
+
+
+class TestReleaseShapeOnTheNoChunkPath:
+    """Concern #2: a diff that yields zero chunks skipped the deterministic
+    check entirely, because ``orchestrate_review`` returned via
+    ``_summary_only_run`` before ``heuristics.release_shape_findings`` was
+    ever called.
+
+    ``build_chunks`` skips a file for exactly one reason — it is binary,
+    ``"there is no reviewable text"`` (its own docstring; ``candidates =
+    [f for f in files if not f.is_binary]`` is the only filter) — so the
+    only diff shape that empties ``chunks`` while still exercising the
+    release-shape ratio is one where EVERY file, release machinery
+    included, is diffed as binary. A pure-text release PR (the realistic
+    case) always chunks normally and takes the path
+    ``TestReleaseShapeFoldIn`` already covers.
+    """
+
+    @staticmethod
+    def _binary_file_diff(path: str) -> str:
+        return (
+            f"diff --git a/{path} b/{path}\n"
+            "index 111..222 100644\n"
+            f"Binary files a/{path} and b/{path} differ\n"
+        )
+
+    # 9 release-machinery basenames, all binary, plus one binary
+    # non-machinery file: 9/10 = 90% >= the 80% ratio.
+    MACHINERY_BASENAMES = (
+        "package.json", "pyproject.toml", "Cargo.toml", "setup.py",
+        "setup.cfg", "VERSION", "CHANGELOG.md", "poetry.lock", "Cargo.lock",
+    )
+    OFFENDER = "src/logo.png"
+
+    def _diff(self) -> str:
+        return "".join(
+            self._binary_file_diff(p)
+            for p in (*self.MACHINERY_BASENAMES, self.OFFENDER)
+        )
+
+    def test_a_release_shaped_diff_with_zero_chunks_still_gets_the_finding(self):
+        forge = FakeForge(diff=self._diff())
+        res = orchestrate_review(forge, REF, FakeLLM(), post=True)
+
+        # Every file was binary: build_chunks skipped all of them, exactly
+        # the pre-fix condition that used to skip the heuristic too.
+        assert res["chunk_count"] == 0
+        assert res["chunks_reviewed"] == 0
+        assert res["chunks_failed"] == 0
+
+        active = res["findings_active"]
+        assert len(active) == 1
+        f = active[0]
+        assert f.title == "Release-shaped PR touches source: 1 non-release file(s)"
+        assert f.file == self.OFFENDER
+        assert f.line == 0
+        assert f.body.endswith(" (deterministic check, no model)")
+        assert res["verdict"] == "Approved"  # a warning-severity finding approves
+
+        assert len(forge.summaries) == 1
+        assert self.OFFENDER in forge.summaries[0]
+        assert "Release-shaped PR touches source" in forge.summaries[0]
+
+    def test_confidence_floor_still_applies_on_the_no_chunk_path(self):
+        """The caller's quality-gate knobs reach the heuristic finding here
+        exactly like they reach a chunk finding on the normal path."""
+        forge = FakeForge(diff=self._diff())
+        # The heuristic always emits confidence 1.0; a floor above 1.0 is
+        # unreachable and drops it, proving the gate actually ran here.
+        res = orchestrate_review(
+            forge, REF, FakeLLM(), post=False, confidence_floor=1.1,
+        )
+        assert res["findings_active"] == []
+        assert len(res["findings_dropped"]) == 1
+        assert "below floor" in res["findings_dropped"][0].drop_reason
+
+    def test_a_pure_release_diff_with_zero_chunks_yields_no_finding(self):
+        """The control: no offending file, no finding, same as before the fix."""
+        forge = FakeForge(
+            diff="".join(self._binary_file_diff(p) for p in self.MACHINERY_BASENAMES)
+        )
+        res = orchestrate_review(forge, REF, FakeLLM(), post=False)
+        assert res["chunk_count"] == 0
+        assert res["findings_active"] == []
+        assert res["verdict"] == "Approved"
+
+
 class TestChunkTimeoutRetry:
     """A chunk that outruns the LLM deadline gets ONE smaller-prompt retry."""
 
@@ -2475,8 +2702,12 @@ class TestChunkTimeoutRetry:
         calls: list[dict] = []
 
         def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
-                max_tokens=None, context_lines=None):
-            calls.append({"context_lines": context_lines, "path": files[0].path})
+                max_tokens=None, context_lines=None, context_blocks=""):
+            calls.append({
+                "context_lines": context_lines,
+                "context_blocks": context_blocks,
+                "path": files[0].path,
+            })
             outcome = outcomes.pop(0)
             return [Finding(
                 file=files[0].path, line=1, severity="outofscope",
@@ -2569,3 +2800,200 @@ class TestChunkTimeoutRetry:
         assert not orchestrator._is_timeout_error("LLMError: m1: HTTP 500")
         assert not orchestrator._is_timeout_error("JSONDecodeError: bad json")
         assert not orchestrator._is_timeout_error("")
+
+
+class TestSamplingRecord:
+    """``sampling`` rides EVERY exit of ``orchestrate_review``.
+
+    The three exits are the normal return, ``_summary_only_run`` (empty
+    diff), and ``_error_run`` (five call sites); each is driven below.
+    """
+
+    class _Sampled(FakeLLM):
+        temperature = 0.0
+        seed = 11
+        models = ["fast", "slow"]
+
+    def test_normal_return_carries_the_client_knobs(self):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(forge, REF, self._Sampled(), post=False)
+        assert res["sampling"] == {
+            "temperature": 0.0, "seed": 11, "models": ["fast", "slow"],
+        }
+
+    def test_empty_diff_exit_carries_the_client_knobs(self):
+        forge = FakeForge(diff="")
+        res = orchestrate_review(forge, REF, self._Sampled(), post=False)
+        assert res["sampling"]["seed"] == 11
+
+    def test_error_exit_carries_the_client_knobs(self):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        forge.fail.add("get_diff")
+        res = orchestrate_review(forge, REF, self._Sampled(), post=False)
+        assert res["verdict"] == "Error"
+        assert res["sampling"]["models"] == ["fast", "slow"]
+
+    def test_a_silent_client_still_gets_all_three_keys(self):
+        forge = FakeForge(diff=TWO_FILE_DIFF)
+        res = orchestrate_review(forge, REF, FakeLLM(), post=False)
+        assert res["sampling"] == {
+            "temperature": None, "seed": None, "models": [],
+        }
+
+class TestSweepSeesTheDiscussion:
+    """Existing threads reach the sweep prompt, fetched once (issue 06)."""
+
+    THREAD = Thread(
+        path="src/supabase.ts", line=None, resolved=False, author="bob",
+        body_snippet="We already argued this one out on the earlier PR.",
+    )
+
+    def test_threads_for_digested_files_reach_the_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF, threads=[self.THREAD])
+
+        orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert [t.path for t in calls[0]["threads"]] == ["src/supabase.ts"]
+
+    def test_a_thread_on_an_undigested_file_is_filtered_out(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        elsewhere = Thread(
+            path="docs/notes.md", line=None, resolved=False, author="carol",
+            body_snippet="Unrelated.",
+        )
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF, threads=[elsewhere])
+
+        orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert calls[0]["threads"] == []
+
+    def test_a_list_threads_failure_still_runs_the_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        forge = FakeForge(diff=SWEEP_SIGNAL_DIFF, threads=[self.THREAD])
+        forge.fail.add("list_threads")
+
+        res = orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert len(calls) == 1
+        assert calls[0]["threads"] == []
+        assert res["chunks_failed"] == 0
+
+    def test_threads_are_fetched_once_for_the_sweep_and_the_dedup(self):
+        class CountingForge(FakeForge):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.thread_calls = 0
+
+            def list_threads(self, ref):
+                self.thread_calls += 1
+                return super().list_threads(ref)
+
+        forge = CountingForge(diff=SWEEP_SIGNAL_DIFF, threads=[self.THREAD])
+        orchestrate_review(forge, REF, FakeLLM('{"findings": []}'), post=False)
+
+        assert forge.thread_calls == 1
+
+TS_CONTEXT_DIFF_A = (
+    "diff --git a/src/a.ts b/src/a.ts\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    "+++ b/src/a.ts\n"
+    "@@ -0,0 +1,2 @@\n"
+    "+import { Effect } from 'effect';\n"
+    "+export const a = Effect;\n"
+)
+
+TS_CONTEXT_DIFF_B = TS_CONTEXT_DIFF_A.replace("src/a.ts", "src/b.ts")
+
+TS_PACKAGE_JSON = '{"dependencies": {"effect": "4.0.0"}}'
+
+
+class _ReaderForge(FakeForge):
+    """FakeForge with the optional ``get_file_content``, counting every call."""
+
+    def __init__(self, *args, raises: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.raises = raises
+        self.content_calls: list[tuple[str, str]] = []
+
+    def get_file_content(self, ref, path, *, sha):
+        self.content_calls.append((path, sha))
+        if self.raises:
+            raise RuntimeError("boom get_file_content")
+        return TS_PACKAGE_JSON if path == "package.json" else None
+
+
+class TestChunkContextInjection:
+    """Issues 01/02: dependency pins and definitions reach the worker prompt,
+    and every way that read can fail degrades to no block, never to a failure."""
+
+    def _recording_llm(self, prompts):
+        class RecordingLLM:
+            def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
+                       timeout_s=60.0):
+                prompts.append(f"{system}\n{user}")
+                return InvokeResult(
+                    text='{"findings": [], "escalations": []}',
+                    input_tokens=1, output_tokens=1,
+                    model="m", backend="b", elapsed_ms=1,
+                )
+        return RecordingLLM()
+
+    def _real_reviewer(self, monkeypatch):
+        monkeypatch.setattr(orchestrator.reviewer, "review_chunk", REAL_REVIEW_CHUNK)
+        monkeypatch.setattr(orchestrator.reviewer, "load_prompt", REAL_LOAD_PROMPT)
+
+    def test_the_dependency_block_reaches_the_prompt(self, monkeypatch):
+        self._real_reviewer(monkeypatch)
+        prompts: list[str] = []
+        res = orchestrate_review(
+            _ReaderForge(diff=TS_CONTEXT_DIFF_A), REF,
+            self._recording_llm(prompts), post=False,
+        )
+        assert res["chunks_failed"] == 0
+        assert any("### Dependency versions" in p for p in prompts)
+        assert any("effect@4.0.0" in p for p in prompts)
+
+    def test_a_reader_that_raises_still_reviews_and_adds_no_block(self, monkeypatch):
+        self._real_reviewer(monkeypatch)
+        prompts: list[str] = []
+        forge = _ReaderForge(diff=TS_CONTEXT_DIFF_A, raises=True)
+        res = orchestrate_review(forge, REF, self._recording_llm(prompts), post=False)
+
+        assert res["verdict"] == "Approved"
+        assert res["chunks_failed"] == 0
+        assert forge.content_calls, "the reader was never consulted"
+        assert all("### Dependency versions" not in p for p in prompts)
+        assert all("### Definitions referenced by this chunk" not in p for p in prompts)
+
+    def test_one_manifest_is_read_once_across_two_chunks(self):
+        forge = _ReaderForge(diff=TS_CONTEXT_DIFF_A + TS_CONTEXT_DIFF_B)
+        res = orchestrate_review(
+            forge, REF, FakeLLM("{}"), post=False, max_files_per_chunk=1,
+        )
+        assert res["chunk_count"] == 3  # two chunks plus the sweep
+        manifest_reads = [c for c in forge.content_calls if c[0] == "package.json"]
+        assert len(manifest_reads) == 1, forge.content_calls
+
+    def test_an_empty_head_sha_skips_the_reader_entirely(self):
+        pr = make_pr()
+        pr.source_sha = ""
+        forge = _ReaderForge(pr=pr, diff=TS_CONTEXT_DIFF_A)
+        res = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+
+        assert res["chunks_failed"] == 0
+        assert forge.content_calls == []
+
+    def test_every_read_uses_the_pr_head_sha(self):
+        forge = _ReaderForge(diff=TS_CONTEXT_DIFF_A)
+        orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
+        assert forge.content_calls
+        assert all(sha == forge.pr.source_sha for _, sha in forge.content_calls)
+
+    def test_a_forge_without_the_method_builds_no_reader(self):
+        forge = FakeForge(diff=TS_CONTEXT_DIFF_A)
+        assert orchestrator._make_file_reader(forge, REF, forge.pr) is None

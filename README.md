@@ -2,7 +2,7 @@
 
 Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
 
-prxref inspects pull and merge requests across the three major code hosting forges in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary.
+prxref inspects pull and merge requests across the three major code hosting forges in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary.
 
 ```
                   ┌──────────────────────┐
@@ -48,6 +48,21 @@ prxref inspects pull and merge requests across the three major code hosting forg
                   │     + Summary        │
                   └──────────────────────┘
 ```
+
+## Deterministic Checks and Quality Passes
+
+Not every finding comes from a model, and no finding posts unfiltered. prxref
+computes one class of finding directly from the parsed diff — the
+release-shaped-PR check — and then runs every finding, model-authored or not,
+through eleven deterministic passes: location validation, `package.json` claim
+checks, line alignment, thread dedup, settled-thread suppression, severity
+consistency, the removal-claim check, the hedge gate, the quality gate, sweep
+dedup, and the containment note. A filtered finding is never discarded
+silently — it is kept with a `drop_reason` for the run log, and visible in a
+`--no-post` dry run or under `--format json`.
+
+The passes, the checks, every `drop_reason` string, and which of them have a
+knob: [docs/quality.md](docs/quality.md).
 
 ## Quickstart
 
@@ -109,6 +124,8 @@ export PRXREF_LLM_MODELS="openrouter/meta-llama/llama-3.3-70b-instruct,bedrock/a
 
 On a reasoning model the hidden reasoning trace draws from the **same** completion budget as the answer, so turning `PRXREF_LLM_REASONING_EFFORT` up makes truncation *more* likely. A truncated chunk is counted as failed and the posted summary names the reason and the variable to raise; see [Reasoning models and the token budget](docs/env-vars.md#reasoning-models-and-the-token-budget).
 
+Temperature `0.0` and an optional `PRXREF_LLM_SEED` are sent on every call, but neither makes a review bit-reproducible — provider fingerprints, load-balanced backends, and gateways that ignore `seed` all still vary the model's output. Everything downstream of the model is deterministic: findings are ordered by `(file, line, title)` and the caps break ties by content, and the run record's `sampling` field reports which knobs were in force. See [Determinism](docs/llm.md#determinism-what-is-pinned-and-what-still-varies).
+
 See [docs/llm.md](docs/llm.md) for architecture, failover behavior, and backend setup, and [docs/env-vars.md](docs/env-vars.md#tuning-for-your-team) for tuning the confidence floor and finding caps to your team.
 
 ## Forge Authentication
@@ -125,7 +142,7 @@ Configure the authentication token matching your forge:
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
 
-See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference and [docs/forges.md](docs/forges.md) for forge specifics.
+See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference, [docs/forges.md](docs/forges.md) for forge specifics, [docs/quality.md](docs/quality.md) for the deterministic checks and every drop reason, and [docs/systemic-sweep.md](docs/systemic-sweep.md) for the whole-PR sweep's digest classes.
 
 ## Webhook Server
 
@@ -142,9 +159,10 @@ The service exposes:
 ## CLI Flags
 
 - `--pr-url URL` — full web URL of the PR or MR (required for `review`).
-- `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge.
+- `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge. In text mode this also prints every active finding's location, title, and body, and every dropped finding with its drop reason.
 - `--max-chunks N` — override maximum diff chunks evaluated (default `8`).
-- `-v, --verbose` — output run timing, token counts, and finding breakdowns to stdout.
+- `-v, --verbose` — output run timing, token counts, and finding breakdowns to stdout; in text mode this also prints finding bodies and dropped findings, same as `--no-post`.
+- `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout — `verdict`, `findings` (active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `title`, `body`, `drop_reason`), `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`, `posted`, and `sampling` (the `temperature`, `seed`, and `models` the run had in force — every review result carries it).
 
 ## Exit Codes
 
