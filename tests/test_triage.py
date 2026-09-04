@@ -452,3 +452,64 @@ def test_finding_dataclass_shape():
     )
     assert f.file == "a.py"
     assert f.drop_reason is None
+
+
+class TestCopyHeaders:
+    """``copy from``/``copy to`` extended headers mark a copy, not a rename."""
+
+    def test_parses_git_copy_headers(self):
+        diff = (
+            "diff --git a/pkg/a.json b/pkg/b.json\n"
+            "similarity index 53%\n"
+            "copy from a/pkg/a.json\n"
+            "copy to b/pkg/b.json\n"
+        )
+        files = parse_unified_diff(diff)
+        assert len(files) == 1
+        f = files[0]
+        assert f.status == "copied"
+        assert f.old_path == "pkg/a.json"
+        assert f.new_path == "pkg/b.json"
+        assert f.path == "pkg/b.json"
+
+    def test_parses_bitbucket_server_copy_headers(self):
+        diff = (
+            "diff --git src://pkg/a.json dst://pkg/b.json\n"
+            "dissimilarity index 12%\n"
+            "copy from src://pkg/a.json\n"
+            "copy to dst://pkg/b.json\n"
+        )
+        files = parse_unified_diff(diff)
+        assert len(files) == 1
+        f = files[0]
+        assert f.status == "copied"
+        assert f.old_path == "pkg/a.json"
+        assert f.new_path == "pkg/b.json"
+
+    def test_similarity_index_line_is_consumed(self):
+        diff = (
+            "diff --git a/pkg/a.json b/pkg/b.json\n"
+            "similarity index 53%\n"
+            "copy from a/pkg/a.json\n"
+            "copy to b/pkg/b.json\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        files = parse_unified_diff(diff)
+        assert len(files) == 1
+        assert len(files[0].hunks) == 1
+        assert [ln.text for ln in files[0].hunks[0].lines] == ["old", "new"]
+
+    def test_copied_status_renders_copy_headers(self):
+        from prxref.reviewer import _render_file
+
+        diff = (
+            "diff --git a/pkg/a.json b/pkg/b.json\n"
+            "copy from a/pkg/a.json\n"
+            "copy to b/pkg/b.json\n"
+        )
+        rendered = _render_file(parse_unified_diff(diff)[0])
+        assert "copy from pkg/a.json" in rendered
+        assert "copy to pkg/b.json" in rendered
+        assert "rename from" not in rendered
