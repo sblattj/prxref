@@ -11,6 +11,7 @@ from prxref.quality import (
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
+    apply_removal_claim_check,
     apply_severity_consistency,
     apply_thread_dedup,
     is_duplicate_of_existing,
@@ -1075,3 +1076,95 @@ class TestBodyCitationGrammar:
             body="Also line 55 matters.",
         )
         assert _body_cited_lines(f) == [40, 55]
+
+
+COPY_DIFF = (
+    "diff --git src://pkg/alpha/package.json dst://pkg/beta/package.json\n"
+    "similarity index 53%\n"
+    "copy from pkg/alpha/package.json\n"
+    "copy to pkg/beta/package.json\n"
+    "@@ -1,1 +1,1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+DELETE_DIFF = (
+    "diff --git a/src/old.ts b/src/old.ts\n"
+    "deleted file mode 100644\n"
+    "--- a/src/old.ts\n"
+    "+++ /dev/null\n"
+    "@@ -1,1 +0,0 @@\n"
+    "-gone\n"
+)
+
+
+class TestRemovalClaimCheck:
+    """``apply_removal_claim_check`` drops removal claims the diff contradicts."""
+
+    def test_drops_claim_when_the_copy_source_is_still_present(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/beta/package.json",
+            title="Alpha package.json removed by rename to beta",
+            body="pkg/alpha/package.json no longer exists after this PR.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert len(out) == 1
+        assert (out[0].drop_reason or "").startswith(
+            "claims removal of a path present in the post-image"
+        )
+        assert "pkg/alpha/package.json" in out[0].drop_reason
+
+    def test_claim_named_only_in_prose_against_the_new_file_is_dropped(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/beta/package.json",
+            title="Package moved",
+            body="The alpha/package.json was removed in this change.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert (out[0].drop_reason or "").startswith(
+            "claims removal of a path present in the post-image"
+        )
+
+    def test_keeps_claim_about_a_genuinely_removed_path(self):
+        files = parse_unified_diff(DELETE_DIFF)
+        f = _f(
+            file="src/old.ts",
+            title="File removed",
+            body="src/old.ts was removed by this PR.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert out[0].drop_reason is None
+
+    def test_keeps_a_non_removal_finding(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/beta/package.json",
+            title="Missing version field",
+            body="pkg/alpha/package.json defines a version; the copy does not.",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert out[0].drop_reason is None
+
+    def test_passes_through_already_dropped_findings(self):
+        files = parse_unified_diff(COPY_DIFF)
+        f = _f(
+            file="pkg/beta/package.json",
+            title="Alpha package.json removed",
+            body="pkg/alpha/package.json no longer exists.",
+            drop_reason="invalid severity: 'nope'",
+        )
+        out = apply_removal_claim_check([f], files)
+        assert out[0].drop_reason == "invalid severity: 'nope'"
+
+    def test_preserves_input_order(self):
+        files = parse_unified_diff(COPY_DIFF)
+        findings = [
+            _f(title="First", body="nothing to see"),
+            _f(title="Second", body="pkg/alpha/package.json was removed."),
+            _f(title="Third", body="still nothing"),
+        ]
+        out = apply_removal_claim_check(findings, files)
+        assert [x.title for x in out] == ["First", "Second", "Third"]
+        assert [x.drop_reason is None for x in out] == [True, False, True]
