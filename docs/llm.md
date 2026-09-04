@@ -102,3 +102,18 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
   ties by finding content (confidence first, then file, line, and normalized
   title), never by the order the workers happened to return in. The same
   findings in any arrival order therefore produce the same review.
+
+## Worker Prompt Context
+
+Each worker sees one chunk's unified diff, trimmed to `PRXREF_CHUNK_CONTEXT_LINES` lines around every change. Two optional blocks are appended after the diff to answer the questions the diff alone cannot.
+
+### Dependency versions and definitions
+
+- **`### Dependency versions`** — `name@version` for each third-party package the chunk's *added* lines import, resolved from the nearest manifest walking up from each changed file to the repository root: `package.json` (`dependencies` + `devDependencies`), `pyproject.toml` (`[project] dependencies` and `[tool.poetry.dependencies]`), `go.mod` `require` lines, and `Cargo.toml` `[dependencies]`. Only imported packages appear. Relative and `node:` specifiers, Python stdlib modules, and relative Python imports are excluded. Without this block a reviewer answers library semantics from whichever major dominates its training data.
+- **`### Definitions referenced by this chunk`** — for identifiers used on added lines whose definition sits in the same file but *outside* the rendered hunk, one `path:line: definition` entry each, taken from the file as served at the PR head. The entry is the defining line plus continuation lines up to a balanced bracket or 6 lines. Caps: at most 40 entries and 8000 characters, with a trailing `… N more definitions omitted` when trimmed; files over 512 KiB are skipped. Definitions the chunk itself adds are never repeated.
+
+Both blocks are **best effort**. They are built from an optional forge method, `get_file_content(ref, path, *, sha) -> str | None`, resolved with `getattr` and always called at the PR head sha (`pr.source_sha`). Every read is cached per run, so one manifest is fetched once no matter how many chunks want it, and any exception from the adapter degrades to no block. A forge that does not implement the method — and a PR with no head sha — reviews exactly as before, with no header and no extra requests. Nothing here can fail a review.
+
+The worker prompt also carries two confidence rules tied to these blocks: a finding that depends on third-party runtime semantics whose version is not listed, or on the semantics of a symbol whose definition is not shown, must cap confidence at 0.5 and be phrased as a question.
+
+On the timeout retry — the one deterministic re-run with `context_lines=0` — the dependency block is kept and the definitions block is dropped, because shrinking the prompt is the entire point of that retry.
