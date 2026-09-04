@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Iterator, Sequence
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -40,6 +41,10 @@ _MAX_PAGES = 50
 # it is still bounded: GitHub's validation errors enumerate every unmatched
 # subschema and run long enough to bury the log line that carries them.
 _ERROR_DETAIL_CHARS = 400
+# get_file_content is best-effort context, not the review itself: a body past
+# this size (or one that looks binary) is worth skipping rather than shipping
+# hundreds of KB into a worker prompt.
+_MAX_FILE_CONTENT_BYTES = 512 * 1024
 
 
 def _response_detail(resp: requests.Response) -> str:
@@ -334,6 +339,47 @@ class ForgeImpl:
             )
 
         return threads
+
+    def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
+        """Return the text of ``path`` at commit ``sha``, best-effort.
+
+        Requests the raw media type so a 2xx response is the file's bytes
+        rather than a base64-wrapped JSON envelope. A JSON body coming back
+        anyway means the raw Accept was not honoured, or ``path`` names a
+        directory or a file over GitHub's 1 MB raw-content ceiling — both
+        read as "no content" here. Never raises.
+        """
+        if not sha:
+            return None
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/contents/"
+            f"{quote(path, safe='/')}"
+        )
+        headers = self._headers(ref.host, {"Accept": "application/vnd.github.raw+json"})
+        try:
+            resp = self.session.get(url, headers=headers, params={"ref": sha})
+        except requests.RequestException as e:
+            logger.debug("get_file_content failed for %s@%s: %s", path, sha, e)
+            return None
+        if not resp.ok:
+            logger.debug(
+                "get_file_content got HTTP %s for %s@%s", resp.status_code, path, sha
+            )
+            return None
+        if "json" in resp.headers.get("Content-Type", "").lower():
+            logger.debug(
+                "get_file_content got a JSON body for %s@%s (raw Accept not "
+                "honoured, a directory, or over the 1 MB ceiling)", path, sha,
+            )
+            return None
+        content = resp.content
+        if len(content) > _MAX_FILE_CONTENT_BYTES:
+            logger.debug("get_file_content body over 512 KiB for %s@%s", path, sha)
+            return None
+        if b"\x00" in content:
+            logger.debug("get_file_content body looked binary for %s@%s", path, sha)
+            return None
+        return content.decode("utf-8", errors="replace")
 
     def prune_inline_comments(self, ref: PRRef) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.

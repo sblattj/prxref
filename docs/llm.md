@@ -58,6 +58,7 @@ The client iterates through `PRXREF_LLM_MODELS` in left-to-right priority order 
   - Malformed JSON response
 - On any failure, `OpenAICompatClient` logs the model error and tries the next model in the chain immediately.
 - If all configured models fail, `LLMError` is raised containing the per-model failure reasons.
+- A 4xx body that names a model as permanently gone (deprovisioned, renamed, not supported, or never enabled for this integrator) is cached for the life of the client: every later call skips that model outright — no request, no per-call log — with a single WARNING logged the one time it is marked. `LiteLLMClient` mirrors the same cache, keyed on the exception litellm raises (a 4xx-shaped error naming a model) instead of an HTTP status; it filters the unavailable model out of both the primary `model` and its native `fallbacks` before calling litellm, and raises `LLMError` without calling litellm at all once every configured model has been marked. A 5xx, a timeout, or a connection error is never cached — only a 4xx carrying that phrasing is treated as permanent.
 
 ---
 
@@ -81,3 +82,39 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
 - The first model in `PRXREF_LLM_MODELS` is used as the primary model.
 - Remaining models in the list are passed to `litellm.completion` via the `fallbacks=` parameter.
 - `num_retries=0` is enforced to ensure immediate failover to backup models without blocking retries on failed endpoints.
+
+---
+
+## Determinism: what is pinned, and what still varies
+
+- `PRXREF_LLM_TEMPERATURE` defaults to `0.0`, and `0.0` is **sent** on the wire
+  rather than omitted.
+- `PRXREF_LLM_SEED` is sent whenever it is set, on both backends.
+- **Neither makes a review bit-reproducible.** Providers vary by system
+  fingerprint, load-balanced backends serve the same model from different
+  hardware, MoE routing shifts with batch composition, and many gateways accept
+  an unknown top-level `seed` and ignore it. Two identical runs may still return
+  different findings, and `prxref` cannot detect a gateway that dropped the seed.
+- The `sampling` field in the run record — `{"temperature", "seed", "models"}`,
+  present on every exit including a failed run — tells you which knobs were
+  actually in force for the run you are looking at.
+- What *is* deterministic is everything downstream of the model: findings are
+  ordered by `(file, line, title)`, and the error and inline-comment caps break
+  ties by finding content (confidence first, then file, line, and normalized
+  title), never by the order the workers happened to return in. The same
+  findings in any arrival order therefore produce the same review.
+
+## Worker Prompt Context
+
+Each worker sees one chunk's unified diff, trimmed to `PRXREF_CHUNK_CONTEXT_LINES` lines around every change. Two optional blocks are appended after the diff to answer the questions the diff alone cannot.
+
+### Dependency versions and definitions
+
+- **`### Dependency versions`** — `name@version` for each third-party package the chunk's *added* lines import, resolved from the nearest manifest walking up from each changed file to the repository root: `package.json` (`dependencies` + `devDependencies`), `pyproject.toml` (`[project] dependencies` and `[tool.poetry.dependencies]`), `go.mod` `require` lines, and `Cargo.toml` `[dependencies]`. Only imported packages appear. Relative and `node:` specifiers, Python stdlib modules, and relative Python imports are excluded. Without this block a reviewer answers library semantics from whichever major dominates its training data.
+- **`### Definitions referenced by this chunk`** — for identifiers used on added lines whose definition sits in the same file but *outside* the rendered hunk, one `path:line: definition` entry each, taken from the file as served at the PR head. The entry is the defining line plus continuation lines up to a balanced bracket or 6 lines. Caps: at most 40 entries and 8000 characters, with a trailing `… N more definitions omitted` when trimmed; files over 512 KiB are skipped. Definitions the chunk itself adds are never repeated.
+
+Both blocks are **best effort**. They are built from an optional forge method, `get_file_content(ref, path, *, sha) -> str | None`, resolved with `getattr` and always called at the PR head sha (`pr.source_sha`). Every read is cached per run, so one manifest is fetched once no matter how many chunks want it, and any exception from the adapter degrades to no block. A forge that does not implement the method — and a PR with no head sha — reviews exactly as before, with no header and no extra requests. Nothing here can fail a review.
+
+The worker prompt also carries two confidence rules tied to these blocks: a finding that depends on third-party runtime semantics whose version is not listed, or on the semantics of a symbol whose definition is not shown, must cap confidence at 0.5 and be phrased as a question.
+
+On the timeout retry — the one deterministic re-run with `context_lines=0` — the dependency block is kept and the definitions block is dropped, because shrinking the prompt is the entire point of that retry.

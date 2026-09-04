@@ -3,8 +3,12 @@
 Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 
 1. ``forge.get_pr`` → PRData, ``forge.get_diff`` → raw diff,
-   ``parse_unified_diff`` → files. An empty or unchunkable diff
-   short-circuits to a summary-only run with verdict ``Approved``.
+   ``parse_unified_diff`` → files. An empty or unchunkable diff (every file
+   binary, or no files at all) short-circuits to a summary-only run with
+   verdict ``Approved`` — no chunk worker or sweep ever runs, but
+   ``heuristics.release_shape_findings`` still does, gated the same as on
+   the normal path, so a release-shaped diff with no reviewable text still
+   gets its deterministic finding instead of a silent approval.
 2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``, each chunk
    sized to ``token_budget`` and capped at ``max_files_per_chunk`` files).
 3. Parallel worker fan-out: one ``reviewer.review_chunk(llm, files, pr)``
@@ -27,20 +31,49 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    chunk results, and counts as one more review unit: ``chunk_count`` is
    ``len(chunks) + 1`` whenever the sweep ran, and a sweep failure is one
    failed chunk in the partial-review banner.
-5. Quality passes in order: location validation (a ``file`` naming no
-   path of the parsed diff is dropped, not rendered) →
-   ``apply_line_align`` → thread dedup
-   (existing threads fetched best-effort; failure means no threads) →
-   severity consistency (findings sharing a normalized title are raised
-   to the group's max severity — the sweep's corroborating title counts
-   toward its group) → ``apply_quality_gate(confidence_floor=,
-   max_errors=)`` → sweep dedup (``apply_sweep_dedup`` drops a sweep
-   finding that restates a chunk finding that SURVIVED the gate, on file
-   + normalized title; running it last is what keeps a sub-floor chunk
+5. Deterministic checks and quality passes, in exactly this order — the
+   raw chunk + sweep findings first gain
+   ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
+   about a PR that is ≥80% release machinery yet also touches source),
+   folded in BEFORE the passes so it is filtered like any other finding,
+   and spliced in at the chunk/sweep boundary — before the sweep's own
+   findings, never after — so it is always a CHUNK-side finding to
+   ``apply_sweep_dedup`` and can never be dropped as a duplicate of a
+   chunk worker's own restatement:
+
+   ``apply_location_validation`` (a ``file`` naming no path of the parsed
+   diff is dropped, not rendered) → ``apply_manifest_claim_check`` (a
+   ``package.json`` claim whose dependency is not the key on the anchored
+   line, or whose asserted section disagrees with the actual one; it must
+   precede line align, which is what makes it read the model's RAW
+   anchor) → ``apply_line_align`` → ``apply_thread_dedup`` (existing
+   threads fetched best-effort BEFORE the workers run, and after the
+   stale-inline prune; failure means no threads) →
+   ``apply_settled_thread_suppression`` (a finding re-litigating a
+   subject an existing thread already argued out, line-independently) →
+   ``apply_severity_consistency`` (findings sharing a normalized title
+   are raised to the group's max severity — the sweep's corroborating
+   title counts toward its group) → ``apply_removal_claim_check`` (a
+   claim that a NAMED path was removed when the post-image still carries
+   it) → ``apply_hedge_gate`` (a finding whose own text conditions the
+   defect on something the worker never established) →
+   ``apply_quality_gate(confidence_floor=, max_errors=)``, which returns
+   its findings in content order, so the chunk/sweep boundary is
+   re-derived here from finding identity rather than carried across the
+   gate as an index → ``apply_sweep_dedup`` (drops a sweep finding that
+   restates a chunk finding that SURVIVED the gate, on file + normalized
+   title; running it after the gate is what keeps a sub-floor chunk
    finding from suppressing its higher-confidence sweep duplicate and
-   then dying at the gate itself). Dropped findings
-   are retained in the result with ``drop_reason`` set, never silently
-   discarded.
+   then dying at the gate itself) → ``apply_containment_note`` (a throw
+   / panic / crash / unhandled-rejection finding that never names its
+   catch or its propagation target gets its body suffixed with
+   ``" [containment boundary not stated]"``; textual only, runs last so
+   it touches both the active and dropped copies of chunk and sweep
+   findings alike). Dropped findings are retained in the result with
+   ``drop_reason`` set, never silently discarded, and both lists come out
+   sorted by ``finding_sort_key``. Every result — including an error or
+   summary-only exit — carries a ``sampling`` record naming the
+   temperature, seed, and model chain actually in force.
 6. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;
@@ -76,21 +109,36 @@ import logging
 import re
 import threading
 import time
+from collections import Counter
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import reviewer, systemic
-from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
+from . import chunk_context, heuristics, reviewer, systemic
+from .forges.base import (
+    ATTRIBUTION_MARKER,
+    Forge,
+    InlineComment,
+    PRData,
+    PRRef,
+    Thread,
+)
 from .llm import LLMClient
 from .quality import (
     active,
+    apply_containment_note,
+    apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
+    apply_manifest_claim_check,
     apply_quality_gate,
+    apply_removal_claim_check,
+    apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_sweep_dedup,
     apply_thread_dedup,
+    finding_rank_key,
+    finding_sort_key,
 )
 from .trace import Tracer, get_tracer
 from .triage import (
@@ -317,7 +365,11 @@ def orchestrate_review(
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
-    tracer.event("run", "start", forge=ref.forge, url=ref.url, number=ref.number)
+    sampling = _sampling(llm)
+    tracer.event(
+        "run", "start", forge=ref.forge, url=ref.url, number=ref.number,
+        sampling=sampling,
+    )
 
     try:
         with tracer.span("forge.get_pr"):
@@ -327,7 +379,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"get_pr failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     try:
@@ -339,7 +391,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"get_diff failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     # Wrapped like every neighbouring stage. These two were the only ones that
@@ -357,7 +409,7 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     try:
@@ -372,19 +424,47 @@ def orchestrate_review(
         tracer.event("run", "fail")
         return _error_run(
             forge, ref, post, 0, f"build_chunks failed: {e}", t0,
-            post_mode=post_mode, tracer=tracer,
+            post_mode=post_mode, tracer=tracer, sampling=sampling,
         )
 
     if not chunks:
-        tracer.event("run", "ok", chunks_reviewed=0, findings=0)
+        # No chunk survived build_chunks — an empty diff, or every file
+        # binary — but the release-shape heuristic is pure and needs no
+        # chunk to fire on: computed here so a release PR whose only
+        # non-machinery file is binary still gets the deterministic finding
+        # instead of a silent Approved (issue #29 residual, concern #2).
+        release_shape = heuristics.release_shape_findings(files)
+        tracer.event("run", "ok", chunks_reviewed=0, findings=len(release_shape))
         return _summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
+            sampling=sampling, release_shape_findings=release_shape,
+            confidence_floor=confidence_floor, max_errors=max_errors,
         )
+
+    # Pruned BEFORE the threads are listed, and both before the review units
+    # run. The prune-then-list order is load-bearing: reading threads first
+    # would let this run's findings be suppressed as already-discussed against
+    # prxref's OWN stale comments, which the prune then deletes. Both moved
+    # ahead of the dispatch because the sweep needs the discussion in its
+    # prompt, and a review that never starts has nothing to say either way.
+    if post and post_mode in POST_INLINE_MODES:
+        _prune_stale_inline_comments(forge, ref)
+
+    # Fetched BEFORE the review units run, not after: the sweep needs the
+    # existing discussion in its own prompt, and the same list serves the
+    # post-hoc thread passes. Best-effort by contract — a forge that cannot
+    # list threads still gets a review.
+    try:
+        threads = forge.list_threads(ref)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("list_threads failed (best-effort): %s", e)
+        threads = []
 
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
+        reader=_make_file_reader(forge, ref, pr),
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -395,7 +475,7 @@ def orchestrate_review(
     results.append(
         _run_sweep(
             llm, files, pr, max_tokens=max_tokens,
-            token_budget=token_budget, tracer=tracer,
+            token_budget=token_budget, tracer=tracer, threads=threads,
         )
     )
 
@@ -414,7 +494,7 @@ def orchestrate_review(
         return _error_run(
             forge, ref, post, len(chunks) + 1, reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
-            post_mode=post_mode,
+            post_mode=post_mode, sampling=sampling,
         )
 
     chunks_failed = sum(1 for r in results if r["error"])
@@ -441,18 +521,29 @@ def orchestrate_review(
     if results[-1]["error"]:
         failed_chunks.append((results[-1]["error"], []))
 
-    if post and post_mode in POST_INLINE_MODES:
-        _prune_stale_inline_comments(forge, ref)
-
-    try:
-        threads = forge.list_threads(ref)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("list_threads failed (best-effort): %s", e)
-        threads = []
+    # A deterministic, non-LLM finding folded in before the quality passes so
+    # it flows through every one of them exactly like a model finding (issue
+    # #10): file-level (line=0) survives apply_line_align untouched, and
+    # warning/1.0 clears apply_quality_gate trivially. Folded in AT the
+    # chunk/sweep boundary — before the sweep's own findings, not after —
+    # and sweep_start moves with it: apply_sweep_dedup only ever drops a
+    # SWEEP-side finding, so appending this after the sweep's findings would
+    # put it on the sweep side of that boundary, where a chunk worker's own
+    # finding sharing its file and normalized title could drop the
+    # deterministic finding as "duplicate of chunk finding" and keep the
+    # model's restatement instead.
+    release_shape = heuristics.release_shape_findings(files)
+    findings = findings[:sweep_start] + release_shape + findings[sweep_start:]
+    sweep_start += len(release_shape)
 
     findings = apply_location_validation(findings, [f.path for f in files])
+    # BEFORE apply_line_align, deliberately: the manifest check compares the
+    # model's raw anchor against the key and section it claims, and realignment
+    # can move a correctly anchored claim onto a neighbouring entry first.
+    findings = apply_manifest_claim_check(findings, files)
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
+    findings = apply_settled_thread_suppression(findings, threads)
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1
@@ -465,17 +556,43 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
+    findings = apply_removal_claim_check(findings, files)
+    findings = apply_hedge_gate(findings)
+    # The sweep boundary is positional, and the gate now returns its findings
+    # in content order, so the boundary is re-derived from the identity of the
+    # sweep's own findings rather than carried across the gate as an index.
+    sweep_identities = Counter(
+        _origin_key(f) for f in findings[sweep_start:]
+    )
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
     )
+    chunk_part: list[Finding] = []
+    sweep_part: list[Finding] = []
+    for f in findings:
+        key = _origin_key(f)
+        if sweep_identities[key] > 0:
+            sweep_identities[key] -= 1
+            sweep_part.append(f)
+        else:
+            chunk_part.append(f)
     # AFTER the gate, deliberately: the duplicate set is built from chunk
     # findings that survived it, so a sub-floor chunk finding cannot suppress
     # its higher-confidence sweep duplicate and then die at the gate itself —
     # that would lose the recall the sweep exists to add.
-    findings = apply_sweep_dedup(findings, sweep_start=sweep_start)
+    findings = apply_sweep_dedup(
+        chunk_part + sweep_part, sweep_start=len(chunk_part)
+    )
+    # Last, deliberately: it only decorates body text (never drop_reason or
+    # severity), so it must run after every pass that keys off title/body
+    # content, and running last means both the posted comment body and the
+    # dropped-audit copy carry the same suffixed text.
+    findings = apply_containment_note(findings)
 
-    findings_active = active(findings)
-    findings_dropped = [f for f in findings if f.drop_reason is not None]
+    findings_active = sorted(active(findings), key=finding_sort_key)
+    findings_dropped = sorted(
+        (f for f in findings if f.drop_reason is not None), key=finding_sort_key
+    )
 
     verdict = (
         "Request-Changes"
@@ -519,7 +636,7 @@ def orchestrate_review(
     if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
         ordered = sorted(
             findings_active,
-            key=lambda f: (_SEVERITY_RANK.get(f.severity, 3), -f.confidence),
+            key=lambda f: (_SEVERITY_RANK.get(f.severity, 3), *finding_rank_key(f)),
         )
         comments = [
             InlineComment(
@@ -584,6 +701,39 @@ def orchestrate_review(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "posted": posted,
+        "sampling": _sampling(llm),
+    }
+
+
+def _origin_key(finding: Finding) -> tuple:
+    """Identity used to re-derive the chunk/sweep boundary across the gate.
+
+    ``severity`` and ``confidence`` are part of the key: without them a chunk
+    finding and a sweep finding that agree on file, line, title, and body
+    collide, ``finding_sort_key`` ties them, and the Counter walk hands the
+    first survivor to the sweep side — dropping the higher-confidence chunk
+    copy as a "duplicate of chunk finding".
+    """
+    return (
+        finding.file,
+        finding.line,
+        finding.title,
+        finding.body,
+        finding.severity,
+        finding.confidence,
+    )
+
+
+def _sampling(llm: object) -> dict:
+    """Report the sampling knobs a client had in force, duck-typed.
+
+    A client that exposes none of them still yields the same three keys, so a
+    run record never has to be read as "absent means default".
+    """
+    return {
+        "temperature": getattr(llm, "temperature", None),
+        "seed": getattr(llm, "seed", None),
+        "models": list(getattr(llm, "models", []) or []),
     }
 
 
@@ -647,10 +797,62 @@ def _inline_accounting(
 HEARTBEAT_SECONDS = 30.0
 
 
+def _make_file_reader(forge: Forge, ref: PRRef, pr: PRData):
+    """A cached ``read(path) -> str | None`` over the forge's optional reader.
+
+    Returns ``None`` when the forge has no ``get_file_content`` or the PR has
+    no head sha, which is the signal to skip context injection entirely.
+    Otherwise every path is fetched at most once per run at ``pr.source_sha``,
+    and any exception from the adapter degrades to ``None``.
+    """
+    reader = getattr(forge, "get_file_content", None)
+    sha = getattr(pr, "source_sha", "") or ""
+    if reader is None or not sha:
+        return None
+
+    cache: dict[tuple[str, str], str | None] = {}
+    lock = threading.Lock()
+
+    def read(path: str) -> str | None:
+        key = (path, sha)
+        with lock:
+            if key in cache:
+                return cache[key]
+        try:
+            value = reader(ref, path, sha=sha)
+        except Exception as e:  # noqa: BLE001 - context is never worth a failed review
+            logger.debug("get_file_content(%s) failed: %s", path, e)
+            value = None
+        if not isinstance(value, str):
+            value = None
+        with lock:
+            cache[key] = value
+        return value
+
+    return read
+
+
+def _context_blocks(chunk, reader, *, include_definitions: bool) -> str:
+    """Render the chunk's dependency and definition blocks; never raises."""
+    if reader is None:
+        return ""
+    try:
+        files = chunk_context.chunk_files(chunk)
+        deps = chunk_context.dependency_versions(files, reader)
+        defs = (
+            chunk_context.referenced_definitions(files, reader)
+            if include_definitions else []
+        )
+        return chunk_context.render_context_blocks(deps, defs)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("chunk context unavailable: %s", e)
+        return ""
+
+
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
-    tracer: Tracer | None = None,
+    tracer: Tracer | None = None, reader=None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -684,7 +886,7 @@ def _run_workers(
         futures = [
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
-                max_tokens, context_lines, tracer,
+                max_tokens, context_lines, tracer, reader,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -729,6 +931,7 @@ _TIMEOUT_RETRY_CONTEXT_LINES = 0
 def _invoke_chunk(
     llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None, context_lines: int | None,
+    reader=None, *, include_definitions: bool = True,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -736,11 +939,19 @@ def _invoke_chunk(
     ``error`` always a string — for both the original attempt and the
     timeout retry in :func:`_run_worker`. Legacy dict-shaped stubs are
     accepted exactly as before.
+
+    ``reader`` is the optional cached file reader from
+    :func:`_make_file_reader`; when present the chunk's dependency and
+    definition context blocks are built here, so both the original attempt and
+    the retry carry them. ``include_definitions`` is false on the timeout
+    retry, whose whole purpose is a smaller prompt.
     """
+    blocks = _context_blocks(chunk, reader, include_definitions=include_definitions)
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, context_lines=context_lines,
+            context_blocks=blocks,
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -780,7 +991,7 @@ def _invoke_chunk(
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
-    tracer: Tracer | None = None,
+    tracer: Tracer | None = None, reader=None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -795,7 +1006,7 @@ def _run_worker(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
     )
-    res = _invoke_chunk(llm, chunk, pr, max_tokens, context_lines)
+    res = _invoke_chunk(llm, chunk, pr, max_tokens, context_lines, reader)
     if (
         res["error"]
         and _is_timeout_error(res["error"])
@@ -813,7 +1024,13 @@ def _run_worker(
         tracer.event(
             "chunk", "retry", index=index, total=total, reason="timeout",
         )
-        res = _invoke_chunk(llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES)
+        # The dependency block is a handful of tokens and survives; the
+        # definitions block is the bulky one and is dropped, because shrinking
+        # the prompt is the entire point of this retry.
+        res = _invoke_chunk(
+            llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
+            include_definitions=False,
+        )
 
     error = res["error"]
     if error:
@@ -849,6 +1066,7 @@ def _run_sweep(
     max_tokens: int | None = None,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     tracer: Tracer | None = None,
+    threads: Sequence[Thread] = (),
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -864,14 +1082,20 @@ def _run_sweep(
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
     digest = systemic.build_digest(files, token_budget)
+    digested = {f.path for f in files}
+    discussion = [t for t in threads if t.path in digested]
     logger.info(
-        "[sweep] start: %d files, digest %d chars", len(files), len(digest),
+        "[sweep] start: %d files, digest %d chars, %d thread(s)",
+        len(files), len(digest), len(discussion),
     )
-    tracer.event("sweep", "start", files=len(files), digest_chars=len(digest))
+    tracer.event(
+        "sweep", "start", files=len(files), digest_chars=len(digest),
+        threads=len(discussion),
+    )
     try:
         findings_raw, meta = reviewer.review_systemic(
             llm, digest, pr_title=pr.title, pr_description=pr.description,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens, threads=discussion,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[sweep] raised: %s", e)
@@ -1103,11 +1327,43 @@ def _trace_post_end(
 def _summary_only_run(
     forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
-    tracer: Tracer | None = None,
+    tracer: Tracer | None = None, sampling: dict | None = None,
+    release_shape_findings: list[Finding] | None = None,
+    confidence_floor: float | None = None, max_errors: int | None = None,
 ) -> dict:
+    """The no-chunk exit: an empty diff, or every file binary.
+
+    No worker ever ran, but the release-shape heuristic
+    (:func:`heuristics.release_shape_findings`) is pure and needs no chunk
+    to fire on, so its findings — passed in by the caller, already computed
+    over the full file list — are put through the same location and
+    quality passes a chunk-sourced finding gets (:func:`apply_location_validation`,
+    :func:`apply_quality_gate`) before they reach ``findings_active`` /
+    ``verdict`` / the summary. An empty diff still yields
+    ``release_shape_findings=[]`` (fewer than 2 files can never be
+    release-shaped), so this degrades to exactly the prior empty-diff
+    behaviour: ``Approved``, no findings, no banner.
+    """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
+
+    findings = list(release_shape_findings or [])
+    if findings:
+        findings = apply_location_validation(findings, [f.path for f in files])
+        findings = apply_quality_gate(
+            findings, confidence_floor=confidence_floor, max_errors=max_errors,
+        )
+    findings_active = sorted(active(findings), key=finding_sort_key)
+    findings_dropped = sorted(
+        (f for f in findings if f.drop_reason is not None), key=finding_sort_key
+    )
+    verdict = (
+        "Request-Changes"
+        if any(f.severity == "error" for f in findings_active)
+        else "Approved"
+    )
+
     wanted = post and post_mode in POST_SUMMARY_MODES
     _trace_post_begin(
         tracer, wanted=wanted, mode=post_mode, kind="empty-diff summary",
@@ -1115,7 +1371,7 @@ def _summary_only_run(
     )
     if wanted:
         summary = _render_summary(
-            pr, files, "Approved", [], "unknown", 0, 0, elapsed_ms,
+            pr, files, verdict, findings_active, "unknown", 0, 0, elapsed_ms,
             chunks_reviewed=0, chunks_failed=0,
             include_verdict=post_verdict,
         )
@@ -1126,9 +1382,9 @@ def _summary_only_run(
             logger.error("post_summary failed: %s", e)
     _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
     return {
-        "verdict": "Approved",
-        "findings_active": [],
-        "findings_dropped": [],
+        "verdict": verdict,
+        "findings_active": findings_active,
+        "findings_dropped": findings_dropped,
         "chunk_count": 0,
         "chunks_reviewed": 0,
         "chunks_failed": 0,
@@ -1136,6 +1392,7 @@ def _summary_only_run(
         "input_tokens": 0,
         "output_tokens": 0,
         "posted": posted,
+        "sampling": sampling if sampling is not None else _sampling(None),
     }
 
 
@@ -1151,6 +1408,7 @@ def _error_run(
     output_tokens: int = 0,
     post_mode: str = "summary+inline",
     tracer: Tracer | None = None,
+    sampling: dict | None = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -1190,4 +1448,5 @@ def _error_run(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "posted": posted,
+        "sampling": sampling if sampling is not None else _sampling(None),
     }
