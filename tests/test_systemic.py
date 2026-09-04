@@ -423,3 +423,6 @@ class TestSweepPromptContract:
         from prxref.reviewer import _CONTEXT_MARKER
 
         assert _CONTEXT_MARKER in load_prompt("systemic.md")
+
+    def test_the_prompt_states_the_containment_boundary_rule(self):
+        assert "containment boundary" in load_prompt("systemic.md")
