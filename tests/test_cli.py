@@ -1,4 +1,5 @@
 """Tests for prxref.cli: review subcommand, serve daemon, --version, and non-blocking exits."""
+import json
 import logging
 import os
 import subprocess
@@ -12,6 +13,7 @@ from prxref import __version__, cli
 from prxref.cli import main
 from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
+from prxref.triage import Finding
 
 
 def _install_fake_module(monkeypatch, fullname: str, **attrs) -> types.ModuleType:
@@ -307,6 +309,138 @@ class TestReviewSubcommand:
         assert "verdict: Approved" in out
         assert "coverage: 1/2 chunks reviewed" in out
         assert "counts:" not in out
+
+    def test_format_json_on_error_shaped_result_still_emits_one_object(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """``_run_review`` can return an incomplete/error-shaped result (as it
+        does today for a partial-coverage run — see the sibling text-mode
+        test above). ``--format json`` must still emit exactly one JSON
+        object, with missing keys defaulting to ``null`` and findings to
+        ``[]`` rather than raising (issue 08 FROZEN CLI CONTRACT)."""
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=42,
+            url="https://github.com/org/repo/pull/42",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+
+        def _partial_orchestrate(**kwargs):
+            return {"verdict": "Approved", "chunks_reviewed": 1, "chunks_failed": 1}
+
+        fake_runtime["set_orchestrate_side_effect"](_partial_orchestrate)
+
+        rc = main([
+            "review", "--pr-url", "https://github.com/org/repo/pull/42",
+            "--no-post", "--format", "json",
+        ])
+
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        payload = json.loads(out.strip())
+        assert payload["verdict"] == "Approved"
+        assert payload["findings"] == []
+        assert payload["chunks_reviewed"] == 1
+        assert payload["chunks_failed"] == 1
+        assert payload["chunk_count"] is None
+        assert payload["input_tokens"] is None
+        assert payload["output_tokens"] is None
+        assert payload["posted"] is None
+        assert "sampling" not in payload
+
+    def test_no_post_text_mode_indents_every_line_of_a_multiline_body(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """A multi-line finding body must have EVERY line indented two
+        spaces, not just the first (issue 08 FROZEN CLI CONTRACT)."""
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=7,
+            url="https://github.com/org/repo/pull/7",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+
+        multiline = Finding(
+            file="src/foo.py",
+            line=42,
+            severity="error",
+            confidence=0.92,
+            title="Off-by-one in loop bound",
+            body="first line\nsecond line\nthird line",
+            drop_reason=None,
+        )
+
+        def _multiline_orchestrate(**kwargs):
+            return {
+                "verdict": "Request-Changes",
+                "findings_active": [multiline],
+                "findings_dropped": [],
+                "chunk_count": 1,
+                "chunks_reviewed": 1,
+                "chunks_failed": 0,
+                "elapsed_ms": 10,
+                "input_tokens": 5,
+                "output_tokens": 5,
+                "posted": False,
+            }
+
+        fake_runtime["set_orchestrate_side_effect"](_multiline_orchestrate)
+
+        rc = main(["review", "--pr-url", "https://github.com/org/repo/pull/7", "--no-post"])
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        assert "  first line\n  second line\n  third line" in out
+
+    def test_format_json_with_verbose_emits_only_one_json_object(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """``--format json`` together with ``-v`` must still print exactly
+        one JSON object and nothing else on stdout — ``-v`` only expands
+        text-mode output, never json (issue 08 FROZEN CLI CONTRACT)."""
+        test_ref = PRRef(
+            forge="github",
+            host="github.com",
+            owner="org",
+            repo="repo",
+            number=7,
+            url="https://github.com/org/repo/pull/7",
+        )
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: test_ref)
+
+        def _full_orchestrate(**kwargs):
+            return {
+                "verdict": "commented",
+                "findings_active": [],
+                "findings_dropped": [],
+                "chunk_count": 2,
+                "chunks_reviewed": 2,
+                "chunks_failed": 0,
+                "elapsed_ms": 500,
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "posted": False,
+            }
+
+        fake_runtime["set_orchestrate_side_effect"](_full_orchestrate)
+
+        rc = main([
+            "review", "--pr-url", "https://github.com/org/repo/pull/7",
+            "--no-post", "--format", "json", "-v",
+        ])
+
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        lines = out.strip().splitlines()
+        assert len(lines) == 1
+        payload = json.loads(lines[0])
+        assert payload["verdict"] == "commented"
+        assert payload["findings"] == []
 
 
 class TestServeSubcommand:

@@ -170,9 +170,10 @@ The service exposes:
 ## CLI Flags
 
 - `--pr-url URL` — full web URL of the PR or MR (required for `review`).
-- `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge.
+- `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge. In text mode this also prints every active finding's location, title, and body, and every dropped finding with its drop reason.
 - `--max-chunks N` — override maximum diff chunks evaluated (default `8`).
-- `-v, --verbose` — output run timing, token counts, and finding breakdowns to stdout.
+- `-v, --verbose` — output run timing, token counts, and finding breakdowns to stdout; in text mode this also prints finding bodies and dropped findings, same as `--no-post`.
+- `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout — `verdict`, `findings` (active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `title`, `body`, `drop_reason`), `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`, `posted` — and nothing else on stdout.
 
 ## Exit Codes
 
