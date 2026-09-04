@@ -634,6 +634,146 @@ class TestLiteLLMClient:
         assert captured[0]["seed"] == 11
 
 
+class _FakeBadRequestError(Exception):
+    """Mimics litellm's own exception shape: a ``.message`` and a ``.model``.
+
+    Real litellm ``BadRequestError``/``NotFoundError`` instances carry both,
+    which is how the fix identifies which model in the chain actually failed
+    without depending on a reliable ``.status_code``.
+    """
+
+    def __init__(self, message: str, model: str | None = None):
+        super().__init__(message)
+        self.message = message
+        self.model = model
+
+
+class _FakeHttpError(Exception):
+    """A litellm-shaped exception carrying only ``.status_code`` (no ``.model``,
+    and a class name that does not itself say BadRequest/NotFound)."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class TestLiteLLMClientSkipsPermanentlyUnavailableModel:
+    """Mirrors OpenAICompatClient's run-lifetime unavailable-model cache
+    (issue 09), keyed on litellm's exception shape instead of a status code.
+    """
+
+    def test_second_invoke_filters_the_unavailable_primary(self, monkeypatch, caplog):
+        calls: list[dict] = []
+
+        def fake_completion(**kwargs):
+            calls.append(kwargs)
+            if kwargs["model"] == "primary":
+                raise _FakeBadRequestError(
+                    "The requested model is not available for this integrator",
+                    model="primary",
+                )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="lit-ok"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                model="fb1-resolved",
+            )
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        client = LiteLLMClient(models=["primary", "fb1"])
+        with caplog.at_level(logging.WARNING, logger="prxref.llm_backends"):
+            with pytest.raises(_FakeBadRequestError):
+                client.invoke("sys", "usr")
+            r2 = client.invoke("sys", "usr")
+        assert r2.text == "lit-ok"
+        assert calls[0]["model"] == "primary"
+        assert calls[0]["fallbacks"] == ["fb1"]
+        assert calls[1]["model"] == "fb1"
+        assert calls[1]["fallbacks"] == []
+        skip_msgs = [
+            rec.getMessage() for rec in caplog.records
+            if "skipping for the rest of the run" in rec.getMessage()
+        ]
+        assert len(skip_msgs) == 1, skip_msgs
+        assert "primary" in skip_msgs[0]
+
+    def test_all_unavailable_raises_without_calling_litellm(self, monkeypatch):
+        calls: list[dict] = []
+
+        def fake_completion(**kwargs):
+            calls.append(kwargs)
+            raise _FakeBadRequestError("model_not_found: dead", model="dead")
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        client = LiteLLMClient(models=["dead"])
+        with pytest.raises(_FakeBadRequestError):
+            client.invoke("sys", "usr")
+        with pytest.raises(LLMError) as exc:
+            client.invoke("sys", "usr")
+        assert len(calls) == 1
+        assert "skipped (unavailable)" in str(exc.value)
+        assert "dead" in str(exc.value)
+
+    def test_status_code_alone_signals_unavailable(self, monkeypatch):
+        """No ``BadRequest``/``NotFound`` in the class name; a 4xx
+        ``.status_code`` plus a phrase match is sufficient on its own."""
+        def fake_completion(**kwargs):
+            raise _FakeHttpError("no such model: primary", status_code=404)
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        client = LiteLLMClient(models=["primary", "fb1"])
+        with pytest.raises(_FakeHttpError):
+            client.invoke("sys", "usr")
+        assert client._unavailable == {"primary"}
+
+
+class TestLiteLLMClientControlsUnaffected:
+    """Transient/ambiguous exceptions must keep retrying every invoke."""
+
+    def test_a_generic_exception_does_not_filter(self, monkeypatch):
+        calls: list[dict] = []
+
+        def fake_completion(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("connection reset by peer")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="lit-ok"))],
+                usage=None,
+                model="m",
+            )
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        client = LiteLLMClient(models=["primary", "fb1"])
+        with pytest.raises(RuntimeError):
+            client.invoke("sys", "usr")
+        client.invoke("sys", "usr")
+        assert calls[1]["model"] == "primary"
+        assert calls[1]["fallbacks"] == ["fb1"]
+
+    def test_5xx_status_code_with_a_matching_phrase_is_not_cached(self, monkeypatch):
+        """Only a 4xx signal qualifies -- mirrors OpenAICompatClient's rule
+        that a 5xx is never cached even when its body happens to use one of
+        the unavailable-phrase words."""
+        def fake_completion(**kwargs):
+            raise _FakeHttpError("model deprecated, retry later", status_code=503)
+
+        monkeypatch.setitem(
+            sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion)
+        )
+        client = LiteLLMClient(models=["primary"])
+        with pytest.raises(_FakeHttpError):
+            client.invoke("sys", "usr")
+        assert client._unavailable == set()
+
+
 _ABSENT = object()
 
 
