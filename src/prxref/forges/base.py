@@ -137,6 +137,16 @@ class Forge(Protocol):
         """List existing threads so re-reviews skip already-discussed findings."""
         ...
 
+    def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
+        """Return the text of ``path`` at commit ``sha``.
+
+        Optional: callers resolve it with ``getattr(forge, "get_file_content",
+        None)``, so a Forge without it is still valid. Return ``None`` when
+        the file is missing, binary, too large, or cannot be fetched for any
+        other reason — this method never raises.
+        """
+        ...
+
 
 def detect_forge(url: str) -> PRRef | None:
     """Try each registered forge's URL parser in order.
