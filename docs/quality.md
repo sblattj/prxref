@@ -43,7 +43,7 @@ it (noted in the table).
 | 4 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
 | 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. |
 | 6 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
-| 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. |
+| 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
 | 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. |
 | 9 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap. Returns its findings in content order. |
 | 10 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate. |
@@ -62,7 +62,7 @@ its own findings against prxref's own stale comments and then delete them.
 | `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A `package.json` finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |
 | `duplicate of existing thread` | `apply_thread_dedup` | An open thread on the PR already says this. |
 | `settled in thread: <author>` | `apply_settled_thread_suppression` | A thread on the same path already argued this subject out. A **resolved** thread still settles it — resolution is a decision, not an expiry. |
-| `claims removal of a path present in the post-image: <path>` | `apply_removal_claim_check` | Every path the claim names is still present after the PR lands. |
+| `claims removal of a path present in the post-image: <path>` | `apply_removal_claim_check` | A removal verb governs this path, and every path the claim names is still present after the PR lands. |
 | `hedged: "<matched phrase>"` | `apply_hedge_gate` | The finding's own text conditions the defect on something the model never established. |
 | `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `outofscope`}. |
 | `confidence <x> below floor <y>` | `apply_quality_gate` | Below `PRXREF_CONFIDENCE_FLOOR`. |

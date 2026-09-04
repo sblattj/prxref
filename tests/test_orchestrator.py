@@ -2425,6 +2425,32 @@ class TestSystemicSweep:
         assert len(res["findings_active"]) == 1
         assert res["findings_active"][0].confidence == 0.9
 
+    def test_byte_identical_copies_drop_the_sweep_one_not_the_chunk_one(
+        self, monkeypatch,
+    ):
+        """Two copies identical but for confidence must partition correctly.
+
+        The chunk/sweep boundary is re-derived after the quality gate from
+        ``_origin_key``. When that key ignored confidence the two copies
+        collided, ``finding_sort_key`` tied them, and the walk handed the
+        FIRST survivor to the sweep side — so the 0.95 chunk copy was dropped
+        as a "duplicate of chunk finding" and the 0.61 sweep copy survived.
+        """
+        double, _calls = _sweep_double([("findings", [dict(
+            self.SWEEP_FINDING[0], confidence=0.61,
+        )])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        res = orchestrate_review(
+            FakeForge(diff=SWEEP_SIGNAL_DIFF), REF, FakeLLM(json.dumps({
+                "findings": [dict(self.SWEEP_FINDING[0], confidence=0.95)],
+            })),
+            post=False, confidence_floor=0.6,
+        )
+        assert [f.confidence for f in res["findings_active"]] == [0.95]
+        dupes = [f for f in res["findings_dropped"]
+                 if f.drop_reason == "duplicate of chunk finding"]
+        assert [f.confidence for f in dupes] == [0.61]
+
     def test_a_sweep_failure_counts_as_one_failed_chunk(self, monkeypatch):
         double, _calls = _sweep_double([("error", "LLMError: all models failed")])
         monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
