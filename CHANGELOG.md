@@ -7,6 +7,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-09-04
+
+### Fixed
+
+- **The settled-thread gate no longer crashes on a general PR comment** (#54).
+  A thread without a path — any unanchored comment, near-universal on
+  Bitbucket Server — raised `AttributeError` inside
+  `apply_settled_thread_suppression` on 0.12.0, and because the pass chain is
+  not guarded the whole review was lost (`review failed: ...`, nothing
+  posted). Such a thread is now skipped by that gate; same-path suppression
+  is unchanged.
+
 ## [0.12.0] — 2026-09-04
 
 The context release. A real-PR audit of 0.11.0/0.11.1 — two review passes over
@@ -745,7 +757,9 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/sblattj/prxref/releases/tag/v0.12.1
+[0.12.0]: https://github.com/sblattj/prxref/releases/tag/v0.12.0
 [0.11.1]: https://github.com/sblattj/prxref/releases/tag/v0.11.1
 [0.11.0]: https://github.com/sblattj/prxref/releases/tag/v0.11.0
 [0.10.1]: https://github.com/sblattj/prxref/releases/tag/v0.10.1
