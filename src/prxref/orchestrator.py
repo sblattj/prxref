@@ -88,6 +88,7 @@ from .quality import (
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
+    apply_removal_claim_check,
     apply_severity_consistency,
     apply_sweep_dedup,
     apply_thread_dedup,
@@ -465,6 +466,7 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
+    findings = apply_removal_claim_check(findings, files)
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
     )
