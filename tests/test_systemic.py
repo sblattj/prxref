@@ -424,6 +424,9 @@ class TestSweepPromptContract:
 
         assert _CONTEXT_MARKER in load_prompt("systemic.md")
 
+    def test_the_prompt_states_the_containment_boundary_rule(self):
+        assert "containment boundary" in load_prompt("systemic.md")
+
 
 class TestGuardRemoval:
     """A deleted limit constant or validator is a class of its own (issue 06).
