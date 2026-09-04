@@ -3,8 +3,12 @@
 Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 
 1. ``forge.get_pr`` → PRData, ``forge.get_diff`` → raw diff,
-   ``parse_unified_diff`` → files. An empty or unchunkable diff
-   short-circuits to a summary-only run with verdict ``Approved``.
+   ``parse_unified_diff`` → files. An empty or unchunkable diff (every file
+   binary, or no files at all) short-circuits to a summary-only run with
+   verdict ``Approved`` — no chunk worker or sweep ever runs, but
+   ``heuristics.release_shape_findings`` still does, gated the same as on
+   the normal path, so a release-shaped diff with no reviewable text still
+   gets its deterministic finding instead of a silent approval.
 2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``, each chunk
    sized to ``token_budget`` and capped at ``max_files_per_chunk`` files).
 3. Parallel worker fan-out: one ``reviewer.review_chunk(llm, files, pr)``
@@ -31,7 +35,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    raw chunk + sweep findings first gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
    about a PR that is ≥80% release machinery yet also touches source),
-   folded in BEFORE the passes so it is filtered like any other finding:
+   folded in BEFORE the passes so it is filtered like any other finding,
+   and spliced in at the chunk/sweep boundary — before the sweep's own
+   findings, never after — so it is always a CHUNK-side finding to
+   ``apply_sweep_dedup`` and can never be dropped as a duplicate of a
+   chunk worker's own restatement:
 
    ``apply_location_validation`` (a ``file`` naming no path of the parsed
    diff is dropped, not rendered) → ``apply_manifest_claim_check`` (a
@@ -420,11 +428,18 @@ def orchestrate_review(
         )
 
     if not chunks:
-        tracer.event("run", "ok", chunks_reviewed=0, findings=0)
+        # No chunk survived build_chunks — an empty diff, or every file
+        # binary — but the release-shape heuristic is pure and needs no
+        # chunk to fire on: computed here so a release PR whose only
+        # non-machinery file is binary still gets the deterministic finding
+        # instead of a silent Approved (issue #29 residual, concern #2).
+        release_shape = heuristics.release_shape_findings(files)
+        tracer.event("run", "ok", chunks_reviewed=0, findings=len(release_shape))
         return _summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
-            sampling=sampling,
+            sampling=sampling, release_shape_findings=release_shape,
+            confidence_floor=confidence_floor, max_errors=max_errors,
         )
 
     # Pruned BEFORE the threads are listed, and both before the review units
@@ -509,8 +524,17 @@ def orchestrate_review(
     # A deterministic, non-LLM finding folded in before the quality passes so
     # it flows through every one of them exactly like a model finding (issue
     # #10): file-level (line=0) survives apply_line_align untouched, and
-    # warning/1.0 clears apply_quality_gate trivially.
-    findings = findings + heuristics.release_shape_findings(files)
+    # warning/1.0 clears apply_quality_gate trivially. Folded in AT the
+    # chunk/sweep boundary — before the sweep's own findings, not after —
+    # and sweep_start moves with it: apply_sweep_dedup only ever drops a
+    # SWEEP-side finding, so appending this after the sweep's findings would
+    # put it on the sweep side of that boundary, where a chunk worker's own
+    # finding sharing its file and normalized title could drop the
+    # deterministic finding as "duplicate of chunk finding" and keep the
+    # model's restatement instead.
+    release_shape = heuristics.release_shape_findings(files)
+    findings = findings[:sweep_start] + release_shape + findings[sweep_start:]
+    sweep_start += len(release_shape)
 
     findings = apply_location_validation(findings, [f.path for f in files])
     # BEFORE apply_line_align, deliberately: the manifest check compares the
@@ -1289,10 +1313,42 @@ def _summary_only_run(
     forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
     tracer: Tracer | None = None, sampling: dict | None = None,
+    release_shape_findings: list[Finding] | None = None,
+    confidence_floor: float | None = None, max_errors: int | None = None,
 ) -> dict:
+    """The no-chunk exit: an empty diff, or every file binary.
+
+    No worker ever ran, but the release-shape heuristic
+    (:func:`heuristics.release_shape_findings`) is pure and needs no chunk
+    to fire on, so its findings — passed in by the caller, already computed
+    over the full file list — are put through the same location and
+    quality passes a chunk-sourced finding gets (:func:`apply_location_validation`,
+    :func:`apply_quality_gate`) before they reach ``findings_active`` /
+    ``verdict`` / the summary. An empty diff still yields
+    ``release_shape_findings=[]`` (fewer than 2 files can never be
+    release-shaped), so this degrades to exactly the prior empty-diff
+    behaviour: ``Approved``, no findings, no banner.
+    """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
+
+    findings = list(release_shape_findings or [])
+    if findings:
+        findings = apply_location_validation(findings, [f.path for f in files])
+        findings = apply_quality_gate(
+            findings, confidence_floor=confidence_floor, max_errors=max_errors,
+        )
+    findings_active = sorted(active(findings), key=finding_sort_key)
+    findings_dropped = sorted(
+        (f for f in findings if f.drop_reason is not None), key=finding_sort_key
+    )
+    verdict = (
+        "Request-Changes"
+        if any(f.severity == "error" for f in findings_active)
+        else "Approved"
+    )
+
     wanted = post and post_mode in POST_SUMMARY_MODES
     _trace_post_begin(
         tracer, wanted=wanted, mode=post_mode, kind="empty-diff summary",
@@ -1300,7 +1356,7 @@ def _summary_only_run(
     )
     if wanted:
         summary = _render_summary(
-            pr, files, "Approved", [], "unknown", 0, 0, elapsed_ms,
+            pr, files, verdict, findings_active, "unknown", 0, 0, elapsed_ms,
             chunks_reviewed=0, chunks_failed=0,
             include_verdict=post_verdict,
         )
@@ -1311,9 +1367,9 @@ def _summary_only_run(
             logger.error("post_summary failed: %s", e)
     _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
     return {
-        "verdict": "Approved",
-        "findings_active": [],
-        "findings_dropped": [],
+        "verdict": verdict,
+        "findings_active": findings_active,
+        "findings_dropped": findings_dropped,
         "chunk_count": 0,
         "chunks_reviewed": 0,
         "chunks_failed": 0,
