@@ -96,6 +96,9 @@ def _render_file(f: FileDiff, context_lines: int | None = None) -> str:
     if f.status == "renamed" and f.old_path and f.new_path:
         out.append(f"rename from {f.old_path}")
         out.append(f"rename to {f.new_path}")
+    if f.status == "copied" and f.old_path and f.new_path:
+        out.append(f"copy from {f.old_path}")
+        out.append(f"copy to {f.new_path}")
     if f.is_binary:
         out.append(f"Binary files a/{old} and b/{new} differ")
         return "\n".join(out)
