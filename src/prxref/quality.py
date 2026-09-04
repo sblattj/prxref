@@ -876,9 +876,11 @@ def apply_settled_thread_suppression(
     the finding's title+body and the thread's snippet.
 
     ``resolved`` does not gate it: a resolved thread is still a decision the
-    reviewers made with more context than the review has. Order-preserving,
-    pure, and already-dropped findings pass through untouched so the reason
-    an earlier pass gave survives.
+    reviewers made with more context than the review has. A thread with no
+    path — a general, unanchored PR comment, near-universal on Bitbucket
+    Server — cannot be "same path" as any finding and is skipped rather than
+    compared. Order-preserving, pure, and already-dropped findings pass
+    through untouched so the reason an earlier pass gave survives.
     """
     if not threads:
         return list(findings)
@@ -892,6 +894,8 @@ def apply_settled_thread_suppression(
         author = ""
         if finding_tokens:
             for t in threads:
+                if t.path is None:
+                    continue
                 if _normalised_path(t.path) != _normalised_path(f.file):
                     continue
                 body_tokens = _tokens(t.body_snippet or "")
