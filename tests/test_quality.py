@@ -1,6 +1,7 @@
 """Tests for prxref.quality: line alignment, thread dedup, and quality gate."""
 from __future__ import annotations
 
+import itertools
 import logging
 
 from prxref.forges.base import Thread
@@ -13,6 +14,8 @@ from prxref.quality import (
     apply_quality_gate,
     apply_severity_consistency,
     apply_thread_dedup,
+    finding_rank_key,
+    finding_sort_key,
     is_duplicate_of_existing,
     normalize_title,
     snap_line,
@@ -1075,3 +1078,34 @@ class TestBodyCitationGrammar:
             body="Also line 55 matters.",
         )
         assert _body_cited_lines(f) == [40, 55]
+
+
+class TestDeterministicCaps:
+    """The error cap and the gate's output order are content-derived."""
+
+    TIED = [
+        _f(file="src/a.py", line=1, severity="error", confidence=0.9, title="alpha"),
+        _f(file="src/a.py", line=2, severity="error", confidence=0.9, title="bravo"),
+        _f(file="src/a.py", line=3, severity="error", confidence=0.9, title="charlie"),
+    ]
+
+    def test_error_cap_survivors_do_not_depend_on_arrival_order(self):
+        seen = set()
+        for perm in itertools.permutations(self.TIED):
+            staged = apply_quality_gate(list(perm), confidence_floor=0.6, max_errors=2)
+            seen.add(frozenset(f.title for f in staged if f.drop_reason is None))
+        assert seen == {frozenset({"alpha", "bravo"})}
+
+    def test_gate_output_is_sorted_by_file_line_title(self):
+        staged = apply_quality_gate(
+            list(reversed(self.TIED)), confidence_floor=0.6, max_errors=3
+        )
+        assert [f.title for f in staged] == ["alpha", "bravo", "charlie"]
+
+    def test_confidence_outranks_content_in_the_rank_key(self):
+        low = _f(file="src/a.py", line=1, severity="error", confidence=0.7, title="aaa")
+        high = _f(file="src/z.py", line=9, severity="error", confidence=0.95, title="zzz")
+        assert finding_rank_key(high) < finding_rank_key(low)
+
+    def test_sort_key_tolerates_a_missing_line(self):
+        assert finding_sort_key(_f(line=None, title="t")) == ("src/app.py", -1, "t")
