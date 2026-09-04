@@ -52,6 +52,12 @@ Six passes run before posting:
 6. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
+6. ``apply_containment_note``: a finding that asserts a throw, panic,
+   crash, or unhandled rejection and never names where it is caught or
+   where it propagates to has its body suffixed with
+   ``" [containment boundary not stated]"`` — a purely textual decoration,
+   run on active and dropped findings alike, that never changes
+   ``drop_reason`` or severity.
 
 Every dropped finding retains its identity with ``drop_reason`` populated,
 so review runstores and logs can explain every filter decision. Use
@@ -968,6 +974,51 @@ def apply_sweep_dedup(
             result.append(f)
     return result
 
+
+_THROW_CLASS_RE = re.compile(
+    r"\bthrows?\b|\bthrowing\b|\bpanics?\b|\bcrash(es|ed)?\b"
+    r"|unhandled rejection|uncaught exception|\braises?\b",
+    re.IGNORECASE,
+)
+
+_CONTAINMENT_BOUNDARY_RE = re.compile(
+    r"\bcaught\b|\buncaught\b|propagat|catch block|catch\s*\(|try/catch"
+    r"|try-catch|\bswallow|handled by|bubbles? up"
+    r"|rejects the promise returned to",
+    re.IGNORECASE,
+)
+
+CONTAINMENT_NOTE_SUFFIX: str = " [containment boundary not stated]"
+
+
+def apply_containment_note(findings: Sequence[Finding]) -> list[Finding]:
+    """Suffix an un-boundaried throw-class finding's body with a note.
+
+    A finding whose title or body asserts a throw, panic, crash, or
+    unhandled rejection (:data:`_THROW_CLASS_RE`) but whose body never
+    names where that exception is caught or where it propagates to
+    (:data:`_CONTAINMENT_BOUNDARY_RE`) has its body suffixed with
+    :data:`CONTAINMENT_NOTE_SUFFIX`, once — a body already carrying the
+    suffix is left unchanged, so the pass is idempotent under repeated
+    application. Purely textual: order-preserving, runs on active and
+    dropped findings alike (it only decorates the text every downstream
+    consumer, including the dropped-findings audit, already carries),
+    and never touches ``drop_reason`` or ``severity``. Findings that do
+    not match, or already name a boundary, pass through as the same
+    instance.
+    """
+    result: list[Finding] = []
+    for f in findings:
+        claim = f"{f.title} {f.body}"
+        if (
+            f.body.endswith(CONTAINMENT_NOTE_SUFFIX)
+            or not _THROW_CLASS_RE.search(claim)
+            or _CONTAINMENT_BOUNDARY_RE.search(f.body)
+        ):
+            result.append(f)
+        else:
+            result.append(replace(f, body=f.body + CONTAINMENT_NOTE_SUFFIX))
+    return result
 
 
 def _problem_classes(title: str) -> set[str]:
