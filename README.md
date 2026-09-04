@@ -125,7 +125,7 @@ Configure the authentication token matching your forge:
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
 
-See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference and [docs/forges.md](docs/forges.md) for forge specifics.
+See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference, [docs/forges.md](docs/forges.md) for forge specifics, and [docs/systemic-sweep.md](docs/systemic-sweep.md) for the whole-PR sweep's digest classes and drop reasons.
 
 ## Webhook Server
 

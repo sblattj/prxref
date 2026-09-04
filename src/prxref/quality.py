@@ -23,13 +23,17 @@ Five passes run before posting:
    anchor never survives while any token-bearing added line exists.
 3. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive tokens).
-4. ``apply_severity_consistency``: findings sharing one normalized title —
+4. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+   subject an existing thread already argued out — same path plus shared
+   distinctive tokens, with NO line test, because line alignment has already
+   demoted a file-level finding to line 0 by this point.
+5. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-5. ``apply_quality_gate``: drop findings below the confidence floor, cap
+6. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
 
@@ -548,6 +552,58 @@ def apply_thread_dedup(
             min_shared_for_distant=min_shared_for_distant,
         ):
             result.append(replace(f, drop_reason="duplicate of existing thread"))
+        else:
+            result.append(f)
+    return result
+
+
+SETTLED_MIN_SHARED_TOKENS = 4
+
+
+def _normalised_path(path: str) -> str:
+    return path[2:] if path.startswith("./") else path
+
+
+def apply_settled_thread_suppression(
+    findings: Sequence[Finding],
+    threads: Sequence[Thread],
+    min_shared_tokens: int = SETTLED_MIN_SHARED_TOKENS,
+) -> list[Finding]:
+    """Drop findings that re-litigate a subject already argued out in a thread.
+
+    Line-INDEPENDENT, which is the whole point:
+    :func:`apply_thread_dedup` needs the thread and the finding to sit near
+    each other, and :func:`apply_line_align` has already demoted a
+    non-anchorable finding to line 0 by the time either runs. A settled
+    discussion is about a SUBJECT, not a line, so the test here is same path
+    plus at least ``min_shared_tokens`` distinct shared content tokens between
+    the finding's title+body and the thread's snippet.
+
+    ``resolved`` does not gate it: a resolved thread is still a decision the
+    reviewers made with more context than the review has. Order-preserving,
+    pure, and already-dropped findings pass through untouched so the reason
+    an earlier pass gave survives.
+    """
+    if not threads:
+        return list(findings)
+
+    result: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            result.append(f)
+            continue
+        finding_tokens = _tokens(f"{f.title} {f.body}")
+        author = ""
+        if finding_tokens:
+            for t in threads:
+                if _normalised_path(t.path) != _normalised_path(f.file):
+                    continue
+                body_tokens = _tokens(t.body_snippet or "")
+                if len(finding_tokens & body_tokens) >= min_shared_tokens:
+                    author = t.author or "unknown"
+                    break
+        if author:
+            result.append(replace(f, drop_reason=f"settled in thread: {author}"))
         else:
             result.append(f)
     return result

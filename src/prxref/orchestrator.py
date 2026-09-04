@@ -81,13 +81,21 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import reviewer, systemic
-from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
+from .forges.base import (
+    ATTRIBUTION_MARKER,
+    Forge,
+    InlineComment,
+    PRData,
+    PRRef,
+    Thread,
+)
 from .llm import LLMClient
 from .quality import (
     active,
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
+    apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_sweep_dedup,
     apply_thread_dedup,
@@ -382,6 +390,25 @@ def orchestrate_review(
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
         )
 
+    # Pruned BEFORE the threads are listed, and both before the review units
+    # run. The prune-then-list order is load-bearing: reading threads first
+    # would let this run's findings be suppressed as already-discussed against
+    # prxref's OWN stale comments, which the prune then deletes. Both moved
+    # ahead of the dispatch because the sweep needs the discussion in its
+    # prompt, and a review that never starts has nothing to say either way.
+    if post and post_mode in POST_INLINE_MODES:
+        _prune_stale_inline_comments(forge, ref)
+
+    # Fetched BEFORE the review units run, not after: the sweep needs the
+    # existing discussion in its own prompt, and the same list serves the
+    # post-hoc thread passes. Best-effort by contract — a forge that cannot
+    # list threads still gets a review.
+    try:
+        threads = forge.list_threads(ref)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("list_threads failed (best-effort): %s", e)
+        threads = []
+
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
@@ -395,7 +422,7 @@ def orchestrate_review(
     results.append(
         _run_sweep(
             llm, files, pr, max_tokens=max_tokens,
-            token_budget=token_budget, tracer=tracer,
+            token_budget=token_budget, tracer=tracer, threads=threads,
         )
     )
 
@@ -441,18 +468,10 @@ def orchestrate_review(
     if results[-1]["error"]:
         failed_chunks.append((results[-1]["error"], []))
 
-    if post and post_mode in POST_INLINE_MODES:
-        _prune_stale_inline_comments(forge, ref)
-
-    try:
-        threads = forge.list_threads(ref)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("list_threads failed (best-effort): %s", e)
-        threads = []
-
     findings = apply_location_validation(findings, [f.path for f in files])
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
+    findings = apply_settled_thread_suppression(findings, threads)
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1
@@ -849,6 +868,7 @@ def _run_sweep(
     max_tokens: int | None = None,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     tracer: Tracer | None = None,
+    threads: Sequence[Thread] = (),
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -864,14 +884,20 @@ def _run_sweep(
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
     digest = systemic.build_digest(files, token_budget)
+    digested = {f.path for f in files}
+    discussion = [t for t in threads if t.path in digested]
     logger.info(
-        "[sweep] start: %d files, digest %d chars", len(files), len(digest),
+        "[sweep] start: %d files, digest %d chars, %d thread(s)",
+        len(files), len(digest), len(discussion),
     )
-    tracer.event("sweep", "start", files=len(files), digest_chars=len(digest))
+    tracer.event(
+        "sweep", "start", files=len(files), digest_chars=len(digest),
+        threads=len(discussion),
+    )
     try:
         findings_raw, meta = reviewer.review_systemic(
             llm, digest, pr_title=pr.title, pr_description=pr.description,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens, threads=discussion,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[sweep] raised: %s", e)

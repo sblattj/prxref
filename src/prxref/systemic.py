@@ -82,7 +82,7 @@ _FULL_CONTENT_NOTE = "[full content omitted: {reason}]"
 # is the miss that motivates this: without the buckets, the first 40
 # console.log lines consume the cap and the credential line is counted as
 # omitted. Within each bucket, diff order is preserved.
-_MUST_SEE_CLASSES = frozenset({"entry-point", "secret", "auth-check"})
+_MUST_SEE_CLASSES = frozenset({"entry-point", "secret", "auth-check", "guard-removal"})
 
 # Lockfile basenames whose coexistence in one diff signals repo-config drift.
 _LOCKFILE_BASENAMES = frozenset({
@@ -147,6 +147,27 @@ _DIGEST_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # Removal-only (see :func:`match_class`): a numeric limit constant or
+        # a validator/guard definition that the PR DELETES. Nothing about the
+        # remaining code marks the absence, so the deleted line is the only
+        # evidence the sweep will ever get.
+        "guard-removal",
+        re.compile(
+            r"\b(?:[A-Z][A-Z0-9_]*)?"
+            r"(?:MAX|MIN|LIMIT|LENGTH|SIZE|BYTES|TIMEOUT|CAP)"
+            r"[A-Z0-9_]*\s*(?::\s*[A-Za-z_][\w.\[\], ]*)?\s*=\s*[0-9][0-9_]*"
+            r"|\b(?:function|def|fn|func)\s+"
+            r"(?:is[A-Z]\w*|isValid\w*|isSupported\w*|assert\w*|check\w*"
+            r"|validate\w*|sanitiz\w*|escape\w*|guard\w*)\s*\("
+            r"|\bconst\s+"
+            r"(?:is[A-Z]\w*|isValid\w*|isSupported\w*|assert\w*|check\w*"
+            r"|validate\w*|sanitiz\w*|escape\w*|guard\w*)\s*=\s*(?:async\s*)?\("
+            r"|^\s*(?:\w+\s+)*"
+            r"(?:is[A-Z]\w*|isValid\w*|isSupported\w*|assert\w*|check\w*"
+            r"|validate\w*|sanitiz\w*|escape\w*|guard\w*)\s*\([^)]*\)\s*\{"
+        ),
+    ),
+    (
         "error-swallow",
         re.compile(
             r"\bcatch\s*(?:\(|\{)"
@@ -196,15 +217,22 @@ _DIGEST_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _PATTERN_BY_NAME = dict(_DIGEST_PATTERNS)
 
 
-def match_class(text: str) -> str | None:
+def match_class(text: str, *, kind: str = "+") -> str | None:
     """The first pattern class ``text`` matches, or ``None``.
 
-    Applied to one diff body line with its ``+``/``-``/space prefix stripped.
-    Classes are mutually exclusive per line by report order only; a line that
-    matches several is reported under the first, which keeps the digest one
-    line per diff line.
+    Applied to one diff body line with its ``+``/``-``/space prefix stripped;
+    ``kind`` is that prefix. Classes are mutually exclusive per line by report
+    order only; a line that matches several is reported under the first, which
+    keeps the digest one line per diff line.
+
+    ``guard-removal`` is the one kind-sensitive class: a limit constant or a
+    validator definition is only a systemic signal when the PR DELETES it, so
+    it is offered for ``kind == "-"`` lines only. Every other class ignores
+    ``kind``.
     """
     for name, pattern in _DIGEST_PATTERNS:
+        if name == "guard-removal" and kind != "-":
+            continue
         if pattern.search(text):
             return name
     return None
@@ -221,7 +249,7 @@ def _matched_lines(f: FileDiff) -> list[DiffLine]:
     rest: list[DiffLine] = []
     for h in f.hunks:
         for ln in h.lines:
-            cls = match_class(ln.text)
+            cls = match_class(ln.text, kind=ln.kind)
             if ln.kind == " " or cls is None:
                 continue
             if cls in _MUST_SEE_CLASSES:
@@ -254,7 +282,7 @@ def _full_content_lines(f: FileDiff) -> list[DiffLine]:
         for ln in h.lines:
             if ln.kind == " ":
                 continue
-            if ln.kind == "-" and match_class(ln.text) is None:
+            if ln.kind == "-" and match_class(ln.text, kind=ln.kind) is None:
                 continue
             out.append(ln)
     return out
