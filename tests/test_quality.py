@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from prxref.forges.base import Thread
 from prxref.quality import (
+    CONTAINMENT_NOTE_SUFFIX,
     _body_cited_lines,
     _resolve_max_errors,
     active,
+    apply_containment_note,
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
@@ -1075,3 +1079,92 @@ class TestBodyCitationGrammar:
             body="Also line 55 matters.",
         )
         assert _body_cited_lines(f) == [40, 55]
+
+
+class TestApplyContainmentNote:
+    """Issue #07: a throw-class finding with no named boundary gets flagged."""
+
+    def test_throws_with_no_boundary_gets_suffixed(self):
+        f = _f(
+            title="Handler aborts on bad input",
+            body="The handler throws when the payload is malformed.",
+        )
+        result = apply_containment_note([f])
+        assert result[0].body == f.body + CONTAINMENT_NOTE_SUFFIX
+
+    def test_panics_with_no_boundary_gets_suffixed(self):
+        f = _f(body="Parser panics on empty input, killing the pipeline.")
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    def test_crashes_with_no_boundary_gets_suffixed(self):
+        f = _f(body="The scheduler crashes when two jobs collide.")
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    def test_unhandled_rejection_with_no_boundary_gets_suffixed(self):
+        f = _f(body="An unhandled rejection escapes the async handler.")
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    @pytest.mark.parametrize(
+        "boundary_phrase",
+        [
+            "but the exception is caught by the outer handler.",
+            "it is uncaught and propagates to serverFactory.",
+            "the catch block above swallows it silently.",
+            "wrapped in a try/catch at the call site.",
+            "wrapped in a try-catch at the call site.",
+            "the error is handled by the retry wrapper.",
+            "the rejection bubbles up to the caller.",
+            "it rejects the promise returned to the caller.",
+        ],
+    )
+    def test_throw_with_boundary_named_is_not_suffixed(self, boundary_phrase):
+        f = _f(body=f"The handler throws when malformed, {boundary_phrase}")
+        result = apply_containment_note([f])
+        assert result[0].body == f.body
+
+    def test_non_throw_finding_is_untouched(self):
+        f = _f(
+            title="computeTotal returns the wrong total",
+            body="The accumulator starts at undefined instead of 0.",
+        )
+        result = apply_containment_note([f])
+        assert result[0].body == f.body
+
+    def test_order_preserving(self):
+        findings = [
+            _f(title="a", body="throws on bad input, no boundary named."),
+            _f(title="b", body="totally unrelated body text."),
+            _f(title="c", body="panics under load, no boundary named."),
+        ]
+        result = apply_containment_note(findings)
+        assert [r.title for r in result] == ["a", "b", "c"]
+
+    def test_idempotent_does_not_double_suffix(self):
+        f = _f(body="The handler throws when the payload is malformed.")
+        once = apply_containment_note([f])
+        twice = apply_containment_note(once)
+        assert twice[0].body == once[0].body
+        assert twice[0].body.count(CONTAINMENT_NOTE_SUFFIX) == 1
+
+    def test_dropped_finding_is_also_decorated(self):
+        f = _f(
+            body="The handler throws when the payload is malformed.",
+            drop_reason="confidence 0.10 below floor 0.60",
+        )
+        result = apply_containment_note([f])
+        assert result[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+        assert result[0].drop_reason == "confidence 0.10 below floor 0.60"
+
+    def test_original_finding_instance_is_not_mutated(self):
+        f = _f(body="The handler throws when the payload is malformed.")
+        original_body = f.body
+        apply_containment_note([f])
+        assert f.body == original_body
+
+    def test_returns_new_instance_when_suffixed(self):
+        f = _f(body="The handler throws when the payload is malformed.")
+        result = apply_containment_note([f])
+        assert result[0] is not f
