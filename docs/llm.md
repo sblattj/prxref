@@ -58,6 +58,7 @@ The client iterates through `PRXREF_LLM_MODELS` in left-to-right priority order 
   - Malformed JSON response
 - On any failure, `OpenAICompatClient` logs the model error and tries the next model in the chain immediately.
 - If all configured models fail, `LLMError` is raised containing the per-model failure reasons.
+- A 4xx body that names a model as permanently gone (deprovisioned, renamed, not supported, or never enabled for this integrator) is cached for the life of the client: every later call skips that model outright — no request, no per-call log — with a single WARNING logged the one time it is marked. `LiteLLMClient` mirrors the same cache, keyed on the exception litellm raises (a 4xx-shaped error naming a model) instead of an HTTP status; it filters the unavailable model out of both the primary `model` and its native `fallbacks` before calling litellm, and raises `LLMError` without calling litellm at all once every configured model has been marked. A 5xx, a timeout, or a connection error is never cached — only a 4xx carrying that phrasing is treated as permanent.
 
 ---
 
