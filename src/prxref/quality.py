@@ -1,6 +1,6 @@
 """Deterministic quality passes over worker findings.
 
-Five passes run before posting:
+Six passes run before posting:
 1. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
@@ -29,7 +29,11 @@ Five passes run before posting:
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-5. ``apply_quality_gate``: drop findings below the confidence floor, cap
+5. ``apply_hedge_gate``: drop findings whose title or body conditions the
+   defect on a precondition the worker never established from the diff
+   ("If X still leases a client", "unless the backfill already ran"),
+   with ``drop_reason`` ``hedged: "<matched span>"``.
+6. ``apply_quality_gate``: drop findings below the confidence floor, cap
    errors per review, and enforce the {error, warning, outofscope} severity
    vocabulary.
 
@@ -60,6 +64,64 @@ DEFAULT_MAX_ERRORS: int = 10
 # evidence. 5 also sits below the smallest drift the issue #19 audit measured
 # on real reviews (10 lines), so no observed-failure distance survives.
 DEFAULT_LINE_TOLERANCE: int = 5
+
+# A period that is not followed by whitespace is member access, a filename, or
+# a version — not a sentence break — so the hedge rules may span it.
+_NO_SENTENCE_BREAK = r"(?:[^.;]|\.(?!\s))"
+
+HEDGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "if-still",
+        re.compile(
+            rf"\bif\b{_NO_SENTENCE_BREAK}{{0,80}}?\b(?:still|already|remains?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "modal-still",
+        re.compile(r"\b(?:may|might|could|likely|probably)\s+still\b", re.IGNORECASE),
+    ),
+    (
+        "assuming",
+        re.compile(
+            r"(?:^|[.;]\s+|,\s*)(?:assuming|presumably|apparently|seemingly)\b(?!-)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "unless-already",
+        re.compile(
+            rf"\bunless\b{_NO_SENTENCE_BREAK}{{0,60}}?\balready\b", re.IGNORECASE
+        ),
+    ),
+    (
+        "not-verified",
+        re.compile(
+            r"\b(?:I (?:can(?:no|')?t|cannot) (?:verify|tell|confirm|determine)"
+            r"|unable to (?:verify|tell|confirm|determine)"
+            r"|not visible in the diff"
+            r"|not shown in the diff"
+            r"|cannot be confirmed from the diff)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "only-caller",
+        re.compile(
+            r"\bif this is the only (?:caller|call site|usage|consumer)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "membership",
+        re.compile(
+            r"\bif (?:they|it|this|those|these) (?:are|is) (?:members?|part) of\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_HEDGE_SPAN_MAX: int = 80
 
 
 def active(findings: Sequence[Finding]) -> list[Finding]:
@@ -861,6 +923,42 @@ def _resolve_max_errors(explicit: int | None) -> int:
             except ValueError:
                 pass
     return DEFAULT_MAX_ERRORS
+
+
+def _hedge_span(text: str) -> str | None:
+    for _name, pattern in HEDGE_RULES:
+        m = pattern.search(text)
+        if m is None:
+            continue
+        span = m.group(0).strip(" \t\n,;.")
+        return span[:_HEDGE_SPAN_MAX]
+    return None
+
+
+def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
+    """Drop findings whose own text conditions the defect on an unverified fact.
+
+    A hedged finding ("If figmaProxy.prepare still leases a client", "If they
+    are members of the root workspaces globs") states a precondition the
+    worker had the whole diff to check and did not. Each rule in
+    ``HEDGE_RULES`` is anchored on an epistemic marker rather than a bare
+    ``if``/``may``/``unless``, which appear throughout legitimate findings.
+
+    Pure and order-preserving: already-dropped findings pass through
+    untouched, and a match sets ``drop_reason`` to ``hedged: "<span>"``
+    naming the matched text so the drop is auditable in the run record.
+    """
+    out: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            out.append(f)
+            continue
+        span = _hedge_span(f.title or "") or _hedge_span(f.body or "")
+        if span is None:
+            out.append(f)
+            continue
+        out.append(replace(f, drop_reason=f'hedged: "{span}"'))
+    return out
 
 
 def apply_quality_gate(

@@ -85,6 +85,7 @@ from .forges.base import ATTRIBUTION_MARKER, Forge, InlineComment, PRData, PRRef
 from .llm import LLMClient
 from .quality import (
     active,
+    apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
     apply_quality_gate,
@@ -465,6 +466,7 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
+    findings = apply_hedge_gate(findings)
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
     )
