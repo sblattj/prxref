@@ -415,7 +415,7 @@ class TestBudgetKnobsFromConfig:
     def test_the_factory_resolves_the_default_constant(self):
         client = create_llm_client()
         assert client.temperature == prxref.llm_backends.DEFAULT_TEMPERATURE == 0.0
-        assert client.seed is None
+        assert client.seed == prxref.llm_backends._run_seed
 
     def test_temperature_from_env_reaches_the_payload(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TEMPERATURE", "0.35")
@@ -431,10 +431,15 @@ class TestBudgetKnobsFromConfig:
         create_llm_client(session=s).invoke("sys", "usr")
         assert s.calls[0]["json"]["temperature"] == 0.0
 
-    def test_seed_unset_is_omitted_from_the_payload(self):
+    def test_seed_unset_auto_derives_and_reaches_the_payload(self):
+        """Unset no longer omits the key: the factory stamps the shared
+        once-per-process seed (issue #56) — unseeded temp-0 sampling still
+        varies on hosted inference, so every run pins a seed."""
         s = _ScriptedSession(_resp())
-        create_llm_client(session=s).invoke("sys", "usr")
-        assert "seed" not in s.calls[0]["json"]
+        client = create_llm_client(session=s)
+        client.invoke("sys", "usr")
+        assert s.calls[0]["json"]["seed"] == client.seed
+        assert isinstance(s.calls[0]["json"]["seed"], int)
 
     def test_seed_from_env_reaches_the_payload_as_an_int(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_SEED", "42")

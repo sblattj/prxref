@@ -26,7 +26,8 @@ LLM / pipeline:
   PRXREF_LLM_SEED               Optional integer sampling seed handed to
                                 OpenAI-compatible backends as top-level
                                 "seed" in the request; >= 0 (0 is a valid
-                                seed); empty or unset omits it entirely
+                                seed); empty or unset falls back to the
+                                factory's once-per-process seed
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped;
                                 a probability in [0.0, 1.0] (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -142,10 +143,11 @@ _DEFAULTS: dict[str, object] = {
     "llm_max_tokens": 4096,
     "llm_timeout": 45.0,
     "llm_temperature": "",
-    # ``None`` is the declared unset: no seed is configured, so none is sent.
-    # Unlike ``llm_temperature`` (whose "" marker survives to the backend that
-    # owns the wire decision), the seed is a first-class int key — coerced and
-    # range-checked here — because "no seed" is representable in its own type.
+    # ``None`` is the declared unset: no seed is configured, so the factory
+    # falls back to its once-per-process seed. Unlike ``llm_temperature``
+    # (whose "" marker survives to the backend that owns the wire decision),
+    # the seed is a first-class int key — coerced and range-checked here —
+    # because "no seed" is representable in its own type.
     "llm_seed": None,
     "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
@@ -312,8 +314,10 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
     operator who typed ``--max-chunks 0`` to hunt for a ``PRXREF_MAX_CHUNKS``
     they had never set.
 
-    A ``None`` value is the declared unset for keys whose default omits them
-    from the request (``llm_seed``): there is no number to range-check, and
+    A ``None`` value is the declared unset for keys whose resolved default
+    lives in the factory (``llm_seed``: unset falls back to the
+    once-per-process seed resolved in ``llm_backends.create_llm_client``):
+    there is no number to range-check, and
     "not configured" is not a violation. Every value that is not ``None`` —
     including one smuggled in through an override — is still checked.
     """

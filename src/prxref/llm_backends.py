@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import secrets
 import threading
 import time
 
@@ -133,7 +134,8 @@ class OpenAICompatClient(LLMClient):
     ``temperature`` and ``seed`` are omitted from the payload entirely when
     ``None`` (like ``reasoning_effort``); the factory resolves temperature's
     configured default of 0.0 — sent, so reviews are reproducible by default —
-    and passes a seed only when one is configured. The choice's
+    and the seed too: configured, else the once-per-process
+    :func:`_auto_run_seed` shared by every client in the run. The choice's
     ``finish_reason`` is carried through verbatim so the reviewer can name
     truncation as the cause of an unparseable response.
     A model whose 4xx body names it as permanently gone (deprovisioned,
@@ -373,9 +375,10 @@ class LiteLLMClient(LLMClient):
     ``num_retries=0`` keeps failover fast; the chain itself is delegated to
     litellm via ``fallbacks=``. Usage and the choice's ``finish_reason`` are
     mapped into InvokeResult; a response carrying neither yields zeros and
-    ``""``. ``temperature`` and ``seed`` are omitted entirely when ``None``,
-    never defaulted; the factory resolves temperature's configured default
-    of 0.0 before this client is built.
+    ``""``.     ``temperature`` and ``seed`` are omitted entirely when ``None``,
+    never defaulted here; the factory resolves both before this client is
+    built — temperature's configured default of 0.0 and, when no seed is
+    configured, the once-per-process :func:`_auto_run_seed`.
     A model litellm reports as permanently gone (a 4xx-shaped exception
     naming it deprovisioned, renamed, or never enabled) is cached in-memory
     for the client's lifetime, mirroring :class:`OpenAICompatClient`: it is
@@ -562,6 +565,27 @@ def _int_setting(raw: str | None, env: str, *, minimum: int) -> int | None:
     return value
 
 
+# Temperature 0 does not pin hosted inference by itself: unseeded, the
+# provider's sampler is free to vary token choice run to run, and a posting
+# run diverged from its dry run over the same PR (issue #56). The factory
+# has no PR identity to derive the seed from, so the fallback is ONE random
+# seed per process, shared by every client the run builds — every invoke in
+# the run pins the same sampling state, and ``orchestrator._sampling``
+# records it via the client's ``seed`` attribute. 31 bits keeps the value a
+# non-negative int inside every OpenAI-compatible provider's accepted range.
+_run_seed: int | None = None
+_run_seed_lock = threading.Lock()
+
+
+def _auto_run_seed() -> int:
+    """The once-per-process fallback seed, shared by every client built without PRXREF_LLM_SEED."""
+    global _run_seed
+    with _run_seed_lock:
+        if _run_seed is None:
+            _run_seed = secrets.randbits(31)
+        return _run_seed
+
+
 def create_llm_client(
     cfg: dict | None = None, session: requests.Session | None = None
 ) -> LLMClient:
@@ -585,8 +609,13 @@ def create_llm_client(
     ``DEFAULT_TEMPERATURE`` (0.0), which IS sent — temperature 0 keeps
     reviews reproducible by default, and an operator-set value wins.
     PRXREF_LLM_SEED (integer >= 0, where 0 is a valid seed) is passed to
-    both backends as a top-level ``seed``; empty or unset omits it from
-    the request entirely. A malformed or out-of-range value for any of
+    both backends as a top-level ``seed`` and always wins when set. Unset
+    or empty does NOT omit the field: temperature 0 alone cannot pin hosted
+    inference, so the factory derives ONE random seed per process
+    (:func:`_auto_run_seed`) and stamps it on every client it builds —
+    all LLM calls within a run share one seed, and the client's ``seed``
+    attribute carries it into the run record's ``sampling``. A malformed
+    or out-of-range value for any of
     these raises :class:`~prxref.llm.ConfigError` naming the variable, so
     the CLI exits 2 rather than degrading the review.
     ``PRXREF_LLM_MAX_TOKENS`` is deliberately NOT read here: it is a
@@ -638,6 +667,8 @@ def create_llm_client(
     seed = _int_setting(
         _get("LLM_SEED", "PRXREF_LLM_SEED"), "PRXREF_LLM_SEED", minimum=0
     )
+    if seed is None:
+        seed = _auto_run_seed()
     if backend in ("openai-compat", "ferry", "http"):
         return OpenAICompatClient(
             base_url=base_url,
