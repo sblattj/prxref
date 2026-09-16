@@ -38,7 +38,7 @@ it (noted in the table).
 | # | Pass | What it does |
 |---|---|---|
 | 1 | `apply_location_validation` | Drops a finding whose `file` names no path of the parsed diff. |
-| 2 | `apply_manifest_claim_check` | `package.json` only. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
+| 2 | `apply_manifest_claim_check` | Manifests and npm-family lockfiles (`package.json`, `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`). When the anchor's hunk holds no section header, the served full-file lines decide the enclosing section. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
 | 3 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
 | 4 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
 | 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
@@ -58,8 +58,8 @@ its own findings against prxref's own stale comments and then delete them.
 | `drop_reason` | Pass | Meaning |
 | --- | --- | --- |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
-| `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A `package.json` finding names one dependency but is anchored on a different entry. |
-| `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A `package.json` finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |
+| `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |
+| `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A manifest/lockfile finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |
 | `duplicate of existing thread` | `apply_thread_dedup` | An open thread on the PR already says this. |
 | `settled in thread: <author>` | `apply_settled_thread_suppression` | A thread on the same path already argued this subject out. A **resolved** thread still settles it — resolution is a decision, not an expiry. |
 | `claims removal of a path present in the post-image: <path>` | `apply_removal_claim_check` | A removal verb governs this path, and every path the claim names is still present after the PR lands. |

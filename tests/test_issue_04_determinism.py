@@ -6,7 +6,10 @@ pick: a tie in the error cap, and a tie in the inline-comment cap, are broken
 by the arrival order of the list rather than by finding content. Tests A/A2
 pin the frozen order-invariance contract (identical result for any permutation
 of the same multiset, ordered by ``(file, line, title)``); Test B pins the new
-``sampling`` observability key. The controls pin what must keep working.
+``sampling`` observability key. Test C pins issue #56's auto-seed: unset
+``PRXREF_LLM_SEED`` no longer omits the field — one seed per process is
+derived and shared, so all LLM calls within a run pin the same sampling state.
+The controls pin what must keep working.
 """
 from __future__ import annotations
 
@@ -15,9 +18,11 @@ import threading
 
 from prxref.forges.base import PRRef
 from prxref.llm import InvokeResult
+from prxref.llm_backends import create_llm_client
 from prxref.orchestrator import orchestrate_review
 from prxref.quality import apply_quality_gate
 from prxref.triage import Finding
+from tests.test_llm_backends import _resp, _ScriptedSession
 from tests.test_orchestrator import FakeForge, make_pr
 
 REF = PRRef(
@@ -166,6 +171,33 @@ def test_b_sampling_survives_the_error_exit():
     assert result["sampling"]["seed"] == 7
 
 
+# --------------------------------------------------------------------------
+# Test C — auto seed (issue #56): one seed per run, on the wire, recorded
+# --------------------------------------------------------------------------
+
+
+def _endpoint(monkeypatch) -> None:
+    monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+    monkeypatch.setenv("PRXREF_LLM_MODELS", "a")
+
+
+def test_c_two_clients_without_seed_share_one_seed_on_the_wire(monkeypatch):
+    """Unset PRXREF_LLM_SEED must not mean "unseeded": two clients the
+    factory builds in one process carry the SAME auto-derived seed, and each
+    one puts it in the request payload — the property that makes every LLM
+    call in a run (chunks, sweep, verdict) pin one sampling state."""
+    _endpoint(monkeypatch)
+    s1, s2 = _ScriptedSession(_resp()), _ScriptedSession(_resp())
+    c1 = create_llm_client(session=s1)
+    c2 = create_llm_client(session=s2)
+    assert isinstance(c1.seed, int)
+    assert c1.seed == c2.seed
+    c1.invoke("sys", "usr")
+    c2.invoke("sys", "usr")
+    assert s1.calls[0]["json"]["seed"] == c1.seed
+    assert s2.calls[0]["json"]["seed"] == c1.seed
+
+
 def test_control_single_order_active_set(monkeypatch):
     """One ordering still yields exactly the two highest-ranked errors."""
     from prxref import orchestrator
@@ -186,6 +218,18 @@ def test_control_single_order_active_set(monkeypatch):
     assert result["verdict"] == "Request-Changes"
     assert len(result["findings_dropped"]) == 1
     assert "error cap exceeded" in result["findings_dropped"][0].drop_reason
+
+
+def test_control_env_seed_1234_wins_over_the_auto_seed(monkeypatch):
+    """PRXREF_LLM_SEED keeps its override semantics: a configured value is
+    sent verbatim and the auto seed never replaces it."""
+    _endpoint(monkeypatch)
+    monkeypatch.setenv("PRXREF_LLM_SEED", "1234")
+    s = _ScriptedSession(_resp())
+    client = create_llm_client(session=s)
+    assert client.seed == 1234
+    client.invoke("sys", "usr")
+    assert s.calls[0]["json"]["seed"] == 1234
 
 
 def test_control_temperature_reaches_the_wire():

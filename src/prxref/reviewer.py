@@ -13,7 +13,11 @@ Both calls take optional supplementary context, and both degrade to the
 pre-existing prompt when it is absent: :func:`review_chunk` takes
 ``context_blocks`` (the dependency-version and referenced-definition
 blocks the orchestrator builds from an optional forge
-``get_file_content``), and :func:`review_systemic` takes ``threads`` (the
+``get_file_content``) and ``sibling_files`` (the whole PR's parsed files,
+reduced by :func:`prxref.chunk_context.sibling_summary_block` to a bounded
+summary of what the chunk's siblings change, so a worker cannot conclude
+from one file that something is absent when a sibling file in the same
+diff refutes it), and :func:`review_systemic` takes ``threads`` (the
 PR's existing review discussion, rendered by
 :func:`_render_discussion_block` under the ``DISCUSSION_MAX_*`` caps) so
 the sweep stops re-raising subjects the team already argued out.
@@ -37,6 +41,7 @@ from collections.abc import Sequence
 from importlib import resources
 from typing import Any
 
+from .chunk_context import sibling_summary_block
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
@@ -147,11 +152,14 @@ def _render_prompt(
     repo_hint: str,
     context_lines: int | None = None,
     context_blocks: str = "",
+    sibling_files: Sequence[FileDiff] = (),
 ) -> tuple[str, str]:
     template = load_prompt("worker.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
     if not marker:
         raise ValueError(f"worker.md is missing the {_CONTEXT_MARKER!r} split marker")
+    sibling_block = sibling_summary_block(chunk, sibling_files)
+    blocks = "\n\n".join(b for b in (sibling_block, context_blocks.strip()) if b)
     user = (
         marker + tail
     ).replace(
@@ -161,7 +169,7 @@ def _render_prompt(
     ).replace(
         "{repo_hint}", repo_hint.strip() or "(unspecified)"
     ).replace(
-        "{context_blocks}", context_blocks.strip()
+        "{context_blocks}", blocks
     ).replace(
         "{diff}", render_chunk(chunk, context_lines) or "(empty chunk)"
     )
@@ -359,6 +367,7 @@ def review_chunk(
     max_tokens: int | None = None,
     context_lines: int | None = None,
     context_blocks: str = "",
+    sibling_files: Sequence[FileDiff] = (),
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -396,6 +405,14 @@ def review_chunk(
     and out-of-hunk definitions built by :mod:`prxref.chunk_context` — placed
     after the diff, inside the ``user`` half of the prompt. The empty default
     renders nothing at all, leaving no stray header for direct callers.
+
+    ``sibling_files`` is the PR's full parsed file list; files already in
+    ``chunk`` are skipped. The rest are summarized — path, status, +/- counts,
+    and a bounded excerpt of each one's added/context hunk lines — under an
+    ``### Other files changed in this PR`` block placed before
+    ``context_blocks``, so a claim that something is absent, unsupported, or
+    contradicted can be checked against the sibling evidence the chunk split
+    moved out of view. The empty default renders no block at all.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -404,6 +421,7 @@ def review_chunk(
         repo_hint=repo_hint,
         context_lines=context_lines,
         context_blocks=context_blocks,
+        sibling_files=sibling_files,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(
