@@ -461,10 +461,11 @@ def orchestrate_review(
         logger.warning("list_threads failed (best-effort): %s", e)
         threads = []
 
+    reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
-        reader=_make_file_reader(forge, ref, pr),
+        reader=reader, all_files=files,
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -540,7 +541,9 @@ def orchestrate_review(
     # BEFORE apply_line_align, deliberately: the manifest check compares the
     # model's raw anchor against the key and section it claims, and realignment
     # can move a correctly anchored claim onto a neighbouring entry first.
-    findings = apply_manifest_claim_check(findings, files)
+    # The same reader the chunk context uses serves the full-file lines that
+    # name the section when the anchor's own hunk starts below its header.
+    findings = apply_manifest_claim_check(findings, files, read=reader)
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
     findings = apply_settled_thread_suppression(findings, threads)
@@ -852,7 +855,7 @@ def _context_blocks(chunk, reader, *, include_definitions: bool) -> str:
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
-    tracer: Tracer | None = None, reader=None,
+    tracer: Tracer | None = None, reader=None, all_files=None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -886,7 +889,7 @@ def _run_workers(
         futures = [
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
-                max_tokens, context_lines, tracer, reader,
+                max_tokens, context_lines, tracer, reader, all_files,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -931,7 +934,7 @@ _TIMEOUT_RETRY_CONTEXT_LINES = 0
 def _invoke_chunk(
     llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None, context_lines: int | None,
-    reader=None, *, include_definitions: bool = True,
+    reader=None, *, include_definitions: bool = True, all_files=None,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -944,14 +947,17 @@ def _invoke_chunk(
     :func:`_make_file_reader`; when present the chunk's dependency and
     definition context blocks are built here, so both the original attempt and
     the retry carry them. ``include_definitions`` is false on the timeout
-    retry, whose whole purpose is a smaller prompt.
+    retry, whose whole purpose is a smaller prompt. ``all_files`` is the PR's
+    full parsed file list; the reviewer reduces it to the bounded sibling
+    summary, which survives the retry because refuting evidence is not
+    bulk context.
     """
     blocks = _context_blocks(chunk, reader, include_definitions=include_definitions)
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, context_lines=context_lines,
-            context_blocks=blocks,
+            context_blocks=blocks, sibling_files=all_files or (),
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -991,7 +997,7 @@ def _invoke_chunk(
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
-    tracer: Tracer | None = None, reader=None,
+    tracer: Tracer | None = None, reader=None, all_files=None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -1006,7 +1012,9 @@ def _run_worker(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
     )
-    res = _invoke_chunk(llm, chunk, pr, max_tokens, context_lines, reader)
+    res = _invoke_chunk(
+        llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
+    )
     if (
         res["error"]
         and _is_timeout_error(res["error"])
@@ -1029,7 +1037,7 @@ def _run_worker(
         # the prompt is the entire point of this retry.
         res = _invoke_chunk(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
-            include_definitions=False,
+            include_definitions=False, all_files=all_files,
         )
 
     error = res["error"]

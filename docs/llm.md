@@ -27,7 +27,7 @@ Four variables shape the request itself. All are optional, and a bad value exits
 | `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call. Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
 | `PRXREF_LLM_TIMEOUT` | `45.0` | The client's default request timeout, in seconds. Must be > 0. It is a **per-model** deadline: a model that exceeds it is abandoned and the next in the chain is tried immediately, so a chain of three can take up to three timeouts. |
 | `PRXREF_LLM_TEMPERATURE` | `0.0` (sent) | `temperature` in the payload. Must be finite and >= 0; no upper bound, since the maximum is provider-specific. Unset or empty sends the default `0.0` rather than omitting the field, so an identical diff reviews identically by default; a set value wins. `PRXREF_LLM_REASONING_EFFORT` keeps its own pass-through-unvalidated rule. |
-| `PRXREF_LLM_SEED` | *(omitted)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset omits the field **entirely**, leaving the provider's own seed behaviour in place. |
+| `PRXREF_LLM_SEED` | *(auto-derived)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset derives one random seed per process, shared by every client the run builds, so all LLM calls in a run pin the same sampling state; the run record's `sampling.seed` reports it. |
 
 ### Configuration Example
 
@@ -89,7 +89,11 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
 
 - `PRXREF_LLM_TEMPERATURE` defaults to `0.0`, and `0.0` is **sent** on the wire
   rather than omitted.
-- `PRXREF_LLM_SEED` is sent whenever it is set, on both backends.
+- `PRXREF_LLM_SEED` is sent on every call, on both backends: the configured
+  value when set, else one random seed derived per process and shared by every
+  client the run builds — temperature 0 alone cannot pin hosted inference
+  (issue #56), so an unseeded run still varies call to call. The `sampling`
+  field reports which seed was in force.
 - **Neither makes a review bit-reproducible.** Providers vary by system
   fingerprint, load-balanced backends serve the same model from different
   hardware, MoE routing shifts with batch composition, and many gateways accept

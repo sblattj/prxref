@@ -646,12 +646,13 @@ class TestLLMBudgetKnobsEndToEnd:
         )
         cli._run_review(self.PR_URL, post=False)
 
-    def test_defaults_send_budget_temperature_0_and_no_seed(
+    def test_defaults_send_budget_temperature_0_and_one_shared_seed(
         self, monkeypatch
     ):
         """The reproducibility contract, end to end: with nothing configured,
         temperature 0.0 IS on the wire (that is the fix for the vanished
-        error-severity finding) and no seed is sent."""
+        error-severity finding) and so is a seed — the auto-derived
+        once-per-process one (issue #56), identical across every call."""
         server = MockOpenAIServer()
         base_url = server.start()
         try:
@@ -662,7 +663,8 @@ class TestLLMBudgetKnobsEndToEnd:
             payload = server.requests[0]["payload"]
             assert payload["max_tokens"] == 4096
             assert payload["temperature"] == 0.0
-            assert "seed" not in payload
+            assert isinstance(payload["seed"], int)
+            assert payload["seed"] == server.requests[1]["payload"]["seed"]
         finally:
             server.stop()
 

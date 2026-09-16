@@ -1,8 +1,13 @@
-"""Extra prompt context for one worker chunk: dependency pins and definitions.
+"""Extra prompt context for one worker chunk: dependency pins, definitions,
+and sibling-file summaries.
 
 Two blocks answer the two questions a diff-only prompt cannot: which VERSION of
 a third-party library the changed code runs against, and what a referenced
-identifier actually IS when its definition sits outside the rendered hunk.
+identifier actually IS when its definition sits outside the rendered hunk. A
+third answers the question chunking itself creates — what the REST of the PR
+changes — so a worker holding one file cannot assert that something is absent
+or unsupported when a sibling file in the same diff carries the refuting
+evidence.
 
 The module is pure. It performs no I/O of its own: every caller passes a
 ``read(path) -> str | None`` callable that resolves a repository-relative path
@@ -26,8 +31,14 @@ MAX_LINES_PER_DEFINITION = 6
 MAX_DEFINITION_CHARS = 8000
 MAX_FILE_BYTES = 512 * 1024
 
+# Same contract for the sibling summary: bounded prompt growth, no lever.
+MAX_SIBLING_FILES = 12
+MAX_SIBLING_LINES_PER_FILE = 40
+MAX_SIBLING_CHARS = 4000
+
 DEPENDENCY_HEADER = "### Dependency versions"
 DEFINITIONS_HEADER = "### Definitions referenced by this chunk"
+SIBLING_HEADER = "### Other files changed in this PR"
 
 _JS_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
 
@@ -445,3 +456,75 @@ def render_context_blocks(dep_lines: Sequence[str], def_lines: Sequence[str]) ->
     if def_lines:
         blocks.append(DEFINITIONS_HEADER + "\n\n" + "\n".join(def_lines))
     return "\n\n".join(blocks)
+
+
+def _sibling_entry(f: object) -> str:
+    """One sibling file: header line plus a bounded excerpt of its hunks.
+
+    Only added and context lines are excerpted — the new-file truth a
+    refutation would cite — and the excerpt obeys both the per-file line cap
+    and the whole-block character cap, so a single pathological file cannot
+    crowd out every other sibling.
+    """
+    header = (
+        f"- {getattr(f, 'path', '')} "
+        f"({getattr(f, 'status', '') or 'modified'}, "
+        f"+{getattr(f, 'lines_added', 0)}/-{getattr(f, 'lines_removed', 0)}):"
+    )
+    kept: list[str] = []
+    hidden = 0
+    used = 0
+    for hunk in getattr(f, "hunks", None) or []:
+        for line in getattr(hunk, "lines", None) or []:
+            kind = getattr(line, "kind", " ")
+            if kind not in (" ", "+"):
+                continue
+            rendered = f"  {kind}{getattr(line, 'text', '')}"
+            if (
+                len(kept) < MAX_SIBLING_LINES_PER_FILE
+                and used + len(rendered) + 1 <= MAX_SIBLING_CHARS
+            ):
+                kept.append(rendered)
+                used += len(rendered) + 1
+            else:
+                hidden += 1
+    out = [header, *kept]
+    if hidden:
+        out.append(f"  … {hidden} more lines not shown")
+    return "\n".join(out)
+
+
+def sibling_summary_block(chunk: Iterable[object], files: Iterable[object]) -> str:
+    """Render the bounded ``### Other files changed in this PR`` block.
+
+    ``files`` is the whole PR's parsed diff and ``chunk`` the files the worker
+    already sees rendered in full; a file in both is skipped, so the caller
+    passes the full list untouched. Each sibling gets one header line (path,
+    status, +/- counts) and at most :data:`MAX_SIBLING_LINES_PER_FILE`
+    added/context lines — never full content — and the block stops at
+    :data:`MAX_SIBLING_FILES` files or :data:`MAX_SIBLING_CHARS` characters,
+    whichever bites first, with an omitted-count line saying so. The first
+    sibling is always rendered, even alone. Returns ``""`` when the chunk
+    already holds the whole PR, so the prompt leaves no stray header.
+    """
+    chunk_paths = {getattr(f, "path", "") for f in chunk}
+    siblings = [
+        f for f in files
+        if (path := getattr(f, "path", "")) and path not in chunk_paths
+    ]
+    if not siblings:
+        return ""
+    entries: list[str] = []
+    used = len(SIBLING_HEADER)
+    for f in siblings[:MAX_SIBLING_FILES]:
+        entry = _sibling_entry(f)
+        # The first entry bypasses the check: `_sibling_entry` already obeys
+        # the character cap, so at worst it is the only sibling shown.
+        if entries and used + len(entry) + 1 > MAX_SIBLING_CHARS:
+            break
+        entries.append(entry)
+        used += len(entry) + 1
+    omitted = len(siblings) - len(entries)
+    if omitted > 0:
+        entries.append(f"… {omitted} more files not shown")
+    return SIBLING_HEADER + "\n\n" + "\n".join(entries)
