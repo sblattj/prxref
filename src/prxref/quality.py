@@ -11,11 +11,14 @@ emit is tabulated for operators in ``docs/quality.md``.
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-2. ``apply_manifest_claim_check``: for findings on a ``package.json``,
-   drop a claim whose named dependency is not the key on the anchored
-   line (``anchor mismatch:``) or sits under a different dependency
-   section than the claim asserts (``section mismatch:``). It runs
-   BEFORE ``apply_line_align`` so it reads the model's raw anchor.
+2. ``apply_manifest_claim_check``: for findings on a manifest or
+   npm-family lockfile (``package.json``, ``bun.lock``, ...), drop a
+   claim whose named dependency is not the key on the anchored line
+   (``anchor mismatch:``) or sits under a different dependency section
+   than the claim asserts (``section mismatch:``); when the anchor's
+   own hunk holds no section header, the served full-file lines decide
+   the enclosing section. It runs BEFORE ``apply_line_align`` so it
+   reads the model's raw anchor.
 3. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
@@ -85,7 +88,7 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -199,7 +202,19 @@ def apply_location_validation(
     return result
 
 
-MANIFEST_BASENAME: str = "package.json"
+# Manifests and npm-family lockfiles whose diff lines are dependency
+# entries under a named section — the files the claim check can judge.
+# Local by design: the lockfile sets in heuristics/systemic are broader
+# (other ecosystems) or carry a different signal. bun.lockb is binary in
+# a diff, so its findings never name a key and pass through leniently.
+MANIFEST_BASENAMES: frozenset[str] = frozenset({
+    "package.json",
+    "bun.lock",
+    "bun.lockb",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+})
 
 DEPENDENCY_SECTIONS: tuple[str, ...] = (
     "dependencies",
@@ -211,15 +226,16 @@ DEPENDENCY_SECTIONS: tuple[str, ...] = (
 # Keys that name a manifest SECTION or the package itself rather than a
 # dependency, so they can never be the "claimed package" of a finding.
 _MANIFEST_NON_PACKAGE_KEYS: frozenset[str] = frozenset(
-    [s.lower() for s in DEPENDENCY_SECTIONS] + ["scripts", "engines", "name", "version"]
+    [s.lower() for s in DEPENDENCY_SECTIONS]
+    + ["packages", "scripts", "engines", "name", "version"]
 )
 
 # Evidence tokens a manifest section header contributes (including the
 # camelCase split of the compound forms), which must not decide a
-# package.json realign — see ``_realign_member``.
+# manifest/lockfile realign — see ``_realign_member``.
 _MANIFEST_SECTION_TOKENS: frozenset[str] = frozenset(
     {"dependencies", "devdependencies", "peerdependencies",
-     "optionaldependencies", "peer", "optional"}
+     "optionaldependencies", "packages", "peer", "optional"}
 )
 
 _NPM_NAME_RE = re.compile(
@@ -228,8 +244,12 @@ _NPM_NAME_RE = re.compile(
 
 _JSON_KEY_RE = re.compile(r'"([^"\n]+)"\s*:')
 
+# A section opener as a line-scan, not a parse: bun.lock is JSONC
+# (trailing commas, optionally unquoted keys), so the quotes are optional
+# and the key must not be the tail of a longer identifier.
 _SECTION_OPEN_RE = re.compile(
-    r'"(dependencies|devDependencies|peerDependencies|optionalDependencies)"'
+    r'(?<!\w)"?(dependencies|devDependencies|peerDependencies'
+    r'|optionalDependencies|packages)"?'
     r"\s*:\s*\{"
 )
 
@@ -294,8 +314,19 @@ def _claimed_section(text: str) -> str | None:
     return best[1] if best else None
 
 
-def _enclosing_section(hunks: Sequence[Hunk], line: int) -> str | None:
-    """The dependency section header above ``line`` in the post-image."""
+def _enclosing_section(
+    hunks: Sequence[Hunk],
+    line: int,
+    full_lines: Sequence[str] | None = None,
+) -> str | None:
+    """The dependency section header above ``line`` in the post-image.
+
+    The anchor's own hunk lines are scanned first; when they hold no
+    header above the anchor — the common lockfile shape, where the
+    ``devDependencies`` block opens far above the hunk — the served
+    full-file lines decide it instead. ``None`` is returned, and the
+    caller stays lenient, only when NO source names a section.
+    """
     for h in hunks:
         body = [ln for ln in h.lines if ln.kind != "-"]
         for i, ln in enumerate(body):
@@ -305,29 +336,52 @@ def _enclosing_section(hunks: Sequence[Hunk], line: int) -> str | None:
                 m = _SECTION_OPEN_RE.search(prev.text)
                 if m is not None:
                     return m.group(1)
-            return None
+            break
+    if full_lines is not None and 0 < line <= len(full_lines):
+        for text in reversed(full_lines[:line]):
+            m = _SECTION_OPEN_RE.search(text)
+            if m is not None:
+                return m.group(1)
     return None
+
+
+def _served_lines(
+    path: str,
+    cache: dict[str, list[str] | None],
+    read: Callable[[str], str | None] | None,
+) -> list[str] | None:
+    """Post-image lines of ``path`` from the reader, cached; None without one."""
+    if read is None:
+        return None
+    if path not in cache:
+        content = read(path)
+        cache[path] = content.splitlines() if content else None
+    return cache[path]
 
 
 def apply_manifest_claim_check(
     findings: Sequence[Finding],
     files: Sequence[FileDiff],
+    read: Callable[[str], str | None] | None = None,
 ) -> list[Finding]:
-    """Drop package.json findings that misname their key or their section.
+    """Drop manifest/lockfile findings that misname key or section.
 
-    A worker reading a manifest diff can name a real dependency and then
-    anchor the comment on an unrelated neighbouring entry, or read an
-    entry as a runtime dependency when the enclosing block is
-    ``devDependencies``. Both are checkable against the diff itself: the
-    claim names a package, the anchored line declares a key, and the
-    nearest section header above that line names the block it lives in.
+    A worker reading a manifest or lockfile diff can name a real
+    dependency and then anchor the comment on an unrelated neighbouring
+    entry, or read an entry as a runtime dependency when the enclosing
+    block is ``devDependencies``. Both are checkable against the diff
+    itself: the claim names a package, the anchored line declares a key,
+    and the nearest section header above that line names the block it
+    lives in — from the anchor's hunk, or, when that hunk holds no
+    header, from the served full file (``read``, the same reader the
+    chunk context uses).
 
     A finding is dropped with ``drop_reason="anchor mismatch: claims
     <claimed> but line <n> is <anchor>"`` when the anchored line declares
     a different dependency, and with ``drop_reason="section mismatch:
     claims <claimed> but <key> is under <actual>"`` when the anchor is
     right but the asserted section is not. Findings on other files, on a
-    package.json whose claim names no key of the diff, and findings that
+    manifest whose claim names no key of the diff, and findings that
     already carry a ``drop_reason`` pass through untouched. Order is
     preserved.
 
@@ -338,8 +392,9 @@ def apply_manifest_claim_check(
     hunks_by_file = {
         f.path: f.hunks
         for f in files
-        if PurePosixPath(f.path).name == MANIFEST_BASENAME
+        if PurePosixPath(f.path).name in MANIFEST_BASENAMES
     }
+    full_lines: dict[str, list[str] | None] = {}
     result: list[Finding] = []
     for f in findings:
         hunks = hunks_by_file.get(f.file)
@@ -368,7 +423,9 @@ def apply_manifest_claim_check(
             ))
             continue
         claimed_section = _claimed_section(claim)
-        actual_section = _enclosing_section(hunks, f.line)
+        actual_section = _enclosing_section(
+            hunks, f.line, _served_lines(f.file, full_lines, read)
+        )
         if (
             claimed_section is not None
             and actual_section is not None
@@ -484,13 +541,14 @@ def _realign_member(
     their snake/camel parts (so ``wp_ajax_nopriv_avatar_upload`` can
     answer a claim about "nopriv avatar upload").
 
-    On a ``package.json`` the manifest section words are dropped from the
-    evidence, because every dependency claim mentions one and the long
-    ``dependencies`` token would otherwise outrank the package name and
-    resolve the anchor onto a section header instead of the entry.
+    On a manifest or lockfile the manifest section words are dropped
+    from the evidence, because every dependency claim mentions one and
+    the long ``dependencies`` token would otherwise outrank the package
+    name and resolve the anchor onto a section header instead of the
+    entry.
     """
     ftoks = _evidence_tokens(f"{finding.title} {finding.body}")
-    if PurePosixPath(finding.file).name == MANIFEST_BASENAME:
+    if PurePosixPath(finding.file).name in MANIFEST_BASENAMES:
         ftoks -= _MANIFEST_SECTION_TOKENS
     if not ftoks:
         return finding.line

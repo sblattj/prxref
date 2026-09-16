@@ -34,7 +34,7 @@ SUMMARY_TEMPLATE = (
 
 def _contract_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
-    max_tokens=None, context_lines=None, context_blocks="",
+    max_tokens=None, context_lines=None, context_blocks="", sibling_files=(),
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -410,6 +410,7 @@ class TestParallelFanOut:
         def barrier_review_chunk(
             llm, files, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, context_lines=None, context_blocks="",
+            sibling_files=(),
         ):
             barrier.wait()
             return [Finding(
@@ -2563,7 +2564,7 @@ class TestReleaseShapeFoldIn:
     ):
         def _review_chunk(llm, files, *, pr_title="", pr_description="",
                            repo_hint="", max_tokens=None, context_lines=None,
-                           context_blocks=""):
+                           context_blocks="", sibling_files=()):
             return [self._matching_finding("chunk worker restatement")], {
                 "input_tokens": 10, "output_tokens": 5, "model": "m",
                 "elapsed_ms": 1, "error": "",
@@ -2702,7 +2703,8 @@ class TestChunkTimeoutRetry:
         calls: list[dict] = []
 
         def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
-                max_tokens=None, context_lines=None, context_blocks=""):
+                max_tokens=None, context_lines=None, context_blocks="",
+                sibling_files=()):
             calls.append({
                 "context_lines": context_lines,
                 "context_blocks": context_blocks,

@@ -1237,6 +1237,52 @@ _MANIFEST_DIFF = (
 
 _MANIFEST_FILES = parse_unified_diff(_MANIFEST_DIFF)
 
+_BUNLOCK_PATH = "apps/server/bun.lock"
+
+# Post-image lines: 1 "{", 2 lockfileVersion, 3 workspaces, 4 root "",
+# 5 name, 6 dependencies header, 7 zod, 8 "},", 9 devDependencies header,
+# 10 typescript, 11 +vitest, 12-14 closers, 15 packages header, 16 pin,
+# 17 "},", 18 "}". The hunk starts BELOW the devDependencies header, so
+# only the served full-file lines can name the section — and the served
+# body is JSONC like a real bun.lock (trailing commas throughout).
+_BUNLOCK_DIFF = (
+    f"diff --git a/{_BUNLOCK_PATH} b/{_BUNLOCK_PATH}\n"
+    f"--- a/{_BUNLOCK_PATH}\n"
+    f"+++ b/{_BUNLOCK_PATH}\n"
+    "@@ -10,3 +10,4 @@\n"
+    '        "typescript": "typescript@5.6.2",\n'
+    '+        "vitest": "vitest@1.2.3",\n'
+    "      },\n"
+    "      },\n"
+)
+
+_BUNLOCK_FILES = parse_unified_diff(_BUNLOCK_DIFF)
+
+_BUNLOCK_SERVED = (
+    "{\n"
+    '  "lockfileVersion": 1,\n'
+    '  "workspaces": {\n'
+    '    "": {\n'
+    '      "name": "mcp",\n'
+    '      "dependencies": {\n'
+    '        "zod": "zod@3.23.8",\n'
+    "      },\n"
+    '      "devDependencies": {\n'
+    '        "typescript": "typescript@5.6.2",\n'
+    '        "vitest": "vitest@1.2.3",\n'
+    "      },\n"
+    "    },\n"
+    "  },\n"
+    '  "packages": {\n'
+    '    "vitest@1.2.3": ["vitest@1.2.3", "", "sha256-AAAA"],\n'
+    "  },\n"
+    "}\n"
+)
+
+
+def _bunlock_read(path: str) -> str | None:
+    return _BUNLOCK_SERVED if path == _BUNLOCK_PATH else None
+
 
 class TestManifestClaimCheck:
     """apply_manifest_claim_check: a package.json claim must anchor on the
@@ -1265,6 +1311,53 @@ class TestManifestClaimCheck:
         assert out[0].drop_reason is not None
         assert out[0].drop_reason.startswith("section mismatch:")
         assert "devDependencies" in out[0].drop_reason
+
+    def test_bunlock_section_mismatch_uses_served_lines(self):
+        f = _f(
+            file=_BUNLOCK_PATH, line=11,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check(
+            [f], _BUNLOCK_FILES, read=_bunlock_read,
+        )
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("section mismatch:")
+        assert "devDependencies" in out[0].drop_reason
+
+    def test_bunlock_correct_claim_untouched(self):
+        f = _f(
+            file=_BUNLOCK_PATH, line=11,
+            title="vitest added to devDependencies",
+            body="A new test runner pin lands in the lockfile.",
+        )
+        out = apply_manifest_claim_check(
+            [f], _BUNLOCK_FILES, read=_bunlock_read,
+        )
+        assert out[0].drop_reason is None
+
+    def test_bunlock_without_reader_stays_lenient(self):
+        f = _f(
+            file=_BUNLOCK_PATH, line=11,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check([f], _BUNLOCK_FILES)
+        assert out[0].drop_reason is None
+
+    def test_bunlock_unquoted_section_keys_scan(self):
+        served = _BUNLOCK_SERVED.replace('"devDependencies": {', "devDependencies: {")
+        f = _f(
+            file=_BUNLOCK_PATH, line=11,
+            title="vitest added to runtime dependencies",
+            body="This bloats production installs.",
+        )
+        out = apply_manifest_claim_check(
+            [f], _BUNLOCK_FILES,
+            read=lambda p: served if p == _BUNLOCK_PATH else None,
+        )
+        assert out[0].drop_reason is not None
+        assert out[0].drop_reason.startswith("section mismatch:")
 
     def test_correct_claim_untouched(self):
         f = _f(
