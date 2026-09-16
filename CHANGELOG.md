@@ -7,6 +7,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-09-15
+
+### Fixed
+
+- **Findings no longer vary between identical runs for want of a seed** (#56).
+  A reporter measured the same commit draw seven findings on a dry run and
+  two on the posting run minutes later — and the two that vanished were the
+  verified-true blockers. Temperature was already 0.0, but temp-0 is not
+  bitwise-deterministic on hosted inference and the seed was unset. Every
+  LLM call in a run now shares one process-level random seed
+  (`secrets.randbits(31)`, lock-guarded), recorded in the result's
+  `sampling` block; `PRXREF_LLM_SEED` still overrides for a fully pinned
+  run.
+
+- **The worker no longer concludes from one file when the refuting evidence
+  is another file in the same diff** (#57). Twice on one PR the reviewer
+  asserted something was absent or unsupported while the diff itself
+  contained the refutation — a build-time `define` flagged as breaking a
+  runtime override the same diff documented as build-time, and a claim
+  about an install flag refuted by the install script two chunks over.
+  Chunks are capped at five files, so the refuting sibling was never in
+  view. The worker prompt now carries a cross-file corroboration rule and a
+  bounded sibling-file summary (path, status, +A/-D, and up to 40
+  added/context lines per file, 12 files and 4000 chars per block) rendered
+  below the diff.
+
+- **The manifest claim-check gate now covers lockfiles, not just
+  `package.json`** (#58). A confident finding claimed `vitest`/`tsup` were
+  runtime `dependencies` when they sit in the adjacent `devDependencies`
+  block of `bun.lock`, anchored to a phantom line. The gate's section and
+  anchor checks now apply to `package.json`, `bun.lock(b)`,
+  `package-lock.json`, `yarn.lock`, and `pnpm-lock.yaml`; section scanning
+  tolerates JSONC (unquoted keys, trailing commas) and falls back to the
+  served full-file lines when the section header sits above the hunk.
+
 ## [0.12.1] — 2026-09-04
 
 ### Fixed
