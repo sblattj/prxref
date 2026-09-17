@@ -35,7 +35,9 @@ warning level and still counted as reviewed.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from collections.abc import Sequence
 from importlib import resources
@@ -265,8 +267,62 @@ def _finding_from(raw: Any) -> Finding | None:
     )
 
 
+def _write_trace_files(
+    trace_dir: str,
+    trace_label: str,
+    system: str,
+    user: str,
+    raw_text: str | None,
+    meta: dict,
+) -> None:
+    """Dump one review unit's prompt, response, and cost meta under ``trace_dir``.
+
+    Writes four files named after ``trace_label`` (``chunk0``, ``sweep``, …):
+    ``<label>.system.md`` and ``<label>.user.md`` are the exact rendered
+    prompt halves, ``<label>.response.json`` is the raw model text JSON-encoded
+    so any JSON reader gets it back verbatim (``null`` when the call never
+    produced a response), and ``<label>.meta.json`` carries ``unit``, ``model``,
+    token counts, ``elapsed_ms``, and ``error``.
+
+    Each file lands via a temp file plus :func:`os.replace`, so a concurrent
+    reader never observes a half-written file, and a timeout retry simply
+    overwrites: the trace ends up showing the attempt whose result was used.
+    Empty ``trace_dir`` is the declared off switch and does nothing — no
+    directory, no syscalls, no cost. Every failure (directory cannot be
+    created, path unwritable, disk full) is a logged warning and nothing more:
+    tracing must never be able to fail a review.
+    """
+    if not trace_dir or not trace_label:
+        return
+    try:
+        os.makedirs(trace_dir, exist_ok=True)
+        base = os.path.join(trace_dir, trace_label)
+        payload = {
+            "unit": trace_label,
+            "model": meta.get("model", ""),
+            "input_tokens": meta.get("input_tokens", 0),
+            "output_tokens": meta.get("output_tokens", 0),
+            "elapsed_ms": meta.get("elapsed_ms", 0),
+            "error": meta.get("error", ""),
+        }
+        files = [
+            (".system.md", system),
+            (".user.md", user),
+            (".response.json", json.dumps(raw_text, ensure_ascii=False)),
+            (".meta.json", json.dumps(payload, ensure_ascii=False, indent=2) + "\n"),
+        ]
+        for suffix, data in files:
+            tmp = base + suffix + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(data)
+            os.replace(tmp, base + suffix)
+    except OSError as e:
+        logger.warning("trace write for %s failed (continuing): %s", trace_label, e)
+
+
 def _invoke_and_parse(
     llm: LLMClient, system: str, user: str, *, budget: int, label: str,
+    trace_dir: str = "", trace_label: str = "",
 ) -> tuple[list[Finding], dict]:
     """One single-shot invoke plus lenient JSON parse, shared by both reviewers.
 
@@ -275,6 +331,10 @@ def _invoke_and_parse(
     raises, empty findings and zeros on failure, and truncation named as the
     cause — with the budget lever — when the budget is why the response was
     unusable.
+
+    ``trace_dir`` with ``trace_label`` turns on the per-unit prompt/response
+    dump (:func:`_write_trace_files`); the default empty ``trace_dir`` keeps
+    the write path dormant.
     """
     t0 = time.perf_counter()
     meta = {
@@ -301,6 +361,7 @@ def _invoke_and_parse(
         logger.warning("worker review failed for %s: %s", label, e)
         meta["error"] = f"{type(e).__name__}: {e}"
         meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+        _write_trace_files(trace_dir, trace_label, system, user, None, meta)
         return [], meta
 
     meta["input_tokens"] = result.input_tokens
@@ -320,6 +381,7 @@ def _invoke_and_parse(
         logger.warning("worker review failed for %s: %s", label, reason)
         meta["error"] = reason
         meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+        _write_trace_files(trace_dir, trace_label, system, user, result.text, meta)
         return [], meta
 
     meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
@@ -331,6 +393,7 @@ def _invoke_and_parse(
         detail = f"worker review JSON is not an object: {type(parsed).__name__}"
         logger.warning(detail)
         meta["error"] = truncated_error if stop_reason else detail
+        _write_trace_files(trace_dir, trace_label, system, user, result.text, meta)
         return [], meta
 
     if stop_reason:
@@ -354,6 +417,7 @@ def _invoke_and_parse(
         raw_esc = []
     meta["escalations"] = [e for e in raw_esc if isinstance(e, dict)]
 
+    _write_trace_files(trace_dir, trace_label, system, user, result.text, meta)
     return findings, meta
 
 
@@ -368,6 +432,8 @@ def review_chunk(
     context_lines: int | None = None,
     context_blocks: str = "",
     sibling_files: Sequence[FileDiff] = (),
+    trace_dir: str = "",
+    trace_label: str = "",
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -413,6 +479,12 @@ def review_chunk(
     ``context_blocks``, so a claim that something is absent, unsupported, or
     contradicted can be checked against the sibling evidence the chunk split
     moved out of view. The empty default renders no block at all.
+
+    ``trace_dir`` with ``trace_label`` (``chunk0``, ``chunk1``, …) writes the
+    unit's exact prompts, raw response, and cost meta to four files under
+    that directory (:func:`_write_trace_files`); the empty default traces
+    nothing. The orchestrator passes both, so ``PRXREF_TRACE_DIR`` covers
+    every chunk without any per-caller wiring.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -426,6 +498,7 @@ def review_chunk(
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(
         llm, system, user, budget=budget, label=f"chunk of {len(chunk)} files",
+        trace_dir=trace_dir, trace_label=trace_label,
     )
 
 
@@ -438,6 +511,8 @@ def review_systemic(
     repo_hint: str = "",
     max_tokens: int | None = None,
     threads: Sequence[Thread] = (),
+    trace_dir: str = "",
+    trace_label: str = "",
 ) -> tuple[list[Finding], dict]:
     """Review the whole-PR systemic digest with a single LLM call.
 
@@ -453,6 +528,10 @@ def review_systemic(
     contract — never raises, ``meta["error"]`` empty on success, truncation
     named when the budget is why — so the orchestrator can treat the sweep
     as one more worker-style unit for coverage accounting.
+
+    ``trace_dir``/``trace_label`` work exactly as in :func:`review_chunk`;
+    the orchestrator passes ``trace_label="sweep"`` so the sweep's prompt and
+    response land beside the chunks' when ``PRXREF_TRACE_DIR`` is set.
     """
     system, user = _render_systemic_prompt(
         digest=digest,
@@ -462,4 +541,7 @@ def review_systemic(
         threads=threads,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
-    return _invoke_and_parse(llm, system, user, budget=budget, label="systemic sweep")
+    return _invoke_and_parse(
+        llm, system, user, budget=budget, label="systemic sweep",
+        trace_dir=trace_dir, trace_label=trace_label,
+    )

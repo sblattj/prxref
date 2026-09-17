@@ -541,6 +541,29 @@ class TestConfiguredKnobsReachTheOrchestrator:
         assert self._review(monkeypatch, ["--max-chunks", "5"]) == 0
         assert fake_runtime["orchestrate_calls"][0]["max_chunks"] == 5
 
+    def test_timeout_env_reaches_the_llm_client(self, fake_runtime, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
+        assert self._review(monkeypatch) == 0
+        assert fake_runtime["llm_calls"][0]["llm_timeout"] == 12.5
+
+    def test_timeout_flag_beats_the_environment(self, fake_runtime, monkeypatch):
+        """Same explicit-keyword > env-var > default precedence as --max-chunks."""
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
+        assert self._review(monkeypatch, ["--timeout", "90"]) == 0
+        assert fake_runtime["llm_calls"][0]["llm_timeout"] == 90.0
+
+    def test_timeout_flag_used_when_environment_absent(self, fake_runtime, monkeypatch):
+        monkeypatch.delenv("PRXREF_LLM_TIMEOUT", raising=False)
+        assert self._review(monkeypatch, ["--timeout", "7.5"]) == 0
+        assert fake_runtime["llm_calls"][0]["llm_timeout"] == 7.5
+
+    def test_timeout_default_when_neither_flag_nor_environment(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.delenv("PRXREF_LLM_TIMEOUT", raising=False)
+        assert self._review(monkeypatch) == 0
+        assert fake_runtime["llm_calls"][0]["llm_timeout"] == 45.0
+
     def test_quality_gate_knobs_reach_the_orchestrator(self, fake_runtime, monkeypatch):
         """Regression: apply_quality_gate() was called with no arguments."""
         monkeypatch.setenv("PRXREF_CONFIDENCE_FLOOR", "0.85")
@@ -682,6 +705,48 @@ class TestDegenerateValuesNeverReachTheOrchestrator:
         assert "--max-chunks" in err
         assert "PRXREF_MAX_CHUNKS" not in err
         assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    @pytest.mark.parametrize("flag_value", ["0", "-2"])
+    def test_degenerate_timeout_flag_exits_2(
+        self, fake_runtime, monkeypatch, capsys, flag_value
+    ):
+        """The flag is applied as a ``load_config`` override, so it is checked
+        on the same path as the environment variable — and reported as the flag.
+        """
+        assert self._review(monkeypatch, ["--timeout", flag_value]) == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert "--timeout" in err
+        assert "PRXREF_LLM_TIMEOUT" not in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    def test_non_numeric_timeout_flag_is_rejected_by_argparse(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """``--timeout abc`` never reaches the config: argparse's float
+        converter rejects it with usage text and exit 2.
+        """
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "review", "--pr-url", "https://github.com/org/repo/pull/7",
+                "--timeout", "abc",
+            ])
+        assert excinfo.value.code == 2
+        _, err = capsys.readouterr()
+        assert "invalid" in err
+        assert len(fake_runtime["orchestrate_calls"]) == 0
+
+    def test_degenerate_timeout_environment_is_still_reported_as_the_environment(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """Control for the test above: the env spelling appears when the
+        environment supplied the value."""
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "0")
+        assert self._review(monkeypatch) == 2
+        _, err = capsys.readouterr()
+        assert "PRXREF_LLM_TIMEOUT" in err
+        assert "--timeout" not in err
 
     def test_the_environment_is_still_reported_as_the_environment(
         self, fake_runtime, monkeypatch, capsys
