@@ -114,10 +114,12 @@ before the dev tools moved to `[dependency-groups]` and does not work now.
 
 ## Still open — not part of this release
 
-- **Observability / tracing** — prompt+response tracing, a `PRXREF_TRACE_DIR`,
-  per-finding drop reasons, a machine-readable run report. Nothing has landed.
-- **`review --timeout SECONDS`** — the per-run counterpart to `PRXREF_LLM_TIMEOUT`,
-  which shipped natively in v0.4.0.
+- **Observability / tracing** — prompt+response tracing and a `PRXREF_TRACE_DIR`
+  are **done** — they landed as the `review --trace-dir` flag and the
+  `PRXREF_TRACE_DIR` env var. Still open from this item: per-finding drop reasons
+  and a machine-readable run report.
+- ~~**`review --timeout SECONDS`** — the per-run counterpart to `PRXREF_LLM_TIMEOUT`,
+  which shipped natively in v0.4.0.~~ **Done** — the flag has landed.
 
 The next three came out of the v0.5.0 release review, which raised them against
 `bitbucket_server.py`. Each one is real, and each one is **repo-wide, not a porting

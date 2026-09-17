@@ -11,6 +11,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from prxref.forges.base import (
+    ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
     FeedReadError,
     InlineComment,
@@ -34,6 +35,22 @@ _MAX_PAGES = 50
 # this size (or one that looks binary) is worth skipping rather than shipping
 # hundreds of KB into a worker prompt.
 _MAX_FILE_CONTENT_BYTES = 512 * 1024
+# A rejection body is operator-only diagnostics, never posted to the forge, but
+# it is still bounded: Bitbucket's validation errors run long enough to bury
+# the log line that carries them.
+_ERROR_DETAIL_CHARS = 400
+
+
+def _response_detail(resp: requests.Response) -> str:
+    """Return a bounded, single-line rendering of an error response body."""
+    try:
+        body = resp.text or ""
+    except Exception:  # noqa: BLE001 - a body that will not decode is not a failure
+        return "<unreadable body>"
+    collapsed = " ".join(body.split())
+    if len(collapsed) > _ERROR_DETAIL_CHARS:
+        return collapsed[:_ERROR_DETAIL_CHARS] + "…"
+    return collapsed or "<empty body>"
 
 _BB_URL_RE = re.compile(
     r"^https?://bitbucket\.org/(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?:pull-requests|pullrequests|pullrequest)/(?P<number>\d+)(?:/.*)?$",
@@ -62,12 +79,14 @@ def _make_retry_session() -> requests.Session:
         # (which the server states it did not process) while holding it back
         # on 502. Writes are therefore left to the caller, which already logs
         # a failed post and carries on; a duplicated comment needs a human to
-        # delete it. The other write verbs go with POST: no adapter issues a
-        # DELETE, and the summary update (PUT, or PATCH on GitHub) is at best
-        # a no-op on replay and at worst a version conflict. Connection
-        # errors are still retried for every verb: urllib3 gates only its
-        # read-error path on the method, and a connection that was never
-        # established carried no write to duplicate.
+        # delete it. The other write verbs go with POST: DELETE (the prune
+        # pass) is held back with them rather than special-cased for the
+        # idempotency a replayed delete would enjoy, and the summary update
+        # (PUT, or PATCH on GitHub) is at best a no-op on replay and at worst
+        # a version conflict. Connection errors are still retried for every
+        # verb: urllib3 gates only its read-error path on the method, and a
+        # connection that was never established carried no write to
+        # duplicate.
         allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
         respect_retry_after_header=True,
         raise_on_status=False,
@@ -418,6 +437,62 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def prune_inline_comments(self, ref: PRRef) -> int:
+        """Delete prxref-attributed inline comments; returns the count removed.
+
+        A re-review updates the summary in place, but the previous run's
+        inline comments stayed standing — so a PR could carry an Approved
+        summary above stale ERROR-severity comments from an earlier,
+        nondeterministic run. Deleting our own comments first keeps what
+        stands on the PR equal to the latest review.
+
+        Only comments whose body carries the attribution marker are
+        candidates, so a human's comment is never touched — and only inline
+        ones (an ``inline`` anchor present): the summary is a top-level
+        comment whose body carries the marker too, and is managed by
+        ``post_summary``, not by this pass. A delete the token is not allowed
+        to perform (403 from a different identity's comment) is logged and
+        skipped, and a feed that cannot be read ends the prune with what it
+        already removed: best-effort, because a cleanup must never abort the
+        review that follows it.
+        """
+        headers, auth = self._get_auth()
+        base = self._pr_url(ref, "/comments")
+        removed = 0
+        try:
+            for comments in self._iter_comment_pages(ref):
+                for comment in comments:
+                    if not comment.get("inline"):
+                        continue
+                    raw = (comment.get("content") or {}).get("raw") or ""
+                    if ATTRIBUTION_MARKER not in raw:
+                        continue
+                    comment_id = comment.get("id")
+                    if comment_id is None:
+                        continue
+                    resp = self._session.delete(
+                        f"{base}/{comment_id}",
+                        headers=headers,
+                        auth=auth,
+                        timeout=_REQUEST_TIMEOUT,
+                    )
+                    if resp.ok:
+                        removed += 1
+                    else:
+                        logger.warning(
+                            "could not prune inline comment %s on %s/%s#%s "
+                            "(HTTP %s): %s",
+                            comment_id, ref.owner, ref.repo, ref.number,
+                            resp.status_code, _response_detail(resp),
+                        )
+        except FeedReadError as e:
+            logger.warning(
+                "prune of inline comments on %s/%s#%s ended early after %d "
+                "removals (best-effort): %s",
+                ref.owner, ref.repo, ref.number, removed, e,
+            )
+        return removed
 
 
 def _is_deleted(comment: dict) -> bool:

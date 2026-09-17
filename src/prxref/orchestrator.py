@@ -325,6 +325,7 @@ def orchestrate_review(
     post_mode: str = "summary+inline",
     post_verdict: bool = True,
     trace_file: str | None = None,
+    trace_dir: str | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -362,6 +363,13 @@ def orchestrate_review(
     re-validated here: ``load_config`` already gates it, and a library
     caller passing an unknown mode degrades to the plain no-op that mode's
     membership tests produce.
+
+    ``trace_dir`` turns on the per-unit prompt/response dump: each review
+    unit writes ``<label>.system.md``, ``<label>.user.md``,
+    ``<label>.response.json`` (raw model text), and ``<label>.meta.json``
+    (model, token counts, elapsed, error) under that directory, labelled
+    ``chunk0`` … ``chunkN-1`` and ``sweep``. Empty (the default) traces
+    nothing; a write failure is a logged warning, never a review failure.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -465,7 +473,7 @@ def orchestrate_review(
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
-        reader=reader, all_files=files,
+        reader=reader, all_files=files, trace_dir=trace_dir,
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -477,6 +485,7 @@ def orchestrate_review(
         _run_sweep(
             llm, files, pr, max_tokens=max_tokens,
             token_budget=token_budget, tracer=tracer, threads=threads,
+            trace_dir=trace_dir,
         )
     )
 
@@ -856,6 +865,7 @@ def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
+    trace_dir: str | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -890,6 +900,7 @@ def _run_workers(
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
                 max_tokens, context_lines, tracer, reader, all_files,
+                trace_label=f"chunk{i}", trace_dir=trace_dir,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -935,6 +946,7 @@ def _invoke_chunk(
     llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None, context_lines: int | None,
     reader=None, *, include_definitions: bool = True, all_files=None,
+    trace_label: str = "", trace_dir: str | None = None,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -958,6 +970,7 @@ def _invoke_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, context_lines=context_lines,
             context_blocks=blocks, sibling_files=all_files or (),
+            trace_label=trace_label, trace_dir=trace_dir or "",
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -998,6 +1011,7 @@ def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
+    trace_label: str = "", trace_dir: str | None = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -1014,6 +1028,7 @@ def _run_worker(
     )
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
+        trace_label=trace_label, trace_dir=trace_dir,
     )
     if (
         res["error"]
@@ -1038,6 +1053,7 @@ def _run_worker(
         res = _invoke_chunk(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,
+            trace_label=trace_label, trace_dir=trace_dir,
         )
 
     error = res["error"]
@@ -1075,6 +1091,7 @@ def _run_sweep(
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     tracer: Tracer | None = None,
     threads: Sequence[Thread] = (),
+    trace_dir: str | None = None,
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -1104,6 +1121,7 @@ def _run_sweep(
         findings_raw, meta = reviewer.review_systemic(
             llm, digest, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, threads=discussion,
+            trace_label="sweep", trace_dir=trace_dir or "",
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[sweep] raised: %s", e)

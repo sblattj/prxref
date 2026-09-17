@@ -57,6 +57,18 @@ LLM / pipeline:
                                 One event per line, flushed as it happens, so
                                 a run still in flight is readable. Render it
                                 with ``prxref trace render``.
+  PRXREF_TRACE_DIR              directory for per-unit prompt/response
+                                traces: each review unit (``chunk0``,
+                                ``chunk1``, … and the whole-PR ``sweep``)
+                                writes ``<unit>.system.md``,
+                                ``<unit>.user.md``, ``<unit>.response.json``
+                                (the raw model text) and
+                                ``<unit>.meta.json`` (model, token counts,
+                                elapsed, error) there. Unset (the default)
+                                writes nothing at no cost.
+                                ``prxref review --trace-dir DIR`` is the
+                                per-run equivalent and wins when both are
+                                set.
   PRXREF_DRY_RUN                literal "1" reviews without writing anything
                                 to the forge — no summary, no inline comments
                                 (default off). Applies to the webhook daemon
@@ -164,6 +176,7 @@ _DEFAULTS: dict[str, object] = {
     "fail_on": "never",
     "dry_run": False,
     "trace_file": "",
+    "trace_dir": "",
     "post_mode": "summary+inline",
     "post_verdict": True,
     "bitbucket_token": "",

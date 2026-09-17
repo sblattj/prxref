@@ -981,3 +981,99 @@ def test_get_file_content_never_logs_above_debug(caplog):
 
     assert result is None
     assert all(record.levelno <= logging.DEBUG for record in caplog.records)
+
+
+# --- pruning stale inline comments -------------------------------------------
+
+
+ATTRIBUTION_BODY = (
+    "🤖 🟥 **[ERROR] x** (`a.py:1`)\n\nbody\n\n---\n"
+    "*Reviewed by prxref · model=m*"
+)
+
+
+def test_prune_deletes_only_attributed_anchored_comments_and_sends_the_version():
+    session = MagicMock()
+    session.get.return_value = _activity_page(
+        [
+            _commented(
+                ATTRIBUTION_BODY,
+                id=11,
+                version=2,
+                anchor={"path": "a.py", "line": 1},
+            ),
+            _commented(
+                "a human's inline comment, never a candidate",
+                id=12,
+                version=1,
+                anchor={"path": "a.py", "line": 1},
+            ),
+            _commented(
+                "*Reviewed by prxref · model=other*",
+                id=13,
+                version=4,
+                anchor={"path": "a.py", "line": 2},
+            ),
+            _commented(
+                # No anchor: an unanchored comment, where the summary lives.
+                # Its body carries the marker too, so only the anchor tells
+                # this pass to leave it to post_summary.
+                ATTRIBUTION_BODY,
+                id=14,
+                version=5,
+            ),
+        ]
+    )
+    session.delete.return_value = _mock_response(204)
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 2
+    assert session.delete.call_count == 2
+    by_id = {
+        c.args[0].rsplit("/", 1)[-1]: c.kwargs["params"]
+        for c in session.delete.call_args_list
+    }
+    # Data Center's optimistic locking requires the version the activity
+    # payload carried; a delete without it is a 400, not a delete.
+    assert by_id == {"11": {"version": 2}, "13": {"version": 4}}
+    for url in (c.args[0] for c in session.delete.call_args_list):
+        assert url.endswith("/pull-requests/42/comments/11") or url.endswith(
+            "/pull-requests/42/comments/13"
+        )
+
+
+def test_prune_counts_past_a_delete_the_token_cannot_perform():
+    session = MagicMock()
+    session.get.return_value = _activity_page(
+        [
+            _commented(
+                ATTRIBUTION_BODY,
+                id=21,
+                version=1,
+                anchor={"path": "a.py", "line": 1},
+            ),
+            _commented(
+                ATTRIBUTION_BODY,
+                id=22,
+                version=2,
+                anchor={"path": "a.py", "line": 2},
+            ),
+        ]
+    )
+    session.delete.side_effect = [_mock_response(204), _mock_response(403)]
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 1
+    assert session.delete.call_count == 2
+
+
+def test_prune_survives_an_unreadable_feed():
+    session = MagicMock()
+    session.get.return_value = _mock_response(500, json_data={"errors": []})
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 0
+    session.delete.assert_not_called()

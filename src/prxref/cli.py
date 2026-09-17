@@ -85,6 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="override the maximum number of diff chunks to review",
     )
     rev.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="override the per-model request deadline in seconds",
+    )
+    rev.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -97,6 +103,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "output format for review results (default text); json emits "
             "exactly one JSON object on stdout"
+        ),
+    )
+    rev.add_argument(
+        "--trace-dir",
+        default=None,
+        help=(
+            "directory for per-chunk prompt/response traces "
+            "(chunk0.system.md, chunk0.response.json, ...; PRXREF_TRACE_DIR "
+            "does the same for every run and this flag wins when both are set)"
         ),
     )
 
@@ -270,20 +285,25 @@ def _run_review(
     *,
     post: bool = True,
     max_chunks: int | None = None,
+    timeout: float | None = None,
+    trace_dir: str | None = None,
 ) -> Any:
     ref = detect_forge(url)
     if ref is None:
         return None
-    # --max-chunks arrives as a load_config override (None is ignored), so the
-    # flag is range-checked on exactly the same path as PRXREF_MAX_CHUNKS and
-    # its precedence is derived once, here. There is deliberately no way to
-    # inject a pre-built config dict: that would bypass _check_ranges and make
-    # every range guarantee conditional on nobody using the bypass.
+    # --max-chunks and --timeout arrive as load_config overrides (None is
+    # ignored), so each flag is range-checked on exactly the same path as its
+    # environment variable and its precedence is derived once, here. There is
+    # deliberately no way to inject a pre-built config dict: that would bypass
+    # _check_ranges and make every range guarantee conditional on nobody using
+    # the bypass.
     cfg = load_config(
         max_chunks=max_chunks,
+        llm_timeout=timeout,
+        trace_dir=trace_dir,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
-        source_labels={"max_chunks": "--max-chunks"},
+        source_labels={"max_chunks": "--max-chunks", "llm_timeout": "--timeout"},
     )
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -321,6 +341,7 @@ def _run_review(
         post_mode=cfg["post_mode"],
         post_verdict=cfg["post_verdict"],
         trace_file=cfg["trace_file"],
+        trace_dir=cfg["trace_dir"],
     )
 
 
@@ -385,6 +406,8 @@ def _cmd_review(args: argparse.Namespace) -> int:
             args.pr_url,
             post=not args.no_post,
             max_chunks=args.max_chunks,
+            timeout=args.timeout,
+            trace_dir=args.trace_dir,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
