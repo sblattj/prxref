@@ -5,7 +5,35 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] — 2026-09-17
+
+### Added
+
+- **Stale-inline pruning now runs on every forge (#17, completed).** GitLab,
+  Bitbucket Cloud, and Bitbucket Server gain the `prune_inline_comments`
+  pass 0.9.0 shipped for GitHub alone, closing the gap its changelog entry
+  named ("GitHub does; the others follow"). Each walks its existing
+  comment/activity feed, deletes only inline comments carrying the
+  attribution marker, and stays best-effort: a 403 delete or an unreadable
+  feed logs and continues. GitLab deletes a diff note through the discussion
+  that holds it (`DELETE …/discussions/{id}/notes/{note_id}`) and only
+  touches notes with a `position` — the top-level summary note carries the
+  marker too and belongs to `post_summary`. Bitbucket Cloud deletes only
+  comments with an `inline` anchor (`DELETE …/pullrequests/{n}/comments/{id}`).
+  Bitbucket Server deletes only anchored comments and carries the `version`
+  its optimistic locking requires (`DELETE …/comments/{id}?version={v}`).
+- **Per-unit prompt/response traces (`PRXREF_TRACE_DIR`, `prxref review
+  --trace-dir`).** The structural JSONL trace (#53's starting point) names
+  phases, never prompts; this names both. When the directory is set, each
+  review unit — `chunk0` … and the whole-PR `sweep` — writes four files:
+  `<unit>.system.md` and `<unit>.user.md` (the exact rendered prompt),
+  `<unit>.response.json` (the raw model text, JSON-encoded), and
+  `<unit>.meta.json` (model, token counts, elapsed, error). Unset means zero
+  cost, and a write failure is a logged warning, never a review failure.
+- **`prxref review --timeout SECONDS`** — the per-invocation override for
+  `PRXREF_LLM_TIMEOUT` (#52), on the same explicit-flag > env-var > default
+  precedence as `--max-chunks`. An invalid value fails fast with
+  `ConfigError` (exit 2) naming the flag.
 
 ## [0.12.2] — 2026-09-15
 

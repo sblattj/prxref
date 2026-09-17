@@ -536,3 +536,89 @@ def test_get_file_content_never_logs_above_debug(caplog):
 
     assert result is None
     assert all(record.levelno <= logging.DEBUG for record in caplog.records)
+
+
+# --- pruning stale inline comments -------------------------------------------
+
+
+ATTRIBUTION_BODY = (
+    "🤖 🟥 **[ERROR] x** (`a.py:1`)\n\nbody\n\n---\n"
+    "*Reviewed by prxref · model=m*"
+)
+
+
+def test_prune_deletes_only_attributed_inline_comments():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _page(
+        [
+            {
+                "id": 11,
+                "inline": {"path": "a.py", "to": 1},
+                "content": {"raw": ATTRIBUTION_BODY},
+            },
+            {
+                "id": 12,
+                "inline": {"path": "a.py", "to": 1},
+                "content": {"raw": "a human's inline comment, never a candidate"},
+            },
+            {
+                "id": 13,
+                "inline": {"path": "a.py", "to": 2},
+                "content": {"raw": "*Reviewed by prxref · model=other*"},
+            },
+            {
+                # No inline anchor: a top-level comment, where the summary
+                # lives. Its body carries the marker too, so only the anchor
+                # tells this pass to leave it to post_summary.
+                "id": 14,
+                "content": {"raw": ATTRIBUTION_BODY},
+            },
+        ]
+    )
+    session.delete.return_value = _mock_response(204)
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 2
+    deleted_urls = [c.args[0] for c in session.delete.call_args_list]
+    for url in deleted_urls:
+        assert url.startswith(
+            "https://api.bitbucket.org/2.0/repositories/acme/api"
+            "/pullrequests/42/comments/"
+        )
+    deleted_ids = {url.rsplit("/", 1)[-1] for url in deleted_urls}
+    assert deleted_ids == {"11", "13"}
+
+
+def test_prune_counts_past_a_delete_the_token_cannot_perform():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _page(
+        [
+            {
+                "id": 21,
+                "inline": {"path": "a.py", "to": 1},
+                "content": {"raw": ATTRIBUTION_BODY},
+            },
+            {
+                "id": 22,
+                "inline": {"path": "a.py", "to": 2},
+                "content": {"raw": ATTRIBUTION_BODY},
+            },
+        ]
+    )
+    session.delete.side_effect = [_mock_response(204), _mock_response(403)]
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 1
+    assert session.delete.call_count == 2
+
+
+def test_prune_survives_an_unreadable_feed():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(500, json_data={"error": "boom"})
+
+    removed = ForgeImpl(session=session).prune_inline_comments(_ref())
+
+    assert removed == 0
+    session.delete.assert_not_called()

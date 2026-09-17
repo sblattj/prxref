@@ -35,6 +35,7 @@ SUMMARY_TEMPLATE = (
 def _contract_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
     max_tokens=None, context_lines=None, context_blocks="", sibling_files=(),
+    trace_label="", trace_dir="",
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -66,7 +67,7 @@ def _contract_review_chunk(
 
 def _contract_review_systemic(
     llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
-    threads=(),
+    threads=(), trace_label="", trace_dir="",
 ):
     return [], {
         "escalations": [], "input_tokens": 0, "output_tokens": 0,
@@ -410,7 +411,7 @@ class TestParallelFanOut:
         def barrier_review_chunk(
             llm, files, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, context_lines=None, context_blocks="",
-            sibling_files=(),
+            sibling_files=(), trace_label="", trace_dir="",
         ):
             barrier.wait()
             return [Finding(
@@ -2305,7 +2306,7 @@ def _sweep_double(results: list, **meta_overrides):
 
     def _review_systemic(
         llm, digest, *, pr_title="", pr_description="", repo_hint="",
-        max_tokens=None, threads=(),
+        max_tokens=None, threads=(), trace_label="", trace_dir="",
     ):
         calls.append({"digest": digest, "max_tokens": max_tokens, "threads": list(threads)})
         kind, payload = results.pop(0)
@@ -2564,14 +2565,16 @@ class TestReleaseShapeFoldIn:
     ):
         def _review_chunk(llm, files, *, pr_title="", pr_description="",
                            repo_hint="", max_tokens=None, context_lines=None,
-                           context_blocks="", sibling_files=()):
+                           context_blocks="", sibling_files=(),
+                           trace_label="", trace_dir=""):
             return [self._matching_finding("chunk worker restatement")], {
                 "input_tokens": 10, "output_tokens": 5, "model": "m",
                 "elapsed_ms": 1, "error": "",
             }
 
         def _review_systemic(llm, digest, *, pr_title="", pr_description="",
-                              repo_hint="", max_tokens=None, threads=()):
+                              repo_hint="", max_tokens=None, threads=(),
+                              trace_label="", trace_dir=""):
             return [self._matching_finding("sweep restatement")], {
                 "input_tokens": 7, "output_tokens": 3, "model": "sweep-model",
                 "elapsed_ms": 1, "error": "",
@@ -2704,7 +2707,7 @@ class TestChunkTimeoutRetry:
 
         def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
                 max_tokens=None, context_lines=None, context_blocks="",
-                sibling_files=()):
+                sibling_files=(), trace_label="", trace_dir=""):
             calls.append({
                 "context_lines": context_lines,
                 "context_blocks": context_blocks,
