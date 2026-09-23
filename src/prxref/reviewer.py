@@ -56,6 +56,8 @@ DEFAULT_CONFIDENCE = 0.5
 
 _CONTEXT_MARKER = "## Review Context"
 
+_NO_SPECS_TEXT = "(no specs provided for this review)"
+
 _MAX_TOKENS_ENV = "PRXREF_LLM_MAX_TOKENS"
 
 # Caps on the ``### Existing discussion`` block appended to the sweep prompt.
@@ -155,6 +157,7 @@ def _render_prompt(
     context_lines: int | None = None,
     context_blocks: str = "",
     sibling_files: Sequence[FileDiff] = (),
+    spec_digest: str = "",
 ) -> tuple[str, str]:
     template = load_prompt("worker.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
@@ -172,6 +175,8 @@ def _render_prompt(
         "{repo_hint}", repo_hint.strip() or "(unspecified)"
     ).replace(
         "{context_blocks}", blocks
+    ).replace(
+        "{spec_digest}", spec_digest.strip() or _NO_SPECS_TEXT
     ).replace(
         "{diff}", render_chunk(chunk, context_lines) or "(empty chunk)"
     )
@@ -217,6 +222,7 @@ def _render_systemic_prompt(
     pr_description: str,
     repo_hint: str,
     threads: Sequence[Thread] = (),
+    spec_digest: str = "",
 ) -> tuple[str, str]:
     template = load_prompt("systemic.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
@@ -230,6 +236,8 @@ def _render_systemic_prompt(
         "{pr_description}", pr_description.strip() or "(none)"
     ).replace(
         "{repo_hint}", repo_hint.strip() or "(unspecified)"
+    ).replace(
+        "{spec_digest}", spec_digest.strip() or _NO_SPECS_TEXT
     ).replace(
         "{digest}", digest.strip() or "(empty digest)"
     )
@@ -434,6 +442,7 @@ def review_chunk(
     sibling_files: Sequence[FileDiff] = (),
     trace_dir: str = "",
     trace_label: str = "",
+    spec_digest: str = "",
 ) -> tuple[list[Finding], dict]:
     """Review one chunk with a single LLM call.
 
@@ -485,6 +494,13 @@ def review_chunk(
     that directory (:func:`_write_trace_files`); the empty default traces
     nothing. The orchestrator passes both, so ``PRXREF_TRACE_DIR`` covers
     every chunk without any per-caller wiring.
+
+    ``spec_digest`` is the spec-grounding text injected into the prompt's
+    Spec constraints block (built by
+    :func:`prxref.specs.build_spec_digest`); empty renders the literal
+    ``(no specs provided for this review)`` instead, and the prompt tells
+    the model ``spec`` is then not a legal severity. The orchestrator always
+    passes this keyword too.
     """
     system, user = _render_prompt(
         chunk=chunk,
@@ -494,6 +510,7 @@ def review_chunk(
         context_lines=context_lines,
         context_blocks=context_blocks,
         sibling_files=sibling_files,
+        spec_digest=spec_digest,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(
@@ -513,6 +530,7 @@ def review_systemic(
     threads: Sequence[Thread] = (),
     trace_dir: str = "",
     trace_label: str = "",
+    spec_digest: str = "",
 ) -> tuple[list[Finding], dict]:
     """Review the whole-PR systemic digest with a single LLM call.
 
@@ -523,6 +541,12 @@ def review_systemic(
     deterministic whole-PR text built by
     :func:`prxref.systemic.build_digest`; the prompt
     (``prompts/systemic.md``) restricts findings to those systemic classes.
+
+    ``spec_digest`` rides the same prompt under the Spec constraints block,
+    under the :func:`review_chunk` contract for it: empty renders
+    ``(no specs provided for this review)``, and with the whole-diff digest
+    plus constraints in view the sweep is the natural seat for cross-file
+    spec classes.
 
     Returns ``(findings, meta)`` under exactly the :func:`review_chunk`
     contract — never raises, ``meta["error"]`` empty on success, truncation
@@ -539,6 +563,7 @@ def review_systemic(
         pr_description=pr_description,
         repo_hint=repo_hint,
         threads=threads,
+        spec_digest=spec_digest,
     )
     budget = MAX_TOKENS if max_tokens is None else max_tokens
     return _invoke_and_parse(

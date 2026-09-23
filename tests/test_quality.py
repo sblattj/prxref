@@ -571,6 +571,70 @@ class TestSeverityTokenGrouping:
         assert not [r for r in caplog.records if r.name == quality_logger.name]
 
 
+class TestSpecSeverity:
+    """The ``spec`` severity: gate vocabulary, rank order, and cap exemption."""
+
+    def test_spec_passes_the_quality_gate(self):
+        f = _f(severity="Spec", confidence=0.9)
+        result = apply_quality_gate([f])
+        assert result[0].drop_reason is None
+        assert result[0].severity == "spec"
+
+    def test_unknown_severity_is_still_dropped(self):
+        f = _f(severity="sepc", confidence=0.95)
+        result = apply_quality_gate([f])
+        assert result[0].drop_reason == "invalid severity: 'sepc'"
+
+    def test_rank_order_in_severity_consistency(self):
+        spec = _f(file="a.ts", line=1, severity="spec", title="Shared pattern")
+        warning = _f(file="b.ts", line=1, severity="warning", title="shared pattern")
+        error = _f(file="c.ts", line=1, severity="error", title="shared pattern")
+        outofscope = _f(
+            file="d.ts", line=1, severity="outofscope", title="shared pattern",
+        )
+        result = apply_severity_consistency([spec, warning, error, outofscope])
+        assert [f.severity for f in result] == [
+            "error", "error", "error", "error",
+        ]
+
+    def test_spec_outranks_outofscope_in_a_title_group(self):
+        spec = _f(file="a.ts", line=1, severity="spec", title="Shared pattern")
+        outofscope = _f(
+            file="b.ts", line=1, severity="outofscope", title="shared pattern",
+        )
+        result = apply_severity_consistency([spec, outofscope])
+        assert [f.severity for f in result] == ["spec", "spec"]
+
+    def test_error_cap_ignores_spec_findings(self):
+        specs = [
+            _f(severity="spec", confidence=0.9, title=f"Spec breach {i}")
+            for i in range(5)
+        ]
+        result = apply_quality_gate(specs, max_errors=2)
+        assert len(active(result)) == 5
+        assert all(f.drop_reason is None for f in result)
+
+    def test_error_cap_still_caps_errors_alongside_spec(self):
+        errors = [
+            _f(severity="error", confidence=0.9, title=f"Err {i}")
+            for i in range(3)
+        ]
+        specs = [
+            _f(severity="spec", confidence=0.9, title=f"Spec breach {i}")
+            for i in range(4)
+        ]
+        result = apply_quality_gate(errors + specs, max_errors=2)
+        survivors = active(result)
+        assert sum(1 for f in survivors if f.severity == "error") == 2
+        assert sum(1 for f in survivors if f.severity == "spec") == 4
+
+    def test_a_title_collision_raises_spec_to_the_group_max(self):
+        spec = _f(file="a.ts", line=1, severity="spec", title="Shared pattern")
+        error = _f(file="b.ts", line=1, severity="error", title="shared pattern")
+        result = apply_severity_consistency([spec, error])
+        assert [f.severity for f in result] == ["error", "error"]
+
+
 class TestQualityGate:
     def test_drops_below_confidence_floor(self):
         # Default floor is 0.60

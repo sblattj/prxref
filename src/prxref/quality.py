@@ -62,7 +62,7 @@ emit is tabulated for operators in ``docs/quality.md``.
 9. ``apply_quality_gate``: drop findings below the confidence floor
    (``confidence 0.40 below floor 0.60``), cap errors per review
    (``error cap exceeded (max N)``), and enforce the
-   {error, warning, outofscope} severity vocabulary
+   {error, warning, spec, outofscope} severity vocabulary
    (``invalid severity: '<value>'``). It RETURNS its findings sorted by
    ``finding_sort_key``, so the caller re-derives the chunk/sweep
    boundary from finding identity rather than carrying an index across it.
@@ -95,7 +95,7 @@ from pathlib import PurePosixPath
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
 
-SEVERITIES: frozenset[str] = frozenset({"error", "warning", "outofscope"})
+SEVERITIES: frozenset[str] = frozenset({"error", "warning", "spec", "outofscope"})
 
 DEFAULT_CONFIDENCE_FLOOR: float = 0.6
 DEFAULT_MAX_ERRORS: int = 10
@@ -967,7 +967,9 @@ def apply_settled_thread_suppression(
     return result
 
 
-_SEVERITY_RANK: dict[str, int] = {"error": 0, "warning": 1, "outofscope": 2}
+_SEVERITY_RANK: dict[str, int] = {
+    "error": 0, "warning": 1, "spec": 2, "outofscope": 3,
+}
 
 _TITLE_PUNCT_RE = re.compile(r"[`*\"'\u2018\u2019\u201c\u201d]")
 
@@ -1225,8 +1227,8 @@ def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
        describing different problems stay apart.
 
     Components bind transitively (A shares a token with B, B with C, so
-    all three group). Each component is rewritten to its highest
-    severity (error > warning > outofscope). A rewritten finding keeps
+    all three group). Each component is rewritten to its highest severity
+    (error > warning > spec > outofscope). A rewritten finding keeps
     its own file, line, body, and confidence; only severity changes.
     Findings carrying a ``drop_reason`` or a severity outside the
     vocabulary pass through untouched. One summary line is logged when
@@ -1562,12 +1564,15 @@ def apply_quality_gate(
     """Filter findings through vocabulary, confidence, and per-review error caps.
 
     Order:
-    1. Severity vocabulary: non-empty lowercase must be in {error, warning, note};
-       case-mismatches are normalized; invalid severities are dropped.
+    1. Severity vocabulary: non-empty lowercase must be in
+       {error, warning, spec, outofscope}; case-mismatches are normalized;
+       invalid severities are dropped.
     2. Confidence floor: drop findings below the threshold (default 0.6).
     3. Error cap: among surviving errors, keep the top N ranked by
        :func:`finding_rank_key` and drop the rest, so ties are broken by
-       content rather than by arrival order.
+       content rather than by arrival order. ``spec`` findings never count
+       toward the cap: a spec-heavy review is neither crowded out by it nor
+       crowding it out.
 
     The returned list is sorted by :func:`finding_sort_key`.
     """

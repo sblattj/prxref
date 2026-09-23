@@ -774,6 +774,81 @@ class TestDegenerateValuesNeverReachTheOrchestrator:
         assert len(fake_runtime["orchestrate_calls"]) == 1
 
 
+class TestSpecFlag:
+    """``--spec`` collects repeatable sources and rides the ``load_config``
+    override path, exactly like ``--max-chunks``: the flag replaces the
+    PRXREF_SPEC_SOURCES environment list wholesale (no merge)."""
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+    URL = "https://github.com/org/repo/pull/7"
+
+    @pytest.fixture(autouse=True)
+    def _detect(self, monkeypatch):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+
+    def test_the_flag_is_repeatable_and_defaults_to_none(self):
+        parser = cli._build_parser()
+        args = parser.parse_args(["review", "--pr-url", self.URL])
+        assert args.spec is None
+        args = parser.parse_args([
+            "review", "--pr-url", self.URL,
+            "--spec", "https://a/spec.md", "--spec", "docs/specs",
+        ])
+        assert args.spec == ["https://a/spec.md", "docs/specs"]
+
+    def test_flag_values_reach_the_resolved_config(self, fake_runtime):
+        """The override is observed on the config the pipeline is actually
+        handed, not on the parser: fake_create_llm_client records it."""
+        assert main([
+            "review", "--pr-url", self.URL, "--no-post",
+            "--spec", "https://a/spec.md", "--spec", "docs/specs",
+        ]) == 0
+        assert fake_runtime["llm_calls"][0]["spec_sources"] == [
+            "https://a/spec.md", "docs/specs",
+        ]
+
+    def test_no_flag_and_no_env_leaves_the_default_empty(self, fake_runtime):
+        assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
+        assert fake_runtime["llm_calls"][0]["spec_sources"] == []
+
+    def test_env_sources_load_through_the_normal_path(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md docs/specs")
+        assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
+        assert fake_runtime["llm_calls"][0]["spec_sources"] == [
+            "https://a/spec.md", "docs/specs",
+        ]
+
+    def test_the_flag_replaces_the_environment_without_merging(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://env/only.md")
+        assert main([
+            "review", "--pr-url", self.URL, "--no-post",
+            "--spec", "https://flag/only.md",
+        ]) == 0
+        assert fake_runtime["llm_calls"][0]["spec_sources"] == [
+            "https://flag/only.md"
+        ]
+
+    def test_the_webhook_daemon_gets_the_environment_sources(
+        self, fake_runtime, monkeypatch
+    ):
+        """The daemon passes no flags, so PRXREF_SPEC_SOURCES in its environment is
+        the only way it can ground a review — and it must reach the pipeline."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
+        cli._webhook_handler(self.URL)
+        assert fake_runtime["llm_calls"][0]["spec_sources"] == ["https://a/spec.md"]
+
+
 class TestDryRun:
     """PRXREF_DRY_RUN must reach BOTH review paths, daemon included.
 

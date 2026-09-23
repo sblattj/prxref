@@ -64,7 +64,7 @@ its own findings against prxref's own stale comments and then delete them.
 | `settled in thread: <author>` | `apply_settled_thread_suppression` | A thread on the same path already argued this subject out. A **resolved** thread still settles it — resolution is a decision, not an expiry. |
 | `claims removal of a path present in the post-image: <path>` | `apply_removal_claim_check` | A removal verb governs this path, and every path the claim names is still present after the PR lands. |
 | `hedged: "<matched phrase>"` | `apply_hedge_gate` | The finding's own text conditions the defect on something the model never established. |
-| `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `outofscope`}. |
+| `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `spec`, `outofscope`}. |
 | `confidence <x> below floor <y>` | `apply_quality_gate` | Below `PRXREF_CONFIDENCE_FLOOR`. |
 | `error cap exceeded (max <n>)` | `apply_quality_gate` | Beyond `PRXREF_MAX_ERROR_FINDINGS`. Ties break on finding content, not arrival order, so the cap is reproducible. |
 | `duplicate of chunk finding` | `apply_sweep_dedup` | A whole-diff sweep finding restates a chunk finding that already survived the gate. |

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "S1",
+    "file": "config/ingest.yaml",
+    "line_hint": 2,
+    "severity": "spec",
+    "must_match": "re:\"3\\.0\"|3\\.0|exact|string equality",
+    "source": "spec"
+  },
+  {
+    "id": "S2",
+    "file": "migrations/V24-add-retention-index.sql",
+    "line_hint": 1,
+    "severity": "spec",
+    "must_match": "re:V24-add|hyphen|double underscore|__|naming",
+    "source": "spec"
+  },
+  {
+    "id": "G1",
+    "file": "src/ingest/runner.py",
+    "line_hint": 10,
+    "severity": "error",
+    "must_match": "re:lexicographic|sort.{0,60}order|V10|natural",
+    "source": "generic"
+  }
+]

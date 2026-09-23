@@ -1,0 +1,18 @@
+{
+  "id": "case-003-config-schema-pin",
+  "title": "Config pin uses a near-miss schema version and a migration file the naming rule rejects",
+  "source_prs": [],
+  "planted_violations": [
+    {
+      "id": "V1",
+      "description": "schema_version is set to \"3\"; docs/config-schema.md C-1 pins the exact string \"3.0\" and explicitly rejects \"3\"",
+      "expected_ref": "S1"
+    },
+    {
+      "id": "V2",
+      "description": "migration file V24-add-retention-index.sql uses a hyphen separator; docs/config-schema.md C-2 requires V<n>__<slug>.sql with exactly two underscores",
+      "expected_ref": "S2"
+    }
+  ],
+  "notes": "Failure mode: naming/version constraint. Both violations are near-misses that read as a diligent upgrade from the diff alone (\"3\" IS newer than \"2.9\"; the filename follows V<version>-<slug>.sql intuition); only docs/config-schema.md makes them wrong. Generic bug G1: sorted() orders migration filenames lexicographically, so V10 sorts before V9 on any fleet past nine migrations."
+}

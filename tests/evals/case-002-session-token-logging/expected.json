@@ -1,0 +1,26 @@
+[
+  {
+    "id": "S1",
+    "file": "src/admin/session_store.py",
+    "line_hint": 24,
+    "severity": "spec",
+    "must_match": "re:(log|logger|debug|info).{0,80}token|token.{0,80}(log|logger|debug|info)",
+    "source": "spec"
+  },
+  {
+    "id": "S2",
+    "file": "src/admin/session_store.py",
+    "line_hint": 18,
+    "severity": "spec",
+    "must_match": "re:VITE_",
+    "source": "spec"
+  },
+  {
+    "id": "G1",
+    "file": "src/admin/session_store.py",
+    "line_hint": 31,
+    "severity": "error",
+    "must_match": "re:NotImplementedError|not implemented|stub|does not persist|persistence",
+    "source": "generic"
+  }
+]
