@@ -29,8 +29,8 @@ SUMMARY_TEMPLATE = (
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
     "🟧 {warning_count} warning · 🔍 {spec_count} spec · "
-    "🟦 {outofscope_count} outofscope\n"
-    "{spec_note}\n\n"
+    "⬜ {outofscope_count} outofscope\n"
+    "{spec_note}{ticket_note}\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -306,7 +306,7 @@ class TestHappyPath:
         assert "[ERROR] Null deref" in by_line[3].body
         assert "x may be None" in by_line[3].body
         assert "Reviewed by prxref · model=test-model-1" in by_line[3].body
-        assert "🟦" in by_line[7].body
+        assert "⬜" in by_line[7].body
 
     def test_inline_comments_capped_at_fifteen(self):
         findings = {

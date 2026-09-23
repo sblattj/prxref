@@ -131,6 +131,7 @@ from .forges.base import (
     Thread,
 )
 from .llm import LLMClient
+from .markers import SEVERITY_MARKERS, severity_marker
 from .quality import (
     active,
     apply_containment_note,
@@ -147,7 +148,7 @@ from .quality import (
     finding_rank_key,
     finding_sort_key,
 )
-from .reviewer import NO_PROMPT_CONTEXT, PromptContext
+from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
@@ -178,8 +179,6 @@ POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 # enough to show a mixed failure (say, a starved budget plus a timeout) without
 # letting a pathological run bury the findings under its own diagnostics.
 MAX_REPORTED_REASONS = 3
-
-_SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "spec": "🔍", "outofscope": "🟦"}
 
 # Inline-comment priority: the most severe findings get the anchor first, so
 # a cap or a rejected anchor costs the run its least-important comments
@@ -299,8 +298,8 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
     "🟧 {warning_count} warning · 🔍 {spec_count} spec · "
-    "🟦 {outofscope_count} outofscope\n"
-    "{spec_note}\n"
+    "⬜ {outofscope_count} outofscope\n"
+    "{spec_note}{ticket_note}\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -832,8 +831,19 @@ def _elapsed_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
 
-def _attribution(model: str, tokens: int, elapsed_ms: int) -> str:
-    return f"{ATTRIBUTION_MARKER} · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
+def _attribution(
+    model: str, tokens: int, elapsed_ms: int, *, cost_label: str = "",
+) -> str:
+    """The attribution line every posted comment carries.
+
+    ``cost_label`` (``"$0.0007"``, ``"~$0.0007 (est.)"``, ``"cost unknown"``)
+    is appended as the LAST field, and only when non-empty: the existing
+    fields keep their order, so a consumer that parses ``model=`` or the
+    token count, and the prune pass that matches ``ATTRIBUTION_MARKER`` as a
+    prefix, see the same line whether or not cost is posted.
+    """
+    line = f"{ATTRIBUTION_MARKER} · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
+    return f"{line} · {cost_label}" if cost_label else line
 
 
 def _prune_stale_inline_comments(forge: Forge, ref: PRRef) -> None:
@@ -1302,7 +1312,23 @@ def _render_summary(
     include_verdict: bool = True,
     inline_accounting: str | None = None,
     spec_note: str = "",
+    ticket_note: str = "",
+    cost_label: str = "",
+    size_advisory_line: str = "",
 ) -> str:
+    """Render the PR summary comment body.
+
+    The template is filled in ONE pass (:func:`reviewer.fill_template`), so
+    a PR title, a note or a finding title containing ``{findings}``,
+    ``{attribution}`` or any other placeholder renders literally instead of
+    receiving that placeholder's value. ``spec_note`` and ``ticket_note``
+    ride ``{spec_note}{ticket_note}`` on the line after the counts; each
+    carries its own trailing newline when non-empty, so empty notes leave the
+    summary byte-identical. ``cost_label`` is the attribution's last field
+    (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
+    ``""``) is prepended to the finished body, after the partial-review
+    banner, so it is the first thing under the forge's summary marker.
+    """
     try:
         template = reviewer.load_prompt("summary")
     except Exception as e:  # noqa: BLE001
@@ -1317,7 +1343,7 @@ def _render_summary(
 
     if findings_active:
         bullets = "\n".join(
-            f"- {_SEVERITY_MARKERS.get(f.severity, '🟦')} "
+            f"- {severity_marker(f.severity)} "
             f"`{f.file}:{f.line if f.line > 0 else '—'}` — {f.title}"
             for f in findings_active
         )
@@ -1327,21 +1353,21 @@ def _render_summary(
         bullets = f"{bullets}\n\n{inline_accounting}"
 
     attribution = _attribution(
-        model, input_tokens + output_tokens, elapsed_ms,
+        model, input_tokens + output_tokens, elapsed_ms, cost_label=cost_label,
     )
-    rendered = (
-        template
-        .replace("{verdict}", verdict)
-        .replace("{title}", pr.title)
-        .replace("{file_count}", str(len(files)))
-        .replace("{error_count}", str(counts["error"]))
-        .replace("{warning_count}", str(counts["warning"]))
-        .replace("{spec_count}", str(counts["spec"]))
-        .replace("{spec_note}", spec_note)
-        .replace("{outofscope_count}", str(counts["outofscope"]))
-        .replace("{findings}", bullets)
-        .replace("{attribution}", attribution)
-    )
+    rendered = fill_template(template, {
+        "verdict": verdict,
+        "title": pr.title,
+        "file_count": str(len(files)),
+        "error_count": str(counts["error"]),
+        "warning_count": str(counts["warning"]),
+        "spec_count": str(counts["spec"]),
+        "outofscope_count": str(counts["outofscope"]),
+        "spec_note": spec_note,
+        "ticket_note": ticket_note,
+        "findings": bullets,
+        "attribution": attribution,
+    })
     if attribution not in rendered:
         rendered = f"{rendered}\n\n{attribution}"
     if chunks_failed:
@@ -1358,7 +1384,7 @@ def _render_summary(
         reason_lines = _failure_reason_lines(failed_chunks)
         if reason_lines:
             rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
-    return rendered
+    return f"{size_advisory_line}{rendered}"
 
 
 def _spec_note(sources: Sequence[Any], digest: str) -> str:
@@ -1385,7 +1411,7 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
     lines: list[str] = []
     if len(failed) < total:
         lines.append(
-            f"> 🔍 Spec-grounded: {total} source(s) · "
+            f"> {SEVERITY_MARKERS['spec']} Spec-grounded: {total} source(s) · "
             f"{specs.constraint_count(digest)} constraint(s) injected"
         )
     if failed:
@@ -1456,7 +1482,7 @@ def _failure_reason_lines(
 
 
 def _format_finding(f: Finding, model: str) -> str:
-    marker = _SEVERITY_MARKERS.get(f.severity, "🟦")
+    marker = severity_marker(f.severity)
     loc = f"{f.file}:{f.line}" if f.line > 0 else f.file
     return (
         f"🤖 {marker} **[{f.severity.upper()}] {f.title}** (`{loc}`)\n\n"
