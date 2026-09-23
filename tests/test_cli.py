@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from prxref import __version__, cli
+from prxref import __version__, cli, config
 from prxref import orchestrator as real_orchestrator
 from prxref.cli import main
 from prxref.forges.base import PRRef
@@ -233,13 +233,14 @@ class TestReviewSubcommand:
         # The hint has to name both halves of every forge. Three of the four
         # adapters serve self-hosted deployments, so listing only the SaaS
         # hostnames would read as a restriction that no longer exists.
-        for forge in ("Bitbucket", "GitHub", "GitLab"):
+        for forge in ("Bitbucket", "GitHub", "GitLab", "Azure DevOps"):
             assert forge in err
-        for host in ("bitbucket.org", "github.com", "gitlab.com"):
+        for host in ("bitbucket.org", "github.com", "gitlab.com", "dev.azure.com"):
             assert host in err
         assert "self-hosted" in err
         assert "Bitbucket Data Center" in err
         assert "GitHub Enterprise Server" in err
+        assert "Azure DevOps Server" in err
 
     def test_orchestration_exception_exits_0_non_blocking(
         self, fake_runtime, monkeypatch, capsys
@@ -805,7 +806,7 @@ class TestSpecFlag:
         ])
         assert args.spec == ["https://a/spec.md", "docs/specs"]
 
-    def test_flag_values_reach_the_resolved_config(self, fake_runtime):
+    def test_flag_values_reach_the_orchestrator(self, fake_runtime):
         """The override is observed on the kwargs the orchestrator is actually
         handed, not on the parser or the resolved config: a value that stops at
         ``load_config`` grounds nothing."""
@@ -897,6 +898,35 @@ def test_run_review_passes_only_real_orchestrate_kwargs(fake_runtime, monkeypatc
     assert len(calls) == 1
     assert calls[0], "the double recorded no kwargs, so the check below is vacuous"
     assert sorted(set(calls[0]) - set(params)) == []
+
+
+def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monkeypatch):
+    """The reverse direction: every ``orchestrate_review`` parameter that is also
+    a ``load_config`` key is handed over by ``_run_review``.
+
+    A parameter the CLI forgets silently runs at its library default, so its
+    environment variable is documented and dead: that is how the price table,
+    the cost line and the size advisory would have shipped unreachable. The
+    loaded rules, ticket context and replay stamp are not config keys, but
+    they are the CLI's to build, so they are required by name.
+    """
+    real = real_orchestrator.orchestrate_review
+    assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
+    params = inspect.signature(real).parameters
+    expected = {name for name in params if name in config._DEFAULTS}
+    assert expected, "no orchestrate parameter is a config key, so the check is vacuous"
+    ref = PRRef(
+        forge="github", host="github.com", owner="org", repo="repo",
+        number=7, url="https://github.com/org/repo/pull/7",
+    )
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: ref)
+
+    assert main(["review", "--pr-url", ref.url, "--no-post"]) == 0
+
+    calls = fake_runtime["orchestrate_calls"]
+    assert len(calls) == 1
+    assert sorted(expected - set(calls[0])) == []
+    assert {"rules", "ticket", "replay"} <= set(calls[0])
 
 
 class TestDryRun:
