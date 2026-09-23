@@ -58,7 +58,9 @@ emit is tabulated for operators in ``docs/quality.md``.
 8. ``apply_hedge_gate``: drop findings whose title or body conditions the
    defect on a precondition the worker never established from the diff
    ("If X still leases a client", "unless the backfill already ran"),
-   with ``drop_reason`` ``hedged: "<matched span>"``.
+   with ``drop_reason`` ``hedged: "<matched span>"``. A body's
+   ``Spec: "..."`` quote is not read for the text it copies verbatim from
+   the spec digest the workers were shown.
 9. ``apply_quality_gate``: drop findings below the confidence floor
    (``confidence 0.40 below floor 0.60``), cap errors per review
    (``error cap exceeded (max N)``), and enforce the
@@ -170,11 +172,12 @@ HEDGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _HEDGE_SPAN_MAX: int = 80
 
-# The verbatim constraint a ``spec`` finding is required to quote. Normative
-# text is conditional by nature ("If a session already exists, the server
-# MUST reuse it"), so the quote is the spec's precondition, not the model's
-# hedge, and is removed before the hedge rules read the body.
-_SPEC_QUOTE_RE = re.compile(r"Spec:\s*[\"“][^\"”\n]*[\"”]")
+# Where a finding quotes its constraint (``Spec: "..."``). Normative text is
+# conditional by nature ("If a session already exists, the server MUST reuse
+# it"), so the quoted text the digest really holds is the spec's precondition,
+# not the model's hedge, and is removed before the hedge rules read the body.
+_SPEC_QUOTE_OPEN_RE = re.compile(r"Spec:\s*[\"“‘']?")
+_SPEC_QUOTE_CLOSERS: frozenset[str] = frozenset("\"”’'")
 
 
 def active(findings: Sequence[Finding]) -> list[Finding]:
@@ -1535,7 +1538,40 @@ def _hedge_span(text: str) -> str | None:
     return None
 
 
-def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
+def _spec_quote_len(rest: str, digest_lower: str) -> int:
+    lo, hi = 0, min(len(rest), len(digest_lower))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if rest[:mid].lower() in digest_lower:
+            lo = mid
+        else:
+            hi = mid - 1
+    for k in range(min(lo, len(rest) - 1), 0, -1):
+        if rest[k] in _SPEC_QUOTE_CLOSERS:
+            return k
+    return 0
+
+
+def _blank_spec_quotes(body: str, spec_digest: str) -> str:
+    if not spec_digest:
+        return body
+    digest_lower = spec_digest.lower()
+    parts: list[str] = []
+    pos = 0
+    for m in _SPEC_QUOTE_OPEN_RE.finditer(body):
+        if m.start() < pos:
+            continue
+        k = _spec_quote_len(body[m.end():], digest_lower)
+        if k:
+            parts.append(body[pos:m.end()])
+            pos = m.end() + k
+    parts.append(body[pos:])
+    return "".join(parts)
+
+
+def apply_hedge_gate(
+    findings: Sequence[Finding], *, spec_digest: str = ""
+) -> list[Finding]:
     """Drop findings whose own text conditions the defect on an unverified fact.
 
     A hedged finding ("If toolProxy.prepare still leases a client", "If they
@@ -1547,16 +1583,25 @@ def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
     Pure and order-preserving: already-dropped findings pass through
     untouched, and a match sets ``drop_reason`` to ``hedged: "<span>"``
     naming the matched text so the drop is auditable in the run record.
-    A ``Spec: "..."`` quote is removed before matching: it is the verbatim
-    constraint the ``spec`` severity must cite, and its conditions belong to
-    the spec, not to the model's reasoning.
+
+    ``spec_digest`` is the spec constraints block the workers were shown.
+    After each ``Spec:`` marker in the body (with or without an opening
+    quote), the longest following text that appears verbatim in the digest,
+    compared case-insensitively, is cut back to end just before a closing
+    quote and removed before the rules read the body; when no closing quote
+    follows any part of it, nothing is removed. A condition inside a real
+    constraint belongs to the spec, not to the model's reasoning, and this
+    holds for every severity. Text the digest does not hold, and every quote
+    when the digest is empty, is read like the rest of the body, so a model
+    cannot hide its own hedge inside a fabricated ``Spec: "..."``. The title
+    is always read as written.
     """
     out: list[Finding] = []
     for f in findings:
         if f.drop_reason is not None:
             out.append(f)
             continue
-        body = _SPEC_QUOTE_RE.sub("", f.body or "")
+        body = _blank_spec_quotes(f.body or "", spec_digest)
         span = _hedge_span(f.title or "") or _hedge_span(body)
         if span is None:
             out.append(f)
