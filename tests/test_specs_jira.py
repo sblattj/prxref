@@ -51,6 +51,7 @@ def _real_response(body: bytes, content_type: str, status_code: int = 200) -> re
     resp = requests.models.Response()
     resp.status_code = status_code
     resp._content = body
+    resp._content_consumed = True
     resp.headers["Content-Type"] = content_type
     return resp
 
