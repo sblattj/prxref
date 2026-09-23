@@ -22,7 +22,13 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``context_lines=0`` rendering — a strictly smaller prompt attacks the
    prefill-side share of the wall clock, and a truncated completion (the
    response-side budget) is not a timeout and never reaches this retry.
-4. Systemic sweep: after the chunk workers, ONE more worker-style
+4. Spec grounding (best-effort, only when ``spec_sources`` is non-empty):
+   ``specs.fetch_specs`` + ``specs.build_spec_digest`` run inside the same
+   never-raise fence as every other stage, and the digest rides the
+   existing chunk calls and the systemic sweep — no extra LLM unit. A run
+   whose every source failed behaves exactly like a run with no specs,
+   plus a grounding note in the summary.
+5. Systemic sweep: after the chunk workers, ONE more worker-style
    single-shot call over the whole-PR digest built by
    ``systemic.build_digest`` (every file with hunk headers; short files and
    migrations render their full added content, the rest only the
@@ -31,7 +37,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    chunk results, and counts as one more review unit: ``chunk_count`` is
    ``len(chunks) + 1`` whenever the sweep ran, and a sweep failure is one
    failed chunk in the partial-review banner.
-5. Deterministic checks and quality passes, in exactly this order — the
+6. Deterministic checks and quality passes, in exactly this order — the
    raw chunk + sweep findings first gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
    about a PR that is ≥80% release machinery yet also touches source),
@@ -74,7 +80,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    sorted by ``finding_sort_key``. Every result — including an error or
    summary-only exit — carries a ``sampling`` record naming the
    temperature, seed, and model chain actually in force.
-6. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
+7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;
    else ``"Approved"``. A partial failure keeps the verdict but the summary
@@ -83,9 +89,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    blockquote) — a partial review reads as a successful one, so a failure
    left only in the logs reaches nobody, and a file list left out of it
    leaves the operator guessing which files went unreviewed.
-7. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
+8. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
-   {warning_count} {outofscope_count} {findings} {attribution}`` filled, plus
+   {warning_count} {spec_count} {spec_note} {outofscope_count} {findings}
+   {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
    ``post_mode`` narrows what is written: ``"summary+inline"`` (default) is
    that full behaviour, ``"summary"`` skips the inline batch, ``"inline"``
@@ -114,7 +121,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import chunk_context, heuristics, reviewer, systemic
+from . import chunk_context, heuristics, reviewer, specs, systemic
 from .forges.base import (
     ATTRIBUTION_MARKER,
     Forge,
@@ -169,12 +176,14 @@ POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 # letting a pathological run bury the findings under its own diagnostics.
 MAX_REPORTED_REASONS = 3
 
-_SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "outofscope": "🟦"}
+_SEVERITY_MARKERS = {"error": "🟥", "warning": "🟧", "spec": "🔍", "outofscope": "🟦"}
 
 # Inline-comment priority: the most severe findings get the anchor first, so
 # a cap or a rejected anchor costs the run its least-important comments
-# rather than whatever happened to sit at the tail of chunk order.
-_SEVERITY_RANK = {"error": 0, "warning": 1, "outofscope": 2}
+# rather than whatever happened to sit at the tail of chunk order. spec sits
+# below warning (a spec violation is an operator-requested contract breach,
+# but not claimed to break at runtime) and above outofscope.
+_SEVERITY_RANK = {"error": 0, "warning": 1, "spec": 2, "outofscope": 3}
 
 _REDACTED = "[redacted]"
 
@@ -286,7 +295,9 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
-    "🟧 {warning_count} warning · 🟦 {outofscope_count} outofscope\n\n"
+    "🟧 {warning_count} warning · 🔍 {spec_count} spec · "
+    "🟦 {outofscope_count} outofscope\n"
+    "{spec_note}\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -326,6 +337,12 @@ def orchestrate_review(
     post_verdict: bool = True,
     trace_file: str | None = None,
     trace_dir: str | None = None,
+    spec_sources: Sequence[str] = (),
+    spec_max_chars: int = 120000,
+    spec_digest_tokens: int = 3000,
+    jira_base_url: str = "",
+    jira_email: str = "",
+    jira_api_token: str = "",
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -370,6 +387,21 @@ def orchestrate_review(
     (model, token counts, elapsed, error) under that directory, labelled
     ``chunk0`` … ``chunkN-1`` and ``sweep``. Empty (the default) traces
     nothing; a write failure is a logged warning, never a review failure.
+
+    ``spec_sources`` grounds the review against written specs: each entry is
+    fetched by :func:`prxref.specs.fetch_specs` and the pruned constraint
+    digest (:func:`prxref.specs.build_spec_digest`) is injected into every
+    worker prompt and the sweep prompt — no extra LLM unit. The fetch never
+    raises and never fails the run: sources that fail become a grounding
+    note in the summary (failure reasons pass through
+    :func:`redact_for_post` before posting), and a run whose every source
+    failed is exactly a run with no specs plus that note. The remaining
+    spec keywords mirror the config keys of the same names
+    (``spec_max_chars``, ``spec_digest_tokens``, ``jira_base_url``,
+    ``jira_email``, ``jira_api_token``); the defaults restate
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does. ``spec_sources`` is
+    deliberately absent from the returned dict, like every other request
+    knob.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -469,11 +501,39 @@ def orchestrate_review(
         logger.warning("list_threads failed (best-effort): %s", e)
         threads = []
 
+    # Best-effort, like the thread listing: a spec-fetch failure is data for
+    # the grounding note, never a failed review. The digest is built once,
+    # after parse_unified_diff (the files are the pruning input) and before
+    # the worker fan-out, then rides the existing chunk + sweep calls.
+    spec_digest = ""
+    spec_note = ""
+    if spec_sources:
+        try:
+            fetched = specs.fetch_specs(
+                list(spec_sources),
+                max_chars=spec_max_chars,
+                jira_base_url=jira_base_url,
+                jira_email=jira_email,
+                jira_api_token=jira_api_token,
+            )
+            spec_digest = specs.build_spec_digest(fetched, files, spec_digest_tokens)
+            ok = sum(1 for s in fetched if not s.error)
+            tracer.event(
+                "specs", "ok",
+                sources=len(fetched), ok=ok, fail=len(fetched) - ok,
+                digest_chars=len(spec_digest),
+            )
+            spec_note = _spec_note(fetched, spec_digest)
+        except Exception as e:  # noqa: BLE001
+            logger.error("spec grounding failed (best-effort): %s", e)
+            tracer.event("specs", "fail", error=e.__class__.__name__)
+
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
         reader=reader, all_files=files, trace_dir=trace_dir,
+        spec_digest=spec_digest,
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -486,6 +546,7 @@ def orchestrate_review(
             llm, files, pr, max_tokens=max_tokens,
             token_budget=token_budget, tracer=tracer, threads=threads,
             trace_dir=trace_dir,
+            spec_digest=spec_digest,
         )
     )
 
@@ -635,6 +696,7 @@ def orchestrate_review(
             # "findings may be incomplete" without which-files acts on nothing.
             failed_chunks=failed_chunks,
             include_verdict=post_verdict,
+            spec_note=spec_note,
         )
         try:
             forge.post_summary(ref, summary)
@@ -681,6 +743,7 @@ def orchestrate_review(
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
             failed_chunks=failed_chunks,
             include_verdict=post_verdict,
+            spec_note=spec_note,
             inline_accounting=_inline_accounting(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
@@ -865,7 +928,7 @@ def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
-    trace_dir: str | None = None,
+    trace_dir: str | None = None, spec_digest: str = "",
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -901,6 +964,7 @@ def _run_workers(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
                 max_tokens, context_lines, tracer, reader, all_files,
                 trace_label=f"chunk{i}", trace_dir=trace_dir,
+                spec_digest=spec_digest,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -947,6 +1011,7 @@ def _invoke_chunk(
     max_tokens: int | None, context_lines: int | None,
     reader=None, *, include_definitions: bool = True, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
+    spec_digest: str = "",
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -971,6 +1036,7 @@ def _invoke_chunk(
             max_tokens=max_tokens, context_lines=context_lines,
             context_blocks=blocks, sibling_files=all_files or (),
             trace_label=trace_label, trace_dir=trace_dir or "",
+            spec_digest=spec_digest,
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -1012,6 +1078,7 @@ def _run_worker(
     max_tokens: int | None = None, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
+    spec_digest: str = "",
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -1028,7 +1095,7 @@ def _run_worker(
     )
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
-        trace_label=trace_label, trace_dir=trace_dir,
+        trace_label=trace_label, trace_dir=trace_dir, spec_digest=spec_digest,
     )
     if (
         res["error"]
@@ -1054,6 +1121,7 @@ def _run_worker(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,
             trace_label=trace_label, trace_dir=trace_dir,
+            spec_digest=spec_digest,
         )
 
     error = res["error"]
@@ -1092,6 +1160,7 @@ def _run_sweep(
     tracer: Tracer | None = None,
     threads: Sequence[Thread] = (),
     trace_dir: str | None = None,
+    spec_digest: str = "",
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -1099,7 +1168,8 @@ def _run_sweep(
     ``token_budget``), makes ONE single-shot call through
     :func:`reviewer.review_systemic` — so ``PRXREF_LLM_MAX_TOKENS``, the
     timeout, and the model fallback chain all apply as to any chunk — and
-    returns the same result shape a chunk worker does. A failure is that
+    returns the same result shape a chunk worker does. ``spec_digest`` rides
+    along into the sweep prompt's Spec constraints block. A failure is that
     shape with ``error`` set prefixed ``systemic sweep:``, so the
     partial-review banner names the unit that failed; it counts as one
     failed chunk in the caller's coverage accounting.
@@ -1122,6 +1192,7 @@ def _run_sweep(
             llm, digest, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, threads=discussion,
             trace_label="sweep", trace_dir=trace_dir or "",
+            spec_digest=spec_digest,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[sweep] raised: %s", e)
@@ -1203,6 +1274,7 @@ def _render_summary(
     failed_chunks: Sequence[tuple[str, Sequence[str]]] = (),
     include_verdict: bool = True,
     inline_accounting: str | None = None,
+    spec_note: str = "",
 ) -> str:
     try:
         template = reviewer.load_prompt("summary")
@@ -1212,7 +1284,7 @@ def _render_summary(
     if not include_verdict:
         template = _strip_verdict_stamp(template)
 
-    counts = {"error": 0, "warning": 0, "outofscope": 0}
+    counts = {"error": 0, "warning": 0, "spec": 0, "outofscope": 0}
     for f in findings_active:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
@@ -1237,6 +1309,8 @@ def _render_summary(
         .replace("{file_count}", str(len(files)))
         .replace("{error_count}", str(counts["error"]))
         .replace("{warning_count}", str(counts["warning"]))
+        .replace("{spec_count}", str(counts["spec"]))
+        .replace("{spec_note}", spec_note)
         .replace("{outofscope_count}", str(counts["outofscope"]))
         .replace("{findings}", bullets)
         .replace("{attribution}", attribution)
@@ -1258,6 +1332,53 @@ def _render_summary(
         if reason_lines:
             rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
     return rendered
+
+
+# A digest line that IS a constraint: a spec unit
+# (``[spec:origin#anchor] (MUST|SHOULD|MAY) statement``) or a ticket line
+# (``[ticket:KEY] statement``). Heading lines, the truncation marker, and
+# the ``nothing diff-relevant kept`` lines are scoping or bookkeeping, not
+# injected constraints, and never match.
+_SPEC_CONSTRAINT_RE = re.compile(
+    r"^\[(?:spec:[^\]]*#\S+|ticket:[^\]]+)\] \((?:MUST|SHOULD|MAY)\) "
+)
+
+
+def _spec_constraint_count(digest: str) -> int:
+    """The number of constraint lines the digest actually injects."""
+    return sum(
+        1 for line in digest.splitlines() if _SPEC_CONSTRAINT_RE.match(line)
+    )
+
+
+def _spec_note(sources: Sequence[Any], digest: str) -> str:
+    """Render the summary's grounding note, ``""`` when nothing was requested.
+
+    One blockquote line counts what was injected; one names every failed
+    source, each reason through :func:`redact_for_post` first, because this
+    text is posted. A run whose every source failed renders ONLY the failure
+    line — the review was un-grounded, and the note must not dress it up as
+    grounded. The note rides the ``{spec_note}`` placeholder on its own line
+    between the counts and the findings, and a non-empty note carries its own
+    trailing newline, so an empty return leaves the summary byte-identical to
+    an ungrounded run's.
+    """
+    if not sources:
+        return ""
+    total = len(sources)
+    failed = [s for s in sources if s.error]
+    lines: list[str] = []
+    if len(failed) < total:
+        lines.append(
+            f"> 🔍 Spec-grounded: {total} source(s) · "
+            f"{_spec_constraint_count(digest)} constraint(s) injected"
+        )
+    if failed:
+        reasons = "; ".join(redact_for_post(s.error) for s in failed)
+        lines.append(
+            f"> ⚠️ Spec fetch failed for {len(failed)} source(s): {reasons}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _chunk_files_label(files: Sequence[str]) -> str:

@@ -1,0 +1,18 @@
+{
+  "id": "case-002-session-token-logging",
+  "title": "Durable session store logs the token and reads its secret from a forbidden env prefix",
+  "source_prs": [],
+  "planted_violations": [
+    {
+      "id": "V1",
+      "description": "issue() logs the session token at DEBUG level, forbidden by docs/session-security.md S-1 (log the opaque session ID instead)",
+      "expected_ref": "S1"
+    },
+    {
+      "id": "V2",
+      "description": "the signing key is read from VITE_SESSION_SECRET; docs/session-security.md S-2 forbids VITE_* as a server-side secret source (APP_ prefix only)",
+      "expected_ref": "S2"
+    }
+  ],
+  "notes": "Failure mode: forbidden pattern. Both violations look like reasonable code from the diff alone (a log line for support, a secret from the environment); only docs/session-security.md makes them violations. Generic bug G1: _persist raises NotImplementedError, so sessions do NOT actually survive a restart despite the ticket's first acceptance criterion. The weak session id (f-string with user_id and random.random()) is intentionally unlisted; expected.json is a floor, not a ceiling."
+}

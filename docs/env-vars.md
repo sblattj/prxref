@@ -33,6 +33,9 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_FAIL_ON` | `never` | Exit-code policy for `prxref review`. `never` (the default) keeps the advisory contract — the exit code never reflects findings. `error` exits `1` when the completed review carries an active error-severity finding; `any` exits `1` on any active finding. Under either value a review that fails to complete also exits `1`, so a gating lane cannot read a broken run as green. The webhook daemon has no exit code and is unaffected. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build). |
 | `PRXREF_POST_MODE` | `summary+inline` | What gets posted to the forge: `summary+inline` (the summary comment, then inline comments only if the summary landed), `summary` (the summary comment only — inline comments are never posted), or `inline` (inline comments only — no summary is posted on any path, including the error notice). Any other value raises `ConfigError` and `prxref review` exits `2`. A dry run posts nothing in any mode. |
 | `PRXREF_POST_VERDICT` | `True` | Set to the literal `1` to keep the verdict stamp in the posted summary; any other value renders the summary without it (no `Approved` / `Request-Changes` heading), keeping the findings, counts, and attribution. The computed verdict printed to stdout and the total-failure notice are unaffected. |
+| `PRXREF_SPEC_SOURCES` | *(empty)* | Spec/ticket sources to review against: public web URLs, local file or directory paths, or Jira ticket URLs. Comma- **and** whitespace-separated when set through the environment. The repeatable `--spec` flag replaces this list entirely when given — there is no merge. |
+| `PRXREF_SPEC_MAX_CHARS` | `120000` | Raw fetched characters kept per spec source (after decoding), before pruning. Must be **greater than 0**. Truncation at the cap is announced in the fetched text, never silent. |
+| `PRXREF_SPEC_DIGEST_TOKENS` | `3000` | Token budget for the final spec-constraint digest injected into worker prompts (estimated at 4 characters per token, like the systemic digest). Must be **greater than 0**. |
 
 ### Per-Forge Authentication
 
@@ -47,6 +50,14 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_GITHUB_TOKEN` | *(empty)* | GitHub Personal Access Token or GitHub App token for `github.com`. |
 | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | *(empty)* | GitHub Enterprise token for custom/self-hosted GitHub Enterprise Server domains. Falls back to `PRXREF_GITHUB_TOKEN` if unset. |
 | `PRXREF_GITLAB_TOKEN` | *(empty)* | GitLab Personal, Project, or Group Access Token (sent via `PRIVATE-TOKEN` header) for `gitlab.com` or self-hosted GitLab. |
+
+### Spec Sources / Jira
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PRXREF_JIRA_BASE_URL` | *(empty)* | REST base for Jira ticket fetches, overriding a ticket URL's own host — a self-hosted board often sits behind a different REST host than its browse URL. Empty resolves the ticket URL's own `scheme://host`. |
+| `PRXREF_JIRA_EMAIL` | *(empty)* | Jira account email for HTTP basic authentication when fetching a ticket, used together with `PRXREF_JIRA_API_TOKEN`. When either is empty the fetch is anonymous, which public boards accept. |
+| `PRXREF_JIRA_API_TOKEN` | *(empty)* | Jira API token for HTTP basic authentication, paired with `PRXREF_JIRA_EMAIL`. Missing credentials are a fetch failure (the review proceeds un-grounded with a note naming these variables), not a configuration error. |
 
 ### Webhook Receiver
 
@@ -126,10 +137,11 @@ The two knobs above are the only configuration that touches the filtering. The e
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **36** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **42** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
-- **LLM / Pipeline (23):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_LLM_SEED`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_TRACE_FILE`, `PRXREF_TRACE_DIR`, `PRXREF_DRY_RUN`, `PRXREF_FAIL_ON`, `PRXREF_POST_MODE`, `PRXREF_POST_VERDICT`
+- **LLM / Pipeline (26):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_LLM_SEED`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_TRACE_FILE`, `PRXREF_TRACE_DIR`, `PRXREF_DRY_RUN`, `PRXREF_FAIL_ON`, `PRXREF_POST_MODE`, `PRXREF_POST_VERDICT`, `PRXREF_SPEC_SOURCES`, `PRXREF_SPEC_MAX_CHARS`, `PRXREF_SPEC_DIGEST_TOKENS`
 - **Per-Forge Auth (9):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_BITBUCKET_SERVER_TOKEN`, `PRXREF_BITBUCKET_SERVER_USER`, `PRXREF_BITBUCKET_SERVER_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`
+- **Spec Sources / Jira (3):** `PRXREF_JIRA_BASE_URL`, `PRXREF_JIRA_EMAIL`, `PRXREF_JIRA_API_TOKEN`
 - **Webhooks (4):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(36 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 37 accepted variable names.)*
+*(42 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 43 accepted variable names.)*

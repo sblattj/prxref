@@ -1,0 +1,27 @@
+diff --git a/config/ingest.yaml b/config/ingest.yaml
+--- a/config/ingest.yaml
++++ b/config/ingest.yaml
+@@ -1,4 +1,4 @@
+ # Ingest service configuration.
+-schema_version: "2.9"
++schema_version: "3"
+ retention:
+   days: 30
+diff --git a/migrations/V24-add-retention-index.sql b/migrations/V24-add-retention-index.sql
+--- /dev/null
++++ b/migrations/V24-add-retention-index.sql
+@@ -0,0 +1,5 @@
++-- Backfill index for retention lookups.
++CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_retention
++    ON events (tenant_id, created_at)
++    WHERE created_at > now() - interval '30 days';
++
+diff --git a/src/ingest/runner.py b/src/ingest/runner.py
+--- a/src/ingest/runner.py
++++ b/src/ingest/runner.py
+@@ -8,4 +8,4 @@
+     return [
+         name
+-        for name in os.listdir(directory)
++        for name in sorted(os.listdir(directory))
+         if name.endswith(".sql")

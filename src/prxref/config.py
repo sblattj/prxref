@@ -91,9 +91,35 @@ LLM / pipeline:
                                 PRXREF_DRY_RUN / ``--no-post``, which post
                                 nothing in any mode.
   PRXREF_POST_VERDICT           literal "1" keeps the verdict stamp in the
-                                posted summary; any other value renders the
-                                summary without it (default on). The
-                                total-failure notice always names its status.
+                                 posted summary; any other value renders the
+                                 summary without it (default on). The
+                                 total-failure notice always names its status.
+  PRXREF_SPEC_SOURCES           Spec/ticket sources to review against, as
+                                 comma- or whitespace-separated web URLs and
+                                 local file/dir paths; the repeatable
+                                 ``--spec`` flag replaces (never merges) this
+                                 list. Jira ticket URLs are routed to the
+                                 Jira REST fetcher below.
+  PRXREF_SPEC_MAX_CHARS         Raw fetched characters kept per spec source
+                                 before pruning; positive int (default
+                                 120000)
+  PRXREF_SPEC_DIGEST_TOKENS     Token budget for the spec digest injected
+                                 into worker prompts; positive int (default
+                                 3000)
+
+Spec sources / Jira:
+  PRXREF_JIRA_BASE_URL          REST base for Jira ticket fetches,
+                                 overriding a ticket URL's own host (a
+                                 self-hosted board often sits behind a
+                                 different REST host than its browse URL);
+                                 empty = the ticket URL's own host
+  PRXREF_JIRA_EMAIL             Jira account email for HTTP basic auth;
+                                 empty fetches anonymously where the board
+                                 allows it. Missing credentials are a fetch
+                                 failure (the review proceeds un-grounded),
+                                 never a configuration error.
+  PRXREF_JIRA_API_TOKEN         Jira API token paired with
+                                 PRXREF_JIRA_EMAIL for HTTP basic auth
 
 Per-forge auth:
   PRXREF_BITBUCKET_TOKEN        Bitbucket Cloud bearer token
@@ -132,6 +158,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import NamedTuple
 
 from prxref.forges.base import Forge, PRRef
@@ -179,6 +206,12 @@ _DEFAULTS: dict[str, object] = {
     "trace_dir": "",
     "post_mode": "summary+inline",
     "post_verdict": True,
+    "spec_sources": [],
+    "spec_max_chars": 120000,
+    "spec_digest_tokens": 3000,
+    "jira_base_url": "",
+    "jira_email": "",
+    "jira_api_token": "",
     "bitbucket_token": "",
     "bitbucket_user": "",
     "bitbucket_app_password": "",
@@ -198,10 +231,11 @@ _INT_KEYS = frozenset({
     "max_error_findings", "max_chunks", "llm_max_tokens", "llm_seed",
     "chunk_token_budget", "chunk_max_files", "chunk_context_lines",
     "max_workers", "max_inline_comments",
+    "spec_max_chars", "spec_digest_tokens",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
 _BOOL_KEYS = frozenset({"allow_unsigned", "dry_run", "post_verdict"})
-_LIST_KEYS = frozenset({"llm_models"})
+_LIST_KEYS = frozenset({"llm_models", "spec_sources"})
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
 # is declared here instead and enforced on the same pass as the ranges. A
@@ -275,6 +309,8 @@ _RANGES: dict[str, _Range] = {
     "chunk_context_lines": _Range(0, low_inclusive=True),
     "max_error_findings": _Range(0, low_inclusive=True),
     "llm_seed": _Range(0, low_inclusive=True),
+    "spec_max_chars": _Range(0),
+    "spec_digest_tokens": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
 }
 
@@ -308,7 +344,9 @@ def _coerce_env(key: str, raw: str, source: str) -> object:
         if key in _BOOL_KEYS:
             return _truthy(raw)
         if key in _LIST_KEYS:
-            return [part.strip() for part in raw.split(",") if part.strip()]
+            return [
+                part.strip() for part in re.split(r"[,\s]+", raw) if part.strip()
+            ]
         return raw
     except ValueError as exc:
         raise ConfigError(f"{source}: {exc}") from exc

@@ -1,0 +1,13 @@
+{
+  "id": "case-001-mcp-protocol-upgrade",
+  "title": "MCP client upgrade to wire spec 2026-07-28 omits a required initialize field",
+  "source_prs": [],
+  "planted_violations": [
+    {
+      "id": "V1",
+      "description": "initialize params omit the required clientInfo object (docs/mcp-client-spec.md section 2 requires name and version); the diff adds capabilities but never clientInfo",
+      "expected_ref": "S1"
+    }
+  ],
+  "notes": "Failure mode: required-field omission. The version bump itself is CORRECT (2026-07-28) and the session-id echo is implemented, so the violation is invisible without docs/mcp-client-spec.md section 2. Generic bug G1: mark_initialized indexes response.headers directly for a header the spec says is MAY-present, crashing on legacy servers (hence S1 anchors the initialize payload at the capabilities line, new-image line 17)."
+}
