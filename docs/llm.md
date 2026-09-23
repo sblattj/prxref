@@ -1,6 +1,6 @@
 # LLM Backends & Failover Architecture
 
-`prxref` connects to LLM inference endpoints using two interchangeable backends: a lightweight OpenAI-compatible plain-HTTP client or an optional in-process `litellm` wrapper. There is no default endpoint and no default model chain — `PRXREF_LLM_BASE_URL` and `PRXREF_LLM_MODELS` are required, and leaving either unset raises `ConfigError` (`prxref review` exits `2`).
+`prxref` connects to LLM inference endpoints using two interchangeable backends: a lightweight OpenAI-compatible plain-HTTP client or an optional in-process `litellm` wrapper. There is no default model chain on any backend — `PRXREF_LLM_MODELS` is required, and leaving it unset raises `ConfigError` (`prxref review` exits `2`). There is no default endpoint either: `PRXREF_LLM_BASE_URL` is required by the `openai-compat` backend (and its `ferry`/`http` aliases), with the same exit `2` when unset, and is not used by any other backend (see [Optional Backend: litellm](#optional-backend-litellm)).
 
 ## Key Architectural Principles
 
@@ -14,7 +14,7 @@
 The primary and default backend communicates via plain HTTP requests with any OpenAI-compatible `/v1/chat/completions` server — a hosted router (OpenRouter, Together, Groq), a self-hosted gateway such as `llm-ferry`, or a local runtime such as vLLM or Ollama.
 
 - **Default Backend Alias:** `PRXREF_LLM_BACKEND=openai-compat` (aliases: `ferry`, `http`).
-- **Endpoint URL:** `PRXREF_LLM_BASE_URL=https://llm.example.com/v1`. Required; there is no default.
+- **Endpoint URL:** `PRXREF_LLM_BASE_URL=https://llm.example.com/v1`. Required for this backend; there is no default.
 - **API Key:** `PRXREF_LLM_API_KEY` (sent as `Authorization: Bearer <key>`). Optional — leave empty for a local no-auth server.
 - **Models:** Model names are whatever the endpoint accepts, listed cheapest first. Required; there is no default.
 
@@ -68,6 +68,7 @@ For environments running without a centralized inference gateway, `prxref` suppo
 
 - **Backend Setting:** `PRXREF_LLM_BACKEND=litellm`
 - **Installation:** `pip install 'prxref[litellm]'`
+- **Endpoint URL: not used.** litellm resolves each model's own provider endpoint and reads that provider's credential (for example `OPENROUTER_API_KEY`) from its own environment, so `PRXREF_LLM_BASE_URL` is not required here and neither it nor `PRXREF_LLM_API_KEY` is ever passed to litellm. A set `PRXREF_LLM_BASE_URL` is ignored with one INFO line (`PRXREF_LLM_BASE_URL is set but not used by the litellm backend; ignoring it`), so a deployment that set a placeholder URL to get past the check older releases applied to every backend keeps working unchanged. To route through a LiteLLM **proxy**, which speaks the OpenAI API, use the `openai-compat` backend with `PRXREF_LLM_BASE_URL` pointing at the proxy.
 - **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and a configured seed is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is openai-compat only.
 
 ### Configuration Example
