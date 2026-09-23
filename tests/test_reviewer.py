@@ -660,6 +660,71 @@ class TestReviewSystemic:
         assert llm.calls[0]["max_tokens"] == 1234
 
 
+class TestSpecDigestPrompt:
+    """The spec digest rides the existing prompts; empty renders the marker."""
+
+    def test_the_shipped_worker_template_has_the_constraints_block(self):
+        template = load_prompt("worker.md")
+        assert "### Spec constraints" in template
+        assert "{spec_digest}" in template
+        assert "`spec`" in template
+
+    def test_the_shipped_systemic_template_has_the_constraints_block(self):
+        template = load_prompt("systemic.md")
+        assert "### Spec constraints" in template
+        assert "{spec_digest}" in template
+
+    def test_digest_replaces_the_placeholder_in_the_worker_prompt(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(
+            llm, parse_unified_diff(MINI_DIFF),
+            spec_digest="[spec:spec.md#L1] (MUST) tools MUST be named with the mcp prefix",
+        )
+        user = llm.calls[0]["user"]
+        assert "tools MUST be named with the mcp prefix" in user
+        assert "{spec_digest}" not in user
+        assert "(no specs provided for this review)" not in user
+
+    def test_empty_digest_renders_the_no_specs_marker_in_the_worker_prompt(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_chunk(llm, parse_unified_diff(MINI_DIFF))
+        assert "(no specs provided for this review)" in llm.calls[0]["user"]
+
+    def test_digest_replaces_the_placeholder_in_the_sweep_prompt(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_systemic(
+            llm, TestReviewSystemic.DIGEST,
+            spec_digest="[ticket:PROJ-9] ship the header flag",
+        )
+        user = llm.calls[0]["user"]
+        assert "ship the header flag" in user
+        assert "{spec_digest}" not in user
+        assert "(no specs provided for this review)" not in user
+
+    def test_empty_digest_renders_the_no_specs_marker_in_the_sweep_prompt(self):
+        llm = FakeLLM(CLEAN_RESPONSE)
+        review_systemic(llm, TestReviewSystemic.DIGEST)
+        assert "(no specs provided for this review)" in llm.calls[0]["user"]
+
+    def test_spec_severity_passes_through_unfiltered(self):
+        payload = json.dumps({
+            "findings": [
+                {"file": "src/app.py", "line": 3, "severity": "spec",
+                 "confidence": 0.9, "title": "Forbidden header sent",
+                 "body": "Spec: \"clients MUST NOT send the protocol header\"."},
+            ],
+            "escalations": [],
+        })
+        llm = FakeLLM(payload)
+        findings, meta = review_chunk(
+            llm, parse_unified_diff(MINI_DIFF),
+            spec_digest="clients MUST NOT send the protocol header",
+        )
+        assert meta["error"] == ""
+        assert len(findings) == 1
+        assert findings[0].severity == "spec"
+
+
 class _RaisingLLM:
     def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
                timeout_s=60.0):

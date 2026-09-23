@@ -1,0 +1,49 @@
+diff --git a/src/admin/app.py b/src/admin/app.py
+--- a/src/admin/app.py
++++ b/src/admin/app.py
+@@ -1,7 +1,10 @@
+ """Admin console app."""
+
+ from flask import Flask
+
++from admin.session_store import SessionStore
++
+ app = Flask(__name__)
++store = SessionStore("sessions.db")
+
+ sessions = {}
+diff --git a/src/admin/session_store.py b/src/admin/session_store.py
+--- /dev/null
++++ b/src/admin/session_store.py
+@@ -0,0 +1,31 @@
++"""Durable session store for the admin console."""
++
++import logging
++import os
++import random
++import time
++
++logger = logging.getLogger(__name__)
++
++SESSION_TTL_SECONDS = 3600
++
++
++class SessionStore:
++    """SQLite-backed session store surviving process restarts."""
++
++    def __init__(self, db_path):
++        self.db_path = db_path
++        self.secret_key = os.environ["VITE_SESSION_SECRET"]
++
++    def issue(self, user_id):
++        token = self._mint_token()
++        session_id = f"{user_id}-{random.random()}"
++        self._persist(session_id, token, user_id, time.time() + SESSION_TTL_SECONDS)
++        logger.debug("issued session token %s for user %s", token, user_id)
++        return session_id
++
++    def _mint_token(self):
++        return os.urandom(32).hex()
++
++    def _persist(self, session_id, token, user_id, expires_at):
++        raise NotImplementedError

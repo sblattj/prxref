@@ -192,6 +192,40 @@ class TestOrchestratorLabelsEveryUnit:
         assert (target / "sweep.meta.json").is_file()
 
 
+class TestSpecDigestInTheTrace:
+    """The spec digest is per-run context, so it rides the USER half of every
+    unit's prompt: a trace reader finds it in ``<unit>.user.md`` for each
+    chunk and the sweep, and the static ``<unit>.system.md`` never changes
+    with the sources."""
+
+    CANARY = "Tools MUST carry the CANARY-4412 prefix."
+
+    def test_the_digest_lands_in_every_user_file_and_no_system_file(
+        self, tmp_path, monkeypatch,
+    ):
+        from prxref import orchestrator
+        from prxref.specs import SpecSource
+
+        monkeypatch.setattr(
+            orchestrator.specs, "fetch_specs",
+            lambda *a, **k: [SpecSource(
+                origin="docs/spec.md", kind="file",
+                text=f"## Rules\n\n{self.CANARY}\n", error="",
+            )],
+        )
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(
+            forge, REF, FakeLLM(RAW_OK), post=False, trace_dir=str(tmp_path),
+            spec_sources=["docs/spec.md"],
+        )
+        for unit in ("chunk0", "sweep"):
+            user = (tmp_path / f"{unit}.user.md").read_text(encoding="utf-8")
+            system = (tmp_path / f"{unit}.system.md").read_text(encoding="utf-8")
+            assert self.CANARY in user, unit
+            assert "(no specs provided for this review)" not in user, unit
+            assert self.CANARY not in system, unit
+
+
 class TestWriteFailureNeverAborts:
     def test_an_unwritable_trace_dir_is_a_warning_not_a_failure(
         self, tmp_path, caplog
