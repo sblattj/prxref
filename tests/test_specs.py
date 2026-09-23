@@ -169,6 +169,7 @@ class TestJiraFetch:
         (src,) = fetch_specs(
             [self._jira_source()],
             max_chars=1000,
+            jira_base_url="https://jira.example.com",
             jira_email="ops@example.com",
             jira_api_token="secret-token",
             session=session,
@@ -216,10 +217,12 @@ class TestJiraFetch:
         (src,) = fetch_specs(
             [self._jira_source()],
             max_chars=1000,
+            jira_base_url="https://jira.example.com",
             jira_email="ops@example.com",
             jira_api_token="secret-token",
             session=session,
         )
+        assert session.calls[0][1]["auth"] == ("ops@example.com", "secret-token")
         assert src.error != ""
         assert "403" in src.error
         assert "PRXREF_JIRA_EMAIL" not in src.error
