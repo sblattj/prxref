@@ -432,62 +432,232 @@ def _strength(line: str) -> int | None:
     return None
 
 
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+_LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s")
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|")
+
+_QUOTE_RE = re.compile(r"^\s*(?:>\s?)+")
+
+_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+
+_SENTENCE_BREAK_RE = re.compile(r"[.;!?][\"'”’)\]]*\s+")
+
+_INITIALISM_RE = re.compile(r"(?:[a-z]\.)+")
+
+_ABBREVIATIONS = frozenset({"etc.", "vs.", "cf.", "incl.", "approx.", "fig.", "sec.", "resp.", "viz."})
+
+_PIN_DECORATION_RE = re.compile(r"[`\"'“”‘’*_()\[\]]")
+
+_NORMATIVE_TOKENS = frozenset(
+    {"must", "shall", "required", "recommended", "forbidden", "discouraged", "should", "never", "optional"}
+)
+
+
 def _is_version_pin_line(line: str) -> bool:
-    if _VERSION_DATE_RE.search(line):
-        return True
-    return bool(_VERSION_NUM_RE.search(line) and _VERSION_CONTEXT_RE.search(line))
+    """True when ``line`` is nothing but a version pin.
+
+    A list marker and markdown decoration (backticks, quotes, emphasis,
+    brackets) are peeled first, so ``- `"2026-07-28"`.`` pins. A date or
+    version number inside prose does not: it rides along verbatim when its
+    sentence is a kept constraint, and is dropped otherwise.
+    """
+    bare = _PIN_DECORATION_RE.sub("", _LIST_ITEM_RE.sub("", line, count=1)).strip()
+    return _STANDALONE_PIN_RE.match(bare) is not None
 
 
-def _spec_units(src: SpecSource, source_idx: int) -> list[_Unit]:
-    short = _origin_short(src.origin)
-    lines = src.text.splitlines()
-    units: list[_Unit] = []
-    heading: tuple[str, str] | None = None
+def _classify(sentence: str) -> tuple[int, bool] | None:
+    if _NAMING_RE.search(sentence):
+        return 3, True
+    strength = _strength(sentence)
+    if strength is not None:
+        return strength, strength > 1 or _STRENGTH1_RE.search(sentence) is not None
+    if _is_version_pin_line(sentence):
+        return 3, False
+    return None
+
+
+def _split_sentences(text: str) -> list[str]:
+    masked = _CODE_SPAN_RE.sub(lambda m: "x" * len(m.group()), text)
+    sentences: list[str] = []
+    start = 0
+    for m in _SENTENCE_BREAK_RE.finditer(masked):
+        if masked[m.start()] == ".":
+            word_start = max(start, masked.rfind(" ", start, m.start()) + 1)
+            word = masked[word_start : m.start() + 1].lstrip("(\"'“‘[").lower()
+            if word in _ABBREVIATIONS or _INITIALISM_RE.fullmatch(word):
+                continue
+        sentences.append(text[start : m.end()].strip())
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
+
+
+@dataclass
+class _Block:
+    """One structural element of a spec text, anchored on its first line."""
+
+    line: int
+    kind: str
+    indent: int
+    parts: list[str]
+
+    def text(self) -> str:
+        return " ".join(" ".join(self.parts).split())
+
+
+def _blocks(text: str) -> list[_Block]:
+    lines = text.splitlines()
+    blocks: list[_Block] = []
+    current: _Block | None = None
+    current_quoted = False
+    fence: str | None = None
     i = 0
     while i < len(lines):
         line = lines[i]
+        stripped = line.strip()
+        i += 1
+        if fence is not None:
+            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+                fence = None
+                blocks.append(_Block(i, "break", 0, []))
+            elif stripped:
+                blocks.append(_Block(i, "code", 0, [stripped]))
+            continue
+        opener = _FENCE_RE.match(line)
+        if opener:
+            fence = opener.group(1)
+            current = None
+            blocks.append(_Block(i, "break", 0, []))
+            continue
+        if not stripped:
+            current = None
+            continue
         md = _MD_HEADING_RE.match(line)
         setext = (
             md is None
             and _SETEXT_TEXT_RE.match(line) is not None
-            and i + 1 < len(lines)
-            and _SETEXT_UNDER_RE.match(lines[i + 1]) is not None
+            and i < len(lines)
+            and _SETEXT_UNDER_RE.match(lines[i]) is not None
             and _strength(line) is None
         )
         if md or setext:
-            text = (md.group(1) if md else line).strip()
+            current = None
+            blocks.append(_Block(i, "heading", 0, [(md.group(1) if md else line).strip()]))
+            i += 1 if setext else 0
+            continue
+        if _SETEXT_UNDER_RE.match(line):
+            current = None
+            blocks.append(_Block(i, "break", 0, []))
+            continue
+        if _TABLE_ROW_RE.match(line):
+            current = None
+            blocks.append(_Block(i, "row", 0, [stripped]))
+            continue
+        quote = _QUOTE_RE.match(line)
+        content = line[quote.end() :] if quote else line
+        if not content.strip():
+            current = None
+            continue
+        if current is not None and current_quoted != bool(quote):
+            current = None
+        current_quoted = bool(quote)
+        item = _LIST_ITEM_RE.match(content)
+        if item:
+            current = _Block(i, "item", len(item.group(1).expandtabs(4)), [content.strip()])
+            blocks.append(current)
+        elif current is not None:
+            current.parts.append(content.strip())
+        else:
+            current = _Block(i, "text", 0, [content.strip()])
+            blocks.append(current)
+    return blocks
+
+
+def _block_statements(block: _Block) -> list[tuple[int, str]]:
+    text = block.text()
+    if block.kind in ("row", "code"):
+        hit = _classify(text)
+        return [(hit[0], _one_line(text, _STATEMENT_MAX_CHARS))] if hit else []
+    hits = [(s, c) for s in _split_sentences(text) if (c := _classify(s)) is not None]
+    if not hits:
+        return []
+    if len(text) > _STATEMENT_MAX_CHARS or len(hits) >= 2:
+        return [(strength, _one_line(s, _STATEMENT_MAX_CHARS)) for s, (strength, _) in hits]
+    sentence, (strength, strong) = hits[0]
+    return [(strength, text if strong else sentence)]
+
+
+def _attach_list(statement: str, blocks: list[_Block], pos: int) -> str:
+    lead = blocks[pos]
+    parts = [statement]
+    size = len(statement)
+    for block in blocks[pos + 1 :]:
+        if block.kind != "item" or (lead.kind == "item" and block.indent <= lead.indent):
+            break
+        item = block.text()
+        if size + 1 + len(item) > _STATEMENT_MAX_CHARS:
+            break
+        parts.append(item)
+        size += 1 + len(item)
+    return " ".join(parts)
+
+
+def _spec_units(src: SpecSource, source_idx: int) -> list[_Unit]:
+    """Extract the constraint units of one non-ticket source, in document order.
+
+    Lines are grouped into blocks before anything is matched: a paragraph or
+    list item joins its wrapped and indented continuation lines, while a
+    blank line, heading, setext underline, code fence, table row or new list
+    item ends a block. Table rows and fenced lines are single-line units and
+    never headings. Each block is split into sentences (``e.g.``/``i.e.``
+    and code spans never end one) and every sentence is matched on its own
+    for RFC-2119 keywords, naming rules and standalone version pins. A
+    block over :data:`_STATEMENT_MAX_CHARS` or holding two or more matching
+    sentences yields one capped unit per matching sentence, each with its
+    own strength; otherwise the block is kept whole, unless its only match
+    is a prose ``can``/``discouraged`` or a bare pin, which keeps just that
+    sentence. A unit that ends its block with ``:`` carries the following
+    list items (nested ones only, under a list item) while they fit the
+    cap; those items are still matched on their own. Every unit is anchored
+    ``L{n}`` on its block's first original line.
+    """
+    short = _origin_short(src.origin)
+    blocks = _blocks(src.text)
+    units: list[_Unit] = []
+    heading: tuple[str, str] | None = None
+    for pos, block in enumerate(blocks):
+        if block.kind == "heading":
+            text = block.parts[0]
             slug = _heading_slug(text)
             heading = (
                 f"[spec:{short}#{slug}] (heading) {_one_line(text, _STATEMENT_MAX_CHARS)}",
                 slug,
             )
-            i += 2 if setext else 1
             continue
-        i += 1
-        stripped = line.strip()
-        if not stripped:
+        if block.kind == "break":
             continue
-        strength = 3 if _NAMING_RE.search(stripped) else _strength(stripped)
-        if strength is None and _is_version_pin_line(stripped):
-            strength = 3
-        if strength is None:
-            continue
-        anchor = f"L{i}"
-        statement = _one_line(stripped, _STATEMENT_MAX_CHARS)
-        label = {3: "MUST", 2: "SHOULD", 1: "MAY"}[strength]
-        units.append(
-            _Unit(
-                origin=src.origin,
-                source_idx=source_idx,
-                doc_idx=i,
-                strength=strength,
-                is_ticket=False,
-                render=f"[spec:{short}#{anchor}] ({label}) {statement}",
-                heading_render=heading[0] if heading else None,
-                heading_key=heading[1] if heading else None,
-                tokens=frozenset(_evidence_tokens(statement)),
+        ends_with_colon = block.kind in ("text", "item") and block.text().endswith(":")
+        for strength, statement in _block_statements(block):
+            if ends_with_colon and statement.endswith(":"):
+                statement = _attach_list(statement, blocks, pos)
+            label = {3: "MUST", 2: "SHOULD", 1: "MAY"}[strength]
+            units.append(
+                _Unit(
+                    origin=src.origin,
+                    source_idx=source_idx,
+                    doc_idx=block.line,
+                    strength=strength,
+                    is_ticket=False,
+                    render=f"[spec:{short}#L{block.line}] ({label}) {statement}",
+                    heading_render=heading[0] if heading else None,
+                    heading_key=heading[1] if heading else None,
+                    tokens=frozenset(_evidence_tokens(statement)),
+                )
             )
-        )
     return units
 
 
@@ -540,7 +710,7 @@ def _rank_units(sources: list[SpecSource], diff_toks: frozenset[str]) -> list[_U
     for u in units:
         if u.is_ticket:
             continue
-        u.score = len(u.tokens & diff_toks)
+        u.score = len((u.tokens & diff_toks) - _NORMATIVE_TOKENS)
         rest.append(u)
     relevant = sorted(
         (u for u in rest if u.score >= 1),
