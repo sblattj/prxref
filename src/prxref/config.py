@@ -3,11 +3,20 @@
 Canonical environment-variable table (every name prefixed PRXREF_):
 
 LLM / pipeline:
-  PRXREF_LLM_BACKEND            LLM backend: openai-compat | ferry | http (aliases) | litellm
-  PRXREF_LLM_BASE_URL           Base URL for the chosen backend (optional)
-  PRXREF_LLM_API_KEY            API key for the chosen backend (optional)
-  PRXREF_LLM_MODELS             Comma-separated model fallback chain, first
-                                that answers wins; empty = backend default
+  PRXREF_LLM_BACKEND            LLM backend: openai-compat | ferry | http
+                                (aliases) | litellm | claude-cli | kiro-cli,
+                                read case-insensitively; any other value is
+                                a configuration error
+  PRXREF_LLM_BASE_URL           Base URL of the OpenAI-compatible endpoint;
+                                required for openai-compat/ferry/http, not
+                                used by litellm, claude-cli or kiro-cli (a
+                                set value is ignored there with one INFO
+                                line)
+  PRXREF_LLM_API_KEY            API key for the openai-compat endpoint
+                                (optional; empty for a local no-auth server)
+  PRXREF_LLM_MODELS             Comma- or whitespace-separated model fallback
+                                chain, first that answers wins; required by
+                                every backend
   PRXREF_LLM_REASONING_EFFORT   Reasoning effort for models that cannot
                                 disable reasoning; provider-specific string,
                                 passed through unvalidated; empty = omit
@@ -28,6 +37,13 @@ LLM / pipeline:
                                 "seed" in the request; >= 0 (0 is a valid
                                 seed); empty or unset falls back to the
                                 factory's once-per-process seed
+  PRXREF_LLM_CLI_PATH           claude-cli / kiro-cli only: path to the CLI
+                                binary, ``~`` expanded; empty = "claude" or
+                                "kiro-cli" on PATH. Not found = configuration
+                                error
+  PRXREF_LLM_CLI_CONCURRENCY    claude-cli / kiro-cli only: max CLI
+                                processes one client runs at once; positive
+                                int (default 2)
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped;
                                 a probability in [0.0, 1.0] (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -94,6 +110,37 @@ LLM / pipeline:
                                  posted summary; any other value renders the
                                  summary without it (default on). The
                                  total-failure notice always names its status.
+  PRXREF_PRICE_TABLE            Fallback price table for runs whose backend
+                                reports no dollar cost: inline JSON (first
+                                non-space character "{") or a path to a JSON
+                                file, mapping model name -> {"input": USD,
+                                "output": USD} per million tokens, keyed on
+                                the model name the run reports. A reported
+                                cost always wins; a figure from this table
+                                marks the run cost_estimated. A malformed
+                                table is a configuration error. Empty (the
+                                default) estimates nothing. After loading,
+                                the key holds the parsed table (a dict).
+  PRXREF_POST_COST              literal "1" appends the run's dollar cost to
+                                the posted summary's attribution line
+                                (default off). The cost is always in the run
+                                record, --format json and the traces.
+  PRXREF_SIZE_WARN_LINES        Advisory-only threshold on lines changed
+                                (added + removed, from the parsed diff,
+                                excluding lock and generated files); one
+                                non-blocking line tops the summary when the
+                                count is above it. Unset (default) disables
+                                it; >= 0, where 0 is a legal threshold
+                                distinct from unset. Never affects the
+                                verdict or the exit code.
+  PRXREF_SIZE_WARN_FILES        Same contract as PRXREF_SIZE_WARN_LINES,
+                                thresholding files changed instead.
+  PRXREF_SIZE_IGNORE_GLOBS      Extra fnmatch globs (case-sensitive, matched
+                                against the full diff path, ``*`` crosses
+                                ``/``) excluded from both size counts, ADDED
+                                to the built-in lock-file and generated-file
+                                detection, never replacing it. Empty
+                                (default) adds nothing.
   PRXREF_SPEC_SOURCES           Spec/ticket sources to review against, as
                                  comma- or whitespace-separated web URLs and
                                  local file/dir paths; the repeatable
@@ -106,20 +153,53 @@ LLM / pipeline:
   PRXREF_SPEC_DIGEST_TOKENS     Token budget for the spec digest injected
                                  into worker prompts; positive int (default
                                  3000)
+  PRXREF_REVIEW_RULES           Path to a team review-rules file (Markdown,
+                                optional front matter with a ``severity:``
+                                map) added to every review prompt, by
+                                ``prxref review`` and the webhook daemon
+                                alike. A missing, unreadable or malformed
+                                file is a configuration error. Read it from a checkout
+                                the PR cannot change. ``--rules-file PATH``
+                                wins; ``--rules-file ""`` turns it off for
+                                one run. Empty (the default) = no rules.
+  PRXREF_REVIEW_RULES_MAX_CHARS Characters of the rules body (after the
+                                front matter) kept in the prompt; longer is
+                                truncated with a warning; positive int
+                                (default 12000)
+  PRXREF_TICKET_CONTEXT_FILE    Path to a text file holding the ticket this
+                                PR implements; each finding is then marked
+                                in, out of, or of unknown ticket scope. An
+                                empty (or whitespace-only) file means "this
+                                PR has no ticket". A missing, unreadable or
+                                non-UTF-8 file is a configuration error.
+                                Ignored by ``prxref serve``.
+                                ``--context-file PATH`` wins;
+                                ``--context-file ""`` turns it off for one
+                                run. Empty (the default) = no ticket.
+  PRXREF_TICKET_CONTEXT_MAX_CHARS
+                                Characters of ticket text kept in the
+                                prompt; longer is truncated with a visible
+                                marker; positive int (default 6000)
 
 Spec sources / Jira:
-  PRXREF_JIRA_BASE_URL          REST base for Jira ticket fetches,
-                                 overriding a ticket URL's own host (a
-                                 self-hosted board often sits behind a
-                                 different REST host than its browse URL);
-                                 empty = the ticket URL's own host
-  PRXREF_JIRA_EMAIL             Jira account email for HTTP basic auth;
-                                 empty fetches anonymously where the board
-                                 allows it. Missing credentials are a fetch
-                                 failure (the review proceeds un-grounded),
-                                 never a configuration error.
+  PRXREF_JIRA_BASE_URL          Jira base URL (scheme://host plus any
+                                 context path) that ticket fetches are
+                                 looked up on, overriding a ticket URL's own
+                                 base (a self-hosted board often sits behind
+                                 a different REST host than its browse URL).
+                                 Jira credentials are only ever sent here;
+                                 empty = the ticket URL's own base, fetched
+                                 anonymously
+  PRXREF_JIRA_EMAIL             Jira account email for HTTP basic auth,
+                                 used only together with
+                                 PRXREF_JIRA_BASE_URL; without it the fetch
+                                 is anonymous and a warning is logged.
+                                 Missing credentials are a fetch failure
+                                 (the review proceeds un-grounded), never a
+                                 configuration error.
   PRXREF_JIRA_API_TOKEN         Jira API token paired with
-                                 PRXREF_JIRA_EMAIL for HTTP basic auth
+                                 PRXREF_JIRA_EMAIL for HTTP basic auth, sent
+                                 only to PRXREF_JIRA_BASE_URL
 
 Per-forge auth:
   PRXREF_BITBUCKET_TOKEN        Bitbucket Cloud bearer token
@@ -132,13 +212,27 @@ Per-forge auth:
   PRXREF_GITHUB_TOKEN           GitHub token (github.com)
   PRXREF_GITHUB_ENTERPRISE_TOKEN GitHub Enterprise token (GHES hosts)
   PRXREF_GITLAB_TOKEN           GitLab token
+  PRXREF_AZURE_DEVOPS_TOKEN     Azure DevOps personal access token (Code
+                                Read to review, Read & write to post); empty
+                                falls back to SYSTEM_ACCESSTOKEN, then to
+                                anonymous access (public projects only)
 
 Webhooks:
   PRXREF_BITBUCKET_WEBHOOK_SECRET HMAC secret for Bitbucket webhook payloads
   PRXREF_GITHUB_WEBHOOK_SECRET    HMAC secret for GitHub webhook payloads
   PRXREF_GITLAB_WEBHOOK_SECRET    HMAC secret for GitLab webhook payloads
+  PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET
+                                  Basic-auth password of the Azure DevOps
+                                  service hook (the user name is ignored);
+                                  empty rejects Azure DevOps webhooks with
+                                  401 unless PRXREF_ALLOW_UNSIGNED is "1"
   PRXREF_ALLOW_UNSIGNED           literal "1" accepts unsigned
                                   webhooks (default off; insecure)
+
+List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES and
+PRXREF_SIZE_IGNORE_GLOBS) split on any run of commas and/or whitespace, so no
+item can contain either; a glob that must match a literal space writes it as
+``?``.
 
 Precedence: built-in defaults < environment < ``overrides`` kwargs.
 An error names the source that actually supplied the offending value — the
@@ -163,6 +257,7 @@ from typing import NamedTuple
 
 from prxref.forges.base import Forge, PRRef
 
+from . import costs
 from .llm import ConfigError
 from .quality import DEFAULT_CONFIDENCE_FLOOR, DEFAULT_MAX_ERRORS
 from .triage import (
@@ -188,6 +283,8 @@ _DEFAULTS: dict[str, object] = {
     # the seed is a first-class int key — coerced and range-checked here —
     # because "no seed" is representable in its own type.
     "llm_seed": None,
+    "llm_cli_path": "",
+    "llm_cli_concurrency": 2,
     "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_chunks": 8,
@@ -206,9 +303,23 @@ _DEFAULTS: dict[str, object] = {
     "trace_dir": "",
     "post_mode": "summary+inline",
     "post_verdict": True,
+    # A str on the way in (inline JSON or a file path); _check_price_table
+    # replaces it with the parsed dict, so a loaded config never holds the raw
+    # text and every consumer sees one type.
+    "price_table": "",
+    "post_cost": False,
+    # ``None`` = the advisory is off, the second "None means off" class next
+    # to ``llm_seed``: 0 is a legal threshold, so it cannot spell "unset".
+    "size_warn_lines": None,
+    "size_warn_files": None,
+    "size_ignore_globs": [],
     "spec_sources": [],
     "spec_max_chars": 120000,
     "spec_digest_tokens": 3000,
+    "review_rules": "",
+    "review_rules_max_chars": 12000,
+    "ticket_context_file": "",
+    "ticket_context_max_chars": 6000,
     "jira_base_url": "",
     "jira_email": "",
     "jira_api_token": "",
@@ -221,9 +332,11 @@ _DEFAULTS: dict[str, object] = {
     "github_token": "",
     "github_enterprise_token": "",
     "gitlab_token": "",
+    "azure_devops_token": "",
     "bitbucket_webhook_secret": "",
     "github_webhook_secret": "",
     "gitlab_webhook_secret": "",
+    "azure_devops_webhook_secret": "",
     "allow_unsigned": False,
 }
 
@@ -232,10 +345,12 @@ _INT_KEYS = frozenset({
     "chunk_token_budget", "chunk_max_files", "chunk_context_lines",
     "max_workers", "max_inline_comments",
     "spec_max_chars", "spec_digest_tokens",
+    "llm_cli_concurrency", "review_rules_max_chars",
+    "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
-_BOOL_KEYS = frozenset({"allow_unsigned", "dry_run", "post_verdict"})
-_LIST_KEYS = frozenset({"llm_models", "spec_sources"})
+_BOOL_KEYS = frozenset({"allow_unsigned", "dry_run", "post_verdict", "post_cost"})
+_LIST_KEYS = frozenset({"llm_models", "spec_sources", "size_ignore_globs"})
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
 # is declared here instead and enforced on the same pass as the ranges. A
@@ -268,8 +383,9 @@ class _Range(NamedTuple):
     worker count (``ThreadPoolExecutor`` rejects it) and for a chunk count
     (``build_chunks`` raises on the overflow branch). Zero IS meaningful for the
     error cap, where it means "report no errors", for the context-line count,
-    where it means "emit the changed lines only", and for the sampling seed,
-    where 0 is a perfectly valid seed.
+    where it means "emit the changed lines only", for the sampling seed,
+    where 0 is a perfectly valid seed, and for the PR-size thresholds, where
+    0 flags any change at all.
     """
 
     low: float
@@ -311,6 +427,11 @@ _RANGES: dict[str, _Range] = {
     "llm_seed": _Range(0, low_inclusive=True),
     "spec_max_chars": _Range(0),
     "spec_digest_tokens": _Range(0),
+    "llm_cli_concurrency": _Range(0),
+    "review_rules_max_chars": _Range(0),
+    "ticket_context_max_chars": _Range(0),
+    "size_warn_lines": _Range(0, low_inclusive=True),
+    "size_warn_files": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
 }
 
@@ -369,7 +490,10 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
     lives in the factory (``llm_seed``: unset falls back to the
     once-per-process seed resolved in ``llm_backends.create_llm_client``):
     there is no number to range-check, and
-    "not configured" is not a violation. Every value that is not ``None`` —
+    "not configured" is not a violation. The PR-size thresholds
+    (``size_warn_lines``, ``size_warn_files``) are the second such class:
+    ``None`` means the advisory is off, because 0 is a legal threshold and
+    cannot double as "unset". Every value that is not ``None`` —
     including one smuggled in through an override — is still checked.
     """
     for key, rng in sorted(_RANGES.items()):
@@ -416,15 +540,32 @@ def _check_post_mode(cfg: dict[str, object], sources: dict[str, str]) -> None:
         )
 
 
+def _check_price_table(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Parse ``price_table`` in place, rejecting a malformed table.
+
+    Same doctrine as :func:`_check_post_mode`: it runs after environment AND
+    overrides, and a failure is a ``ConfigError`` naming whichever input
+    supplied the value, so a typo'd price is exit 2 before anything is
+    reviewed, never a silently wrong estimate. The value may be inline JSON,
+    a path to a JSON file, or a mapping from a library caller; all three are
+    validated by :func:`prxref.costs.parse_price_table`. Afterwards the key
+    holds a ``dict[str, costs.ModelPrice]``, ``{}`` when no table is set.
+    """
+    cfg["price_table"] = costs.parse_price_table(
+        cfg["price_table"], source=sources["price_table"]
+    )
+
+
 def load_config(
     *, source_labels: dict[str, str] | None = None, **overrides: object
 ) -> dict:
     """Build the runtime config dict from defaults, environment, then overrides.
 
     Keys mirror the env table above (lowercase, no prefix). Env values are
-    type-coerced per key (int / float / bool / comma-list / str); an empty or
-    whitespace-only value reads as unset. A malformed value, one out of its
-    numeric range, or one outside its key's allowed vocabulary raises
+    type-coerced per key (int / float / bool / comma-or-whitespace list /
+    str); an empty or whitespace-only value reads as unset. ``price_table``
+    comes back parsed, as a dict. A malformed value, one out of its numeric
+    range, or one outside its key's allowed vocabulary raises
     :class:`~prxref.llm.ConfigError` naming the input that supplied it, which
     the CLI turns into exit 2.
 
@@ -435,7 +576,10 @@ def load_config(
     Config itself knows no flag names: the caller that owns the surface names
     it.
     """
-    cfg: dict[str, object] = dict(_DEFAULTS)
+    cfg: dict[str, object] = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in _DEFAULTS.items()
+    }
     # What supplied each value, for error messages. Defaults start out attributed
     # to their environment variable: that is the name an operator would set to
     # change one, and a built-in default is never out of range anyway.
@@ -463,6 +607,7 @@ def load_config(
     _check_ranges(cfg, sources)
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
+    _check_price_table(cfg, sources)
     return cfg
 
 

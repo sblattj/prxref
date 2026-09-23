@@ -4,7 +4,7 @@ import os
 import pytest
 import requests
 
-from prxref import config, llm_backends, reviewer
+from prxref import cli, config, costs, llm_backends, reviewer
 from prxref.config import load_config, make_forge
 from prxref.forges import bitbucket, github, gitlab
 from prxref.forges.base import PRRef
@@ -1074,3 +1074,394 @@ class TestErrorsNameTheirSource:
         cfg = load_config(source_labels={"max_chunks": "--max-chunks"})
         assert "source_labels" not in cfg
         assert cfg["max_chunks"] == 8
+
+
+_POSITIVE_INT_KNOBS = [
+    ("llm_cli_concurrency", "PRXREF_LLM_CLI_CONCURRENCY", 2),
+    ("review_rules_max_chars", "PRXREF_REVIEW_RULES_MAX_CHARS", 12000),
+    ("ticket_context_max_chars", "PRXREF_TICKET_CONTEXT_MAX_CHARS", 6000),
+]
+
+
+class TestNewPositiveIntKnobs:
+    """The three 0.14 caps that follow the size-knob rule: int, > 0, no ceiling."""
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_default(self, key, env, default):
+        assert config._DEFAULTS[key] == default
+        value = load_config()[key]
+        assert value == default
+        assert isinstance(value, int)
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_declared_in_the_int_and_range_tables(self, key, env, default):
+        assert key in config._INT_KEYS
+        assert config._RANGES[key] == config._Range(0)
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_env_coerces_to_an_int(self, monkeypatch, key, env, default):
+        monkeypatch.setenv(env, " 7 ")
+        value = load_config()[key]
+        assert value == 7
+        assert isinstance(value, int)
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_one_is_the_smallest_legal_value(self, monkeypatch, key, env, default):
+        monkeypatch.setenv(env, "1")
+        assert load_config()[key] == 1
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_whitespace_only_reads_as_unset(self, monkeypatch, key, env, default):
+        monkeypatch.setenv(env, "   ")
+        assert load_config()[key] == default
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    @pytest.mark.parametrize("raw", ["lots", "2.5"])
+    def test_malformed_value_names_the_variable(self, monkeypatch, key, env, default, raw):
+        monkeypatch.setenv(env, raw)
+        with pytest.raises(ConfigError, match=env):
+            load_config()
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    @pytest.mark.parametrize("raw", ["0", "-1"])
+    def test_non_positive_value_rejected(self, monkeypatch, key, env, default, raw):
+        monkeypatch.setenv(env, raw)
+        with pytest.raises(ConfigError, match=env):
+            load_config()
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_an_override_is_range_checked_and_named_as_itself(self, key, env, default):
+        with pytest.raises(ConfigError, match=key) as exc:
+            load_config(**{key: 0})
+        assert env not in str(exc.value)
+
+    @pytest.mark.parametrize("key,env,default", _POSITIVE_INT_KNOBS)
+    def test_an_override_wins_over_the_environment(self, monkeypatch, key, env, default):
+        monkeypatch.setenv(env, "3")
+        assert load_config(**{key: 5})[key] == 5
+
+
+_SIZE_THRESHOLDS = [
+    ("size_warn_lines", "PRXREF_SIZE_WARN_LINES"),
+    ("size_warn_files", "PRXREF_SIZE_WARN_FILES"),
+]
+
+
+class TestSizeWarnThresholds:
+    """PRXREF_SIZE_WARN_LINES / _FILES: the second "None means off" class.
+
+    Like ``llm_seed``, unset is ``None`` in the key's own type, and 0 is a legal
+    value distinct from it (it flags any change at all), so the low bound is
+    inclusive and ``_check_ranges`` skips the key only while it is unset.
+    """
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    def test_default_is_none_meaning_off(self, key, env):
+        assert config._DEFAULTS[key] is None
+        assert load_config()[key] is None
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    def test_declared_in_the_int_and_range_tables(self, key, env):
+        assert key in config._INT_KEYS
+        assert config._RANGES[key] == config._Range(0, low_inclusive=True)
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    @pytest.mark.parametrize("raw,expected", [("0", 0), ("250", 250), (" 40 ", 40)])
+    def test_env_coerces_to_an_int(self, monkeypatch, key, env, raw, expected):
+        monkeypatch.setenv(env, raw)
+        value = load_config()[key]
+        assert value == expected
+        assert isinstance(value, int)
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    def test_zero_is_distinct_from_unset(self, monkeypatch, key, env):
+        monkeypatch.setenv(env, "0")
+        assert load_config()[key] is not None
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_or_whitespace_reads_as_unset(self, monkeypatch, key, env, raw):
+        monkeypatch.setenv(env, raw)
+        assert load_config()[key] is None
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    @pytest.mark.parametrize("raw", ["-1", "-500"])
+    def test_negative_value_rejected(self, monkeypatch, key, env, raw):
+        monkeypatch.setenv(env, raw)
+        with pytest.raises(ConfigError, match=env):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    @pytest.mark.parametrize("raw", ["many", "1.5", "off"])
+    def test_malformed_value_names_the_variable(self, monkeypatch, key, env, raw):
+        monkeypatch.setenv(env, raw)
+        with pytest.raises(ConfigError, match=env):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    def test_an_override_cannot_smuggle_a_negative_threshold(self, key, env):
+        with pytest.raises(ConfigError, match=key) as exc:
+            load_config(**{key: -1})
+        assert env not in str(exc.value)
+
+    @pytest.mark.parametrize("key,env", _SIZE_THRESHOLDS)
+    def test_an_override_wins_over_the_environment(self, monkeypatch, key, env):
+        monkeypatch.setenv(env, "100")
+        assert load_config(**{key: 0})[key] == 0
+
+
+class TestSizeIgnoreGlobs:
+    """PRXREF_SIZE_IGNORE_GLOBS uses the one list grammar every list key shares."""
+
+    def test_default_is_an_empty_list(self):
+        assert config._DEFAULTS["size_ignore_globs"] == []
+        assert load_config()["size_ignore_globs"] == []
+
+    def test_declared_as_a_list_key(self):
+        assert "size_ignore_globs" in config._LIST_KEYS
+        assert "size_ignore_globs" not in config._RANGES
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("*.snap", ["*.snap"]),
+        ("*.snap,vendor/*", ["*.snap", "vendor/*"]),
+        ("*.snap vendor/*", ["*.snap", "vendor/*"]),
+        (" *.snap ,\n vendor/*\t*.pb.go ", ["*.snap", "vendor/*", "*.pb.go"]),
+        ("docs/my?notes.md", ["docs/my?notes.md"]),
+    ])
+    def test_splits_on_commas_and_whitespace(self, monkeypatch, raw, expected):
+        """A literal space in a glob is written ``?``, which survives the split."""
+        monkeypatch.setenv("PRXREF_SIZE_IGNORE_GLOBS", raw)
+        assert load_config()["size_ignore_globs"] == expected
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SIZE_IGNORE_GLOBS", "  \t ")
+        assert load_config()["size_ignore_globs"] == []
+
+    @pytest.mark.parametrize("key", sorted(config._LIST_KEYS))
+    def test_a_default_list_is_not_shared_between_loads(self, key):
+        """``load_config`` copies list defaults, so mutating one run's list
+        cannot leak into ``_DEFAULTS`` and every later load."""
+        before = list(config._DEFAULTS[key])
+        load_config()[key].append("leak")
+        assert config._DEFAULTS[key] == before
+        assert load_config()[key] == before
+
+
+class TestPostCost:
+    """PRXREF_POST_COST is a boolean, and ``_truthy`` is the only boolean parser."""
+
+    def test_defaults_to_off(self):
+        assert config._DEFAULTS["post_cost"] is False
+        assert load_config()["post_cost"] is False
+
+    def test_literal_one_enables_it(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_COST", "1")
+        assert load_config()["post_cost"] is True
+
+    @pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "0", "y"])
+    def test_only_the_literal_one_enables_it(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_POST_COST", raw)
+        assert load_config()["post_cost"] is False
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_COST", "   ")
+        assert load_config()["post_cost"] is False
+
+    def test_it_is_a_bool_key_not_a_numeric_one(self):
+        assert "post_cost" in config._BOOL_KEYS
+        assert "post_cost" not in config._INT_KEYS | config._FLOAT_KEYS
+        assert "post_cost" not in config._RANGES
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_POST_COST", "1")
+        assert load_config(post_cost=False)["post_cost"] is False
+
+
+_GPT_MINI = '{"openai/gpt-4o-mini": {"input": 0.15, "output": 0.60}}'
+
+
+class TestPriceTable:
+    """PRXREF_PRICE_TABLE: a string in, a validated ``dict[str, ModelPrice]`` out.
+
+    ``_check_price_table`` runs inside ``load_config`` after every other check,
+    so a malformed table is the exit-2 configuration error at load time, named
+    after whichever input supplied it — never a mid-review surprise.
+    """
+
+    def test_default_is_no_table(self):
+        assert config._DEFAULTS["price_table"] == ""
+        assert load_config()["price_table"] == {}
+
+    def test_it_is_in_no_coercion_table(self):
+        assert "price_table" not in (
+            config._INT_KEYS | config._FLOAT_KEYS | config._BOOL_KEYS | config._LIST_KEYS
+        )
+        assert "price_table" not in config._RANGES
+        assert "price_table" not in config._CHOICE_KEYS
+
+    def test_inline_json_is_parsed(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", _GPT_MINI)
+        table = load_config()["price_table"]
+        assert table == {"openai/gpt-4o-mini": costs.ModelPrice(0.15, 0.60)}
+        assert isinstance(table["openai/gpt-4o-mini"], costs.ModelPrice)
+
+    def test_inline_json_may_start_after_whitespace(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", "  " + _GPT_MINI)
+        assert list(load_config()["price_table"]) == ["openai/gpt-4o-mini"]
+
+    def test_a_file_path_is_read(self, monkeypatch, tmp_path):
+        path = tmp_path / "prices.json"
+        path.write_text('{"local/free": {"input": 0, "output": 0}}', encoding="utf-8")
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", str(path))
+        assert load_config()["price_table"] == {"local/free": costs.ModelPrice(0.0, 0.0)}
+
+    @pytest.mark.parametrize("raw", [
+        "{not json",
+        '{"m": {"input": 1}}',
+        '{"m": {"input": 1, "ouput": 2}}',
+        '{"m": {"input": -1, "output": 2}}',
+        '{"m": {"input": true, "output": 2}}',
+        '{"m": "cheap"}',
+    ])
+    def test_a_malformed_table_is_a_config_error_naming_the_variable(
+        self, monkeypatch, raw
+    ):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", raw)
+        with pytest.raises(ConfigError, match=r"^PRXREF_PRICE_TABLE: "):
+            load_config()
+
+    def test_a_missing_file_is_a_config_error_naming_the_variable(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", str(tmp_path / "absent.json"))
+        with pytest.raises(ConfigError, match=r"^PRXREF_PRICE_TABLE: "):
+            load_config()
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", "   ")
+        assert load_config()["price_table"] == {}
+
+    def test_a_mapping_override_is_validated_like_json(self):
+        cfg = load_config(price_table={"m": {"input": 1, "output": 2}})
+        assert cfg["price_table"] == {"m": costs.ModelPrice(1.0, 2.0)}
+
+    def test_a_bad_override_is_named_as_itself(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", _GPT_MINI)
+        with pytest.raises(ConfigError, match=r"^price_table: ") as exc:
+            load_config(price_table={"m": {"input": "cheap", "output": 2}})
+        assert "PRXREF_PRICE_TABLE" not in str(exc.value)
+
+    def test_a_caller_label_names_the_override(self):
+        with pytest.raises(ConfigError, match=r"^caller-prices: "):
+            load_config(
+                price_table="{oops", source_labels={"price_table": "caller-prices"}
+            )
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", _GPT_MINI)
+        cfg = load_config(price_table='{"m": {"input": 3, "output": 4}}')
+        assert cfg["price_table"] == {"m": costs.ModelPrice(3.0, 4.0)}
+
+    def test_a_malformed_table_exits_2_before_the_review_runs(
+        self, monkeypatch, capsys
+    ):
+        """Observed through the real entry point: ``prxref review`` resolves
+        its config before orchestration, so a bad table is exit 2 with no run."""
+        calls = []
+        monkeypatch.setattr(cli, "_run_review", lambda *a, **k: calls.append(a))
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", "{not json")
+
+        rc = cli.main(["review", "--pr-url", "https://github.com/org/repo/pull/7"])
+
+        assert rc == 2
+        _, err = capsys.readouterr()
+        assert "configuration error" in err
+        assert "PRXREF_PRICE_TABLE" in err
+        assert calls == []
+
+    def test_a_valid_table_reaches_the_review(self, monkeypatch):
+        """Control for the exit-2 test: the same entry point with a good table
+        gets past config and calls the review."""
+        calls = []
+
+        def _record(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("stop after config")
+
+        monkeypatch.setattr(cli, "_run_review", _record)
+        monkeypatch.setenv("PRXREF_PRICE_TABLE", _GPT_MINI)
+
+        cli.main(["review", "--pr-url", "https://github.com/org/repo/pull/7"])
+
+        assert len(calls) == 1
+
+
+_PLAIN_STRING_KEYS = [
+    ("llm_cli_path", "PRXREF_LLM_CLI_PATH", "~/bin/claude"),
+    ("review_rules", "PRXREF_REVIEW_RULES", ".prxref/rules.md"),
+    ("ticket_context_file", "PRXREF_TICKET_CONTEXT_FILE", "ticket.md"),
+    ("azure_devops_token", "PRXREF_AZURE_DEVOPS_TOKEN", "pat-value"),
+    ("azure_devops_webhook_secret", "PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET", "hook-secret"),
+]
+
+
+class TestNewStringKeys:
+    """The 0.14 string keys: empty by default, passed through verbatim.
+
+    Paths are only read later (``cli._run_review``, the backend factory), so
+    ``load_config`` stays I/O-free for them and does no coercion.
+    """
+
+    @pytest.mark.parametrize("key,env,value", _PLAIN_STRING_KEYS)
+    def test_default_is_empty(self, key, env, value):
+        assert config._DEFAULTS[key] == ""
+        assert load_config()[key] == ""
+
+    @pytest.mark.parametrize("key,env,value", _PLAIN_STRING_KEYS)
+    def test_in_no_coercion_table(self, key, env, value):
+        assert key not in (
+            config._INT_KEYS | config._FLOAT_KEYS | config._BOOL_KEYS | config._LIST_KEYS
+        )
+        assert key not in config._RANGES
+        assert key not in config._CHOICE_KEYS
+
+    @pytest.mark.parametrize("key,env,value", _PLAIN_STRING_KEYS)
+    def test_env_value_passes_through(self, monkeypatch, key, env, value):
+        monkeypatch.setenv(env, value)
+        assert load_config()[key] == value
+
+    @pytest.mark.parametrize("key,env,value", _PLAIN_STRING_KEYS)
+    def test_whitespace_only_reads_as_unset(self, monkeypatch, key, env, value):
+        monkeypatch.setenv(env, "   ")
+        assert load_config()[key] == ""
+
+    def test_a_missing_rules_file_is_not_read_at_load_time(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PRXREF_REVIEW_RULES", str(tmp_path / "absent.md"))
+        monkeypatch.setenv("PRXREF_TICKET_CONTEXT_FILE", str(tmp_path / "absent.txt"))
+        cfg = load_config()
+        assert cfg["review_rules"].endswith("absent.md")
+        assert cfg["ticket_context_file"].endswith("absent.txt")
+
+
+class TestNewKeysAreClearedSuiteWide:
+    @pytest.mark.parametrize("env", [
+        "PRXREF_LLM_CLI_PATH", "PRXREF_LLM_CLI_CONCURRENCY", "PRXREF_PRICE_TABLE",
+        "PRXREF_POST_COST", "PRXREF_SIZE_WARN_LINES", "PRXREF_SIZE_WARN_FILES",
+        "PRXREF_SIZE_IGNORE_GLOBS", "PRXREF_REVIEW_RULES",
+        "PRXREF_REVIEW_RULES_MAX_CHARS", "PRXREF_TICKET_CONTEXT_FILE",
+        "PRXREF_TICKET_CONTEXT_MAX_CHARS", "PRXREF_AZURE_DEVOPS_TOKEN",
+        "PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET",
+    ])
+    def test_the_env_name_is_derived(self, env):
+        assert env in prxref_env_names()
+
+
+class TestLLMBackendIsNotAChoiceKey:
+    def test_the_factory_owns_the_backend_vocabulary(self):
+        """The factory lower-cases the value, so an exact-match choice table
+        here would reject ``Claude-CLI`` that the factory accepts."""
+        assert "llm_backend" not in config._CHOICE_KEYS
+
+    def test_a_mixed_case_backend_loads(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "Claude-CLI")
+        assert load_config()["llm_backend"] == "Claude-CLI"
