@@ -360,6 +360,12 @@ def _run_review(
         post_verdict=cfg["post_verdict"],
         trace_file=cfg["trace_file"],
         trace_dir=cfg["trace_dir"],
+        spec_sources=cfg["spec_sources"],
+        spec_max_chars=cfg["spec_max_chars"],
+        spec_digest_tokens=cfg["spec_digest_tokens"],
+        jira_base_url=cfg["jira_base_url"],
+        jira_email=cfg["jira_email"],
+        jira_api_token=cfg["jira_api_token"],
     )
 
 

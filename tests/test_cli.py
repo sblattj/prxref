@@ -804,26 +804,27 @@ class TestSpecFlag:
         assert args.spec == ["https://a/spec.md", "docs/specs"]
 
     def test_flag_values_reach_the_resolved_config(self, fake_runtime):
-        """The override is observed on the config the pipeline is actually
-        handed, not on the parser: fake_create_llm_client records it."""
+        """The override is observed on the kwargs the orchestrator is actually
+        handed, not on the parser or the resolved config: a value that stops at
+        ``load_config`` grounds nothing."""
         assert main([
             "review", "--pr-url", self.URL, "--no-post",
             "--spec", "https://a/spec.md", "--spec", "docs/specs",
         ]) == 0
-        assert fake_runtime["llm_calls"][0]["spec_sources"] == [
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
             "https://a/spec.md", "docs/specs",
         ]
 
     def test_no_flag_and_no_env_leaves_the_default_empty(self, fake_runtime):
         assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
-        assert fake_runtime["llm_calls"][0]["spec_sources"] == []
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == []
 
     def test_env_sources_load_through_the_normal_path(
         self, fake_runtime, monkeypatch
     ):
         monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md docs/specs")
         assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
-        assert fake_runtime["llm_calls"][0]["spec_sources"] == [
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
             "https://a/spec.md", "docs/specs",
         ]
 
@@ -835,7 +836,7 @@ class TestSpecFlag:
             "review", "--pr-url", self.URL, "--no-post",
             "--spec", "https://flag/only.md",
         ]) == 0
-        assert fake_runtime["llm_calls"][0]["spec_sources"] == [
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
             "https://flag/only.md"
         ]
 
@@ -846,7 +847,27 @@ class TestSpecFlag:
         the only way it can ground a review — and it must reach the pipeline."""
         monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
         cli._webhook_handler(self.URL)
-        assert fake_runtime["llm_calls"][0]["spec_sources"] == ["https://a/spec.md"]
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == ["https://a/spec.md"]
+
+    def test_every_spec_key_reaches_the_orchestrator(
+        self, fake_runtime, monkeypatch
+    ):
+        """All six spec/Jira config keys ride into ``orchestrate_review``; the
+        daemon has no flags, so the environment is its only way in."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
+        monkeypatch.setenv("PRXREF_SPEC_MAX_CHARS", "5000")
+        monkeypatch.setenv("PRXREF_SPEC_DIGEST_TOKENS", "500")
+        monkeypatch.setenv("PRXREF_JIRA_BASE_URL", "https://jira.example.com")
+        monkeypatch.setenv("PRXREF_JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("PRXREF_JIRA_API_TOKEN", "t0ken")
+        cli._webhook_handler(self.URL)
+        kwargs = fake_runtime["orchestrate_calls"][0]
+        assert kwargs["spec_sources"] == ["https://a/spec.md"]
+        assert kwargs["spec_max_chars"] == 5000
+        assert kwargs["spec_digest_tokens"] == 500
+        assert kwargs["jira_base_url"] == "https://jira.example.com"
+        assert kwargs["jira_email"] == "bot@example.com"
+        assert kwargs["jira_api_token"] == "t0ken"
 
 
 class TestDryRun:
