@@ -1,7 +1,11 @@
 """Spec fetch + digest tests: prxref.specs dispatch, failure doctrine, ranking."""
 from __future__ import annotations
 
+import json
+
 import pytest
+from requests.structures import CaseInsensitiveDict
+from requests.utils import get_encoding_from_headers
 
 from prxref.specs import (
     SOURCE_TRUNCATION_MARKER,
@@ -16,26 +20,38 @@ from prxref.triage import parse_unified_diff
 
 
 class _FakeResponse:
+    """A streamed response with no ``raw``, so specs reads it through ``iter_content``.
+
+    ``encoding`` is what requests itself would set from the headers
+    (ISO-8859-1 for a charset-less ``text/*``), never a utf-8 default that
+    hides a decoding bug. A ``payload`` becomes the JSON body.
+    """
+
     def __init__(
         self,
         status_code: int = 200,
         content_type: str = "text/plain",
         body: bytes = b"",
         chunks: list[bytes] | None = None,
-        encoding: str = "utf-8",
         payload: object | None = None,
     ):
         self.status_code = status_code
-        self.headers = {"Content-Type": content_type}
-        self._chunks = chunks if chunks is not None else [body]
-        self.encoding = encoding
+        self.headers = CaseInsensitiveDict({"Content-Type": content_type})
+        self.encoding = get_encoding_from_headers(self.headers)
+        if chunks is None:
+            chunks = [json.dumps(payload).encode() if payload is not None else body]
+        self._chunks = chunks
         self._payload = payload if payload is not None else {}
+        self.closed = False
 
     def iter_content(self, chunk_size: int = 8192, **kwargs):
         return iter(self._chunks)
 
     def json(self):
         return self._payload
+
+    def close(self):
+        self.closed = True
 
 
 class _FakeSession:
