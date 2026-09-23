@@ -79,7 +79,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``drop_reason`` set, never silently discarded, and both lists come out
    sorted by ``finding_sort_key``. Every result — including an error or
    summary-only exit — carries a ``sampling`` record naming the
-   temperature, seed, and model chain actually in force.
+   temperature, seed, and model chain actually in force, and the run-record
+   keys that :func:`_run_record` stamps on every exit (``cost_usd``,
+   ``cost_estimated``, ``review_rules``, ``ticket_context``,
+   ``spec_grounding``, ``size_advisory``; ``replay`` on replays only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;
@@ -117,11 +120,11 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import chunk_context, heuristics, reviewer, specs, systemic
+from . import chunk_context, costs, heuristics, reviewer, specs, systemic
 from .forges.base import (
     ATTRIBUTION_MARKER,
     Forge,
@@ -345,12 +348,27 @@ def orchestrate_review(
     jira_base_url: str = "",
     jira_email: str = "",
     jira_api_token: str = "",
+    rules: Any = None,
+    ticket: Any = None,
+    price_table: Mapping[str, Any] | None = None,
+    post_cost: bool = False,
+    size_warn_lines: int | None = None,
+    size_warn_files: int | None = None,
+    size_ignore_globs: Sequence[str] = (),
+    replay: Mapping[str, Any] | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
-    posted}``. Never raises on ANY stage failure — forge, diff parsing,
+    posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
+    spec_grounding, size_advisory}``, plus ``replay`` on a replay run only.
+    Every exit, error and empty-diff exits included, goes through
+    :func:`_run_record`, so the last six keys are always present and are
+    ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
+    ``False``) when their feature is off or the run never reached it.
+    ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
+    Never raises on ANY stage failure — forge, diff parsing,
     chunking, or LLM — the run degrades to verdict ``"Error"`` with a posted
     notice when ``post`` is true. Degenerate arguments are part of that: a
     caller passing ``max_chunks=0`` gets an error run, not a ``ValueError``.
@@ -404,13 +422,53 @@ def orchestrate_review(
     ``config._DEFAULTS`` the way ``MAX_WORKERS`` does. ``spec_sources`` is
     deliberately absent from the returned dict, like every other request
     knob.
+
+    ``rules`` and ``ticket`` are the loaded review-rules and ticket-context
+    objects (``rules.ReviewRules`` / ``ticket.TicketContext``), duck-typed so
+    this module never imports theirs; ``None`` turns each off.
+
+    ``price_table`` is the parsed ``PRXREF_PRICE_TABLE``
+    (:func:`prxref.costs.parse_price_table`); ``None`` or ``{}`` estimates
+    nothing. It is not read from the environment here, because parsing can
+    raise ``ConfigError`` and this function must not raise. ``post_cost``
+    appends the run's cost label (:func:`prxref.costs.cost_label`) as the
+    last field of the summary and error-notice attribution; off, both are
+    byte-identical to a run without it.
+
+    ``size_warn_lines`` / ``size_warn_files`` are the PR-size advisory
+    thresholds (``None`` = off; ``0`` is a legal threshold) and
+    ``size_ignore_globs`` the operator's extra ignore patterns. When either
+    threshold is set the advisory's stats ride the result under
+    ``size_advisory``, and a triggered advisory is prepended to every posted
+    summary. It never touches the verdict.
+
+    ``replay`` is the evaluation-replay stamp built by the CLI
+    (``{base_sha, head_sha, threads, diff_file}``). When given it is copied
+    into the returned dict under ``replay`` and into the ``run start`` trace
+    event, the one request knob that is echoed back, so a replay can never
+    be read as a live review. It changes nothing about how the review runs:
+    pinning and thread hiding live in the forge the caller passes.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
     sampling = _sampling(llm)
+    # The per-run record every exit is stamped with (_run_record). Built here
+    # with every always-present key at its "off / not reached" value; each
+    # stage assigns its own key as the run proceeds, so the value a return
+    # carries is the one in force at that exit.
+    run_inputs: dict[str, Any] = {
+        "cost_usd": 0.0,
+        "cost_estimated": False,
+        "review_rules": None,
+        "ticket_context": None,
+        "spec_grounding": None,
+        "size_advisory": None,
+        "replay": dict(replay) if replay is not None else None,
+    }
     tracer.event(
         "run", "start", forge=ref.forge, url=ref.url, number=ref.number,
         sampling=sampling,
+        **({"replay": dict(replay)} if replay is not None else {}),
     )
 
     try:
@@ -418,11 +476,12 @@ def orchestrate_review(
             pr = forge.get_pr(ref)
     except Exception as e:  # noqa: BLE001
         logger.error("get_pr failed: %s", e)
-        tracer.event("run", "fail")
-        return _error_run(
+        tracer.event("run", "fail", **_cost_meta(run_inputs))
+        return _run_record(_error_run(
             forge, ref, post, 0, f"get_pr failed: {e}", t0,
             post_mode=post_mode, tracer=tracer, sampling=sampling,
-        )
+            cost_label=_cost_label(run_inputs, post_cost),
+        ), run_inputs)
 
     try:
         with tracer.span("forge.get_diff") as sp:
@@ -430,11 +489,12 @@ def orchestrate_review(
             sp["bytes"] = len(raw)
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
-        tracer.event("run", "fail")
-        return _error_run(
+        tracer.event("run", "fail", **_cost_meta(run_inputs))
+        return _run_record(_error_run(
             forge, ref, post, 0, f"get_diff failed: {e}", t0,
             post_mode=post_mode, tracer=tracer, sampling=sampling,
-        )
+            cost_label=_cost_label(run_inputs, post_cost),
+        ), run_inputs)
 
     # Wrapped like every neighbouring stage. These two were the only ones that
     # could raise out of orchestrate_review, which made the never-raise contract
@@ -448,11 +508,26 @@ def orchestrate_review(
             sp["files"] = len(files)
     except Exception as e:  # noqa: BLE001
         logger.error("parse_unified_diff failed: %s", e)
-        tracer.event("run", "fail")
-        return _error_run(
+        tracer.event("run", "fail", **_cost_meta(run_inputs))
+        return _run_record(_error_run(
             forge, ref, post, 0, f"parse_unified_diff failed: {e}", t0,
             post_mode=post_mode, tracer=tracer, sampling=sampling,
+            cost_label=_cost_label(run_inputs, post_cost),
+        ), run_inputs)
+
+    # Sized once, from the parsed files (never the raw diff), so every later
+    # exit carries the same stats and the size line can reach all three
+    # summary renders. Advisory only: a failure here is logged and the review
+    # goes on without it.
+    try:
+        run_inputs["size_advisory"] = _size_advisory(
+            files, lines_limit=size_warn_lines, files_limit=size_warn_files,
+            ignore_globs=size_ignore_globs,
         )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("size advisory failed (continuing without it): %s", e)
+        run_inputs["size_advisory"] = None
+    size_advisory_line = _size_advisory_line(run_inputs["size_advisory"])
 
     try:
         with tracer.span("build_chunks") as sp:
@@ -463,11 +538,12 @@ def orchestrate_review(
             sp["chunks"] = len(chunks)
     except Exception as e:  # noqa: BLE001
         logger.error("build_chunks failed: %s", e)
-        tracer.event("run", "fail")
-        return _error_run(
+        tracer.event("run", "fail", **_cost_meta(run_inputs))
+        return _run_record(_error_run(
             forge, ref, post, 0, f"build_chunks failed: {e}", t0,
             post_mode=post_mode, tracer=tracer, sampling=sampling,
-        )
+            cost_label=_cost_label(run_inputs, post_cost),
+        ), run_inputs)
 
     if not chunks:
         # No chunk survived build_chunks — an empty diff, or every file
@@ -476,13 +552,18 @@ def orchestrate_review(
         # non-machinery file is binary still gets the deterministic finding
         # instead of a silent Approved (issue #29 residual, concern #2).
         release_shape = heuristics.release_shape_findings(files)
-        tracer.event("run", "ok", chunks_reviewed=0, findings=len(release_shape))
-        return _summary_only_run(
+        tracer.event(
+            "run", "ok", chunks_reviewed=0, findings=len(release_shape),
+            **_cost_meta(run_inputs),
+        )
+        return _run_record(_summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             confidence_floor=confidence_floor, max_errors=max_errors,
-        )
+            cost_label=_cost_label(run_inputs, post_cost),
+            size_advisory_line=size_advisory_line,
+        ), run_inputs)
 
     # Pruned BEFORE the threads are listed, and both before the review units
     # run. The prune-then-list order is load-bearing: reading threads first
@@ -565,6 +646,20 @@ def orchestrate_review(
         )
     )
 
+    # Priced once every review unit is final, and BEFORE the total-failure
+    # exit below: requests went out, so that exit's record must say what they
+    # cost rather than the pre-request 0.0. Cost accounting never fails a
+    # review; a crash here leaves the cost unknown.
+    try:
+        _stamp_run_cost(
+            run_inputs, results, {} if price_table is None else price_table,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cost accounting failed (continuing): %s", e)
+        run_inputs["cost_usd"] = None
+        run_inputs["cost_estimated"] = False
+    cost_label = _cost_label(run_inputs, post_cost)
+
     input_tokens = sum(r["input_tokens"] for r in results)
     output_tokens = sum(r["output_tokens"] for r in results)
     model = next((r["model"] for r in results if r["model"]), "unknown")
@@ -576,12 +671,12 @@ def orchestrate_review(
     if all(r["error"] for r in results[:-1]):
         reason = f"all {len(chunks)} worker reviews failed ({results[0]['error']})"
         logger.error("Total LLM failure: %s", reason)
-        tracer.event("run", "fail")
-        return _error_run(
+        tracer.event("run", "fail", **_cost_meta(run_inputs))
+        return _run_record(_error_run(
             forge, ref, post, len(chunks) + 1, reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
-            post_mode=post_mode, sampling=sampling,
-        )
+            post_mode=post_mode, sampling=sampling, cost_label=cost_label,
+        ), run_inputs)
 
     chunks_failed = sum(1 for r in results if r["error"])
     chunks_reviewed = len(results) - chunks_failed
@@ -712,6 +807,8 @@ def orchestrate_review(
             failed_chunks=failed_chunks,
             include_verdict=post_verdict,
             spec_note=spec_note,
+            cost_label=cost_label,
+            size_advisory_line=size_advisory_line,
         )
         try:
             forge.post_summary(ref, summary)
@@ -759,6 +856,8 @@ def orchestrate_review(
             failed_chunks=failed_chunks,
             include_verdict=post_verdict,
             spec_note=spec_note,
+            cost_label=cost_label,
+            size_advisory_line=size_advisory_line,
             inline_accounting=_inline_accounting(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
@@ -779,8 +878,9 @@ def orchestrate_review(
         "run", "ok", verdict=verdict,
         chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
         findings=len(findings_active),
+        **_cost_meta(run_inputs),
     )
-    return {
+    return _run_record({
         "verdict": verdict,
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
@@ -792,7 +892,7 @@ def orchestrate_review(
         "output_tokens": output_tokens,
         "posted": posted,
         "sampling": _sampling(llm),
-    }
+    }, run_inputs)
 
 
 def _origin_key(finding: Finding) -> tuple:
@@ -829,6 +929,65 @@ def _sampling(llm: object) -> dict:
 
 def _elapsed_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
+
+
+def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
+    """Stamp one exit's result with the per-run record; the single choke point.
+
+    Every return of :func:`orchestrate_review` goes through here, so a
+    run-record key is added once instead of at each exit, and no exit can be
+    missed. Each key of ``run_inputs`` is copied in with ``setdefault``
+    semantics — a key the exit's own dict already carries wins — except
+    ``replay``, which is written only when it is not ``None``: a normal run's
+    record has no ``replay`` key at all, and a replay's is a copy of the
+    stamp, never the caller's mapping. Returns ``result`` itself.
+    """
+    for key, value in run_inputs.items():
+        if key == "replay":
+            if value is not None:
+                result.setdefault(key, dict(value))
+        else:
+            result.setdefault(key, value)
+    return result
+
+
+def _cost_meta(run_inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """The cost keys every ``run ok`` / ``run fail`` trace event carries."""
+    return {
+        "cost_usd": run_inputs.get("cost_usd"),
+        "cost_estimated": run_inputs.get("cost_estimated") is True,
+    }
+
+
+def _cost_label(run_inputs: Mapping[str, Any], post_cost: bool) -> str:
+    """The attribution's cost field, or ``""`` when ``post_cost`` is off.
+
+    ``""`` keeps every attribution byte-identical to a run without cost
+    posting; otherwise it is :func:`prxref.costs.cost_label` of the cost in
+    force at this exit (``$0.00`` before any LLM request, ``cost unknown``
+    when the run's cost could not be established).
+    """
+    if not post_cost:
+        return ""
+    return costs.cost_label(
+        run_inputs.get("cost_usd"), run_inputs.get("cost_estimated") is True,
+    )
+
+
+def _stamp_run_cost(
+    run_inputs: dict,
+    units: Sequence[Mapping[str, Any]],
+    price_table: Mapping[str, Any],
+) -> None:
+    """Set ``run_inputs["cost_usd"]`` and ``["cost_estimated"]`` from the units.
+
+    Called once, after the sweep, with every review unit's result (the chunk
+    workers plus the sweep) and the parsed price table. Inert in this build:
+    the cost is recorded as unknown (``None``, never ``0``) until the
+    per-unit cost plumbing lands.
+    """
+    run_inputs["cost_usd"] = None
+    run_inputs["cost_estimated"] = False
 
 
 def _attribution(
@@ -1387,6 +1546,33 @@ def _render_summary(
     return f"{size_advisory_line}{rendered}"
 
 
+def _size_advisory(
+    files,
+    *,
+    lines_limit: int | None,
+    files_limit: int | None,
+    ignore_globs: Sequence[str] = (),
+) -> dict | None:
+    """The PR-size advisory's stats, or ``None`` when both limits are unset.
+
+    The stats are ``{changed_lines, changed_files, lines_limit, files_limit,
+    triggered, message}``, where ``message`` is plain text and is ``None``
+    unless a configured limit is exceeded. Inert in this build: it always
+    returns ``None``, so no run carries a size advisory yet.
+    """
+    return None
+
+
+def _size_advisory_line(stats: Mapping[str, Any] | None) -> str:
+    """The blockquote a triggered size advisory prepends to the summary.
+
+    ``"> ⚠️ {message}\\n\\n"`` when ``stats`` carries a message, else ``""``,
+    which leaves the summary byte-identical to a run without the advisory.
+    """
+    message = stats.get("message") if stats else None
+    return f"> ⚠️ {message}\n\n" if message else ""
+
+
 def _spec_note(sources: Sequence[Any], digest: str) -> str:
     """Render the summary's grounding note, ``""`` when nothing was requested.
 
@@ -1521,6 +1707,7 @@ def _summary_only_run(
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
+    ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -1534,6 +1721,11 @@ def _summary_only_run(
     ``release_shape_findings=[]`` (fewer than 2 files can never be
     release-shaped), so this degrades to exactly the prior empty-diff
     behaviour: ``Approved``, no findings, no banner.
+
+    ``ticket_note``, ``cost_label`` and ``size_advisory_line`` are handed to
+    :func:`_render_summary` unchanged; all three default to ``""``, which
+    renders the summary exactly as before. The run-record keys are added by
+    the caller's :func:`_run_record`, not here.
     """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -1565,6 +1757,9 @@ def _summary_only_run(
             pr, files, verdict, findings_active, "unknown", 0, 0, elapsed_ms,
             chunks_reviewed=0, chunks_failed=0,
             include_verdict=post_verdict,
+            ticket_note=ticket_note,
+            cost_label=cost_label,
+            size_advisory_line=size_advisory_line,
         )
         try:
             forge.post_summary(ref, summary)
@@ -1600,7 +1795,16 @@ def _error_run(
     post_mode: str = "summary+inline",
     tracer: Tracer | None = None,
     sampling: dict | None = None,
+    *,
+    cost_label: str = "",
 ) -> dict:
+    """The error exit: post the failure notice when asked, return an Error run.
+
+    ``cost_label`` becomes the notice attribution's last field
+    (:func:`_attribution`); ``""`` leaves it as before. The notice never
+    carries a ticket note or a size advisory, and the run-record keys are
+    added by the caller's :func:`_run_record`, not here.
+    """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
@@ -1612,6 +1816,7 @@ def _error_run(
     if wanted:
         attribution = _attribution(
             model, input_tokens + output_tokens, elapsed_ms,
+            cost_label=cost_label,
         )
         # The same redaction the partial banner uses: this notice interpolates
         # the reason into a public comment, and the caller has already logged
