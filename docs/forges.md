@@ -160,3 +160,9 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     capital `R`, and the list, both of which differ from Cloud.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against
     `PRXREF_BITBUCKET_WEBHOOK_SECRET`, the same secret Cloud uses.
+
+---
+
+## 5. Azure DevOps Services & Server
+
+<!-- 0.14 placeholder: W62B -->
