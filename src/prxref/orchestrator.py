@@ -534,7 +534,7 @@ def orchestrate_review(
                     )
             logger.info(
                 "spec grounding: %d/%d source(s) fetched, %d constraint(s) injected",
-                ok, len(fetched), _spec_constraint_count(spec_digest),
+                ok, len(fetched), specs.constraint_count(spec_digest),
             )
         except Exception as e:  # noqa: BLE001
             logger.error("spec grounding failed (best-effort): %s", e)
@@ -1346,47 +1346,38 @@ def _render_summary(
     return rendered
 
 
-# A digest line that IS a constraint: a spec unit
-# (``[spec:origin#anchor] (MUST|SHOULD|MAY) statement``) or a ticket line
-# (``[ticket:KEY] statement``). Heading lines, the truncation marker, and
-# the ``nothing diff-relevant kept`` lines are scoping or bookkeeping, not
-# injected constraints, and never match.
-_SPEC_CONSTRAINT_RE = re.compile(
-    r"^\[(?:spec:[^\]]*#\S+|ticket:[^\]]+)\] \((?:MUST|SHOULD|MAY)\) "
-)
-
-
-def _spec_constraint_count(digest: str) -> int:
-    """The number of constraint lines the digest actually injects."""
-    return sum(
-        1 for line in digest.splitlines() if _SPEC_CONSTRAINT_RE.match(line)
-    )
-
-
 def _spec_note(sources: Sequence[Any], digest: str) -> str:
     """Render the summary's grounding note, ``""`` when nothing was requested.
 
-    One blockquote line counts what was injected; one names every failed
-    source, each reason through :func:`redact_for_post` first, because this
-    text is posted. A run whose every source failed renders ONLY the failure
-    line — the review was un-grounded, and the note must not dress it up as
-    grounded. The note rides the ``{spec_note}`` placeholder on its own line
-    between the counts and the findings, and a non-empty note carries its own
-    trailing newline, so an empty return leaves the summary byte-identical to
-    an ungrounded run's.
+    One blockquote line counts what was injected
+    (:func:`prxref.specs.constraint_count`); one lists every failed source.
+    A failure is labelled by its 1-based position in the configured source
+    list and its kind, ``source 2 (url)``, or ``source 2`` when the kind was
+    never determined, never by its origin: a local path or a URL's query is
+    not the PR audience's business, and the operator can map the ordinal
+    back to the list. Each reason goes through :func:`redact_for_post`
+    first, because this text is posted. A run whose every source failed
+    renders ONLY the failure line — the review was un-grounded, and the note
+    must not dress it up as grounded. The note rides the ``{spec_note}``
+    placeholder on its own line between the counts and the findings, and a
+    non-empty note carries its own trailing newline, so an empty return
+    leaves the summary byte-identical to an ungrounded run's.
     """
     if not sources:
         return ""
     total = len(sources)
-    failed = [s for s in sources if s.error]
+    failed = [(i, s) for i, s in enumerate(sources, start=1) if s.error]
     lines: list[str] = []
     if len(failed) < total:
         lines.append(
             f"> 🔍 Spec-grounded: {total} source(s) · "
-            f"{_spec_constraint_count(digest)} constraint(s) injected"
+            f"{specs.constraint_count(digest)} constraint(s) injected"
         )
     if failed:
-        reasons = "; ".join(redact_for_post(s.error) for s in failed)
+        reasons = "; ".join(
+            f"source {i}{f' ({s.kind})' if s.kind else ''}: {redact_for_post(s.error)}"
+            for i, s in failed
+        )
         lines.append(
             f"> ⚠️ Spec fetch failed for {len(failed)} source(s): {reasons}"
         )

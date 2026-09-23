@@ -191,7 +191,16 @@ def _read_stream(resp: requests.Response, max_chars: int) -> str:
 
 
 class _HTMLTextExtractor(HTMLParser):
-    """Strip tags to text: block tags become line breaks, script/style drop."""
+    """Strip tags to text: block tags become line breaks, script/style drop.
+
+    An ``<hN>`` element becomes one markdown heading line, ``"#" * N + " " +
+    text``, so HTML sources scope their constraints the way markdown sources
+    do. Its text is every data run inside it with the block tags nested there
+    ignored (doc sites wrap a permalink ``<div><a>`` inside each heading),
+    zero-width spaces and pilcrow permalinks removed, whitespace collapsed. A
+    heading never closed by any ``</hN>`` falls back to plain text, so a
+    malformed page loses no content.
+    """
 
     _BLOCK = frozenset(
         {
@@ -202,29 +211,64 @@ class _HTMLTextExtractor(HTMLParser):
         }
     )
     _DROP = frozenset({"script", "style", "template"})
+    _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+    _HEADING_NOISE = str.maketrans("", "", "​¶")
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._parts: list[str] = []
         self._skip = 0
+        self._heading: str | None = None
+        self._heading_text: list[str] = []
+        self._heading_raw: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in self._DROP:
             self._skip += 1
+        elif self._heading is not None:
+            if tag in self._BLOCK:
+                self._heading_raw.append("\n")
+        elif tag in self._HEADINGS and not self._skip:
+            self._heading = tag
+            self._heading_text = []
+            self._heading_raw = ["\n"]
         elif tag in self._BLOCK:
             self._parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self._DROP:
             self._skip = max(0, self._skip - 1)
+        elif self._heading is not None:
+            if tag in self._HEADINGS:
+                self._close_heading()
+            elif tag in self._BLOCK:
+                self._heading_raw.append("\n")
         elif tag in self._BLOCK:
             self._parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if not self._skip:
+        if self._skip:
+            return
+        if self._heading is not None:
+            self._heading_text.append(data)
+            self._heading_raw.append(data)
+        else:
             self._parts.append(data)
 
+    def _close_heading(self) -> None:
+        level = int((self._heading or "h1")[1])
+        text = " ".join("".join(self._heading_text).translate(self._HEADING_NOISE).split())
+        self._parts.append(f"\n{'#' * level} {text}\n" if text else "\n")
+        self._heading = None
+        self._heading_text = []
+        self._heading_raw = []
+
     def text(self) -> str:
+        if self._heading is not None:
+            self._parts.extend(self._heading_raw)
+            self._heading = None
+            self._heading_text = []
+            self._heading_raw = []
         collapsed: list[str] = []
         blank = True
         for line in "".join(self._parts).splitlines():
@@ -405,11 +449,17 @@ class _Unit:
 
 
 def _origin_short(origin: str) -> str:
+    """The short name a source goes by in the digest, which the LLM sees.
+
+    A URL keeps only its last path segment, falling back to the bare host, so
+    no query, fragment, userinfo, or port reaches the prompt; a path keeps its
+    last component. A credential that IS the last path segment survives.
+    """
     parsed = urlparse(origin)
     if parsed.scheme:
         tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-        return tail or parsed.netloc
-    return origin.rsplit("/", 1)[-1] or origin
+        return tail or parsed.hostname or parsed.scheme
+    return origin.rstrip("/").rsplit("/", 1)[-1] or origin
 
 
 def _heading_slug(text: str) -> str:
@@ -731,20 +781,33 @@ def build_spec_digest(sources: list[SpecSource], files: list[FileDiff], token_bu
 
     Per source, in document order, headings, RFC-2119 normative statements,
     version pins, and naming/shape rules are extracted; each kept unit
-    renders as one ``[spec:{origin}#anchor] (STRENGTH) statement`` line, its
-    nearest preceding heading riding along as a scoping line. Units are
-    ranked: ticket constraints first (scope beats relevance), then units
-    sharing at least one content token with the diff's token set (file paths
-    plus changed lines, compound-split, the same evidence vocabulary
-    :mod:`prxref.quality` uses — higher overlap first), then unmatched
-    MUST-level rules in source order, then unmatched SHOULD- and MAY-level
-    rules, which the budget exhausts first. The walk stops at
-    ``token_budget * 4`` chars with :data:`TRUNCATION_MARKER`. Every source
-    that contributed nothing after pruning gets an explicit
-    ``[spec:{origin}: nothing diff-relevant kept]`` line, so silence is
-    explained. A ``token_budget`` below 1 degrades to a truncated one-line
-    digest rather than raising.
+    renders as one ``[spec:{short}#anchor] (STRENGTH) statement`` line, where
+    ``{short}`` is the source's last path segment (or bare host), never its
+    full origin. Units are ranked: ticket constraints first (scope beats
+    relevance), then units sharing at least one content token with the
+    diff's token set (file paths plus changed lines, compound-split, the same
+    evidence vocabulary :mod:`prxref.quality` uses — higher overlap first),
+    then unmatched MUST-level rules in source order, then unmatched SHOULD-
+    and MAY-level rules, which the budget exhausts first. Ranking interleaves
+    sections, so a constraint's heading line is re-emitted whenever the open
+    section changes, and a unit with no heading after one that had one is
+    preceded by ``[spec:{short}] (heading) (no section)``: every constraint
+    sits under its own section. The walk stops at ``token_budget * 4`` chars
+    with :data:`TRUNCATION_MARKER`. A source that fetched fine but
+    contributed nothing gets an explicit
+    ``[spec:{short}: nothing diff-relevant kept]`` line, so silence is
+    explained; a failed source gets no line (the grounding note reports it).
+
+    Returns ``""`` when sources were given but no unit was extracted from any
+    of them — every source failed, or none held a constraint — so the prompt
+    shows its no-specs text and :func:`constraint_count` is 0. The test runs
+    before the budget cut: a budget too small for any unit, a ``token_budget``
+    below 1 included, yields the intro plus :data:`TRUNCATION_MARKER` rather
+    than raising. No sources at all yields the intro alone.
     """
+    units = _rank_units(sources, _diff_tokens(files))
+    if sources and not units:
+        return ""
     budget = max(1, token_budget) * CHARS_PER_TOKEN
     intro = (
         "Spec constraints ranked for this diff: ticket scope first, then "
@@ -753,15 +816,18 @@ def build_spec_digest(sources: list[SpecSource], files: list[FileDiff], token_bu
     out = [intro]
     used = len(intro)
     contributed: set[str] = set()
-    emitted_headings: set[tuple[int, str]] = set()
+    open_scope: tuple[int, str | None] | None = None
     truncated = False
-    for unit in _rank_units(sources, _diff_tokens(files)):
+    for unit in units:
         parts: list[str] = []
-        if unit.heading_render is not None:
-            key = (unit.source_idx, unit.heading_key or "")
-            if key not in emitted_headings:
-                emitted_headings.add(key)
-                parts.append(unit.heading_render)
+        if not unit.is_ticket:
+            key = (unit.source_idx, unit.heading_key) if unit.heading_render is not None else None
+            if key != open_scope:
+                parts.append(
+                    unit.heading_render
+                    or f"[spec:{_origin_short(unit.origin)}] (heading) (no section)"
+                )
+                open_scope = key
         parts.append(unit.render)
         block = "\n".join(parts)
         if used + len(block) + 1 > budget:
@@ -773,12 +839,33 @@ def build_spec_digest(sources: list[SpecSource], files: list[FileDiff], token_bu
         contributed.add(unit.origin)
     if not truncated:
         for src in sources:
-            if src.origin in contributed:
+            if src.error or src.origin in contributed:
                 continue
-            line = f"[spec:{src.origin}: nothing diff-relevant kept]"
+            line = f"[spec:{_origin_short(src.origin)}: nothing diff-relevant kept]"
             if used + len(line) + 1 > budget:
                 out.append(TRUNCATION_MARKER)
                 break
             out.append(line)
             used += len(line) + 1
     return "\n".join(out)
+
+
+_CONSTRAINT_LINE_RE = re.compile(
+    r"^\[(?:spec:[^\]]*#\S+\] \((?:MUST|SHOULD|MAY)\) |ticket:[^\]]+\] )", re.M
+)
+
+
+def constraint_count(digest: str) -> int:
+    """The number of constraint lines a :func:`build_spec_digest` digest injects.
+
+    A constraint line is a spec unit, ``[spec:{short}#anchor] (MUST|SHOULD|MAY)
+    statement``, or a ticket line, ``[ticket:KEY] statement``; the strength
+    label binds to the spec form only, because ticket lines carry none. The
+    intro, heading lines (``(heading)``, including ``(heading) (no
+    section)``), the truncation markers, and the bracket-closed bookkeeping
+    lines such as ``[spec:{short}: nothing diff-relevant kept]`` are scoping
+    or bookkeeping and never count. An empty digest counts 0. The grounding
+    note and every decision about whether a run is spec-grounded use this
+    count, so it and the render f-strings live in one module.
+    """
+    return len(_CONSTRAINT_LINE_RE.findall(digest))
