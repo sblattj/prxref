@@ -49,6 +49,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError, SSLError
 
 from .quality import _evidence_tokens, _tokens
 from .retry_logging import LoggingRetry
@@ -242,6 +243,11 @@ def _read_stream(resp: requests.Response, byte_cap: int, deadline: float) -> tup
     :class:`_FetchTimeout`, at most one read timeout late. A response whose
     ``raw`` has no ``read1`` (urllib3 1.x) is read a byte at a time through
     ``iter_content`` under the same check.
+
+    A failed read raises what ``iter_content`` raises for it —
+    ``ChunkedEncodingError``, ``ContentDecodingError``, ``ConnectionError``
+    for a read timeout, ``SSLError`` — so both read paths fail as the same
+    :class:`OSError` and never as urllib3's own exception, which is not one.
     """
     read1 = getattr(getattr(resp, "raw", None), "read1", None)
     chunks = None if read1 is not None else resp.iter_content(chunk_size=1)
@@ -249,7 +255,16 @@ def _read_stream(resp: requests.Response, byte_cap: int, deadline: float) -> tup
     while len(buf) <= byte_cap:
         if time.monotonic() >= deadline:
             raise _FetchTimeout
-        chunk = read1(8192, decode_content=True) if read1 is not None else next(chunks, b"")
+        try:
+            chunk = read1(8192, decode_content=True) if read1 is not None else next(chunks, b"")
+        except ProtocolError as exc:
+            raise requests.exceptions.ChunkedEncodingError(exc) from exc
+        except DecodeError as exc:
+            raise requests.exceptions.ContentDecodingError(exc) from exc
+        except ReadTimeoutError as exc:
+            raise requests.exceptions.ConnectionError(exc) from exc
+        except SSLError as exc:
+            raise requests.exceptions.SSLError(exc) from exc
         if not chunk:
             return bytes(buf), False
         buf += chunk
