@@ -676,7 +676,7 @@ def _dispatch(
         ref = parse_ticket_url(text)
         if ref is not None:
             src.kind = "jira"
-            _fetch_jira(src, ref, jira_base_url, jira_email, jira_api_token, session)
+            _fetch_jira(src, ref, jira_base_url, jira_email, jira_api_token, session, max_chars=max_chars)
         else:
             src.kind = "url"
             _fetch_url(src, text, max_chars, session)
