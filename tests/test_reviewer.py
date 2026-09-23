@@ -13,6 +13,7 @@ from prxref.reviewer import (
     DISCUSSION_MAX_SNIPPET_CHARS,
     DISCUSSION_MAX_THREADS,
     MAX_TOKENS,
+    PromptContext,
     _render_systemic_prompt,
     load_prompt,
     render_chunk,
@@ -678,7 +679,9 @@ class TestSpecDigestPrompt:
         llm = FakeLLM(CLEAN_RESPONSE)
         review_chunk(
             llm, parse_unified_diff(MINI_DIFF),
-            spec_digest="[spec:spec.md#L1] (MUST) tools MUST be named with the mcp prefix",
+            prompt_context=PromptContext(
+                spec_digest="[spec:spec.md#L1] (MUST) tools MUST be named with the mcp prefix",
+            ),
         )
         user = llm.calls[0]["user"]
         assert "tools MUST be named with the mcp prefix" in user
@@ -694,7 +697,7 @@ class TestSpecDigestPrompt:
         llm = FakeLLM(CLEAN_RESPONSE)
         review_systemic(
             llm, TestReviewSystemic.DIGEST,
-            spec_digest="[ticket:PROJ-9] ship the header flag",
+            prompt_context=PromptContext(spec_digest="[ticket:PROJ-9] ship the header flag"),
         )
         user = llm.calls[0]["user"]
         assert "ship the header flag" in user
@@ -718,7 +721,9 @@ class TestSpecDigestPrompt:
         llm = FakeLLM(payload)
         findings, meta = review_chunk(
             llm, parse_unified_diff(MINI_DIFF),
-            spec_digest="clients MUST NOT send the protocol header",
+            prompt_context=PromptContext(
+                spec_digest="clients MUST NOT send the protocol header",
+            ),
         )
         assert meta["error"] == ""
         assert len(findings) == 1
