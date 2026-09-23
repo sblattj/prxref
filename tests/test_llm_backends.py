@@ -332,19 +332,23 @@ class TestCreateLLMClient:
         assert isinstance(create_llm_client(), OpenAICompatClient)
 
     def test_litellm_selection(self, monkeypatch):
+        """litellm needs no endpoint: PRXREF_LLM_BASE_URL is unset (#61)."""
         fake = types.SimpleNamespace(completion=lambda **kw: None)
         monkeypatch.setitem(sys.modules, "litellm", fake)
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "litellm")
-        monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
+        monkeypatch.delenv("PRXREF_LLM_BASE_URL", raising=False)
         monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
         assert isinstance(create_llm_client(), LiteLLMClient)
 
     def test_unknown_backend_raises(self, monkeypatch):
+        """A value outside the vocabulary is a configuration error (exit 2), not a review failure."""
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "skynet")
         monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
         monkeypatch.setenv("PRXREF_LLM_MODELS", "a,b")
-        with pytest.raises(LLMError):
+        with pytest.raises(ConfigError, match="PRXREF_LLM_BACKEND") as exc:
             create_llm_client()
+        assert "claude-cli" in str(exc.value)
+        assert "'skynet'" in str(exc.value)
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.delenv("PRXREF_LLM_BACKEND", raising=False)
