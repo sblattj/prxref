@@ -42,7 +42,7 @@ PR description:
 
 Repo: {repo_hint}
 
-### Spec constraints
+{ticket_context}### Spec constraints
 
 {spec_digest}
 

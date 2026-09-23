@@ -58,6 +58,9 @@ class Finding:
     ``quality.apply_line_align`` snapping; 0 means file-level.
     ``drop_reason`` is set by quality passes instead of the finding being
     silently discarded, so run records can explain every drop.
+    ``scope`` is one of :data:`SCOPES`: where the finding sits relative to
+    the ticket the PR implements, ``unknown`` whenever no ticket is active.
+    It is the last field, so every positional construction keeps working.
     """
 
     file: str
@@ -67,6 +70,7 @@ class Finding:
     title: str
     body: str
     drop_reason: str | None = None
+    scope: str = SCOPE_UNKNOWN
 
 
 @dataclass
