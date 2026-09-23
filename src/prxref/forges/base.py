@@ -19,7 +19,7 @@ from typing import Protocol
 class PRRef:
     """A pull/merge request identity, normalized across forges."""
 
-    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab"
+    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab" | "azure-devops" | "local"
     host: str  # e.g. "bitbucket.org", "github.com", "gitlab.com", or self-hosted host
     owner: str  # workspace / org / group
     repo: str
@@ -144,6 +144,18 @@ class Forge(Protocol):
         None)``, so a Forge without it is still valid. Return ``None`` when
         the file is missing, binary, too large, or cannot be fetched for any
         other reason — this method never raises.
+        """
+        ...
+
+    def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
+        """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
+
+        Optional: callers resolve it with ``getattr(forge, "get_compare_diff", None)``,
+        so a Forge without it is still valid (replay then refuses pinned SHAs with a
+        configuration error). Three-dot semantics — exactly what the PR's own diff
+        shows when ``base_sha``/``head_sha`` are the PR's target/source commits.
+        Raises on transport or HTTP failure like ``get_diff``; returns ``""`` for an
+        empty range and leaves the judgement to the caller.
         """
         ...
 
