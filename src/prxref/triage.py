@@ -27,6 +27,28 @@ DEFAULT_MAX_FILES_PER_CHUNK: int = 5
 # adds what it did not.
 DEFAULT_CONTEXT_LINES: int = 3
 
+# Where a finding sits relative to the ticket the PR is meant to implement.
+# Orthogonal to severity: scope never feeds dedup, the error cap, the verdict
+# or the fail-on exit. "unknown" is both the no-ticket state and the answer
+# for anything the model returned that is not exactly one of these words.
+SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN = "in", "out", "unknown"
+SCOPES: tuple[str, ...] = (SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN)
+
+
+def normalize_scope(raw: object) -> str:
+    """Map a model-supplied ``scope`` value onto :data:`SCOPES`.
+
+    Only a string that is exactly ``"in"``, ``"out"`` or ``"unknown"`` after
+    ``strip().casefold()`` keeps its meaning; everything else (``None``, a
+    bool, ``"In scope"``, ``"yes"``) is ``"unknown"``. There is deliberately
+    no synonym table: a lenient mapping would turn a malformed answer into a
+    confident ``in`` or ``out``.
+    """
+    if not isinstance(raw, str):
+        return SCOPE_UNKNOWN
+    value = raw.strip().casefold()
+    return value if value in SCOPES else SCOPE_UNKNOWN
+
 
 @dataclass
 class Finding:
