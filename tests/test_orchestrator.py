@@ -243,18 +243,15 @@ class FakeForge:
 
 
 @pytest.fixture(autouse=True)
-def _contract_stubs(monkeypatch):
-    """Pin the reviewer contract. Env clearing lives in tests/conftest.py.
+def _contract_stubs(contract_stubs):
+    """Pin the reviewer contract for every test in this module.
 
-    The systemic sweep is stubbed to a clean no-findings success so the
-    sweep-specific classes below can monkeypatch their own doubles; the
-    chunk-count assertions in the older classes include the sweep unit.
+    The stubs are installed by the opt-in ``contract_stubs`` fixture in
+    tests/conftest.py, which also holds env clearing. The systemic sweep is
+    stubbed to a clean no-findings success so the sweep-specific classes below
+    can monkeypatch their own doubles; the chunk-count assertions in the older
+    classes include the sweep unit.
     """
-    monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _contract_review_chunk)
-    monkeypatch.setattr(
-        orchestrator.reviewer, "review_systemic", _contract_review_systemic,
-    )
-    monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _contract_load_prompt)
 
 
 HAPPY_FINDINGS = {
