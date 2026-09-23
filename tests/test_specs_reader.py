@@ -41,6 +41,7 @@ READ_TIMEOUT_S = 5.0
 GAP_S = 0.05
 TRICKLE_LIMIT_S = 8.0
 SLACK_S = 2.0
+QUICK_READ_TIMEOUT_S = 0.3
 
 SENTENCE = "Clients MUST send the “Mcp-Session-Id” header — always. Café naïve."
 LATIN1_SENTENCE = "Clients MUST send the header. Café naïve à la carte."
@@ -323,6 +324,73 @@ class TestBodies:
     def test_the_response_is_always_closed(self, response):
         fetch_specs(["https://example.com/spec.md"], max_chars=100, session=_FakeSession(response))
         assert response.closed
+
+
+def _short_body(h: BaseHTTPRequestHandler, stop: threading.Event) -> None:
+    h.send_response(200)
+    h.send_header("Content-Type", "text/plain")
+    h.send_header("Content-Length", "100")
+    h.end_headers()
+    h.wfile.write(b"0123456789")
+
+
+def _stall(h: BaseHTTPRequestHandler, stop: threading.Event) -> None:
+    h.send_response(200)
+    h.send_header("Content-Type", "text/plain")
+    h.end_headers()
+    h.wfile.write(b"ab")
+    stop.wait(TRICKLE_LIMIT_S)
+
+
+READ_ERRORS = [
+    pytest.param(_short_body, requests.exceptions.ChunkedEncodingError, id="shorter-than-content-length"),
+    pytest.param(
+        _body(b"this is not gzip", "text/plain", headers=(("Content-Encoding", "gzip"),)),
+        requests.exceptions.ContentDecodingError,
+        id="bad-gzip",
+    ),
+    pytest.param(_stall, requests.exceptions.ConnectionError, id="read-timeout"),
+]
+
+
+@pytest.fixture
+def quick_read_timeout(monkeypatch):
+    monkeypatch.setattr(specs, "SPEC_FETCH_TIMEOUT_S", QUICK_READ_TIMEOUT_S)
+
+
+@pytest.mark.usefixtures("quick_read_timeout")
+class TestReadErrors:
+    """``raw.read1`` bypasses requests' exception mapping, so the reader must redo it.
+
+    urllib3's own exceptions are not :class:`OSError`, so without the mapping a
+    failed read would reach the ``fetch_specs`` fence as a different kind of
+    failure than the same read through ``iter_content``.
+    """
+
+    @pytest.mark.parametrize(("route", "expected"), READ_ERRORS)
+    def test_the_reader_raises_the_requests_exception(self, server, route, expected):
+        server.routes["/bad"] = route
+        src = SpecSource(origin=server.url("/bad"), kind="url", text="", error="")
+        with pytest.raises(expected) as info:
+            specs._fetch_url(src, server.url("/bad"), 1000, specs._create_default_session())
+        assert isinstance(info.value, OSError)
+
+    @pytest.mark.parametrize(("route", "expected"), READ_ERRORS)
+    def test_control_iter_content_raises_the_same(self, server, route, expected):
+        server.routes["/bad"] = route
+        resp = requests.get(server.url("/bad"), timeout=QUICK_READ_TIMEOUT_S, stream=True)
+        try:
+            with pytest.raises(expected):
+                b"".join(resp.iter_content(chunk_size=8192))
+        finally:
+            resp.close()
+
+    @pytest.mark.parametrize(("route", "expected"), READ_ERRORS)
+    def test_fetch_specs_records_it_as_the_source_error(self, server, route, expected):
+        server.routes["/bad"] = route
+        src, _ = _fetch(server.url("/bad"))
+        assert src.text == ""
+        assert src.error.startswith(expected.__name__)
 
 
 class TestCharset:
