@@ -41,7 +41,9 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
+from email.message import Message
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
 
@@ -55,6 +57,8 @@ from .triage import FileDiff
 logger = logging.getLogger(__name__)
 
 SPEC_FETCH_TIMEOUT_S = 15
+
+SPEC_FETCH_BUDGET_S = 30
 
 SPEC_DIR_MAX_FILES = 20
 
@@ -187,16 +191,27 @@ def _board_ticket(text: str) -> TicketRef | None:
 def _create_default_session() -> requests.Session:
     """Build the read-only HTTP session spec fetching uses.
 
-    The retry policy is the forge adapters' verbatim: read verbs only, since
-    urllib3 retries beneath the requests adapter and a re-sent write is sent
-    whole. Spec fetching only ever GETs.
+    Read verbs only, as in the forge adapters: urllib3 retries beneath the
+    requests adapter and a re-sent write is sent whole. Spec fetching only
+    ever GETs. Unlike the forges it retries once, with no backoff sleep, and
+    ignores ``Retry-After``: the webhook daemon reviews one PR at a time, so
+    a spec host that is down or asks for time is skipped, not waited for.
+
+    Until the response headers arrive a source is bounded by those two
+    attempts, each allowed :data:`SPEC_FETCH_TIMEOUT_S` to connect and per
+    read, so a host that accepts and never answers costs 30 s. Once the
+    headers are in, :func:`_read_stream` holds the source to
+    :data:`SPEC_FETCH_BUDGET_S`, counted from before the request, plus at
+    most one read timeout: 45 s for a host that answers and then trickles.
+    Neither bound depends on ``--timeout``. A host trickling its header
+    lines, or the body of a redirect, is bounded per read only.
     """
     session = requests.Session()
     retry = LoggingRetry(
-        total=3,
+        total=1,
         backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
-        respect_retry_after_header=True,
+        respect_retry_after_header=False,
         allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
     )
     adapter = HTTPAdapter(max_retries=retry)
@@ -211,25 +226,84 @@ def _is_text_like(content_type: str) -> bool:
     )
 
 
-def _read_stream(resp: requests.Response, max_chars: int) -> str:
-    """Decode the streamed body up to ``max_chars``, announcing truncation."""
-    decoder = codecs.getincrementaldecoder(resp.encoding or "utf-8")(errors="replace")
-    parts: list[str] = []
-    total = 0
-    for chunk in resp.iter_content(chunk_size=8192):
+class _FetchTimeout(Exception):
+    """A spec body was still arriving when its :data:`SPEC_FETCH_BUDGET_S` ran out."""
+
+
+def _read_stream(resp: requests.Response, byte_cap: int, deadline: float) -> tuple[bytes, bool]:
+    """Read a streamed body up to ``byte_cap`` bytes, never past ``deadline``.
+
+    Returns the bytes and whether the body went on past the cap. Every read
+    is a single socket read — ``raw.read1`` with the content encoding undone
+    — so the monotonic clock is checked between reads however the host paces
+    the body: close-delimited, chunked or compressed. ``iter_content`` would
+    block until a whole chunk arrived, and a byte every few seconds never
+    trips the per-read timeout. A body still arriving at ``deadline`` raises
+    :class:`_FetchTimeout`, at most one read timeout late. A response whose
+    ``raw`` has no ``read1`` (urllib3 1.x) is read a byte at a time through
+    ``iter_content`` under the same check.
+    """
+    read1 = getattr(getattr(resp, "raw", None), "read1", None)
+    chunks = None if read1 is not None else resp.iter_content(chunk_size=1)
+    buf = bytearray()
+    while len(buf) <= byte_cap:
+        if time.monotonic() >= deadline:
+            raise _FetchTimeout
+        chunk = read1(8192, decode_content=True) if read1 is not None else next(chunks, b"")
         if not chunk:
+            return bytes(buf), False
+        buf += chunk
+    return bytes(buf[:byte_cap]), True
+
+
+_META_CHARSET_RE = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_.:-]+)""", re.IGNORECASE)
+
+_META_PRESCAN_BYTES = 1024
+
+
+def _codec(name: str | None) -> str | None:
+    """Return the codec a declared charset decodes with, or ``None`` if Python has none.
+
+    UTF-8 is read as ``utf-8-sig``, so a byte-order mark never reaches the text.
+    """
+    if not name:
+        return None
+    try:
+        canonical = codecs.lookup(name).name
+    except LookupError:
+        return None
+    return "utf-8-sig" if canonical == "utf-8" else canonical
+
+
+def _decode_body(data: bytes, content_type: str, *, cut: bool) -> str:
+    """Decode a fetched body, never trusting requests' ISO-8859-1 guess for ``text/*``.
+
+    The charset is the ``Content-Type`` header's, then for HTML a ``<meta>``
+    charset in the first 1024 bytes, then strict UTF-8 (a byte-order mark
+    dropped), and only when that fails cp1252 with undecodable bytes
+    replaced. A declared charset Python cannot decode text with falls
+    through to the next step instead of failing the source. ``cut`` says the
+    bytes stop at the byte cap, so a multibyte sequence split there is not
+    taken for invalid UTF-8.
+    """
+    header = Message()
+    header["Content-Type"] = content_type
+    declared = [header.get_content_charset()]
+    if "html" in content_type.split(";")[0].lower():
+        meta = _META_CHARSET_RE.search(data[:_META_PRESCAN_BYTES])
+        declared.append(meta.group(1).decode("ascii") if meta else None)
+    for name in declared:
+        codec = _codec(name)
+        if codec is None:
             continue
-        decoded = decoder.decode(chunk, final=False)
-        if decoded:
-            parts.append(decoded)
-            total += len(decoded)
-        if total >= max_chars:
-            break
-    parts.append(decoder.decode(b"", final=True))
-    text = "".join(parts)
-    if len(text) > max_chars:
-        text = text[:max_chars] + SOURCE_TRUNCATION_MARKER.format(n=max_chars)
-    return text
+        try:
+            return data.decode(codec, errors="replace")
+        except LookupError:
+            continue
+    try:
+        return codecs.getincrementaldecoder("utf-8-sig")().decode(data, final=not cut)
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -343,18 +417,37 @@ def _read_capped(path: str, max_chars: int) -> str:
 
 
 def _fetch_url(src: SpecSource, url: str, max_chars: int, session: requests.Session) -> None:
+    """Fetch a web page into ``src`` within :data:`SPEC_FETCH_BUDGET_S`.
+
+    The body is read up to ``4 * max_chars + 4`` bytes, decoded by
+    :func:`_decode_body`, and cut at ``max_chars``. HTML is stripped after
+    the cut and the truncation marker appended after the stripping, so a
+    cut inside a ``<script>`` or an open tag cannot swallow the marker. A
+    body still arriving when the budget runs out fails the source.
+    """
+    deadline = time.monotonic() + SPEC_FETCH_BUDGET_S
     resp = session.get(url, timeout=SPEC_FETCH_TIMEOUT_S, stream=True)
-    content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if resp.status_code != 200:
-        src.error = f"HTTP {resp.status_code} fetching {url}"
+    try:
+        header = resp.headers.get("Content-Type") or ""
+        content_type = header.split(";")[0].strip().lower()
+        if resp.status_code != 200:
+            src.error = f"HTTP {resp.status_code} fetching {url}"
+            return
+        if not _is_text_like(content_type):
+            src.error = f"not a text content type: {content_type or 'unknown'}"
+            return
+        data, cut = _read_stream(resp, 4 * max_chars + 4, deadline)
+    except _FetchTimeout:
+        src.error = f"timed out after {SPEC_FETCH_BUDGET_S:g} s"
         return
-    if not _is_text_like(content_type):
-        src.error = f"not a text content type: {content_type or 'unknown'}"
-        return
-    text = _read_stream(resp, max_chars)
+    finally:
+        resp.close()
+    text = _decode_body(data, header, cut=cut)
+    truncated = cut or len(text) > max_chars
+    text = text[:max_chars]
     if "html" in content_type:
         text = _strip_html(text)
-    src.text = text
+    src.text = text + SOURCE_TRUNCATION_MARKER.format(n=max_chars) if truncated else text
 
 
 def _fetch_file(src: SpecSource, path: str, max_chars: int) -> None:
@@ -381,16 +474,38 @@ def _fetch_jira(
     jira_email: str,
     jira_api_token: str,
     session: requests.Session,
+    *,
+    max_chars: int = 120_000,
 ) -> None:
+    """Fetch one ticket over Jira REST into ``src`` within :data:`SPEC_FETCH_BUDGET_S`.
+
+    The response streams through :func:`_read_stream` like a web page, with
+    a ``4 * max_chars + 4`` byte cap. A body over the cap fails the source
+    instead of being parsed as truncated JSON, and the rendered ticket text
+    is cut at ``max_chars`` with the source truncation marker. ``max_chars``
+    defaults to the ``PRXREF_SPEC_MAX_CHARS`` default.
+    """
     url, auth = _jira_request(ref, jira_base_url, jira_email, jira_api_token)
-    resp = session.get(url, timeout=SPEC_FETCH_TIMEOUT_S, auth=auth)
-    if resp.status_code != 200:
-        src.error = _jira_status_error(
-            resp.status_code, ref.key, auth=auth, credentials_set=bool(jira_email and jira_api_token)
-        )
+    byte_cap = 4 * max_chars + 4
+    deadline = time.monotonic() + SPEC_FETCH_BUDGET_S
+    resp = session.get(url, timeout=SPEC_FETCH_TIMEOUT_S, auth=auth, stream=True)
+    try:
+        if resp.status_code != 200:
+            src.error = _jira_status_error(
+                resp.status_code, ref.key, auth=auth, credentials_set=bool(jira_email and jira_api_token)
+            )
+            return
+        body, cut = _read_stream(resp, byte_cap, deadline)
+    except _FetchTimeout:
+        src.error = f"Jira timed out after {SPEC_FETCH_BUDGET_S:g} s for {ref.key}"
+        return
+    finally:
+        resp.close()
+    if cut:
+        src.error = f"Jira response for {ref.key} exceeded {byte_cap} bytes"
         return
     try:
-        payload = resp.json()
+        payload = json.loads(body)
     except ValueError:
         content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         src.error = f"Jira returned a non-JSON body for {ref.key} ({content_type or 'no content type'})"
@@ -399,6 +514,8 @@ def _fetch_jira(
     if text is None:
         src.error = f"Jira returned no issue fields for {ref.key}"
         return
+    if len(text) > max_chars:
+        text = text[:max_chars] + SOURCE_TRUNCATION_MARKER.format(n=max_chars)
     src.text = text
 
 
