@@ -1,7 +1,7 @@
 """Issue #12 — package.json section misattribution: a devDependency reported
 as a runtime dependency.
 
-docs/issues/inbox-2026-09-04/prxref-issue-2026-09-03.md §2: on ``acme-mcp``
+The 2026-09-04 inbox report, issue 12 §2 (private, not tracked): on ``acme-mcp``
 a pull request, prxref flagged ``vitest`` as a production dependency at
 ``apps/server/package.json:20`` — line 20 is ``"@acme-mcp/gamma": "*",``, a
 ``dependencies`` entry, not the ``vitest`` line (which is line 37, inside
@@ -115,8 +115,8 @@ PACKAGE_JSON_DIFF = (
     + "\n".join(_HUNK_LINES) + "\n"
 )
 
-# Verbatim from docs/issues/inbox-2026-09-04/prxref-issue-2026-09-03.md §2,
-# comment 1000001.
+# Verbatim from the 2026-09-04 inbox report, issue 12 §2, comment 1000001
+# (private, not tracked).
 TITLE = "vitest added to runtime dependencies"
 BODY = (
     "vitest is a test-only tool but is added under `dependencies` in "
