@@ -348,12 +348,13 @@ class TestBuildSpecDigest:
         sources, diff = _digest_sources()
         empty = SpecSource(origin="/docs/unrelated.md", kind="file", text="Filler prose without keywords.", error="")
         digest = build_spec_digest([*sources, empty], parse_unified_diff(diff), token_budget=3000)
-        assert "[spec:/docs/unrelated.md: nothing diff-relevant kept]" in digest
+        assert "[spec:unrelated.md: nothing diff-relevant kept]" in digest
+        assert "/docs/" not in digest
 
     def test_failed_source_explained(self):
         failed = SpecSource(origin="https://example.com/gone.md", kind="url", text="", error="HTTP 404 fetching")
         digest = build_spec_digest([failed], [], token_budget=3000)
-        assert "[spec:https://example.com/gone.md: nothing diff-relevant kept]" in digest
+        assert digest == ""
 
     def test_heading_scoping_line_accompanies_kept_constraint(self):
         sources, diff = _digest_sources()
