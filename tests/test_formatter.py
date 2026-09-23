@@ -69,10 +69,10 @@ class TestFormatInlineComment:
     def test_warning_and_note_markers(self):
         assert format_inline_comment(_f(severity="warning"), "a").startswith("🟧 **")
         assert format_inline_comment(_f(severity="spec"), "a").startswith("🔍 **")
-        assert format_inline_comment(_f(severity="outofscope"), "a").startswith("🟦 **")
+        assert format_inline_comment(_f(severity="outofscope"), "a").startswith("⬜ **")
 
     def test_unknown_severity_defaults_to_note(self):
-        assert format_inline_comment(_f(severity=""), "a").startswith("🟦 **")
+        assert format_inline_comment(_f(severity=""), "a").startswith("⬜ **")
 
     def test_pipe_in_title_is_not_part_of_inline_output_structure(self):
         text = format_inline_comment(_f(title="a|b", body="x|y"), "a")
@@ -101,7 +101,7 @@ class TestFormatSummaryCounts:
         )
         assert "🟥 2 error" in text
         assert "🟧 0 warning" in text
-        assert "🟦 1 outofscope" in text
+        assert "⬜ 1 outofscope" in text
 
     def test_active_of_total_counts(self):
         assert "1 active of 2 raw" in _summary()
@@ -113,7 +113,7 @@ class TestFormatSummaryCounts:
             findings_dropped=[],
         )
         assert "✅ Approved" in text
-        assert "🟥 0 error · 🟧 0 warning · 🔍 0 spec · 🟦 0 outofscope" in text
+        assert "🟥 0 error · 🟧 0 warning · 🔍 0 spec · ⬜ 0 outofscope" in text
         assert "0 active of 0 raw" in text
         assert "No findings survived the quality passes." in text
 

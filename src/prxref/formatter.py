@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+from .markers import SEVERITY_MARKERS as _SEVERITY_MARKERS
 from .triage import Finding
 
 try:
@@ -17,12 +18,6 @@ except ImportError:  # reviewer seat not landed yet; inline default applies
     _reviewer_load_prompt = None
 
 
-_SEVERITY_MARKERS: dict[str, str] = {
-    "error": "🟥",
-    "warning": "🟧",
-    "spec": "🔍",
-    "outofscope": "🟦",
-}
 _SEVERITY_ORDER: dict[str, int] = {
     "error": 0, "warning": 1, "spec": 2, "outofscope": 3,
 }
@@ -30,7 +25,7 @@ _SEVERITY_ORDER: dict[str, int] = {
 _DEFAULT_SUMMARY_TEMPLATE = (
     "## {verdict_banner}\n\n"
     "**Findings:** 🟥 {error_count} error · 🟧 {warning_count} warning · "
-    "🔍 {spec_count} spec · 🟦 {outofscope_count} outofscope\n"
+    "🔍 {spec_count} spec · ⬜ {outofscope_count} outofscope\n"
     "{spec_note}\n"
     "{active_count} active of {total_count} raw\n\n"
     "{findings_table}\n"
