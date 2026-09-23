@@ -88,7 +88,7 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -1633,3 +1633,21 @@ def apply_quality_gate(
             )
 
     return sorted(staged, key=finding_sort_key)
+
+
+def apply_severity_map(
+    findings: Sequence[Finding], severity_map: Mapping[str, str],
+) -> list[Finding]:
+    """Rewrite a team severity word to the prxref severity it maps to.
+
+    ``severity_map`` is the review rules' front-matter map, team word to
+    prxref tier (``{"blocker": "error"}``). ``orchestrate_review`` runs this
+    before every other pass, so a mapped word reaches the gate as its tier
+    and an unmapped one still dies there as ``invalid severity``. Returns a
+    new list of the same length and order, rewritten findings being
+    :func:`dataclasses.replace` copies; it drops nothing.
+
+    Inert in this build: every finding passes through unchanged until the
+    team-review-rules feature lands.
+    """
+    return list(findings)
