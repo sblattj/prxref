@@ -1,9 +1,25 @@
 """prxref command-line interface.
 
 Provides three subcommands:
-  * ``review --pr-url URL`` — one-shot PR/MR review from a forge URL.
+  * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
+    GitLab, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
+
+``review`` takes three optional inputs besides the PR itself, and they
+compose: ``--spec URL_OR_PATH`` (repeatable) grounds the review against specs
+or tickets and replaces ``PRXREF_SPEC_SOURCES``; ``--rules-file PATH`` adds a
+team review-rules file (``PRXREF_REVIEW_RULES``); ``--context-file PATH``
+names the ticket the PR implements (``PRXREF_TICKET_CONTEXT_FILE``), so each
+finding is marked in, out of, or of unknown ticket scope. Each flag wins over
+its variable, and ``--rules-file ""`` / ``--context-file ""`` turn the
+variable off for one run. Both files are read before any network call, so an
+unusable one is a configuration error. The webhook daemon reads the rules
+file from its own environment and never reads a ticket-context file. The
+replay flags (``--base-sha`` / ``--head-sha``, ``--no-threads``,
+``--diff-file``) review a pinned, reproducible input for evaluation, and a
+replay never posts. In this build the rules and ticket-context loaders and
+replay mode fail closed: a non-empty path or any replay flag exits 2.
 
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
@@ -38,6 +54,7 @@ import argparse
 import importlib
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -48,6 +65,8 @@ from prxref.config import load_config, make_forge
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
 from prxref.llm import ConfigError
+from prxref.rules import load_review_rules
+from prxref.ticket import load_ticket_context
 from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
 from prxref.viz import render_file
 
@@ -57,7 +76,7 @@ logger = logging.getLogger("prxref")
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prxref",
-        description="Fast automated AI code review for Bitbucket, GitLab, and GitHub.",
+        description="Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps.",
     )
     parser.add_argument(
         "--version",
@@ -70,7 +89,10 @@ def _build_parser() -> argparse.ArgumentParser:
     rev.add_argument(
         "--pr-url",
         required=True,
-        help="full URL of the PR or MR on Bitbucket, GitHub, or GitLab",
+        help=(
+            "full URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure "
+            "DevOps (required unless --diff-file is given)"
+        ),
     )
     rev.add_argument(
         "--no-post",
@@ -100,6 +122,64 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "spec/ticket source to review against; repeatable "
             "(PRXREF_SPEC_SOURCES otherwise)"
+        ),
+    )
+    rev.add_argument(
+        "--rules-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "team review rules (Markdown/text) added to every review prompt; "
+            "overrides PRXREF_REVIEW_RULES, and '' turns it off for this run; "
+            "read it from a trusted checkout, never from the PR under review"
+        ),
+    )
+    rev.add_argument(
+        "--context-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "ticket context (plain text/Markdown) the PR is meant to "
+            "implement; findings get a scope of in/out/unknown against it; "
+            "overrides PRXREF_TICKET_CONTEXT_FILE, and '' turns it off for "
+            "this run"
+        ),
+    )
+    rev.add_argument(
+        "--base-sha",
+        default=None,
+        metavar="SHA",
+        help=(
+            "replay: review the range BASE...HEAD (merge-base diff, like the "
+            "PR's own) in the --pr-url repository; needs --head-sha; implies "
+            "no posting"
+        ),
+    )
+    rev.add_argument(
+        "--head-sha",
+        default=None,
+        metavar="SHA",
+        help=(
+            "replay: head commit of the pinned range; file context is read at "
+            "this commit; needs --base-sha"
+        ),
+    )
+    rev.add_argument(
+        "--no-threads",
+        action="store_true",
+        help=(
+            "replay: hide the PR's existing threads from the prompt and the "
+            "thread-dedup passes; implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--diff-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "replay: review this unified diff (git diff or git format-patch "
+            "output) instead of fetching one; --pr-url becomes optional; "
+            "implies no posting"
         ),
     )
     rev.add_argument(
@@ -391,6 +471,56 @@ def _build_json_result(result: Any) -> dict:
     return payload
 
 
+def _resolve_replay(
+    url: str | None,
+    *,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+    no_threads: bool = False,
+    diff_file: str | None = None,
+) -> None:
+    """Validate the replay flags; ``None`` means a normal, non-replay run.
+
+    Pure: it reads nothing and calls nothing. ``_run_review`` calls it first,
+    before ``detect_forge``, so a bad set of replay flags exits 2 even next
+    to an unrecognised URL.
+
+    Replay mode is not wired in this build, so any replay flag, even with an
+    empty value, raises a ``ConfigError`` naming the flags given (exit 2)
+    rather than silently reviewing, and posting to, the live PR.
+    """
+    given = [
+        flag
+        for flag, value in (
+            ("--base-sha", base_sha),
+            ("--head-sha", head_sha),
+            ("--no-threads", no_threads),
+            ("--diff-file", diff_file),
+        )
+        if value is not None and value is not False
+    ]
+    if given:
+        raise ConfigError(f"{'/'.join(given)}: replay mode is not wired in this build")
+    return None
+
+
+def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> Any:
+    """Run the rules or ticket-context ``loader``, fencing every failure into a ``ConfigError``.
+
+    The loaders raise ``ConfigError`` naming ``source`` themselves; an
+    ``OSError`` or ``ValueError`` that escapes one is re-raised as a
+    ``ConfigError`` naming it too. So an unusable file always exits 2 before
+    any network call, and nothing a loader raises can reach the orchestrator,
+    which reads the loaded object unfenced.
+    """
+    try:
+        return loader(path, max_chars=max_chars, source=source)
+    except ConfigError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
+
+
 def _run_review(
     url: str,
     *,
@@ -399,30 +529,63 @@ def _run_review(
     timeout: float | None = None,
     trace_dir: str | None = None,
     spec_sources: list[str] | None = None,
+    rules_file: str | None = None,
+    context_file: str | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+    no_threads: bool = False,
+    diff_file: str | None = None,
 ) -> Any:
+    replay = _resolve_replay(
+        url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
+        diff_file=diff_file,
+    )
     ref = detect_forge(url)
     if ref is None:
         return None
-    # --max-chunks, --timeout, and --spec arrive as load_config overrides (None
-    # is ignored), so each flag rides exactly the path its environment variable
-    # does: --max-chunks and --timeout are range-checked on the same pass as
-    # PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, and --spec replaces
-    # PRXREF_SPEC_SOURCES wholesale rather than merging with it. Precedence is
-    # derived once, here. There is deliberately no way to inject a pre-built
-    # config dict: that would bypass _check_ranges and make every range
-    # guarantee conditional on nobody using the bypass.
+    # --max-chunks, --timeout, --spec, --rules-file and --context-file arrive
+    # as load_config overrides (None is ignored, "" is not), so each flag rides
+    # exactly the path its environment variable does: --max-chunks and
+    # --timeout are range-checked on the same pass as PRXREF_MAX_CHUNKS and
+    # PRXREF_LLM_TIMEOUT, --spec replaces PRXREF_SPEC_SOURCES wholesale rather
+    # than merging with it, and --rules-file "" / --context-file "" blank
+    # their variable for one run. Precedence is derived once, here. There is
+    # deliberately no way to inject a pre-built config dict: that would bypass
+    # _check_ranges and make every range guarantee conditional on nobody using
+    # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
+    # orchestrate_review has no timeout parameter.
     cfg = load_config(
         max_chunks=max_chunks,
         llm_timeout=timeout,
         trace_dir=trace_dir,
         spec_sources=spec_sources,
+        review_rules=rules_file,
+        ticket_context_file=context_file,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
             "max_chunks": "--max-chunks",
             "llm_timeout": "--timeout",
             "spec_sources": "--spec",
+            "review_rules": "--rules-file",
+            "ticket_context_file": "--context-file",
         },
+    )
+    # Both files are read here, after config and before make_forge and the LLM
+    # client, so an unusable one exits 2 before any network I/O. load_config
+    # stays I/O-free. Each is reported under the input that supplied its
+    # path: the flag whenever it was given, else the variable.
+    rules = _load_text_input(
+        load_review_rules, cfg["review_rules"],
+        max_chars=cfg["review_rules_max_chars"],
+        source="--rules-file" if rules_file is not None else "PRXREF_REVIEW_RULES",
+    )
+    ticket = _load_text_input(
+        load_ticket_context, cfg["ticket_context_file"],
+        max_chars=cfg["ticket_context_max_chars"],
+        source=(
+            "--context-file" if context_file is not None else "PRXREF_TICKET_CONTEXT_FILE"
+        ),
     )
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -467,6 +630,15 @@ def _run_review(
         jira_base_url=cfg["jira_base_url"],
         jira_email=cfg["jira_email"],
         jira_api_token=cfg["jira_api_token"],
+        rules=rules,
+        ticket=ticket,
+        # Already parsed by load_config into {model: costs.ModelPrice}.
+        price_table=cfg["price_table"],
+        post_cost=cfg["post_cost"],
+        size_warn_lines=cfg["size_warn_lines"],
+        size_warn_files=cfg["size_warn_files"],
+        size_ignore_globs=cfg["size_ignore_globs"],
+        replay=replay,
     )
 
 
@@ -476,9 +648,15 @@ def _webhook_handler(url: str) -> None:
     ``post=True`` is the daemon's intent, not its last word: ``_run_review``
     downgrades it when the configured dry run says so, which is the only way to
     observe the daemon against a real repo without writing to it.
+
+    ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
+    webhook: one static ticket file cannot describe every PR the daemon sees,
+    so its findings always carry scope ``unknown``. The team rules file still
+    comes from the daemon's environment, re-read on every webhook. The daemon
+    passes no replay flag, so it never replays.
     """
     try:
-        _run_review(url, post=True)
+        _run_review(url, post=True, context_file="")
     except Exception:
         logger.exception("webhook review failed for %s", url)
 
@@ -534,6 +712,12 @@ def _cmd_review(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             trace_dir=args.trace_dir,
             spec_sources=args.spec,
+            rules_file=args.rules_file,
+            context_file=args.context_file,
+            base_sha=args.base_sha,
+            head_sha=args.head_sha,
+            no_threads=args.no_threads,
+            diff_file=args.diff_file,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
@@ -556,7 +740,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
             "pull-requests, GitHub pull, or GitLab merge_requests link "
             "(bitbucket.org, github.com, gitlab.com, or a self-hosted "
             "Bitbucket Data Center, GitHub Enterprise Server, or GitLab "
-            "host); the URL must keep the forge's own path shape.",
+            "host), or an Azure DevOps pullrequest link (dev.azure.com, "
+            "*.visualstudio.com, or an Azure DevOps Server host); the URL "
+            "must keep the forge's own path shape.",
             file=sys.stderr,
         )
         return 0
@@ -575,6 +761,14 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
+    # Said once at startup rather than per webhook: _webhook_handler blanks
+    # the variable on every review, and an operator who set it should learn
+    # that before the first PR arrives, not infer it from unscoped findings.
+    if os.environ.get("PRXREF_TICKET_CONTEXT_FILE", "").strip():
+        logger.warning(
+            "PRXREF_TICKET_CONTEXT_FILE is ignored by prxref serve: one file "
+            "cannot describe every PR"
+        )
     serve_fn = importlib.import_module("prxref.webhooks").serve
     serve_fn(port=args.port, host=args.host, handler=_webhook_handler)
     return 0
