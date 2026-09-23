@@ -53,6 +53,22 @@ Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
 its own findings against prxref's own stale comments and then delete them.
 
+## Severity map from team review rules
+
+<!-- 0.14 placeholder: W63 -->
+
+## Spec grounding
+
+<!-- 0.14 placeholder: W-SPECDOCS -->
+
+## Ticket scope
+
+<!-- 0.14 placeholder: W64A -->
+
+## Replay runs and the thread passes
+
+<!-- 0.14 placeholder: W65C -->
+
 ## Drop reasons
 
 | `drop_reason` | Pass | Meaning |

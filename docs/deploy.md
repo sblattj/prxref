@@ -55,6 +55,10 @@ Configure secret tokens and match the events accepted by `prxref`:
 
 *First deployment:* set `PRXREF_DRY_RUN=1` before pointing webhooks at a busy repository. The daemon then runs every review in full — fetch, chunk, LLM calls, quality gate — and writes nothing back to the forge, so you can read the logs and confirm the review is sane before it starts commenting. Unset it when you are satisfied. This is the only way to observe the daemon against real traffic: `--no-post` covers a single CLI invocation, and `serve` takes only `--host`/`--port`, so the daemon has no flag-based equivalent.
 
+### Azure DevOps service hooks
+
+<!-- 0.14 placeholder: W62B -->
+
 ---
 
 ## 3. Non-Docker Deployment (Systemd / Bare Metal)
@@ -157,3 +161,15 @@ Practical consequences for a pipeline:
 - **Do not add `continue-on-error` to hide review failures.** They already exit `0`. Suppressing errors instead hides the `2` that tells you the deployment is misconfigured — and a review step that can never fail is a review step nobody notices has stopped running.
 - **Do not gate a merge on the exit code.** There is deliberately no `PRXREF_FAIL_ON`. A probabilistic reviewer used as a gate is worse than no gate: the first false positive teaches the team to bypass it. Read the verdict from the posted summary comment instead.
 - **Watch for the partial-review banner.** A run where some chunks failed still exits `0` and still posts a summary; the banner in that summary (and the `coverage: N/M chunks reviewed` line on stdout) is the only signal that the review was incomplete. The most common cause is a starved completion budget — see [Reasoning models and the token budget](env-vars.md#reasoning-models-and-the-token-budget).
+
+---
+
+## 6. CLI Model Backends in Docker and CI
+
+<!-- 0.14 placeholder: W66B -->
+
+---
+
+## 7. Spec Sources in CI and on the Daemon
+
+<!-- 0.14 placeholder: W-SPECDOCS -->

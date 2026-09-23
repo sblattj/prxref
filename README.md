@@ -1,8 +1,8 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
+Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps — Cloud and self-hosted.
 
-prxref inspects pull and merge requests across the three major code hosting forges in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary.
+prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, and Azure DevOps in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary. Give it the spec or ticket a change implements with `--spec` (a web page, a local file or directory, or a Jira ticket URL) and the review also checks the diff against that spec.
 
 ```
                   ┌──────────────────────┐
@@ -63,6 +63,10 @@ silently — it is kept with a `drop_reason` for the run log, and visible in a
 
 The passes, the checks, every `drop_reason` string, and which of them have a
 knob: [docs/quality.md](docs/quality.md).
+
+## PR Size Advisory
+
+<!-- 0.14 placeholder: W68 -->
 
 ## Quickstart
 
@@ -156,14 +160,56 @@ The service exposes:
 - `POST /webhook` — verifies HMAC or token signatures per forge, enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially.
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
+## Review Against a Spec or Ticket
+
+<!-- 0.14 placeholder: W-SPECDOCS -->
+
+## Ticket Context and Scope
+
+<!-- 0.14 placeholder: W64A -->
+
+## Team Review Rules
+
+<!-- 0.14 placeholder: W63 -->
+
+## Finding Markers
+
+<!-- 0.14 placeholder: W64B -->
+
 ## CLI Flags
 
-- `--pr-url URL` — full web URL of the PR or MR (required for `review`).
+`prxref review` takes:
+
+- `--pr-url URL` — full web URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure DevOps. Required unless `--diff-file` is given.
 - `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge. In text mode this also prints every active finding's location, title, and body, and every dropped finding with its drop reason.
 - `--max-chunks N` — override maximum diff chunks evaluated (default `8`).
 - `--timeout SECONDS` — override the per-model request deadline (default `45.0`, or `PRXREF_LLM_TIMEOUT` when set); the flag wins for the current invocation only.
-- `-v, --verbose` — output run timing, token counts, and finding breakdowns to stdout; in text mode this also prints finding bodies and dropped findings, same as `--no-post`.
-- `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout — `verdict`, `findings` (active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `title`, `body`, `drop_reason`), `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`, `posted`, and `sampling` (the `temperature`, `seed`, and `models` the run had in force — every review result carries it).
+- `--spec URL_OR_PATH` — a spec or ticket to review the PR against: a public web URL, a local file or directory, or a Jira ticket URL. Repeatable. When given, the flags replace `PRXREF_SPEC_SOURCES` entirely rather than adding to it. See [Review Against a Spec or Ticket](#review-against-a-spec-or-ticket).
+- `--rules-file PATH` — your team's review rules (Markdown or text, with optional front matter carrying a `severity:` map), added to every review prompt. Overrides `PRXREF_REVIEW_RULES` for this run, and `--rules-file ""` turns an environment-configured file off. Read it from a trusted checkout, never from the PR under review. See [Team Review Rules](#team-review-rules).
+- `--context-file PATH` — the ticket the PR is meant to implement (plain text or Markdown). Every finding is then marked in, out of, or of unknown ticket scope, and an empty file means "this PR has no ticket". Overrides `PRXREF_TICKET_CONTEXT_FILE` for this run, and `--context-file ""` turns it off. See [Ticket Context and Scope](#ticket-context-and-scope).
+- `--trace-dir DIR` — write each review unit's exact prompt halves, raw model response, and metadata to `DIR` (`chunk0.system.md`, `chunk0.user.md`, `chunk0.response.json`, `chunk0.meta.json`, and so on for each chunk and for the whole-PR `sweep`). `PRXREF_TRACE_DIR` does the same for every run; the flag wins when both are set.
+- `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
+- `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout, with these keys in this order:
+  - `verdict`;
+  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `title`, `body`, `drop_reason`;
+  - `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`;
+  - `cost_usd`: the run's cost in USD, `null` when no source could price it (never `0` for an unknown cost), and `cost_estimated`: `true` when any part of it came from `PRXREF_PRICE_TABLE`. See [Cost accounting](docs/llm.md#cost-accounting);
+  - `posted`;
+  - `review_rules` (`path`, `sha256`, `chars`, `max_chars`, `truncated`, `severity_map`), `ticket_context` (`path`, `sha256`, `chars`, `max_chars`, `truncated`, `has_acceptance_criteria`, `empty`; never the ticket text), `spec_grounding` (`sources`, `ok`, `failed`, `constraints`, `digest_sha256`), and `size_advisory` (`changed_lines`, `changed_files`, `lines_limit`, `files_limit`, `triggered`, `message`). These four are always present and `null` when their feature is off;
+  - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
+  - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`), on replay runs only.
+
+Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evaluation)). Any of them turns posting off for the run:
+
+- `--base-sha SHA` / `--head-sha SHA` — review the pinned range `BASE...HEAD` of the `--pr-url` repository (the merge-base diff, as the PR's own diff is), with file context read at `HEAD`. The two come as a pair, must be full 40- or 64-character hex commit SHAs, must differ, and need `--pr-url`.
+- `--no-threads` — hide the PR's existing threads from the prompt and from the thread-dedup passes.
+- `--diff-file PATH` — review this unified diff (`git diff` or `git format-patch` output) instead of fetching one; `--pr-url` becomes optional.
+
+The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
+
+## Replay Mode (Evaluation)
+
+<!-- 0.14 placeholder: W65C -->
 
 ## Exit Codes
 
