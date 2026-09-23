@@ -9,6 +9,7 @@ import pytest
 from prxref.forges.base import Thread
 from prxref.quality import (
     CONTAINMENT_NOTE_SUFFIX,
+    _blank_spec_quotes,
     _body_cited_lines,
     _resolve_max_errors,
     active,
@@ -1664,6 +1665,24 @@ LEGITIMATE_CASES = [
     ("if-null", "If cfg is None line 30 raises AttributeError."),
 ]
 
+SPEC_DIGEST = "\n".join([
+    "[spec:spec.md#L1] (MUST) If a session already exists, the server MUST "
+    "reuse it.",
+    "[spec:spec.md#L2] (MUST) Clients MUST send clientInfo unless the session "
+    "already exists.",
+    "[spec:spec.md#L3] (MUST) If the server is still initializing, the client "
+    "MUST NOT send requests.",
+    "[spec:spec.md#L4] (MUST) Tokens MUST NOT be logged.",
+    "[spec:spec.md#L5] (MUST) Tools MUST keep the mcp prefix if they are "
+    "already registered.",
+    '[spec:spec.md#L6] (MUST) Set "mode" to strict if it is still unset.',
+    "[spec:spec.md#L7] (MUST) The server's session MUST be reused if it "
+    "already exists.",
+    "[spec:spec.md#L8] (SHOULD) Servers SHOULD retry if the upstream is still "
+    "unavailable.",
+    "[spec:spec.md#L9] (MAY) Clients MAY still send the legacy header.",
+])
+
 
 class TestHedgeGate:
     @pytest.mark.parametrize(
@@ -1733,16 +1752,26 @@ class TestHedgeGate:
         out = apply_quality_gate(hedged, max_errors=1)
         assert out[0].drop_reason.startswith("hedged:")
 
-    @pytest.mark.parametrize("quote", [
+    SPEC_QUOTES = [
         '"If a session already exists, the server MUST reuse it."',
         '"Clients MUST send clientInfo unless the session already exists."',
         '“If the server is still initializing, the client MUST NOT send requests.”',
-    ])
+    ]
+
+    @pytest.mark.parametrize("quote", SPEC_QUOTES)
     def test_a_quoted_spec_condition_is_not_a_hedge(self, quote):
         """The spec severity must quote its constraint verbatim; a condition
         inside that quote is the spec's, not the model's."""
         f = _f(severity="spec", body=f"Spec: {quote} The diff violates it.")
-        assert apply_hedge_gate([f])[0].drop_reason is None
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason is None
+
+    @pytest.mark.parametrize("quote", SPEC_QUOTES)
+    def test_without_a_digest_the_quote_is_read_like_the_body(self, quote):
+        f = _f(severity="spec", body=f"Spec: {quote} The diff violates it.")
+        assert apply_hedge_gate([f])[0].drop_reason.startswith('hedged: "')
+        out = apply_hedge_gate([f], spec_digest="")
+        assert out[0].drop_reason.startswith('hedged: "')
 
     def test_a_hedge_outside_the_spec_quote_still_drops(self):
         f = _f(
@@ -1750,7 +1779,114 @@ class TestHedgeGate:
             body='Spec: "Tokens MUST NOT be logged." If the logger is still '
                  "at debug level, the token leaks.",
         )
-        assert apply_hedge_gate([f])[0].drop_reason.startswith("hedged:")
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason == 'hedged: "If the logger is still"'
+
+    def test_a_quote_whose_case_differs_from_the_digest_is_not_a_hedge(self):
+        f = _f(
+            severity="spec",
+            body='Spec: "tools MUST keep the mcp prefix if they are already '
+                 'registered"; the diff drops it.',
+        )
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason is None
+
+    def test_a_fake_quote_not_in_the_digest_is_read_like_the_body(self):
+        f = _f(
+            severity="spec",
+            body='Spec: "If the cache is still warm, reads MUST bypass it." '
+                 "The diff reads through it.",
+        )
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason == 'hedged: "If the cache is still"'
+
+    def test_an_inner_quoted_literal_stays_inside_the_quote(self):
+        f = _f(
+            severity="spec",
+            body='Spec: "Set "mode" to strict if it is still unset." '
+                 "The diff leaves it lax.",
+        )
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason is None
+
+    def test_an_unclosed_quote_backs_off_to_its_last_closing_quote(self):
+        body = ('Spec: "Set "mode" to strict if it is still unset. '
+                "The diff leaves it lax.")
+        assert _blank_spec_quotes(body, SPEC_DIGEST) == (
+            'Spec: "" to strict if it is still unset. The diff leaves it lax.'
+        )
+        out = apply_hedge_gate([_f(severity="spec", body=body)],
+                               spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason == 'hedged: "if it is still"'
+
+    def test_a_quote_with_no_closing_quote_is_read_like_the_body(self):
+        body = ("Spec: If a session already exists, the server MUST reuse it. "
+                "The diff creates a new one.")
+        assert _blank_spec_quotes(body, SPEC_DIGEST) == body
+        out = apply_hedge_gate([_f(severity="spec", body=body)],
+                               spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason.startswith('hedged: "If a session')
+
+    def test_an_apostrophe_inside_the_quote_is_not_its_end(self):
+        body = ('Spec: "The server\'s session MUST be reused if it already '
+                'exists." The diff opens another.')
+        assert _blank_spec_quotes(body, SPEC_DIGEST) == (
+            'Spec: "" The diff opens another.'
+        )
+
+    @pytest.mark.parametrize("quoted", [
+        '"Servers SHOULD retry if the upstream is still unavailable."',
+        "“Servers SHOULD retry if the upstream is still unavailable.”",
+        "‘Servers SHOULD retry if the upstream is still unavailable.’",
+        "'Servers SHOULD retry if the upstream is still unavailable.'",
+    ], ids=["straight-double", "curly-double", "curly-single", "straight-single"])
+    def test_straight_and_curly_quotes_are_recognised(self, quoted):
+        body = f"Spec: {quoted} The diff never retries."
+        assert _blank_spec_quotes(body, SPEC_DIGEST) == (
+            f"Spec: {quoted[0]}{quoted[-1]} The diff never retries."
+        )
+        out = apply_hedge_gate([_f(severity="spec", body=body)],
+                               spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason is None
+
+    def test_a_modal_still_inside_the_quote_is_not_a_hedge(self):
+        f = _f(
+            severity="spec",
+            body='Spec: "Clients MAY still send the legacy header." '
+                 "The diff rejects it.",
+        )
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason is None
+
+    @pytest.mark.parametrize("severity", ["error", "warning", "outofscope"])
+    def test_every_severity_gets_the_quote_exemption(self, severity):
+        f = _f(
+            severity=severity,
+            body='Spec: "If a session already exists, the server MUST reuse '
+                 'it." The diff creates a new one.',
+        )
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason is None
+
+    def test_every_quote_in_the_body_is_checked_on_its_own(self):
+        f = _f(
+            severity="spec",
+            body='Spec: "Tokens MUST NOT be logged." Also Spec: "If the cache '
+                 'is still warm, reads MUST bypass it."',
+        )
+        out = apply_hedge_gate([f], spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason == 'hedged: "If the cache is still"'
+
+    def test_the_title_is_read_as_written(self):
+        quote = '"If a session already exists, the server MUST reuse it."'
+        hedged_title = _f(severity="spec", title="Session may still leak",
+                          body=f"Spec: {quote}")
+        quoted_title = _f(severity="spec", title=f"Spec: {quote}",
+                          body="The diff creates a new session.")
+        out = apply_hedge_gate([hedged_title, quoted_title],
+                               spec_digest=SPEC_DIGEST)
+        assert out[0].drop_reason == 'hedged: "may still"'
+        assert out[1].drop_reason == 'hedged: "If a session already"'
 
 
 class TestApplyContainmentNote:
