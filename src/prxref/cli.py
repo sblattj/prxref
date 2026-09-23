@@ -45,8 +45,10 @@ from typing import Any
 
 import prxref
 from prxref.config import load_config, make_forge
+from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
 from prxref.llm import ConfigError
+from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
 from prxref.viz import render_file
 
 logger = logging.getLogger("prxref")
@@ -176,6 +178,36 @@ def _fmt_tokens(result: Any) -> str:
     return f"{inp}+{out}"
 
 
+def _fmt_cost(result: Any) -> str:
+    """Render the run's cost for the ``-v`` line.
+
+    ``costs.cost_label`` of the record's ``cost_usd`` and ``cost_estimated``
+    (``$0.0007``, ``~$0.0007 (est.)``, or ``cost unknown`` for ``None``), and
+    ``-`` when the result carries no ``cost_usd`` key at all. An absent key
+    means nothing measured the cost; ``None`` means it was measured and no
+    source could price it. The two are different claims, so they print
+    differently.
+    """
+    if not isinstance(result, dict) or "cost_usd" not in result:
+        return "-"
+    return cost_label(result.get("cost_usd"), result.get("cost_estimated") is True)
+
+
+def _dash(value: Any, width: int | None = None) -> str:
+    if value is None or value == "":
+        return "-"
+    text = str(value)
+    return text[:width] if width else text
+
+
+def _scope_counts(result: dict) -> tuple[int, int, int]:
+    active = result.get("findings_active")
+    scopes = [normalize_scope(getattr(f, "scope", None)) for f in active] if isinstance(active, list) else []
+    n_in = scopes.count(SCOPE_IN)
+    n_out = scopes.count(SCOPE_OUT)
+    return n_in, n_out, len(scopes) - n_in - n_out
+
+
 def _print_summary(
     result: Any,
     elapsed_s: float,
@@ -183,19 +215,64 @@ def _print_summary(
     verbose: bool,
     out=None,
 ) -> None:
+    """Print the text-mode summary of one review.
+
+    Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
+    ``size advisory:`` when the PR-size advisory fired; and ``replay:`` when
+    the run was a replay, so a replay can never be read as a live review.
+    Under ``-v`` it adds the finding counts, the ``elapsed/tokens/cost`` line,
+    and one line for each configured input: ``rules:``, ``ticket:`` (with the
+    active findings' scope counts), and ``spec:``. ``result`` may be partial,
+    or not a dict at all; a missing or ``None`` record prints nothing.
+    """
     target = sys.stdout if out is None else out
+    record = result if isinstance(result, dict) else {}
     verdict = result.get("verdict") if isinstance(result, dict) else result
     print(f"verdict: {verdict if verdict is not None else 'done'}", file=target)
-    failed = result.get("chunks_failed", 0) if isinstance(result, dict) else 0
+    failed = record.get("chunks_failed", 0)
     if failed:
-        reviewed = result.get("chunks_reviewed", 0)
+        reviewed = record.get("chunks_reviewed", 0)
         print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
+    size = record.get("size_advisory")
+    if isinstance(size, dict) and size.get("message"):
+        print(f"size advisory: {size['message']}", file=target)
+    replay = record.get("replay")
+    if isinstance(replay, dict):
+        print(
+            f"replay: base={_dash(replay.get('base_sha'), 12)} head={_dash(replay.get('head_sha'), 12)} "
+            f"threads={_dash(replay.get('threads'))} diff_file={_dash(replay.get('diff_file'))}",
+            file=target,
+        )
     if not verbose:
         return
-    dropped = result.get("findings_dropped", []) if isinstance(result, dict) else []
+    dropped = record.get("findings_dropped", [])
     dropped = len(dropped) if isinstance(dropped, list) else 0
     print(f"counts: {_fmt_counts(result)} (dropped: {dropped})", file=target)
-    print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)}", file=target)
+    print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)} cost: {_fmt_cost(result)}", file=target)
+    rules = record.get("review_rules")
+    if isinstance(rules, dict):
+        truncated = f" (truncated at {_dash(rules.get('max_chars'))})" if rules.get("truncated") else ""
+        print(
+            f"rules: {_dash(rules.get('path'))} sha256={_dash(rules.get('sha256'), 12)} "
+            f"chars={_dash(rules.get('chars'))}{truncated}",
+            file=target,
+        )
+    ticket = record.get("ticket_context")
+    if isinstance(ticket, dict):
+        truncated = " truncated" if ticket.get("truncated") else ""
+        n_in, n_out, n_unknown = _scope_counts(record)
+        print(
+            f"ticket: {_dash(ticket.get('path'))} sha256={_dash(ticket.get('sha256'), 12)} "
+            f"chars={_dash(ticket.get('chars'))}{truncated} in={n_in} out={n_out} unknown={n_unknown}",
+            file=target,
+        )
+    spec = record.get("spec_grounding")
+    if isinstance(spec, dict):
+        print(
+            f"spec: {_dash(spec.get('ok'))}/{_dash(spec.get('sources'))} source(s) ok, "
+            f"{_dash(spec.get('constraints'))} constraint(s)",
+            file=target,
+        )
 
 
 def _fmt_finding_line(f: Any) -> str:
@@ -244,12 +321,18 @@ def _print_findings(result: Any, *, out=None) -> None:
 
 def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     """Build one JSON finding row explicitly (``Finding`` is a dataclass, not
-    JSON-serializable by default)."""
+    JSON-serializable by default).
+
+    ``scope`` is the finding's position relative to the ticket context
+    (``in``, ``out`` or ``unknown``); a finding object without the attribute
+    reports ``unknown``.
+    """
     return {
         "file": f.file,
         "line": f.line,
         "severity": f.severity,
         "confidence": f.confidence,
+        "scope": getattr(f, "scope", "unknown"),
         "title": f.title,
         "body": f.body,
         "drop_reason": drop_reason,
@@ -259,11 +342,21 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
 def _build_json_result(result: Any) -> dict:
     """Build the single JSON payload for ``--format json``.
 
+    Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
+    ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
+    ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
+    ``ticket_context``, ``spec_grounding``, ``size_advisory``, then
+    ``sampling`` and ``replay`` when present.
+
     Tolerates an error-shaped or partial result (a dict missing keys, as an
-    incomplete or failed run may return): every key defaults to ``None`` and
-    ``findings`` defaults to ``[]`` rather than raising. ``sampling`` is
-    forwarded only when the result already carries it — a sibling feature's
-    key, not one this CLI invents.
+    incomplete or failed run may return): every always-present key defaults
+    to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
+    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) are
+    always emitted and are ``null`` when their feature is off; ``cost_usd`` is
+    also ``null`` when no source could price the run, never ``0``.
+    ``sampling`` and ``replay`` are forwarded only when the result already
+    carries them. ``replay`` is on replay runs only, so a normal run's
+    payload has no ``replay`` key at all.
     """
     if not isinstance(result, dict):
         result = {}
@@ -283,10 +376,18 @@ def _build_json_result(result: Any) -> dict:
         "elapsed_ms": result.get("elapsed_ms"),
         "input_tokens": result.get("input_tokens"),
         "output_tokens": result.get("output_tokens"),
+        "cost_usd": result.get("cost_usd"),
+        "cost_estimated": result.get("cost_estimated"),
         "posted": result.get("posted"),
+        "review_rules": result.get("review_rules"),
+        "ticket_context": result.get("ticket_context"),
+        "spec_grounding": result.get("spec_grounding"),
+        "size_advisory": result.get("size_advisory"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
+    if "replay" in result:
+        payload["replay"] = result["replay"]
     return payload
 
 
