@@ -1,6 +1,6 @@
 """Regression tests for issue #03: copy/rename diff headers read as deletion.
 
-docs/issues/inbox-2026-09-04/prxref-issues/03-rename-copy-header-read-as-deletion.md
+The 2026-09-04 inbox report, issue 03 (private, not tracked)
 reports that a Bitbucket Server ``copy from``/``copy to`` diff header (a
 monorepo package copied to a new location) got the copy's SOURCE path
 reported as removed, even though the same diff contains a separate section

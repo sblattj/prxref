@@ -56,8 +56,7 @@ TWO_FILE_DIFF = _diff_with_lines(MCP_PATH, _MCP_LINES) + _diff_with_lines(
     DOCKERFILE, _DOCKER_LINES
 )
 
-# Verbatim from docs/issues/inbox-2026-09-04/prxref-issues/
-# 05-quality-gate-admits-self-hedged-findings.md
+# Verbatim from the 2026-09-04 inbox report, issue 05 (private, not tracked)
 CANVAS_BODY = (
     "The diff removes the close()/stream-wrapper lifecycle and returns "
     "createMcpHandler(serverFactory) directly, so nothing calls canvas cleanup "
@@ -65,7 +64,7 @@ CANVAS_BODY = (
     "lease is only released when the enclosing scope (service layer) closes, "
     "not per request."
 )
-# Verbatim from docs/issues/inbox-2026-09-04/prxref-issue-2026-09-03.md §1
+# Verbatim from the 2026-09-04 inbox report, issue 05 §1 (private, not tracked)
 NPM_CI_BODY = (
     "The deps stage copies only api, worker, shared, "
     "config, auth and billing manifests, but this PR adds "
