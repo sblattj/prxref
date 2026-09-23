@@ -15,11 +15,10 @@ was transcribed from.
 
 ## Origin
 
-Produced by the `sharpen` retro of session
-`974bbdda-6362-4426-9971-fec77fabc1d9` (2026-08-30/31). That session stood up
-Bitbucket Data Center 10.4.2 in Docker with an unattended timebomb-license
-setup, seeded a repo with three planted bugs, opened a real PR, and ran
-`prxref review` against it with posting enabled.
+Produced by a retrospective of the 2026-08-30/31 live-instance session, which
+stood up Bitbucket Data Center 10.4.2 in Docker with an unattended
+timebomb-license setup, seeded a repo with three planted bugs, opened a real
+PR, and ran `prxref review` against it with posting enabled.
 
 **Two genuine bugs fell out of one live run, neither of which any hand-written
 fixture had ever caught, for the life of the project:**
