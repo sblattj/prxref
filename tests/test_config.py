@@ -518,6 +518,145 @@ class TestChunkFileCapAndContextConfig:
         assert cfg["chunk_context_lines"] == 100_000
 
 
+class TestSpecSourceConfig:
+    """PRXREF_SPEC_SOURCES / PRXREF_SPEC_MAX_CHARS / PRXREF_SPEC_DIGEST_TOKENS and the
+    three PRXREF_JIRA_* keys: the spec-grounded review's input surface."""
+
+    def test_defaults_are_inert(self):
+        cfg = load_config()
+        assert cfg["spec_sources"] == []
+        assert cfg["spec_max_chars"] == 120000
+        assert isinstance(cfg["spec_max_chars"], int)
+        assert cfg["spec_digest_tokens"] == 3000
+        assert isinstance(cfg["spec_digest_tokens"], int)
+        assert cfg["jira_base_url"] == ""
+        assert cfg["jira_email"] == ""
+        assert cfg["jira_api_token"] == ""
+
+    def test_the_new_keys_are_declared_in_their_tables(self):
+        """The four-surface rule starts here: list key in _LIST_KEYS, both ints
+        in _INT_KEYS and _RANGES, the three strings in none of them."""
+        assert "spec_sources" in config._LIST_KEYS
+        assert {"spec_max_chars", "spec_digest_tokens"} <= config._INT_KEYS
+        assert {"spec_max_chars", "spec_digest_tokens"} <= set(config._RANGES)
+        for key in ("jira_base_url", "jira_email", "jira_api_token"):
+            assert key not in (
+                config._INT_KEYS | config._FLOAT_KEYS | config._BOOL_KEYS
+                | config._LIST_KEYS
+            )
+
+    def test_env_values_coerce(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SPEC_MAX_CHARS", "5000")
+        monkeypatch.setenv("PRXREF_SPEC_DIGEST_TOKENS", "500")
+        monkeypatch.setenv("PRXREF_JIRA_BASE_URL", "https://jira.example.com")
+        monkeypatch.setenv("PRXREF_JIRA_EMAIL", "ops@example.com")
+        monkeypatch.setenv("PRXREF_JIRA_API_TOKEN", "token")
+        cfg = load_config()
+        assert cfg["spec_max_chars"] == 5000
+        assert isinstance(cfg["spec_max_chars"], int)
+        assert cfg["spec_digest_tokens"] == 500
+        assert isinstance(cfg["spec_digest_tokens"], int)
+        assert cfg["jira_base_url"] == "https://jira.example.com"
+        assert cfg["jira_email"] == "ops@example.com"
+        assert cfg["jira_api_token"] == "token"
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("a", ["a"]),
+        ("a,b", ["a", "b"]),
+        ("a, b", ["a", "b"]),
+        ("a b", ["a", "b"]),
+        ("a b,c  d", ["a", "b", "c", "d"]),
+        ("  a  ,  b  ", ["a", "b"]),
+        ("a,,b", ["a", "b"]),
+        ("a,b,", ["a", "b"]),
+    ])
+    def test_spec_sources_split_on_comma_and_whitespace(
+        self, monkeypatch, raw, expected
+    ):
+        """A PRXREF_SPEC_SOURCES value may separate sources with commas, whitespace,
+        or both — URLs and paths are opaque strings, so the only split that
+        cannot corrupt one is a run of separators."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", raw)
+        assert load_config()["spec_sources"] == expected
+
+    @pytest.mark.parametrize("name,key,expected", [
+        ("PRXREF_SPEC_SOURCES", "spec_sources", []),
+        ("PRXREF_SPEC_MAX_CHARS", "spec_max_chars", 120000),
+        ("PRXREF_SPEC_DIGEST_TOKENS", "spec_digest_tokens", 3000),
+    ])
+    def test_whitespace_only_env_reads_as_unset(self, monkeypatch, name, key, expected):
+        monkeypatch.setenv(name, "   ")
+        assert load_config()[key] == expected
+
+    @pytest.mark.parametrize("name", [
+        "PRXREF_SPEC_MAX_CHARS",
+        "PRXREF_SPEC_DIGEST_TOKENS",
+    ])
+    def test_malformed_int_names_the_variable(self, monkeypatch, name):
+        monkeypatch.setenv(name, "lots")
+        with pytest.raises(ConfigError, match=name):
+            load_config()
+
+    @pytest.mark.parametrize("name", [
+        "PRXREF_SPEC_MAX_CHARS",
+        "PRXREF_SPEC_DIGEST_TOKENS",
+    ])
+    @pytest.mark.parametrize("raw", ["0", "-1"])
+    def test_non_positive_spec_ints_rejected(self, monkeypatch, name, raw):
+        """Same bound as every other size knob: positive, unbounded above."""
+        monkeypatch.setenv(name, raw)
+        with pytest.raises(ConfigError, match=name):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", [
+        ("spec_max_chars", "PRXREF_SPEC_MAX_CHARS"),
+        ("spec_digest_tokens", "PRXREF_SPEC_DIGEST_TOKENS"),
+    ])
+    def test_overrides_cannot_smuggle_a_degenerate_value(self, key, env):
+        """An override is still range-checked, and reported as the override."""
+        with pytest.raises(ConfigError, match=key) as exc:
+            load_config(**{key: 0})
+        assert env not in str(exc.value)
+
+    def test_no_upper_bound_is_invented(self, monkeypatch):
+        """A ceiling would be corpus-size-specific; a huge cap is a cap."""
+        monkeypatch.setenv("PRXREF_SPEC_MAX_CHARS", "10000000")
+        monkeypatch.setenv("PRXREF_SPEC_DIGEST_TOKENS", "1000000")
+        cfg = load_config()
+        assert cfg["spec_max_chars"] == 10_000_000
+        assert cfg["spec_digest_tokens"] == 1_000_000
+
+    def test_overrides_accept_the_new_keys(self):
+        cfg = load_config(
+            spec_sources=["https://a/spec.md"],
+            spec_max_chars=1,
+            spec_digest_tokens=1,
+            jira_base_url="https://jira.example.com",
+            jira_email="ops@example.com",
+            jira_api_token="token",
+        )
+        assert cfg["spec_sources"] == ["https://a/spec.md"]
+        assert cfg["spec_max_chars"] == 1
+        assert cfg["spec_digest_tokens"] == 1
+        assert cfg["jira_base_url"] == "https://jira.example.com"
+        assert cfg["jira_email"] == "ops@example.com"
+        assert cfg["jira_api_token"] == "token"
+
+    def test_an_override_replaces_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "env-a env-b")
+        assert load_config(spec_sources=["flag-a"])["spec_sources"] == ["flag-a"]
+
+    def test_a_none_override_is_ignored(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "env-a")
+        assert load_config(spec_sources=None)["spec_sources"] == ["env-a"]
+
+    def test_the_widened_list_split_is_a_noop_for_llm_models(self, monkeypatch):
+        """The comma-or-whitespace split applies to every list key; model
+        names can never contain spaces, so ``llm_models`` only gains slack."""
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "m1 m2,m3")
+        assert load_config()["llm_models"] == ["m1", "m2", "m3"]
+
+
 class TestPreExistingNumericRanges:
     """The three numeric keys that predate the range check are now covered too.
 

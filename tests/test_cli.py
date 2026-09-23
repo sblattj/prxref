@@ -1,4 +1,5 @@
 """Tests for prxref.cli: review subcommand, serve daemon, --version, and non-blocking exits."""
+import inspect
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from prxref import __version__, cli
+from prxref import orchestrator as real_orchestrator
 from prxref.cli import main
 from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
@@ -772,6 +774,129 @@ class TestDegenerateValuesNeverReachTheOrchestrator:
         monkeypatch.setenv(name, raw)
         assert self._review(monkeypatch) == 0
         assert len(fake_runtime["orchestrate_calls"]) == 1
+
+
+class TestSpecFlag:
+    """``--spec`` collects repeatable sources and rides the ``load_config``
+    override path, exactly like ``--max-chunks``: the flag replaces the
+    PRXREF_SPEC_SOURCES environment list wholesale (no merge)."""
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+    URL = "https://github.com/org/repo/pull/7"
+
+    @pytest.fixture(autouse=True)
+    def _detect(self, monkeypatch):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+
+    def test_the_flag_is_repeatable_and_defaults_to_none(self):
+        parser = cli._build_parser()
+        args = parser.parse_args(["review", "--pr-url", self.URL])
+        assert args.spec is None
+        args = parser.parse_args([
+            "review", "--pr-url", self.URL,
+            "--spec", "https://a/spec.md", "--spec", "docs/specs",
+        ])
+        assert args.spec == ["https://a/spec.md", "docs/specs"]
+
+    def test_flag_values_reach_the_resolved_config(self, fake_runtime):
+        """The override is observed on the kwargs the orchestrator is actually
+        handed, not on the parser or the resolved config: a value that stops at
+        ``load_config`` grounds nothing."""
+        assert main([
+            "review", "--pr-url", self.URL, "--no-post",
+            "--spec", "https://a/spec.md", "--spec", "docs/specs",
+        ]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
+            "https://a/spec.md", "docs/specs",
+        ]
+
+    def test_no_flag_and_no_env_leaves_the_default_empty(self, fake_runtime):
+        assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == []
+
+    def test_env_sources_load_through_the_normal_path(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md docs/specs")
+        assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
+            "https://a/spec.md", "docs/specs",
+        ]
+
+    def test_the_flag_replaces_the_environment_without_merging(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://env/only.md")
+        assert main([
+            "review", "--pr-url", self.URL, "--no-post",
+            "--spec", "https://flag/only.md",
+        ]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
+            "https://flag/only.md"
+        ]
+
+    def test_the_webhook_daemon_gets_the_environment_sources(
+        self, fake_runtime, monkeypatch
+    ):
+        """The daemon passes no flags, so PRXREF_SPEC_SOURCES in its environment is
+        the only way it can ground a review — and it must reach the pipeline."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
+        cli._webhook_handler(self.URL)
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == ["https://a/spec.md"]
+
+    def test_every_spec_key_reaches_the_orchestrator(
+        self, fake_runtime, monkeypatch
+    ):
+        """All six spec/Jira config keys ride into ``orchestrate_review``; the
+        daemon has no flags, so the environment is its only way in."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
+        monkeypatch.setenv("PRXREF_SPEC_MAX_CHARS", "5000")
+        monkeypatch.setenv("PRXREF_SPEC_DIGEST_TOKENS", "500")
+        monkeypatch.setenv("PRXREF_JIRA_BASE_URL", "https://jira.example.com")
+        monkeypatch.setenv("PRXREF_JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("PRXREF_JIRA_API_TOKEN", "t0ken")
+        cli._webhook_handler(self.URL)
+        kwargs = fake_runtime["orchestrate_calls"][0]
+        assert kwargs["spec_sources"] == ["https://a/spec.md"]
+        assert kwargs["spec_max_chars"] == 5000
+        assert kwargs["spec_digest_tokens"] == 500
+        assert kwargs["jira_base_url"] == "https://jira.example.com"
+        assert kwargs["jira_email"] == "bot@example.com"
+        assert kwargs["jira_api_token"] == "t0ken"
+
+
+def test_run_review_passes_only_real_orchestrate_kwargs(fake_runtime, monkeypatch):
+    """Every kwarg ``_run_review`` hands the orchestrator is a real parameter.
+
+    ``fake_runtime``'s double accepts ``**kwargs``, so a misspelt kwarg passes
+    every other test here while the real call raises ``TypeError`` — which
+    ``review`` swallows to exit 0, silently dropping the review. The signature
+    comes from the module imported at the top of this file, captured before the
+    fixture swapped ``sys.modules["prxref.orchestrator"]`` for the double.
+    """
+    real = real_orchestrator.orchestrate_review
+    assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
+    params = inspect.signature(real).parameters
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    ref = PRRef(
+        forge="github", host="github.com", owner="org", repo="repo",
+        number=7, url="https://github.com/org/repo/pull/7",
+    )
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: ref)
+
+    assert main(["review", "--pr-url", ref.url, "--no-post", "--spec", "docs/specs"]) == 0
+
+    calls = fake_runtime["orchestrate_calls"]
+    assert len(calls) == 1
+    assert calls[0], "the double recorded no kwargs, so the check below is vacuous"
+    assert sorted(set(calls[0]) - set(params)) == []
 
 
 class TestDryRun:

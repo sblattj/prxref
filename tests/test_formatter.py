@@ -68,6 +68,7 @@ class TestFormatInlineComment:
 
     def test_warning_and_note_markers(self):
         assert format_inline_comment(_f(severity="warning"), "a").startswith("🟧 **")
+        assert format_inline_comment(_f(severity="spec"), "a").startswith("🔍 **")
         assert format_inline_comment(_f(severity="outofscope"), "a").startswith("🟦 **")
 
     def test_unknown_severity_defaults_to_note(self):
@@ -112,9 +113,18 @@ class TestFormatSummaryCounts:
             findings_dropped=[],
         )
         assert "✅ Approved" in text
-        assert "🟥 0 error · 🟧 0 warning · 🟦 0 outofscope" in text
+        assert "🟥 0 error · 🟧 0 warning · 🔍 0 spec · 🟦 0 outofscope" in text
         assert "0 active of 0 raw" in text
         assert "No findings survived the quality passes." in text
+
+    def test_spec_count_present(self):
+        text = _summary(findings_active=[_f(severity="spec", title="Spec breach")])
+        assert "🔍 1 spec" in text
+
+    def test_no_specs_requested_leaves_no_grounding_note(self):
+        """The renderer owns the grounding note; the forge-neutral formatter
+        always renders it empty, so its output matches an ungrounded run."""
+        assert "Spec-grounded" not in _summary()
 
 
 class TestFormatSummaryTables:
@@ -129,6 +139,17 @@ class TestFormatSummaryTables:
         assert header in text
         assert text.index("z.py:2") < text.index("z.py:1")
         assert "| 🟥 | z.py:2 | Boom |" in text
+
+    def test_spec_rows_order_between_warning_and_outofscope(self):
+        text = _summary(
+            findings_active=[
+                _f(severity="outofscope", file="z.py", line=1),
+                _f(severity="spec", file="z.py", line=2, title="Spec breach"),
+                _f(severity="warning", file="z.py", line=3),
+            ]
+        )
+        assert text.index("z.py:3") < text.index("z.py:2") < text.index("z.py:1")
+        assert "| 🔍 | z.py:2 | Spec breach |" in text
 
     def test_file_level_finding_omits_line_zero(self):
         text = _summary(findings_active=[_f(line=0)])

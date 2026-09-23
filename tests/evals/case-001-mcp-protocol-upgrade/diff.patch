@@ -1,0 +1,32 @@
+diff --git a/src/mcp_client/session.py b/src/mcp_client/session.py
+--- a/src/mcp_client/session.py
++++ b/src/mcp_client/session.py
+@@ -1,6 +1,6 @@
+ """Session handling for the MCP client."""
+
+-PROTOCOL_VERSION = "2025-06-18"
++PROTOCOL_VERSION = "2026-07-28"
+
+
+class McpSession:
+@@ -12,9 +12,19 @@
+         self.session_id = None
+
+     def initialize_payload(self):
+         return {
+             "protocolVersion": PROTOCOL_VERSION,
++            "capabilities": {"roots": {"listChanged": True}},
+         }
+
+     def request_headers(self):
+-        return {"Authorization": f"Bearer {self.token}"}
++        headers = {"Authorization": f"Bearer {self.token}"}
++        if self.session_id is not None:
++            headers["Mcp-Session-Id"] = self.session_id
++        return headers
++
++    def mark_initialized(self, response):
++        if response.ok:
++            self.session_id = response.headers["Mcp-Session-Id"].strip()
++            return True
++        return False
