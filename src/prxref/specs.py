@@ -50,6 +50,7 @@ from requests.adapters import HTTPAdapter
 
 from .quality import _evidence_tokens, _tokens
 from .retry_logging import LoggingRetry
+from .text_inputs import confine_to_cwd, read_capped_file
 from .triage import FileDiff
 
 logger = logging.getLogger(__name__)
@@ -335,11 +336,19 @@ def _strip_html(text: str) -> str:
 
 
 def _read_capped(path: str, max_chars: int) -> str:
-    with open(path, encoding="utf-8") as fh:
-        data = fh.read()
-    if len(data) > max_chars:
-        return data[:max_chars] + SOURCE_TRUNCATION_MARKER.format(n=max_chars)
-    return data
+    """Read a local spec file in bounded memory, announcing truncation.
+
+    :func:`prxref.text_inputs.read_capped_file` does the read: the path must
+    not symlink out of the working directory, only a regular file is opened,
+    the whole file must be strict UTF-8 (a BOM is dropped), and at most
+    ``max_chars`` characters are held. The marker is appended exactly when
+    the file is longer than ``max_chars``, never when it is exactly that
+    long.
+    """
+    capped = read_capped_file(path, max_chars)
+    if capped.truncated:
+        return capped.text + SOURCE_TRUNCATION_MARKER.format(n=max_chars)
+    return capped.text
 
 
 def _fetch_url(src: SpecSource, url: str, max_chars: int, session: requests.Session) -> None:
@@ -362,15 +371,42 @@ def _fetch_file(src: SpecSource, path: str, max_chars: int) -> None:
 
 
 def _fetch_dir(src: SpecSource, path: str, max_chars: int) -> None:
-    names = sorted(
-        name
-        for name in os.listdir(path)
-        if name.endswith(_DIR_SUFFIXES) and os.path.isfile(os.path.join(path, name))
-    )[:SPEC_DIR_MAX_FILES]
-    if not names:
-        src.error = f"no {'/'.join(_DIR_SUFFIXES)} files in {path}"
+    """Read the spec files directly inside ``path``, skipping what is unsafe or unreadable.
+
+    Candidates are the regular files with a spec suffix, sorted by name and
+    capped at :data:`SPEC_DIR_MAX_FILES`. Every symlinked entry is skipped,
+    wherever it points, because a PR can commit one. A candidate that cannot
+    be read or decoded is skipped on its own, so one bad file never fails
+    its siblings. Skipped names are logged when other files were read, and
+    become the source's error when none was. No reason carries the path.
+    """
+    candidates: list[os.DirEntry[str]] = []
+    skipped: list[str] = []
+    with os.scandir(path) as it:
+        entries = sorted((e for e in it if e.name.endswith(_DIR_SUFFIXES)), key=lambda e: e.name)
+    for entry in entries:
+        if entry.is_symlink():
+            skipped.append(f"{entry.name} (symlink)")
+        elif entry.is_file(follow_symlinks=False):
+            candidates.append(entry)
+    parts: list[str] = []
+    for entry in candidates[:SPEC_DIR_MAX_FILES]:
+        try:
+            body = _read_capped(entry.path, max_chars)
+        except (OSError, UnicodeDecodeError) as exc:
+            skipped.append(f"{entry.name} ({_exc_reason(exc)})")
+            continue
+        parts.append(f"## {entry.name}\n\n{body}")
+    if not parts:
+        suffixes = "/".join(_DIR_SUFFIXES)
+        src.error = (
+            f"no readable {suffixes} files in directory; skipped {', '.join(skipped)}"
+            if skipped
+            else f"no {suffixes} files in directory"
+        )
         return
-    parts = [f"## {name}\n\n{_read_capped(os.path.join(path, name), max_chars)}" for name in names]
+    if skipped:
+        logger.warning("spec directory %s: skipped %s", src.origin.strip(), ", ".join(skipped))
     src.text = "\n\n".join(parts)
 
 
@@ -480,6 +516,12 @@ def _jira_ticket_text(payload: object) -> str | None:
     return "\n".join([*lines, "", description]).strip()
 
 
+def _exc_reason(exc: BaseException) -> str:
+    """Name a failure by class and reason, never by the path an ``OSError`` carries."""
+    detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+    return f"{type(exc).__name__}: {detail}"
+
+
 def _dispatch(
     src: SpecSource,
     raw: str,
@@ -489,6 +531,14 @@ def _dispatch(
     jira_api_token: str,
     session: requests.Session,
 ) -> None:
+    """Route one source string to its fetcher, confining local paths first.
+
+    A local path goes through :func:`prxref.text_inputs.confine_to_cwd`
+    before anything stats or reads it, and only the resolved path is used
+    after that. So a path under the working directory that symlinks out of
+    it fails the same way whether its target exists or not, and a PR cannot
+    use the source's kind to probe the runner's filesystem.
+    """
     text = raw.strip()
     if text.startswith(("http://", "https://")):
         ref = parse_ticket_url(text)
@@ -499,15 +549,19 @@ def _dispatch(
             src.kind = "url"
             _fetch_url(src, text, max_chars, session)
         return
-    if os.path.isdir(text):
+    if not text:
+        src.error = "not a URL or path"
+        return
+    resolved = confine_to_cwd(text)
+    if os.path.isdir(resolved):
         src.kind = "dir"
-        _fetch_dir(src, text, max_chars)
+        _fetch_dir(src, resolved, max_chars)
         return
-    if os.path.isfile(text):
+    if os.path.isfile(resolved):
         src.kind = "file"
-        _fetch_file(src, text, max_chars)
+        _fetch_file(src, resolved, max_chars)
         return
-    src.error = f"not a URL or path: {text}"
+    src.error = "not a URL or path"
 
 
 def fetch_specs(
@@ -536,6 +590,18 @@ def fetch_specs(
     email and token without a base URL are withheld and a warning names
     ``PRXREF_JIRA_BASE_URL``; a plain-http base URL is honoured with a
     warning.
+
+    A local path under the working directory must still resolve under it
+    once its symlinks are followed (:func:`prxref.text_inputs.confine_to_cwd`),
+    so a symlink committed in a PR checkout cannot pull in a file from
+    outside it; an absolute path outside the working directory is the
+    operator's own choice and is read as given. A directory contributes at
+    most :data:`SPEC_DIR_MAX_FILES` regular files with a spec suffix, skips
+    every symlinked entry, and skips a file it cannot read or decode without
+    failing the others. Files are read in bounded memory as strict UTF-8
+    and capped at ``max_chars`` with :data:`SOURCE_TRUNCATION_MARKER`. No
+    error string carries a local path: an ``OSError`` is reported by its
+    class and ``strerror``, since the reasons are posted to the PR.
     """
     active = session if session is not None else _create_default_session()
     out: list[SpecSource] = []
@@ -545,7 +611,7 @@ def fetch_specs(
             _dispatch(src, raw, max_chars, jira_base_url, jira_email, jira_api_token, active)
         except Exception as exc:  # noqa: BLE001 - a failed source is data, not an abort
             src.text = ""
-            src.error = f"{type(exc).__name__}: {exc}"
+            src.error = _exc_reason(exc)
         out.append(src)
     return out
 
