@@ -38,7 +38,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``len(chunks) + 1`` whenever the sweep ran, and a sweep failure is one
    failed chunk in the partial-review banner.
 6. Deterministic checks and quality passes, in exactly this order — the
-   raw chunk + sweep findings first gain
+   raw chunk + sweep findings have their ``scope`` held to ``unknown``
+   unless a ticket is active (``_enforce_scope``), then gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
    about a PR that is ≥80% release machinery yet also touches source),
    folded in BEFORE the passes so it is filtered like any other finding,
@@ -47,8 +48,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``apply_sweep_dedup`` and can never be dropped as a duplicate of a
    chunk worker's own restatement:
 
-   ``apply_location_validation`` (a ``file`` naming no path of the parsed
-   diff is dropped, not rendered) → ``apply_manifest_claim_check`` (a
+   ``apply_severity_map`` (only when the team review rules declare a
+   severity map: a team word such as ``blocker`` becomes the prxref tier it
+   maps to; drops nothing) → ``apply_location_validation`` (a ``file``
+   naming no path of the parsed diff is dropped, not rendered) →
+   ``apply_manifest_claim_check`` (a
    ``package.json`` claim whose dependency is not the key on the anchored
    line, or whose asserted section disagrees with the actual one; it must
    precede line align, which is what makes it read the model's RAW
@@ -94,8 +98,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    leaves the operator guessing which files went unreviewed.
 8. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
    placeholders ``{verdict} {title} {file_count} {error_count}
-   {warning_count} {spec_count} {spec_note} {outofscope_count} {findings}
-   {attribution}`` filled, plus
+   {warning_count} {spec_count} {spec_note} {ticket_note}
+   {outofscope_count} {findings} {attribution}`` filled, plus
    inline comments for up to ``max_inline_comments`` active findings.
    ``post_mode`` narrows what is written: ``"summary+inline"`` (default) is
    that full behaviour, ``"summary"`` skips the inline batch, ``"inline"``
@@ -122,6 +126,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
 from . import chunk_context, costs, heuristics, reviewer, specs, systemic
@@ -146,6 +151,7 @@ from .quality import (
     apply_removal_claim_check,
     apply_settled_thread_suppression,
     apply_severity_consistency,
+    apply_severity_map,
     apply_sweep_dedup,
     apply_thread_dedup,
     finding_rank_key,
@@ -157,6 +163,8 @@ from .triage import (
     DEFAULT_CONTEXT_LINES,
     DEFAULT_MAX_FILES_PER_CHUNK,
     DEFAULT_TOKEN_BUDGET,
+    SCOPE_IN,
+    SCOPE_OUT,
     SCOPE_UNKNOWN,
     Finding,
     added_lines_by_file,
@@ -189,6 +197,11 @@ MAX_REPORTED_REASONS = 3
 # below warning (a spec violation is an operator-requested contract breach,
 # but not claimed to break at runtime) and above outofscope.
 _SEVERITY_RANK = {"error": 0, "warning": 1, "spec": 2, "outofscope": 3}
+
+# The tie-break after severity: within one severity, a finding outside the
+# ticket yields the inline slots to in-ticket and unjudged ones. With no active
+# ticket every scope is unknown, so the ordering is exactly the severity one.
+_SCOPE_RANK = {SCOPE_IN: 0, SCOPE_UNKNOWN: 0, SCOPE_OUT: 1}
 
 _REDACTED = "[redacted]"
 
@@ -425,7 +438,21 @@ def orchestrate_review(
 
     ``rules`` and ``ticket`` are the loaded review-rules and ticket-context
     objects (``rules.ReviewRules`` / ``ticket.TicketContext``), duck-typed so
-    this module never imports theirs; ``None`` turns each off.
+    this module never imports theirs; ``None`` turns each off, and with both
+    off the prompts, posts, record and trace are exactly a run without them.
+    Their ``record()`` fills the ``review_rules`` / ``ticket_context`` keys on
+    every exit, and is the meta of one ``rules ok`` / ``ticket ok`` trace
+    event. The rules' ``prompt_block("worker")`` / ``("sweep")`` reach every
+    chunk and the sweep through one :class:`reviewer.PromptContext`, and
+    their ``severity_map`` goes to :func:`quality.apply_severity_map` ahead of
+    every quality pass (a ``rules remap`` event counts the rewrites). An
+    ACTIVE ticket (``ticket.active``) adds its ``scope_block()`` and
+    ``prompt_block()`` to every unit, which is what lets a finding carry a
+    ``scope`` of ``in`` or ``out``; otherwise every scope is forced to
+    ``unknown`` (:func:`_enforce_scope`). A configured ticket's ``note()``
+    rides the summary after the spec note, on the main and summary-only
+    posts but never the error notice, and an active ticket's scope counts
+    ride the ``run ok`` event.
 
     ``price_table`` is the parsed ``PRXREF_PRICE_TABLE``
     (:func:`prxref.costs.parse_price_table`); ``None`` or ``{}`` estimates
@@ -465,11 +492,26 @@ def orchestrate_review(
         "size_advisory": None,
         "replay": dict(replay) if replay is not None else None,
     }
+    # Resolved once, before the first exit, so every exit records them and the
+    # empty-diff summary gets the ticket note. An inactive (empty) ticket is
+    # still recorded and still noted; it just asks the model for no scope.
+    if rules is not None:
+        run_inputs["review_rules"] = rules.record()
+    if ticket is not None:
+        run_inputs["ticket_context"] = ticket.record()
+    ticket_active = ticket is not None and bool(ticket.active)
+    ticket_note = ticket.note() if ticket is not None else ""
+    if ticket_note and not ticket_note.endswith("\n"):
+        ticket_note += "\n"
     tracer.event(
         "run", "start", forge=ref.forge, url=ref.url, number=ref.number,
         sampling=sampling,
         **({"replay": dict(replay)} if replay is not None else {}),
     )
+    if run_inputs["review_rules"] is not None:
+        tracer.event("rules", "ok", **run_inputs["review_rules"])
+    if run_inputs["ticket_context"] is not None:
+        tracer.event("ticket", "ok", **run_inputs["ticket_context"])
 
     try:
         with tracer.span("forge.get_pr"):
@@ -555,12 +597,14 @@ def orchestrate_review(
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(release_shape),
             **_cost_meta(run_inputs),
+            **(_scope_counts(release_shape) if ticket_active else {}),
         )
         return _run_record(_summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             confidence_floor=confidence_floor, max_errors=max_errors,
+            ticket_note=ticket_note,
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
         ), run_inputs)
@@ -623,7 +667,13 @@ def orchestrate_review(
             logger.error("spec grounding failed (best-effort): %s", e)
             tracer.event("specs", "fail", error=e.__class__.__name__)
 
-    prompt_context = PromptContext(spec_digest=spec_digest)
+    prompt_context = PromptContext(
+        rules_worker=rules.prompt_block("worker") if rules is not None else "",
+        rules_sweep=rules.prompt_block("sweep") if rules is not None else "",
+        ticket_scope=ticket.scope_block() if ticket_active else "",
+        ticket_context=ticket.prompt_block() if ticket_active else "",
+        spec_digest=spec_digest,
+    )
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
@@ -688,6 +738,7 @@ def orchestrate_review(
         len(r["findings"]) for r in results[:-1] if not r["error"]
     )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
+    findings = _enforce_scope(findings, ticket_active)
 
     # Futures were submitted in chunk order, so results[i] is chunk[i]'s
     # outcome for i < len(chunks): the zip pairs each failed review with the
@@ -716,6 +767,25 @@ def orchestrate_review(
     release_shape = heuristics.release_shape_findings(files)
     findings = findings[:sweep_start] + release_shape + findings[sweep_start:]
     sweep_start += len(release_shape)
+
+    # FIRST among the passes: a team word the map knows ("blocker") would
+    # otherwise die at the gate as an invalid severity, and consistency and
+    # _origin_key both read the severity. 1:1 and order-preserving, so
+    # sweep_start still marks the boundary.
+    if rules is not None and rules.severity_map:
+        mapped = apply_severity_map(findings, rules.severity_map)
+        remapped = sum(
+            1
+            for before, after in zip(findings, mapped, strict=True)
+            if before.severity != after.severity
+        )
+        if remapped:
+            logger.info(
+                "severity map: rewrote %d finding(s) from team severity words",
+                remapped,
+            )
+            tracer.event("rules", "remap", findings=remapped)
+        findings = mapped
 
     findings = apply_location_validation(findings, [f.path for f in files])
     # BEFORE apply_line_align, deliberately: the manifest check compares the
@@ -807,6 +877,7 @@ def orchestrate_review(
             failed_chunks=failed_chunks,
             include_verdict=post_verdict,
             spec_note=spec_note,
+            ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
         )
@@ -822,7 +893,11 @@ def orchestrate_review(
     if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
         ordered = sorted(
             findings_active,
-            key=lambda f: (_SEVERITY_RANK.get(f.severity, 3), *finding_rank_key(f)),
+            key=lambda f: (
+                _SEVERITY_RANK.get(f.severity, 3),
+                _SCOPE_RANK.get(f.scope, 0),
+                *finding_rank_key(f),
+            ),
         )
         comments = [
             InlineComment(
@@ -856,6 +931,7 @@ def orchestrate_review(
             failed_chunks=failed_chunks,
             include_verdict=post_verdict,
             spec_note=spec_note,
+            ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             inline_accounting=_inline_accounting(
@@ -879,6 +955,7 @@ def orchestrate_review(
         chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
         findings=len(findings_active),
         **_cost_meta(run_inputs),
+        **(_scope_counts(findings_active) if ticket_active else {}),
     )
     return _run_record({
         "verdict": verdict,
@@ -902,7 +979,9 @@ def _origin_key(finding: Finding) -> tuple:
     finding and a sweep finding that agree on file, line, title, and body
     collide, ``finding_sort_key`` ties them, and the Counter walk hands the
     first survivor to the sweep side — dropping the higher-confidence chunk
-    copy as a "duplicate of chunk finding".
+    copy as a "duplicate of chunk finding". ``scope`` is in it for the same
+    reason: with a ticket active the two copies can disagree on it, and a
+    swap would put the sweep copy's scope in the chunk copy's slot.
     """
     return (
         finding.file,
@@ -911,7 +990,36 @@ def _origin_key(finding: Finding) -> tuple:
         finding.body,
         finding.severity,
         finding.confidence,
+        finding.scope,
     )
+
+
+def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
+    """Hold every finding's ``scope`` to what the run asked the model for.
+
+    With no active ticket the prompts never asked for a scope, so any value
+    other than ``unknown`` — from a test double, a library reviewer, or a
+    future backend that bypasses the reviewer's own gate — is reset to
+    ``unknown``. With one active, the value is normalized
+    (:func:`triage.normalize_scope`), so an unrecognised one is ``unknown``
+    too. Returns a new list in the same order; only a finding whose scope
+    changes is replaced, with :func:`dataclasses.replace`.
+    """
+    out: list[Finding] = []
+    for f in findings:
+        scope = normalize_scope(f.scope) if active else SCOPE_UNKNOWN
+        out.append(f if scope == f.scope else replace(f, scope=scope))
+    return out
+
+
+def _scope_counts(findings: Sequence[Finding]) -> dict[str, int]:
+    """The ``run ok`` event's ``scope_in`` / ``scope_out`` / ``scope_unknown``."""
+    counts = Counter(f.scope for f in findings)
+    return {
+        "scope_in": counts[SCOPE_IN],
+        "scope_out": counts[SCOPE_OUT],
+        "scope_unknown": counts[SCOPE_UNKNOWN],
+    }
 
 
 def _sampling(llm: object) -> dict:
