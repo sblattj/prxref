@@ -16,10 +16,16 @@ Two halves, both deterministic and model-free, mirroring
   read-only retried session (GET/HEAD/OPTIONS only, the same policy the forge
   adapters use), streams at most ``max_chars`` per source with an explicit
   truncation marker, accepts only text-like content types, strips HTML to
-  text, and reads local files as UTF-8. Jira tickets are fetched over REST
-  with basic auth when credentials are configured, anonymously otherwise;
-  a 401/403 without credentials names the ``PRXREF_JIRA_*`` variables — the
-  fix an operator can act on — never their values.
+  text, and reads local files as UTF-8. Jira tickets (a ``/browse/`` or REST
+  URL under a context path of up to two segments, a Cloud issue view, or a
+  Cloud board's ``selectedIssue``) are fetched over REST. Credentials are
+  only ever sent to ``PRXREF_JIRA_BASE_URL``: basic auth goes out only when
+  it, ``PRXREF_JIRA_EMAIL`` and ``PRXREF_JIRA_API_TOKEN`` are all set, and
+  every other fetch is anonymous. Credentials set without the base URL are
+  withheld with a warning, and a plain-http base URL is used with a warning.
+  An anonymous 401, 403 or 404 — Jira Cloud hides a private issue behind a
+  404 — names the variables that would fix it, never their values, and a
+  200 that is not a JSON issue fails its source cleanly.
 
 - The digest (:func:`build_spec_digest`) extracts constraints per source in
   document order — headings, RFC-2119 normative statements, version pins, and
@@ -32,11 +38,12 @@ from __future__ import annotations
 
 import codecs
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -44,6 +51,8 @@ from requests.adapters import HTTPAdapter
 from .quality import _evidence_tokens, _tokens
 from .retry_logging import LoggingRetry
 from .triage import FileDiff
+
+logger = logging.getLogger(__name__)
 
 SPEC_FETCH_TIMEOUT_S = 15
 
@@ -61,13 +70,19 @@ _STATEMENT_MAX_CHARS = 400
 
 _KEY = r"[A-Z][A-Z0-9_]*-\d+"
 
+_KEY_RE = re.compile(_KEY)
+
+_CTX = r"(?:/[^/?#]+){0,2}"
+
 _TICKET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(rf"^(?P<base>https?://[^/]+)/browse/(?P<key>{_KEY})(?:[/?#]|$)"),
-    re.compile(rf"^(?P<base>https?://[^/]+)/rest/api/(?:2|3)/issue/(?P<key>{_KEY})(?:[/?#]|$)"),
+    re.compile(rf"^(?P<base>https?://[^/?#]+{_CTX})/browse/(?P<key>{_KEY})(?:[/?#]|$)"),
+    re.compile(rf"^(?P<base>https?://[^/?#]+{_CTX})/rest/api/(?:2|3)/issue/(?P<key>{_KEY})(?:[/?#]|$)"),
     re.compile(
-        rf"^(?P<base>https?://[^/]+)/jira/software/c/projects/[A-Z][A-Z0-9_]*/issues/(?P<key>{_KEY})(?:[/?#]|$)"
+        rf"^(?P<base>https?://[^/?#]+)/jira/software/(?:c/)?projects/[^/?#]+/issues/(?P<key>{_KEY})(?:[/?#]|$)"
     ),
 )
+
+_JIRA_ENV_HINT = "PRXREF_JIRA_BASE_URL, PRXREF_JIRA_EMAIL and PRXREF_JIRA_API_TOKEN"
 
 _MD_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
 
@@ -127,19 +142,46 @@ class TicketRef:
 def parse_ticket_url(url: str) -> TicketRef | None:
     """Recognize a Jira ticket URL, returning its REST base and key.
 
-    Three shapes are recognized: ``{host}/browse/{KEY}-{n}`` (Jira Cloud and
-    Server classic), ``{host}/rest/api/{2|3}/issue/{KEY}-{n}`` (raw REST
-    links), and ``{host}/jira/software/c/projects/{KEY}/issues/{KEY}-{n}``
-    (Cloud new UI). Project keys are uppercase letters, digits, and
-    underscores; the numeric suffix is required. Anything else returns
-    ``None``.
+    Four shapes are recognized:
+
+    - ``{base}/browse/{KEY}-{n}`` (Jira Cloud and Server classic) and
+      ``{base}/rest/api/{2|3}/issue/{KEY}-{n}`` (raw REST links), where
+      ``{base}`` is ``scheme://host`` plus a context path of zero to two
+      segments (``https://issues.apache.org/jira``,
+      ``https://acme.com/tools/jira``); the base keeps that context path,
+      because Server serves its REST API under it.
+    - ``{host}/jira/software/projects/{P}/issues/{KEY}-{n}`` and its ``/c/``
+      form (Cloud team- and company-managed issue views).
+    - A Cloud board or backlog URL on a ``/jira/`` path carrying the ticket
+      in its ``selectedIssue`` query parameter, read wherever it sits in the
+      query string; the base is ``scheme://host``.
+
+    Project keys are uppercase letters, digits, and underscores; the numeric
+    suffix is required. The context-path bound is what keeps a Bitbucket
+    Server file URL (``/projects/P/repos/R/browse/…``, four segments deep)
+    from matching. A non-Jira URL with at most two path segments before
+    ``/browse/{KEY}-{n}`` does match, and is fetched from Jira REST on that
+    host anonymously, or looked up by key on ``PRXREF_JIRA_BASE_URL`` when
+    that is set. Anything else returns ``None``.
     """
     text = (url or "").strip()
     for pattern in _TICKET_PATTERNS:
         m = pattern.match(text)
         if m:
             return TicketRef(base_url=m.group("base"), key=m.group("key"), url=text)
-    return None
+    return _board_ticket(text)
+
+
+def _board_ticket(text: str) -> TicketRef | None:
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    if not parsed.path.startswith("/jira/"):
+        return None
+    selected = parse_qs(parsed.query).get("selectedIssue")
+    if not selected or not _KEY_RE.fullmatch(selected[0]):
+        return None
+    return TicketRef(base_url=f"{parsed.scheme}://{parsed.netloc}", key=selected[0], url=text)
 
 
 def _create_default_session() -> requests.Session:
@@ -296,31 +338,102 @@ def _fetch_jira(
     jira_api_token: str,
     session: requests.Session,
 ) -> None:
-    base = (jira_base_url or ref.base_url).rstrip("/")
-    url = f"{base}/rest/api/2/issue/{ref.key}?fields=summary,description,issuetype,labels"
-    auth = (jira_email, jira_api_token) if jira_email and jira_api_token else None
+    url, auth = _jira_request(ref, jira_base_url, jira_email, jira_api_token)
     resp = session.get(url, timeout=SPEC_FETCH_TIMEOUT_S, auth=auth)
-    if resp.status_code in (401, 403) and auth is None:
-        src.error = (
-            f"Jira returned {resp.status_code} for {ref.key} without credentials; set "
-            "PRXREF_JIRA_BASE_URL, PRXREF_JIRA_EMAIL and PRXREF_JIRA_API_TOKEN to authenticate."
+    if resp.status_code != 200:
+        src.error = _jira_status_error(
+            resp.status_code, ref.key, auth=auth, credentials_set=bool(jira_email and jira_api_token)
         )
         return
-    if resp.status_code != 200:
-        src.error = f"Jira returned {resp.status_code} for {ref.key}"
+    try:
+        payload = resp.json()
+    except ValueError:
+        content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        src.error = f"Jira returned a non-JSON body for {ref.key} ({content_type or 'no content type'})"
         return
-    payload = resp.json()
-    fields = payload.get("fields") or {} if isinstance(payload, dict) else {}
-    summary = fields.get("summary") or ""
+    text = _jira_ticket_text(payload)
+    if text is None:
+        src.error = f"Jira returned no issue fields for {ref.key}"
+        return
+    src.text = text
+
+
+def _jira_request(
+    ref: TicketRef, jira_base_url: str, jira_email: str, jira_api_token: str
+) -> tuple[str, tuple[str, str] | None]:
+    """Resolve a ticket's REST URL and the basic auth to send with it.
+
+    Credentials are only ever sent to ``jira_base_url``: without it the fetch
+    is anonymous even when the email and token are set, because the request
+    host then comes from the ticket URL, which is not the host the operator
+    trusted with them. Both warnings name variables, never their values.
+    """
+    base = (jira_base_url or ref.base_url).rstrip("/")
+    url = f"{base}/rest/api/2/issue/{ref.key}?fields=summary,description,issuetype,labels"
+    if not (jira_email and jira_api_token):
+        return url, None
+    if not jira_base_url:
+        logger.warning(
+            "PRXREF_JIRA_EMAIL and PRXREF_JIRA_API_TOKEN are set but PRXREF_JIRA_BASE_URL is "
+            "empty; Jira credentials are only sent to PRXREF_JIRA_BASE_URL, so %s is fetched "
+            "anonymously",
+            ref.key,
+        )
+        return url, None
+    if urlparse(jira_base_url).scheme.lower() == "http":
+        logger.warning(
+            "PRXREF_JIRA_BASE_URL is plain http; the Jira credentials for %s cross the network "
+            "unencrypted",
+            ref.key,
+        )
+    return url, (jira_email, jira_api_token)
+
+
+def _jira_status_error(
+    status: int, key: str, *, auth: tuple[str, str] | None, credentials_set: bool
+) -> str:
+    """Explain a non-200 Jira answer, naming the variables that would fix it.
+
+    An anonymous 401 or 403 is a missing login, and so is an anonymous 404:
+    Jira Cloud answers 404, not 403, for a private issue it will not show
+    anonymously.
+    """
+    if auth is not None or status not in (401, 403, 404):
+        return f"Jira returned {status} for {key}"
+    if credentials_set:
+        return (
+            f"Jira returned {status} for {key} without credentials: PRXREF_JIRA_EMAIL and "
+            "PRXREF_JIRA_API_TOKEN are set, but credentials are only sent to "
+            "PRXREF_JIRA_BASE_URL, which is empty; set it to this Jira's base URL to authenticate."
+        )
+    reason = " (Jira hides a private issue from anonymous readers as 404)" if status == 404 else ""
+    return f"Jira returned {status} for {key} without credentials{reason}; set {_JIRA_ENV_HINT} to authenticate."
+
+
+def _jira_ticket_text(payload: object) -> str | None:
+    """Render an issue payload as ``Summary:``/``Type:``/``Labels:`` lines plus the description.
+
+    A header line whose value is empty is left out rather than rendered bare,
+    since every non-blank ticket line becomes a digest constraint. Returns
+    ``None`` when the payload carries no ``fields`` object.
+    """
+    fields = payload.get("fields") if isinstance(payload, dict) else None
+    if not isinstance(fields, dict):
+        return None
     issuetype = fields.get("issuetype")
-    issue_type = issuetype.get("name", "") if isinstance(issuetype, dict) else ""
-    labels = ", ".join(str(label) for label in fields.get("labels") or [])
+    raw_labels = fields.get("labels")
+    header = [
+        ("Summary", str(fields.get("summary") or "").strip()),
+        ("Type", str(issuetype.get("name") or "").strip() if isinstance(issuetype, dict) else ""),
+        ("Labels", ", ".join(str(label) for label in raw_labels) if isinstance(raw_labels, list) else ""),
+    ]
     description = fields.get("description")
     if description is None:
         description = ""
     elif not isinstance(description, str):
         description = json.dumps(description)
-    src.text = "\n".join([f"Summary: {summary}", f"Type: {issue_type}", f"Labels: {labels}", "", description]).strip()
+    lines = [f"{name}: {value}" for name, value in header if value]
+    return "\n".join([*lines, "", description]).strip()
 
 
 def _dispatch(
@@ -371,9 +484,14 @@ def fetch_specs(
     ``not a URL or path`` error. Every exception — network, decode, bad
     credentials — becomes that source's ``error`` string with empty ``text``;
     a source never aborts the run. ``jira_base_url`` overrides the ticket
-    URL's own host when non-empty (self-hosted boards behind a different REST
-    host); Jira authenticates with basic auth only when both ``jira_email``
-    and ``jira_api_token`` are non-empty, anonymously otherwise.
+    URL's own base when non-empty (self-hosted boards behind a different REST
+    host), so every ticket is looked up there by key. Credentials are only
+    ever sent to ``jira_base_url`` (``PRXREF_JIRA_BASE_URL``): Jira
+    authenticates with basic auth only when ``jira_base_url``, ``jira_email``
+    and ``jira_api_token`` are all non-empty, and anonymously otherwise. An
+    email and token without a base URL are withheld and a warning names
+    ``PRXREF_JIRA_BASE_URL``; a plain-http base URL is honoured with a
+    warning.
     """
     active = session if session is not None else _create_default_session()
     out: list[SpecSource] = []
