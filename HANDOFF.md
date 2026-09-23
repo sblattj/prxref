@@ -80,8 +80,8 @@ integers built as `f"**{len(_DEFAULTS)}** configuration keys"` and
 So a new config key is not a source change — it is an atomic four-surface change:
 `_DEFAULTS`, the `config.py` docstring, `.env.example`, and `docs/env-vars.md`
 including its counts and its `Per-Forge Auth (N)` section heading. Adding three keys
-here failed five tests until all four surfaces moved together. Current values: **33**
-keys, **1** legacy alias, **34** accepted names.
+here failed five tests until all four surfaces moved together. Current values: **55**
+keys, **1** legacy alias, **56** accepted names.
 
 ## Release shape (follow this next time)
 
