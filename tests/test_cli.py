@@ -1,4 +1,5 @@
 """Tests for prxref.cli: review subcommand, serve daemon, --version, and non-blocking exits."""
+import inspect
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from prxref import __version__, cli
+from prxref import orchestrator as real_orchestrator
 from prxref.cli import main
 from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
@@ -868,6 +870,33 @@ class TestSpecFlag:
         assert kwargs["jira_base_url"] == "https://jira.example.com"
         assert kwargs["jira_email"] == "bot@example.com"
         assert kwargs["jira_api_token"] == "t0ken"
+
+
+def test_run_review_passes_only_real_orchestrate_kwargs(fake_runtime, monkeypatch):
+    """Every kwarg ``_run_review`` hands the orchestrator is a real parameter.
+
+    ``fake_runtime``'s double accepts ``**kwargs``, so a misspelt kwarg passes
+    every other test here while the real call raises ``TypeError`` — which
+    ``review`` swallows to exit 0, silently dropping the review. The signature
+    comes from the module imported at the top of this file, captured before the
+    fixture swapped ``sys.modules["prxref.orchestrator"]`` for the double.
+    """
+    real = real_orchestrator.orchestrate_review
+    assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
+    params = inspect.signature(real).parameters
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    ref = PRRef(
+        forge="github", host="github.com", owner="org", repo="repo",
+        number=7, url="https://github.com/org/repo/pull/7",
+    )
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: ref)
+
+    assert main(["review", "--pr-url", ref.url, "--no-post", "--spec", "docs/specs"]) == 0
+
+    calls = fake_runtime["orchestrate_calls"]
+    assert len(calls) == 1
+    assert calls[0], "the double recorded no kwargs, so the check below is vacuous"
+    assert sorted(set(calls[0]) - set(params)) == []
 
 
 class TestDryRun:

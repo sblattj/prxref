@@ -1090,7 +1090,7 @@ def _run_worker(
     max_tokens: int | None = None, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
-    spec_digest: str = "",
+    *, spec_digest: str = "",
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
