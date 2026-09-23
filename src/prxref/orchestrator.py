@@ -524,6 +524,18 @@ def orchestrate_review(
                 digest_chars=len(spec_digest),
             )
             spec_note = _spec_note(fetched, spec_digest)
+            # The note only reaches a POSTED summary, so a --no-post, dry-run,
+            # or inline-only run would otherwise learn nothing about grounding.
+            for s in fetched:
+                if s.error:
+                    logger.warning(
+                        "spec source failed (review continues without it): %s",
+                        redact_for_post(s.error),
+                    )
+            logger.info(
+                "spec grounding: %d/%d source(s) fetched, %d constraint(s) injected",
+                ok, len(fetched), _spec_constraint_count(spec_digest),
+            )
         except Exception as e:  # noqa: BLE001
             logger.error("spec grounding failed (best-effort): %s", e)
             tracer.event("specs", "fail", error=e.__class__.__name__)

@@ -2167,6 +2167,27 @@ class TestSpecGrounding:
         assert "> 🔍 Spec-grounded: 2 source(s) · 1 constraint(s) injected" in summary
         assert "> ⚠️ Spec fetch failed for 1 source(s)" in summary
 
+    def test_an_unposted_run_still_logs_each_failed_source(
+        self, monkeypatch, caplog,
+    ):
+        """The grounding note only reaches a POSTED summary; --no-post and
+        dry-run operators learn about a dead source from the log alone."""
+        caplog.set_level(logging.INFO, logger="prxref")
+        fetched = self._fetched() + self._fetched(failed=True, origin="x/other.md")
+        forge, _res = self._run(monkeypatch, fetched=fetched, post=False)
+        assert forge.summaries == []
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "spec source failed" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "HTTP 404" in warnings[0]
+        assert "secret.example.invalid" not in warnings[0]
+        assert any(
+            "spec grounding: 1/2 source(s) fetched, 1 constraint(s) injected"
+            in r.getMessage() for r in caplog.records
+        )
+
     def test_fetch_failure_reasons_are_redacted(self, monkeypatch):
         leaked = SpecSource(
             origin="https://secret.example.invalid/browse/PROJ-9",
