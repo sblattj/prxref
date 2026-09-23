@@ -1733,6 +1733,26 @@ class TestHedgeGate:
         out = apply_quality_gate(hedged, max_errors=1)
         assert out[0].drop_reason.startswith("hedged:")
 
+    @pytest.mark.parametrize("quote", [
+        '"If a session already exists, the server MUST reuse it."',
+        '"Clients MUST send clientInfo unless the session already exists."',
+        '“If the server is still initializing, the client MUST NOT send requests.”',
+    ])
+    def test_a_quoted_spec_condition_is_not_a_hedge(self, quote):
+        """The spec severity must quote its constraint verbatim; a condition
+        inside that quote is the spec's, not the model's."""
+        f = _f(severity="spec", body=f"Spec: {quote} The diff violates it.")
+        assert apply_hedge_gate([f])[0].drop_reason is None
+
+    def test_a_hedge_outside_the_spec_quote_still_drops(self):
+        f = _f(
+            severity="spec",
+            body='Spec: "Tokens MUST NOT be logged." If the logger is still '
+                 "at debug level, the token leaks.",
+        )
+        assert apply_hedge_gate([f])[0].drop_reason.startswith("hedged:")
+
+
 class TestApplyContainmentNote:
     """Issue #07: a throw-class finding with no named boundary gets flagged."""
 

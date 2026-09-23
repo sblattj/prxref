@@ -44,7 +44,7 @@ it (noted in the table).
 | 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
 | 6 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
 | 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
-| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. |
+| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. A `spec` finding's verbatim `Spec: "…"` quote is not read: a condition inside it belongs to the spec, not the model. |
 | 9 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap. Returns its findings in content order. |
 | 10 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate. |
 | 11 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |

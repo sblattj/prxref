@@ -170,6 +170,12 @@ HEDGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _HEDGE_SPAN_MAX: int = 80
 
+# The verbatim constraint a ``spec`` finding is required to quote. Normative
+# text is conditional by nature ("If a session already exists, the server
+# MUST reuse it"), so the quote is the spec's precondition, not the model's
+# hedge, and is removed before the hedge rules read the body.
+_SPEC_QUOTE_RE = re.compile(r"Spec:\s*[\"“][^\"”\n]*[\"”]")
+
 
 def active(findings: Sequence[Finding]) -> list[Finding]:
     """Return only the findings that survived every quality pass."""
@@ -1541,13 +1547,17 @@ def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
     Pure and order-preserving: already-dropped findings pass through
     untouched, and a match sets ``drop_reason`` to ``hedged: "<span>"``
     naming the matched text so the drop is auditable in the run record.
+    A ``Spec: "..."`` quote is removed before matching: it is the verbatim
+    constraint the ``spec`` severity must cite, and its conditions belong to
+    the spec, not to the model's reasoning.
     """
     out: list[Finding] = []
     for f in findings:
         if f.drop_reason is not None:
             out.append(f)
             continue
-        span = _hedge_span(f.title or "") or _hedge_span(f.body or "")
+        body = _SPEC_QUOTE_RE.sub("", f.body or "")
+        span = _hedge_span(f.title or "") or _hedge_span(body)
         if span is None:
             out.append(f)
             continue
