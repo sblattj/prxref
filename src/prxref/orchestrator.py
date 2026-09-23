@@ -147,14 +147,17 @@ from .quality import (
     finding_rank_key,
     finding_sort_key,
 )
+from .reviewer import NO_PROMPT_CONTEXT, PromptContext
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
     DEFAULT_MAX_FILES_PER_CHUNK,
     DEFAULT_TOKEN_BUDGET,
+    SCOPE_UNKNOWN,
     Finding,
     added_lines_by_file,
     build_chunks,
+    normalize_scope,
     parse_unified_diff,
 )
 
@@ -540,12 +543,13 @@ def orchestrate_review(
             logger.error("spec grounding failed (best-effort): %s", e)
             tracer.event("specs", "fail", error=e.__class__.__name__)
 
+    prompt_context = PromptContext(spec_digest=spec_digest)
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
         reader=reader, all_files=files, trace_dir=trace_dir,
-        spec_digest=spec_digest,
+        prompt_context=prompt_context,
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -558,7 +562,7 @@ def orchestrate_review(
             llm, files, pr, max_tokens=max_tokens,
             token_budget=token_budget, tracer=tracer, threads=threads,
             trace_dir=trace_dir,
-            spec_digest=spec_digest,
+            prompt_context=prompt_context,
         )
     )
 
@@ -940,7 +944,8 @@ def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
-    trace_dir: str | None = None, spec_digest: str = "",
+    trace_dir: str | None = None,
+    prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -976,7 +981,7 @@ def _run_workers(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
                 max_tokens, context_lines, tracer, reader, all_files,
                 trace_label=f"chunk{i}", trace_dir=trace_dir,
-                spec_digest=spec_digest,
+                prompt_context=prompt_context,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -1023,7 +1028,7 @@ def _invoke_chunk(
     max_tokens: int | None, context_lines: int | None,
     reader=None, *, include_definitions: bool = True, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
-    spec_digest: str = "",
+    prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -1039,7 +1044,10 @@ def _invoke_chunk(
     retry, whose whole purpose is a smaller prompt. ``all_files`` is the PR's
     full parsed file list; the reviewer reduces it to the bounded sibling
     summary, which survives the retry because refuting evidence is not
-    bulk context.
+    bulk context. ``prompt_context`` (rules, ticket, spec digest) is passed
+    unchanged on both attempts: it is intent, not bulk context, and a
+    dict-shaped finding keeps its ``scope`` only when
+    :attr:`reviewer.PromptContext.scope_active`.
     """
     blocks = _context_blocks(chunk, reader, include_definitions=include_definitions)
     try:
@@ -1048,7 +1056,7 @@ def _invoke_chunk(
             max_tokens=max_tokens, context_lines=context_lines,
             context_blocks=blocks, sibling_files=all_files or (),
             trace_label=trace_label, trace_dir=trace_dir or "",
-            spec_digest=spec_digest,
+            prompt_context=prompt_context,
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -1071,7 +1079,7 @@ def _invoke_chunk(
 
     findings = []
     for item in res.get("findings") or []:
-        finding = _coerce_finding(item)
+        finding = _coerce_finding(item, accept_scope=prompt_context.scope_active)
         if finding is not None:
             findings.append(finding)
 
@@ -1090,7 +1098,7 @@ def _run_worker(
     max_tokens: int | None = None, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
-    *, spec_digest: str = "",
+    *, prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -1107,7 +1115,7 @@ def _run_worker(
     )
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
-        trace_label=trace_label, trace_dir=trace_dir, spec_digest=spec_digest,
+        trace_label=trace_label, trace_dir=trace_dir, prompt_context=prompt_context,
     )
     if (
         res["error"]
@@ -1133,7 +1141,7 @@ def _run_worker(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,
             trace_label=trace_label, trace_dir=trace_dir,
-            spec_digest=spec_digest,
+            prompt_context=prompt_context,
         )
 
     error = res["error"]
@@ -1172,7 +1180,7 @@ def _run_sweep(
     tracer: Tracer | None = None,
     threads: Sequence[Thread] = (),
     trace_dir: str | None = None,
-    spec_digest: str = "",
+    prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -1180,8 +1188,11 @@ def _run_sweep(
     ``token_budget``), makes ONE single-shot call through
     :func:`reviewer.review_systemic` — so ``PRXREF_LLM_MAX_TOKENS``, the
     timeout, and the model fallback chain all apply as to any chunk — and
-    returns the same result shape a chunk worker does. ``spec_digest`` rides
-    along into the sweep prompt's Spec constraints block. A failure is that
+    returns the same result shape a chunk worker does. ``prompt_context``
+    rides along into the sweep prompt (sweep rules and ticket scope in the
+    system half, ticket context and the spec digest in the user half), and a
+    dict-shaped finding keeps its ``scope`` only when
+    :attr:`reviewer.PromptContext.scope_active`. A failure is that
     shape with ``error`` set prefixed ``systemic sweep:``, so the
     partial-review banner names the unit that failed; it counts as one
     failed chunk in the caller's coverage accounting.
@@ -1204,7 +1215,7 @@ def _run_sweep(
             llm, digest, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, threads=discussion,
             trace_label="sweep", trace_dir=trace_dir or "",
-            spec_digest=spec_digest,
+            prompt_context=prompt_context,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[sweep] raised: %s", e)
@@ -1220,7 +1231,7 @@ def _run_sweep(
 
     findings = []
     for item in findings_raw:
-        finding = _coerce_finding(item)
+        finding = _coerce_finding(item, accept_scope=prompt_context.scope_active)
         if finding is not None:
             findings.append(finding)
 
@@ -1251,7 +1262,7 @@ def _run_sweep(
     }
 
 
-def _coerce_finding(item) -> Finding | None:
+def _coerce_finding(item, *, accept_scope: bool = False) -> Finding | None:
     if isinstance(item, Finding):
         return item
     if isinstance(item, dict):
@@ -1263,6 +1274,10 @@ def _coerce_finding(item) -> Finding | None:
                 confidence=float(item.get("confidence") or 0.0),
                 title=str(item.get("title") or ""),
                 body=str(item.get("body") or ""),
+                scope=(
+                    normalize_scope(item.get("scope")) if accept_scope
+                    else SCOPE_UNKNOWN
+                ),
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)
