@@ -504,6 +504,13 @@ class TestJiraBody:
         assert src.error == ""
         assert src.text == TICKET_TEXT[:30] + _marker(30)
 
+    def test_fetch_specs_hands_max_chars_to_jira(self, server):
+        body = json.dumps({"fields": TICKET_FIELDS}).encode()
+        url = self._route(server, "ABC-9", _body(body, "application/json"))
+        src, _ = _fetch(url, max_chars=10)
+        assert src.text == ""
+        assert src.error == "Jira response for ABC-9 exceeded 44 bytes"
+
     def test_a_login_page_keeps_the_non_json_error(self, server):
         url = self._route(server, "ABC-7", _body(b"<html>Log in</html>", "text/html; charset=utf-8"))
         src, _ = _fetch(url)
