@@ -44,7 +44,7 @@ it (noted in the table).
 | 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
 | 6 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
 | 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
-| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. A `spec` finding's verbatim `Spec: "…"` quote is not read: a condition inside it belongs to the spec, not the model. |
+| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
 | 9 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap. Returns its findings in content order. |
 | 10 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate. |
 | 11 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
@@ -59,7 +59,42 @@ its own findings against prxref's own stale comments and then delete them.
 
 ## Spec grounding
 
-<!-- 0.14 placeholder: W-SPECDOCS -->
+A run is **grounded** when the spec digest it built holds at least one
+constraint line (`specs.constraint_count` above 0). Only a grounded digest is
+injected into the prompts. A digest with no constraint line is not injected at
+all: no spec sources, every source failed, nothing extracted, or a
+`PRXREF_SPEC_DIGEST_TOKENS` budget too small for one line. Every review unit
+then sees the no-specs text `(no specs provided for this review)`, under which
+the prompts make `spec` an illegal severity.
+
+`apply_spec_grounding` runs right after the severity map and before
+`apply_location_validation` (pass 1 above), over chunk and sweep findings
+alike:
+
+- On an ungrounded run it relabels every `spec` finding as `warning`. The
+  severity is compared trimmed and lower-cased, so `SPEC` counts. It never
+  drops a finding and never raises one to `spec`, and because it runs before
+  `apply_severity_consistency`, an ungrounded `spec` finding can never lift a
+  same-title sibling to `spec`.
+- When it relabels anything, one INFO line gives the count (`spec grounding:
+  relabelled N spec finding(s) as warning (no spec constraint was
+  injected)`), and the run trace gets one `specs relabel` event with
+  `findings: N`. This can happen on a run with no spec sources at all, when a
+  model emits `spec` unasked.
+- On a grounded run it changes nothing.
+
+A relabel is not a drop, so it has no `drop_reason`. After this pass a `spec`
+finding is filtered like any other. `apply_severity_consistency` ranks
+`error` > `warning` > `spec` > `outofscope`, so a same-title `warning` or
+`error` raises it. The confidence floor applies to it. It never counts toward
+`PRXREF_MAX_ERROR_FINDINGS` and never moves the verdict. The hedge gate's
+`Spec: "…"` exemption (pass 8) reads the injected digest only, so an
+ungrounded run exempts nothing.
+
+Since 0.14.0 the worker and sweep prompts carry spec text on every run, with
+spec sources or without. Their system half carries the `spec` severity and the
+spec-grounded rules. Their user half carries a `### Spec constraints` block
+that reads `(no specs provided for this review)` when nothing is injected.
 
 ## Ticket scope
 
