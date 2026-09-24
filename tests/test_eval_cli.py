@@ -138,7 +138,10 @@ class TestEvalParserShape:
 
     def test_the_eval_option_strings_are_exactly_these(self):
         ev = _subparser(cli._build_parser(), "eval")
-        assert _option_strings(ev) == {"--cases", "--label", "--out", "--rules-file", "--resume", "--judge-model"}
+        assert _option_strings(ev) == {
+            "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
+            "--judge-model",
+        }
 
     def test_an_unknown_action_exits_2(self, capsys):
         with pytest.raises(SystemExit) as excinfo:
