@@ -58,6 +58,7 @@ import time
 
 import requests
 
+from . import costs
 from .llm import ConfigError, InvokeResult, LLMClient
 
 DEFAULT_BASE_URL = ""
@@ -130,6 +131,54 @@ def _openai_error_message(resp: requests.Response) -> str:
         elif isinstance(error, str):
             return error
     return getattr(resp, "text", "") or ""
+
+
+def _header(headers: object, name: str) -> object:
+    """Case-insensitive lookup of one response header; ``None`` when absent.
+
+    A real response carries a ``requests.structures.CaseInsensitiveDict``,
+    whose ``get`` already ignores case. A plain mapping (a test double, or
+    anything else a session hands back) gets an exact ``get`` first and then
+    a casefolded scan of its items, so ``X-LiteLLM-Response-Cost`` and
+    ``x-litellm-response-cost`` read the same everywhere.
+    """
+    if not headers:
+        return None
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        if value is not None:
+            return value
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return None
+    wanted = name.casefold()
+    for key, value in items():
+        if isinstance(key, str) and key.casefold() == wanted:
+            return value
+    return None
+
+
+def _reported_cost(usage: object, resp: object) -> tuple[float | None, str]:
+    """The dollar figure the provider reported for one completion, and its source.
+
+    The body's ``usage.cost`` (OpenRouter sends it unasked) wins; it must be
+    a JSON number, so a string there is no figure. Otherwise the
+    ``x-litellm-response-cost`` header that a LiteLLM-based gateway sets, a
+    string by nature. Anything :func:`prxref.costs.valid_usd` rejects
+    (negative, ``NaN``, ``""``, ``"None"``) is no figure, and no figure is
+    ``(None, "")``: never ``0.0``.
+    """
+    if isinstance(usage, dict):
+        body_cost = usage.get("cost")
+        if not isinstance(body_cost, str):
+            cost = costs.valid_usd(body_cost)
+            if cost is not None:
+                return cost, "usage.cost"
+    cost = costs.valid_usd(_header(getattr(resp, "headers", None), "x-litellm-response-cost"))
+    if cost is not None:
+        return cost, "x-litellm-response-cost"
+    return None, ""
 
 
 def _mark_unavailable(model: str, unavailable: set[str], lock: threading.Lock) -> bool:
@@ -281,6 +330,7 @@ class OpenAICompatClient(LLMClient):
 
         failures: list[str] = []
         last_truncated: InvokeResult | None = None
+        received: list[tuple[float | None, str]] = []
         for attempt, model in enumerate(self.models, start=1):
             if model in self._unavailable:
                 failures.append(f"{model}: skipped (unavailable)")
@@ -356,6 +406,11 @@ class OpenAICompatClient(LLMClient):
                 )
                 failures.append(f"{model}: malformed response ({exc.__class__.__name__})")
                 continue
+            # Every completion that came back was billed, a truncated one the
+            # chain moves past included, so the call's figure sums them all.
+            attempt_cost, attempt_source = _reported_cost(usage, resp)
+            received.append((attempt_cost, attempt_source))
+            cost_usd, cost_source = costs.combine_reported(received)
             if finish_reason.strip().lower() in _TRUNCATION_FINISH_REASONS:
                 # A truncated completion is HTTP 200, so without this branch
                 # it returned as success and PRXREF_LLM_MODELS never advanced.
@@ -373,13 +428,15 @@ class OpenAICompatClient(LLMClient):
                     backend="openai-compat",
                     elapsed_ms=elapsed_ms,
                     finish_reason=finish_reason,
+                    cost_usd=cost_usd,
+                    cost_source=cost_source,
                 )
                 continue
             logger.info(
-                "llm attempt %d/%d ok: model=%s %dms in=%s out=%s finish=%s",
+                "llm attempt %d/%d ok: model=%s %dms in=%s out=%s finish=%s cost=%s",
                 attempt, len(self.models), resp_model, elapsed_ms,
                 usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0,
-                finish_reason or "-",
+                finish_reason or "-", "-" if attempt_cost is None else attempt_cost,
             )
             return InvokeResult(
                 text=text,
@@ -389,6 +446,8 @@ class OpenAICompatClient(LLMClient):
                 backend="openai-compat",
                 elapsed_ms=elapsed_ms,
                 finish_reason=finish_reason,
+                cost_usd=cost_usd,
+                cost_source=cost_source,
             )
         # Exhausting the chain on truncation alone is a last resort, not a
         # failure: the best answer anyone managed is still handed back, with
@@ -492,6 +551,12 @@ class LiteLLMClient(LLMClient):
         choice = response.choices[0]
         text = choice.message.content or ""
         usage = getattr(response, "usage", None)
+        # litellm prices the call from its own bundled map and leaves the
+        # figure here; completion_cost() is never called, because it raises on
+        # a model the map does not know. A string is not a figure.
+        hidden = getattr(response, "_hidden_params", None)
+        raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else getattr(hidden, "response_cost", None)
+        cost_usd = None if isinstance(raw_cost, str) else costs.valid_usd(raw_cost)
         return InvokeResult(
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -501,6 +566,8 @@ class LiteLLMClient(LLMClient):
             elapsed_ms=elapsed_ms,
             # Absent on a provider that does not report one; never guessed.
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
+            cost_usd=cost_usd,
+            cost_source="litellm" if cost_usd is not None else "",
         )
 
     def _maybe_mark_unavailable(
