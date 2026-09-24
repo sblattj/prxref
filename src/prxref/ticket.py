@@ -155,9 +155,10 @@ class TicketContext:
 
         It asks for a ``scope`` of ``in``, ``out`` or ``unknown``
         (:data:`prxref.triage.SCOPES`) on every finding, and it is the only
-        place any prompt asks for one: a non-empty block is what makes the
-        reviewer read the model's ``scope``, so it is non-empty exactly when
-        :attr:`active` is true.
+        place any prompt explains one: a non-empty block is what makes the
+        reviewer read the model's ``scope`` and show ``"scope": "in"`` on the
+        USER prompt's ``## Output Format`` example finding, so it is non-empty
+        exactly when :attr:`active` is true.
         """
         return _SCOPE_BLOCK if self.active else ""
 
