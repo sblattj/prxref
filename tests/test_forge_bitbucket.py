@@ -622,3 +622,71 @@ def test_prune_survives_an_unreadable_feed():
 
     assert removed == 0
     session.delete.assert_not_called()
+
+
+# --- get_compare_diff (replay) ------------------------------------------------
+
+
+BASE_SHA = "a" * 40
+HEAD_SHA = "b" * 40
+COMPARE_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n"
+    "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x\n+y\n"
+)
+
+
+def test_get_compare_diff_spec_is_head_then_base_with_topic_true(monkeypatch):
+    # Bitbucket spells a range SOURCE..DEST, the reverse of git. The swapped
+    # order returns a different diff that still parses, so only this pin
+    # catches it.
+    monkeypatch.setenv("PRXREF_BITBUCKET_TOKEN", "t0ken")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(text=COMPARE_DIFF)
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == COMPARE_DIFF
+    session.get.assert_called_once()
+    assert session.get.call_args[0][0] == (
+        f"https://api.bitbucket.org/2.0/repositories/acme/api/diff/{HEAD_SHA}..{BASE_SHA}"
+    )
+    kwargs = session.get.call_args[1]
+    assert kwargs["params"] == {"topic": "true"}
+    assert kwargs["headers"] == {"Authorization": "Bearer t0ken", "Accept": "text/plain"}
+    assert kwargs["auth"] is None
+
+
+def test_get_compare_diff_sends_basic_auth_when_no_token(monkeypatch):
+    monkeypatch.setenv("PRXREF_BITBUCKET_USER", "svc")
+    monkeypatch.setenv("PRXREF_BITBUCKET_APP_PASSWORD", "pw")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(text=COMPARE_DIFF)
+
+    ForgeImpl(session=session).get_compare_diff(_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA)
+
+    kwargs = session.get.call_args[1]
+    assert kwargs["auth"] == ("svc", "pw")
+    assert kwargs["headers"] == {"Accept": "text/plain"}
+
+
+def test_get_compare_diff_returns_an_empty_range_as_empty_text():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(text="")
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == ""
+
+
+def test_get_compare_diff_raises_on_http_error():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(404, json_data={"type": "error"})
+
+    with pytest.raises(requests.HTTPError):
+        ForgeImpl(session=session).get_compare_diff(
+            _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )

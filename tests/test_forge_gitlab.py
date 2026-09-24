@@ -229,6 +229,40 @@ def test_get_diff_empty_raises():
         forge.get_diff(ref)
 
 
+# One entry per header branch of the renderer, plus the three shapes a `diff`
+# body arrives in: newline-terminated, unterminated, and led by a newline. The
+# expected text is spelled out byte for byte, so moving the renderer out of
+# get_diff (to share it with get_compare_diff) cannot change a single byte.
+RENDER_ENTRIES = [
+    {"old_path": "src/a.py", "new_path": "src/a.py", "diff": "@@ -1 +1 @@\n-a\n+b\n"},
+    {"old_path": "src/new.py", "new_path": "src/new.py", "new_file": True, "diff": "@@ -0,0 +1 @@\n+x"},
+    {"old_path": "src/old.py", "new_path": "src/old.py", "deleted_file": True, "diff": "\n@@ -1 +0,0 @@\n-y\n"},
+    {"old_path": "docs/a.md", "new_path": "docs/b.md", "renamed_file": True, "diff": ""},
+    {"old_path": "img/logo.png", "new_path": "img/logo.png", "diff": None},
+]
+RENDERED = (
+    "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+    "@@ -1 +1 @@\n-a\n+b\n"
+    "diff --git a/src/new.py b/src/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.py\n"
+    "@@ -0,0 +1 @@\n+x\n"
+    "diff --git a/src/old.py b/src/old.py\ndeleted file mode 100644\n--- a/src/old.py\n+++ /dev/null\n"
+    "@@ -1 +0,0 @@\n-y\n"
+    "diff --git a/docs/a.md b/docs/b.md\nrename from docs/a.md\nrename to docs/b.md\n"
+    "--- a/docs/a.md\n+++ b/docs/b.md\n"
+    "diff --git a/img/logo.png b/img/logo.png\n--- a/img/logo.png\n+++ b/img/logo.png\n"
+)
+BASE_SHA = "1" * 40
+HEAD_SHA = "2" * 40
+
+
+def test_get_diff_renders_every_header_branch_byte_for_byte():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(200, json_data=RENDER_ENTRIES)
+    ref = PRRef("gitlab", "gitlab.com", "group", "repo", 5, "https://gitlab.com/group/repo/-/merge_requests/5")
+
+    assert ForgeImpl(session=session).get_diff(ref) == RENDERED
+
+
 def test_post_summary_create_new():
     session = MagicMock(spec=requests.Session)
     forge = ForgeImpl(session=session)
@@ -830,3 +864,266 @@ def test_prune_survives_an_unreadable_feed():
 
     assert removed == 0
     session.delete.assert_not_called()
+
+
+# --- get_compare_diff (replay) ------------------------------------------------
+
+
+def _compare_body(diffs, **extra):
+    body = {
+        "commit": None,
+        "commits": [],
+        "diffs": diffs,
+        "compare_timeout": False,
+        "compare_same_ref": False,
+    }
+    body.update(extra)
+    return body
+
+
+def test_render_diff_entries_is_the_get_diff_renderer():
+    assert gitlab._render_diff_entries(RENDER_ENTRIES) == RENDERED
+    assert gitlab._render_diff_entries([]) == ""
+
+
+def test_get_compare_diff_calls_repository_compare_merge_base_form(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITLAB_TOKEN", "t0ken")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(json_data=_compare_body(RENDER_ENTRIES))
+    ref = ForgeImpl.parse_pr_url(
+        "https://gitlab.example.com/group/sub/repo/-/merge_requests/5"
+    )
+    assert ref is not None
+
+    ForgeImpl(session=session).get_compare_diff(ref, base_sha=BASE_SHA, head_sha=HEAD_SHA)
+
+    session.get.assert_called_once()
+    assert session.get.call_args[0][0] == (
+        "https://gitlab.example.com/api/v4/projects/group%2Fsub%2Frepo/repository/compare"
+    )
+    kwargs = session.get.call_args[1]
+    # straight=false is the merge-base form; unidiff would embed ---/+++ in
+    # every entry and the renderer would write them a second time.
+    assert kwargs["params"] == {"from": BASE_SHA, "to": HEAD_SHA, "straight": "false"}
+    assert kwargs["headers"] == {"PRIVATE-TOKEN": "t0ken"}
+
+
+def test_get_compare_diff_renders_like_mr_get_diff():
+    ref = _gl_ref()
+    mr_session = MagicMock(spec=requests.Session)
+    mr_session.get.return_value = _mock_response(json_data=RENDER_ENTRIES)
+    compare_session = MagicMock(spec=requests.Session)
+    compare_session.get.return_value = _mock_response(
+        json_data=_compare_body(RENDER_ENTRIES)
+    )
+
+    mr_diff = ForgeImpl(session=mr_session).get_diff(ref)
+    compare_diff = ForgeImpl(session=compare_session).get_compare_diff(
+        ref, base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert compare_diff == mr_diff == RENDERED
+
+
+def test_get_compare_diff_raises_on_compare_timeout():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=_compare_body(RENDER_ENTRIES[:1], compare_timeout=True)
+    )
+
+    with pytest.raises(ValueError, match="timed out"):
+        ForgeImpl(session=session).get_compare_diff(
+            _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+
+@pytest.mark.parametrize("flag", ["too_large", "collapsed"])
+def test_get_compare_diff_warns_on_too_large_entry(flag, caplog):
+    big = {"old_path": "data/big.csv", "new_path": "data/big.csv", "diff": "", flag: True}
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=_compare_body([RENDER_ENTRIES[0], big])
+    )
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        diff = ForgeImpl(session=session).get_compare_diff(
+            _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+    files = parse_unified_diff(diff)
+    assert [f.path for f in files] == ["src/a.py", "data/big.csv"]
+    assert files[1].hunks == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "data/big.csv" in warnings[0].getMessage()
+
+
+def test_get_compare_diff_does_not_warn_on_an_ordinary_entry(caplog):
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(json_data=_compare_body(RENDER_ENTRIES))
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        ForgeImpl(session=session).get_compare_diff(
+            _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_get_compare_diff_returns_empty_text_for_an_empty_range():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=_compare_body([], compare_same_ref=True)
+    )
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == ""
+
+
+def test_get_compare_diff_rejects_a_body_that_is_not_a_comparison():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(json_data=[])
+
+    with pytest.raises(ValueError, match="not a comparison object"):
+        ForgeImpl(session=session).get_compare_diff(
+            _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+
+def test_get_compare_diff_raises_on_http_error():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(404, json_data={"message": "404 Not found"})
+
+    with pytest.raises(requests.HTTPError):
+        ForgeImpl(session=session).get_compare_diff(
+            _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+
+# --- get_diff pagination ------------------------------------------------------
+
+# GitLab's documented default for the MR diffs listing when no per_page is sent.
+GITLAB_DEFAULT_PER_PAGE = 20
+
+
+def _diff_entry(i):
+    path = f"src/mod_{i:03d}.py"
+    return {"old_path": path, "new_path": path, "diff": f"@@ -1 +1 @@\n-a{i}\n+b{i}\n"}
+
+
+def _paging_diff_server(entries, fail_page=None, failure=None):
+    """Serve ``entries`` the way GitLab pages them: sliced by the request's own
+    ``page`` and ``per_page``, never by call order. ``fail_page`` answers that
+    page with ``failure`` (a response, or an exception to raise) instead.
+    """
+    def get(url, headers=None, params=None, timeout=None):
+        params = params or {}
+        page = int(params.get("page", 1))
+        per_page = int(params.get("per_page", GITLAB_DEFAULT_PER_PAGE))
+        if page == fail_page:
+            if isinstance(failure, BaseException):
+                raise failure
+            return failure
+        start = (page - 1) * per_page
+        return _mock_response(200, json_data=entries[start:start + per_page])
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def test_get_diff_reads_every_page_of_a_large_mr():
+    # More files than one page of the adapter's page size, so the walk has to
+    # cross two page boundaries; a single request of GitLab's default size
+    # would have seen the first 20 of them.
+    entries = [_diff_entry(i) for i in range(2 * gitlab._PAGE_SIZE + 45)]
+    session = _paging_diff_server(entries)
+
+    diff = ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert [f.path for f in parse_unified_diff(diff)] == [e["new_path"] for e in entries]
+    assert diff == gitlab._render_diff_entries(entries)
+    sent = [c[1]["params"] for c in session.get.call_args_list]
+    assert [p["page"] for p in sent] == [1, 2, 3]
+    assert {p["per_page"] for p in sent} == {gitlab._PAGE_SIZE}
+    # /diffs ignores access_raw_diffs (byte-identical bodies with and without
+    # it on gitlab.com); only the deprecated /changes endpoint reads it.
+    assert not any("access_raw_diffs" in p for p in sent)
+    assert all(
+        c[0][0] == "https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/7/diffs"
+        for c in session.get.call_args_list
+    )
+
+
+def test_get_diff_stops_after_a_single_short_page():
+    entries = [_diff_entry(i) for i in range(3)]
+    session = _paging_diff_server(entries)
+
+    diff = ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert session.get.call_count == 1
+    assert session.get.call_args[1]["params"]["page"] == 1
+    assert diff == gitlab._render_diff_entries(entries)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _mock_response(500, json_data={"message": "boom"}),
+        requests.ConnectionError("down"),
+    ],
+    ids=["http-500", "transport"],
+)
+def test_get_diff_fails_rather_than_returning_the_first_page_alone(failure):
+    entries = [_diff_entry(i) for i in range(gitlab._PAGE_SIZE + 5)]
+    session = _paging_diff_server(entries, fail_page=2, failure=failure)
+
+    with pytest.raises(FeedReadError, match="MR diff list .* page 2"):
+        ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert [c[1]["params"]["page"] for c in session.get.call_args_list] == [1, 2]
+
+
+@pytest.mark.parametrize("flag", ["too_large", "collapsed"])
+def test_get_diff_keeps_an_excluded_file_as_header_only(flag):
+    # GitLab 18.4+ marks a file whose hunks it will not serve; the MR is still
+    # reviewed, with that file present and hunkless rather than dropped.
+    big = {"old_path": "data/big.csv", "new_path": "data/big.csv", "diff": "", flag: True}
+    session = _paging_diff_server([RENDER_ENTRIES[0], big])
+
+    files = parse_unified_diff(ForgeImpl(session=session).get_diff(_gl_ref()))
+
+    assert [f.path for f in files] == ["src/a.py", "data/big.csv"]
+    assert files[1].hunks == []
+
+
+@pytest.mark.parametrize("flag", ["too_large", "collapsed"])
+def test_get_diff_warns_once_for_each_excluded_file(flag, caplog):
+    # Same WARNING get_compare_diff gives, so a header-only file in a live MR
+    # review is visible in the log rather than silently hunkless.
+    big = {"old_path": "data/big.csv", "new_path": "data/big.csv", "diff": "", flag: True}
+    huge = {"old_path": "assets/huge.bin", "new_path": "assets/huge.bin", "diff": "", flag: True}
+    entries = [RENDER_ENTRIES[0], big, huge]
+    session = _paging_diff_server(entries)
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        diff = ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert diff == gitlab._render_diff_entries(entries)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "data/big.csv" in warnings[0]
+    assert "assets/huge.bin" in warnings[1]
+    assert not any("src/a.py" in message for message in warnings)
+
+
+def test_get_diff_does_not_warn_on_an_ordinary_entry(caplog):
+    session = _paging_diff_server(RENDER_ENTRIES)
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []

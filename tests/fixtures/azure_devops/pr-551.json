@@ -1,0 +1,30 @@
+{
+  "pullRequestId": 551,
+  "status": "completed",
+  "title": "Added keyvault cleanup task",
+  "description": "Added keyvault cleanup task",
+  "sourceRefName": "refs/heads/feature/keyvaultcleanup",
+  "targetRefName": "refs/heads/master",
+  "mergeStatus": "succeeded",
+  "isDraft": false,
+  "supportsIterations": true,
+  "createdBy": {
+    "displayName": "Example User",
+    "uniqueName": null
+  },
+  "lastMergeSourceCommit": {
+    "commitId": "41449294c4fc8ffdfb063a9176b560dc70ef7dd0"
+  },
+  "lastMergeTargetCommit": {
+    "commitId": "d82bd8eda4e7e90fd2dece6e67e13fc8c9d2dbe7"
+  },
+  "repository": {
+    "name": "AcmeWeb",
+    "remoteUrl": "https://acme@dev.azure.com/acme/AcmeWeb/_git/AcmeWeb",
+    "webUrl": "https://dev.azure.com/acme/AcmeWeb/_git/AcmeWeb",
+    "project": {
+      "name": "AcmeWeb",
+      "visibility": "public"
+    }
+  }
+}

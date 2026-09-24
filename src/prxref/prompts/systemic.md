@@ -13,7 +13,7 @@ Per-chunk reviewers each see one slice of the diff and reliably miss classes tha
 - A removed guard: a deleted numeric limit constant (`MAX_*_LENGTH`, `*_SIZE`, `*_BYTES`, `*_TIMEOUT`) or a deleted validator/sanitiser definition (`isValid*`, `validate*`, `sanitize*`, `check*`, `assert*`, `escape*`) on a path that consumes remote or third-party input. The digest shows these as `-` lines; the code that remains says nothing about the bound that is gone, so the deletion itself is the finding.
 - Repo-config drift: two lockfiles for one package manager root — a lockfile newly added while another lockfile or a `packageManager` pin also appears in the PR. The digest states this collision on a `! repo-config:` line.
 
-Nothing else. Per-file bugs inside one chunk are the chunk workers' job; repeating them here only duplicates their findings, which are deduplicated away.
+Nothing else. Per-file bugs inside one chunk are the chunk workers' job; repeating them here only duplicates their findings, which are deduplicated away. One cross-file addition: with the whole-diff digest plus any spec constraints in view, this sweep is the natural seat for cross-file spec classes — naming rules, version pins, and `no component may` rules — while per-chunk seats catch line-local violations.
 
 Do not raise a subject the reviewers already argued out under `### Existing discussion` — that decision was made with more context than the digest carries. If you raise it anyway, say in the body why the discussion's conclusion is wrong.
 
@@ -21,7 +21,12 @@ Do not raise a subject the reviewers already argued out under `### Existing disc
 
 - `error` — the change will break at runtime or is a real bug: crash, wrong result, data loss, security hole, broken contract.
 - `warning` — risk or smell the diff introduces or worsens: race-prone pattern, resource leak, missing error handling, load-bearing duplication.
+- `spec` — the diff violates a constraint quoted in the Spec constraints block below: a MUST/SHALL/required behaviour not implemented, a forbidden behaviour implemented, a version pin or naming rule broken. Only when specs were provided. Quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 - `outofscope` — minor: misleading naming, a TODO without context, dead code the diff adds.
+
+## Spec-grounded rules
+
+Emit `spec` only for a conflict between the diff and a constraint quoted in the Spec constraints block — never for a generic best practice not present in the block. This prompt's built-in classes (RLS, secrets, …) are never spec constraints. When the only basis for a finding is a constraint quoted in the Spec constraints block, its severity is `spec`. When the block reads `(no specs provided for this review)`, `spec` is not a legal severity. Cite the digest line that violates it — the same `file`/`line` contract as every finding — and quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 
 ## Confidence
 
@@ -44,6 +49,10 @@ PR description:
 
 Repo: {repo_hint}
 
+{ticket_context}### Spec constraints
+
+{spec_digest}
+
 The digest below lists every changed file (`## path`) with its hunk headers (`@@`), then its lines: a short file (or any file the migration DDL pattern touches) shows its FULL added content — every `+` line — so a statement you would expect and do not see inside such a file is evidence of absence; larger files show only the added (`+<new-line>|`) and removed (`-<old-line>|`) lines that matched a high-signal pattern, with secret, auth, and entry-point lines listed ahead of noisier matches in a capped file. A `! repo-config:` line is a synthetic note, not a diff line — cite it as a file-level finding (`line: 0`). `[full content omitted: ...]` means that file degraded to pattern lines only. `[digest truncated: token budget reached]` means the cap cut the text short; there is no more.
 
 ### Digest
@@ -65,7 +74,7 @@ Return exactly one JSON object, no prose, no fences:
       "severity": "error",
       "confidence": 0.9,
       "title": "Paid API handler has no auth check",
-      "body": "The digest shows the handler on line 42 reaching the billing API; no nonce or auth line for it appears anywhere in the digest."
+      "body": "The digest shows the handler on line 42 reaching the billing API; no nonce or auth line for it appears anywhere in the digest."{scope_example}
     }
   ],
   "escalations": []

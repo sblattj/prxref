@@ -41,3 +41,33 @@ def clear_prxref_env(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def _clear_prxref_env(monkeypatch):
     """No ambient PRXREF_* reaches any test; every test sets what it needs."""
     clear_prxref_env(monkeypatch)
+
+
+@pytest.fixture
+def contract_stubs(monkeypatch):
+    """Pin the reviewer contract: chunk, sweep and summary-prompt stubs. Opt-in.
+
+    ``tests/test_orchestrator.py`` requests it from an autouse wrapper, so every
+    test there runs against the stubs. Any other module opts in with
+    ``@pytest.mark.usefixtures("contract_stubs")``; a test that must prove the
+    real prompts end to end leaves it off and runs the real reviewer.
+
+    The systemic sweep is stubbed to a clean no-findings success so
+    sweep-specific tests can monkeypatch their own doubles; chunk-count
+    assertions include the sweep unit.
+
+    The stubs live in ``tests/test_orchestrator.py`` and are imported here, at
+    call time, so loading this conftest never imports a test module.
+    """
+    from prxref import orchestrator
+    from tests.test_orchestrator import (
+        _contract_load_prompt,
+        _contract_review_chunk,
+        _contract_review_systemic,
+    )
+
+    monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _contract_review_chunk)
+    monkeypatch.setattr(
+        orchestrator.reviewer, "review_systemic", _contract_review_systemic,
+    )
+    monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _contract_load_prompt)

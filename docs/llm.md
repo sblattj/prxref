@@ -1,10 +1,10 @@
 # LLM Backends & Failover Architecture
 
-`prxref` connects to LLM inference endpoints using two interchangeable backends: a lightweight OpenAI-compatible plain-HTTP client or an optional in-process `litellm` wrapper. There is no default endpoint and no default model chain — `PRXREF_LLM_BASE_URL` and `PRXREF_LLM_MODELS` are required, and leaving either unset raises `ConfigError` (`prxref review` exits `2`).
+`prxref` reaches a model through one of four backends: a lightweight OpenAI-compatible plain-HTTP client, an optional in-process `litellm` wrapper, or one of two subscription CLI backends, `claude-cli` and `kiro-cli`, that run your own logged-in CLI (see [Subscription CLI backends](#subscription-cli-backends-claude-cli-and-kiro-cli)). There is no default model chain on any backend — `PRXREF_LLM_MODELS` is required, and leaving it unset raises `ConfigError` (`prxref review` exits `2`). There is no default endpoint either: `PRXREF_LLM_BASE_URL` is required by the `openai-compat` backend (and its `ferry`/`http` aliases), with the same exit `2` when unset, and is not used by any other backend (see [Optional Backend: litellm](#optional-backend-litellm)).
 
 ## Key Architectural Principles
 
-1. **No Provider Credentials in `prxref`:** `prxref` reads no third-party cloud provider credentials (no AWS IAM keys, no OpenAI keys, no Google Cloud keys, and no Anthropic API keys). All provider credentials, quota pools, and upstream authentication live securely behind the inference proxy endpoint.
+1. **No Provider Credentials in `prxref`:** `prxref` never looks up, stores, or uses a provider credential (no AWS IAM keys, no OpenAI keys, no Google Cloud keys, and no Anthropic API keys), and its own settings are provider-neutral `PRXREF_*` names. The one key it sends is `PRXREF_LLM_API_KEY`, as a bearer token to the `openai-compat` endpoint you configured. Every provider key lives behind that endpoint, in the provider SDK's own environment (`litellm`), or inside your own logged-in CLI (`claude-cli`, `kiro-cli`). A CLI backend hands its CLI the environment `prxref` was started with; `claude-cli` first removes a fixed list of credential-routing variable *names*, so the CLI falls back to its subscription login, and never reads their values.
 2. **Fast Caller-Side Failover:** Fallback is implemented as a fast sequential loop over the model list. If a model encounters HTTP 429 (rate limit), HTTP >= 500 (server/upstream error), connection failures, or timeouts, the client immediately advances to the next model in the chain without same-model retries.
 
 ---
@@ -14,7 +14,7 @@
 The primary and default backend communicates via plain HTTP requests with any OpenAI-compatible `/v1/chat/completions` server — a hosted router (OpenRouter, Together, Groq), a self-hosted gateway such as `llm-ferry`, or a local runtime such as vLLM or Ollama.
 
 - **Default Backend Alias:** `PRXREF_LLM_BACKEND=openai-compat` (aliases: `ferry`, `http`).
-- **Endpoint URL:** `PRXREF_LLM_BASE_URL=https://llm.example.com/v1`. Required; there is no default.
+- **Endpoint URL:** `PRXREF_LLM_BASE_URL=https://llm.example.com/v1`. Required for this backend; there is no default.
 - **API Key:** `PRXREF_LLM_API_KEY` (sent as `Authorization: Bearer <key>`). Optional — leave empty for a local no-auth server.
 - **Models:** Model names are whatever the endpoint accepts, listed cheapest first. Required; there is no default.
 
@@ -24,7 +24,7 @@ Four variables shape the request itself. All are optional, and a bad value exits
 
 | Variable | Default | Effect on the request |
 |---|---|---|
-| `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call. Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
+| `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call on `openai-compat` and `litellm`; the CLI backends accept it and do not apply it (see [What is not applied](#what-is-not-applied)). Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
 | `PRXREF_LLM_TIMEOUT` | `45.0` | The client's default request timeout, in seconds. Must be > 0. It is a **per-model** deadline: a model that exceeds it is abandoned and the next in the chain is tried immediately, so a chain of three can take up to three timeouts. |
 | `PRXREF_LLM_TEMPERATURE` | `0.0` (sent) | `temperature` in the payload. Must be finite and >= 0; no upper bound, since the maximum is provider-specific. Unset or empty sends the default `0.0` rather than omitting the field, so an identical diff reviews identically by default; a set value wins. `PRXREF_LLM_REASONING_EFFORT` keeps its own pass-through-unvalidated rule. |
 | `PRXREF_LLM_SEED` | *(auto-derived)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset derives one random seed per process, shared by every client the run builds, so all LLM calls in a run pin the same sampling state; the run record's `sampling.seed` reports it. |
@@ -68,7 +68,8 @@ For environments running without a centralized inference gateway, `prxref` suppo
 
 - **Backend Setting:** `PRXREF_LLM_BACKEND=litellm`
 - **Installation:** `pip install 'prxref[litellm]'`
-- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and a configured seed is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is openai-compat only.
+- **Endpoint URL: not used.** litellm resolves each model's own provider endpoint and reads that provider's credential (for example `OPENROUTER_API_KEY`) from its own environment, so `PRXREF_LLM_BASE_URL` is not required here and neither it nor `PRXREF_LLM_API_KEY` is ever passed to litellm. A set `PRXREF_LLM_BASE_URL` is ignored with one INFO line (`PRXREF_LLM_BASE_URL is set but not used by the litellm backend; ignoring it`), so a deployment that set a placeholder URL to get past the check older releases applied to every backend keeps working unchanged. To route through a LiteLLM **proxy**, which speaks the OpenAI API, use the `openai-compat` backend with `PRXREF_LLM_BASE_URL` pointing at the proxy.
+- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and the seed, configured or else auto-derived, is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is not applied by `litellm`: it reaches only `openai-compat` (as `reasoning_effort` in the payload) and `claude-cli` (as `--effort`), and `kiro-cli` ignores it too.
 
 ### Configuration Example
 
@@ -85,15 +86,138 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
 
 ---
 
+## Subscription CLI backends: `claude-cli` and `kiro-cli`
+
+These two backends review with the Claude Code CLI or the Kiro CLI that is already installed and logged in on your machine, so the review runs on your own subscription instead of an API key. Every model attempt starts one CLI process. `PRXREF_LLM_MODELS` is walked as a failover chain exactly as on the other backends, and every posted comment still names the model.
+
+> **Policy.** These backends only run *your own* locally installed, logged-in CLI, for *your own* use. prxref never ships, stores, or brokers subscription credentials. Anthropic's Agent SDK terms do not allow third-party products to offer claude.ai login or subscription rate limits without approval, so do not use `claude-cli` for a team, a shared webhook, or CI: use an API key, Workload Identity Federation, or Bedrock/Vertex/Foundry through `openai-compat` or `litellm`. prxref's guidance for `kiro-cli` is the same: a developer's own machine, not CI or the webhook daemon. The Docker image ships neither CLI; see [CLI Model Backends in Docker and CI](deploy.md#6-cli-model-backends-in-docker-and-ci).
+
+### Requirements
+
+- **The CLI is installed.** `claude` or `kiro-cli` must be on `PATH`, or `PRXREF_LLM_CLI_PATH` must name it (`~` is expanded, and a bare name is looked up on `PATH`). The binary is resolved when the LLM client is built, before any network call, and a missing or non-executable one exits `2`:
+
+  ```
+  configuration error: PRXREF_LLM_BACKEND: kiro-cli needs the 'kiro-cli' CLI, which was not found on PATH; install it and log in, or set PRXREF_LLM_CLI_PATH to its absolute path
+  ```
+
+- **The CLI is logged in.** For `claude`, run `claude` once and `/login`; in a headless shell, create a token with `claude setup-token` and export it as `CLAUDE_CODE_OAUTH_TOKEN`, which is passed through to the CLI. For `kiro-cli`, the browser login is enough, and `kiro-cli whoami` shows the account it uses. A `KIRO_API_KEY` in the environment is passed through unchanged.
+- A logged-out CLI is not a configuration error. Every model fails, the review fails the way an unreachable endpoint does, and `prxref review` exits `0` — `1` under `PRXREF_FAIL_ON=error` or `any`, like any review that does not complete (see [Troubleshooting](#troubleshooting)).
+
+### Configuration example
+
+```bash
+PRXREF_LLM_BACKEND=claude-cli
+PRXREF_LLM_MODELS=sonnet,opus
+PRXREF_LLM_TIMEOUT=120
+```
+
+```bash
+PRXREF_LLM_BACKEND=kiro-cli
+PRXREF_LLM_MODELS=claude-haiku-4.5,claude-sonnet-4.5
+PRXREF_LLM_TIMEOUT=120
+```
+
+`PRXREF_LLM_CLI_PATH` and `PRXREF_LLM_CLI_CONCURRENCY` are the two settings only these backends read; see [env-vars.md](env-vars.md).
+
+### What runs
+
+`claude-cli`, one process per model attempt:
+
+```
+claude -p --model <model> --output-format stream-json --verbose --tools "" --setting-sources "" --strict-mcp-config --no-session-persistence --max-turns 1 --system-prompt-file <file>
+```
+
+`--effort <value>` is appended when `PRXREF_LLM_REASONING_EFFORT` is set. The CLI runs with no built-in tools, no settings files, no MCP servers, no saved session, and a single turn.
+
+`kiro-cli`, one process per model attempt:
+
+```
+kiro-cli chat --no-interactive --agent prxref-review --output-format stream-json --trust-tools= --agent-engine v2
+```
+
+prxref asks for the v2 agent engine because the v1 engine does not emit `stream-json`, and v2 does not apply a `--model` flag, so each attempt writes the agent file `.kiro/agents/prxref-review.json` into its working directory. That file carries the system prompt and the model, and allows no tools, no MCP servers and no resources (`"tools": []`, `"allowedTools": []`, `"mcpServers": {}`, `"includeMcpJson": false`, `"resources": []`); `--trust-tools=` trusts none either. Whether Kiro still adds user-level configuration, such as `~/.kiro/steering/`, to a working-directory agent has not been verified, and the agent file cannot turn it off.
+
+For both CLIs:
+
+- The process is started from an argument list, never through a shell, and the user message (the diff) goes on stdin, never into the arguments.
+- Each attempt runs in a fresh temporary working directory that is removed afterwards, whether the call answered, failed or timed out. For `claude-cli` it is empty and the system prompt file sits beside it; for `kiro-cli` it holds only the agent file.
+- `json_mode` calls append one fixed "respond with exactly one JSON object" instruction to the system prompt. Any code fence the model still adds is stripped by the reviewer's lenient parse.
+
+### Environment
+
+- **`claude-cli`** hands the CLI `prxref`'s environment minus eight names: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_PROFILE`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and `CLAUDE_CODE_SIMPLE`. Each would move the call off your subscription login: an API key always wins in `-p` mode, a gateway token or base URL re-points the CLI, the three `USE_*` flags route it to a cloud provider, a profile selects an organization identity, and bare mode ignores the OAuth login. Only the names are removed; their values are never read. `CLAUDE_CODE_OAUTH_TOKEN`, `HOME` and `CLAUDE_CONFIG_DIR` are kept, because they are how the CLI finds your login.
+- **Managed settings are out of prxref's reach.** An organization's managed `apiKeyHelper` or forced gateway still loads under `--setting-sources ""`. The CLI reports which credential it used: the INFO line of every answered `claude-cli` call ends `auth=<apiKeySource>`, and a value other than `none` logs one WARNING, `claude-cli: the CLI reports apiKeySource=…, so this call is NOT on your subscription login (check managed settings / apiKeyHelper)`.
+- **`kiro-cli`** hands the CLI the environment unchanged.
+
+### What is not applied
+
+| Setting | `claude-cli` | `kiro-cli` |
+|---|---|---|
+| `PRXREF_LLM_BASE_URL` | Ignored, with one INFO line when set | Ignored, with one INFO line when set |
+| `PRXREF_LLM_API_KEY` | Ignored | Ignored |
+| `PRXREF_LLM_MAX_TOKENS` | Not applied | Not applied |
+| `PRXREF_LLM_TEMPERATURE`, `PRXREF_LLM_SEED` | Not applied, with one WARNING when set | Not applied, with one WARNING when set |
+| `PRXREF_LLM_REASONING_EFFORT` | `--effort <value>`, passed unvalidated | Not applied, with one INFO line when set |
+
+Neither CLI takes a per-call output budget. `PRXREF_LLM_MAX_TOKENS` is deliberately not mapped to `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: hitting that cap makes the CLI spend extra recovery turns and still end in an error. A `CLAUDE_CODE_MAX_OUTPUT_TOKENS` you export yourself reaches the CLI unchanged.
+
+Neither CLI takes a temperature or a seed either, so a review on a CLI backend is less reproducible than one on `openai-compat` or `litellm` (see [Determinism](#determinism-what-is-pinned-and-what-still-varies)), and the run record's `sampling` field shows `"temperature": null` and `"seed": null`.
+
+### Models
+
+- **`claude-cli`** takes whatever `claude --model` takes: an alias such as `sonnet`, `opus` or `haiku`, or a full model id. The attribution and the logs name the model the CLI reports it ran, so an alias shows up as its full id. A model the CLI rejects as unknown (a 404, or its unrecognized-model marker on stderr) is skipped for the rest of the run, with one WARNING.
+- **`kiro-cli`** takes the ids `kiro-cli chat --list-models` prints, such as `claude-haiku-4.5`. The model goes into the agent file because the v2 engine ignores `--model`: it warns `failed to set model … Method not found` and runs its `auto` model. Kiro does not report which model ran, so the attribution names the model you configured. An unknown id fails that model as `<model>: prompt error: Internal error (possibly an unknown model; check kiro-cli chat --list-models)`. Because Kiro's error does not name the model, prxref does not skip it for the rest of the run: every call tries it again before moving on down the chain.
+
+### Concurrency and timeouts
+
+- `PRXREF_LLM_CLI_CONCURRENCY` (default `2`) caps the CLI processes one client runs at once. The review's workers queue for a free slot, and the wait does not count against the timeout. A subscription's rate window belongs to your account, so a higher cap spends it faster.
+- `PRXREF_LLM_TIMEOUT` is each model's wall-clock deadline, and it includes the CLI's own start-up: about 2.3 s for `claude` on a tiny prompt whose model time was 1.4 s, and 3.6–6.7 s for `kiro-cli`, as observed while designing these backends. Live `kiro-cli` calls on 2026-09-23 were much slower, 24–27 s for a one-line prompt and 28–37 s for a review call, so for `kiro-cli` `120` is the floor, not a comfortable margin. The 45 s default is sized for HTTP; use `120` or more. A model that misses its deadline has its whole process group killed, the chain moves on, and the review's zero-context retry applies exactly as it does over HTTP.
+
+### Tokens, cost and credits
+
+- **`claude-cli`** counts cache-creation and cache-read tokens as input tokens, because that is prompt the model read.
+- **`kiro-cli`** reports no token counts, so every Kiro call counts `0` tokens and the attribution reads `0 tok`. Kiro meters credits, not dollars. The INFO line of every answered call ends with the credits Kiro metered and its session id:
+
+  ```
+  INFO llm attempt 1/1 ok: backend=kiro-cli model=claude-haiku-4.5 3570ms in=0 out=0 finish=end_turn credits=0.0060 session=<session id>
+  ```
+
+What either backend contributes to `cost_usd` is set out in [Cost accounting](#cost-accounting).
+
+### Privacy
+
+- **`kiro-cli`** saves every chat under `~/.kiro/sessions/cli/<session id>.json` and `.jsonl`, prompt included, so every diff it reviewed is kept there. prxref does not delete these files, because deleting a session takes Kiro about 11 seconds. Use the `session=` id from the INFO line with `kiro-cli chat --delete-session <session id>`, or prune the directory yourself.
+- **`claude-cli`** runs with `--no-session-persistence`, so the CLI saves no transcript of a review.
+
+### Troubleshooting
+
+| What you see | What it means |
+|---|---|
+| Exit `2`, `configuration error: PRXREF_LLM_BACKEND: … needs the '…' CLI, which was not found on PATH` | The CLI is not installed, or not on the `PATH` prxref runs with. Install it, or set `PRXREF_LLM_CLI_PATH`. |
+| Exit `2`, `configuration error: PRXREF_LLM_CLI_PATH: '…' is not an executable file` | The override names a missing file or one without execute permission. |
+| Every model fails, and each reason quotes the CLI's own login or authentication error | The CLI is logged out. Log in again (for headless `claude`, refresh `CLAUDE_CODE_OAUTH_TOKEN`). |
+| `<model>: prompt error: Internal error (possibly an unknown model; …)` | Kiro does not know that model id. Check `kiro-cli chat --list-models`. |
+| `<model>: engine error: …` | Kiro failed before the model ran, for example because the installed `kiro-cli` cannot start the v2 agent engine. Update `kiro-cli`. |
+| WARNING `claude-cli: subscription rate limit status=… type=… utilization=…` | Your subscription window is close to its limit. A `rejected` status fails the call as `rate limited`. |
+| WARNING `claude-cli: the CLI reports apiKeySource=…` | Managed settings or an `apiKeyHelper` put the call on an API key, not your subscription. |
+| WARNING `claude-cli: the CLI loaded tools/MCP servers despite --tools '' --strict-mcp-config` | The CLI no longer honours the isolation flags; its options may have changed. |
+| `<model>: timeout (TimeoutExpired after 45s)` | Start-up plus the answer took longer than `PRXREF_LLM_TIMEOUT`. Raise it to `120` or more. |
+
+---
+
 ## Determinism: what is pinned, and what still varies
 
 - `PRXREF_LLM_TEMPERATURE` defaults to `0.0`, and `0.0` is **sent** on the wire
-  rather than omitted.
-- `PRXREF_LLM_SEED` is sent on every call, on both backends: the configured
+  by the two API backends, `openai-compat` and `litellm`, rather than omitted.
+- `PRXREF_LLM_SEED` is sent on every call by the two API backends,
+  `openai-compat` and `litellm`: the configured
   value when set, else one random seed derived per process and shared by every
   client the run builds — temperature 0 alone cannot pin hosted inference
   (issue #56), so an unseeded run still varies call to call. The `sampling`
-  field reports which seed was in force.
+  field reports which seed was in force. The CLI backends, `claude-cli` and
+  `kiro-cli`, send no seed and no temperature: setting either logs one WARNING
+  that it is not applied, and `sampling` reports both as `null` (see
+  [What is not applied](#what-is-not-applied)).
 - **Neither makes a review bit-reproducible.** Providers vary by system
   fingerprint, load-balanced backends serve the same model from different
   hardware, MoE routing shifts with batch composition, and many gateways accept
@@ -107,6 +231,75 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
   ties by finding content (confidence first, then file, line, and normalized
   title), never by the order the workers happened to return in. The same
   findings in any arrival order therefore produce the same review.
+
+## Cost accounting
+
+Every run record carries `cost_usd` (USD) and `cost_estimated` (bool), on every exit, and `--format json` prints both. A run's cost is in exactly one of three states:
+
+- **Reported.** The backend returned a dollar figure for each call. A reported figure always wins, even over a price-table entry for the same model.
+- **Estimated.** No figure came back, but `PRXREF_PRICE_TABLE` prices the model. `cost_estimated` is `true`.
+- **Unknown.** Neither. `cost_usd` is `null`: never `0`, and never a partial sum of the calls that were priced.
+
+### Where a reported figure comes from
+
+| Backend | Source | `cost_source` |
+|---|---|---|
+| `openai-compat` (`ferry`, `http`) | The response body's `usage.cost` (OpenRouter returns it on every completion without being asked), else the `x-litellm-response-cost` response header that a LiteLLM gateway or `llm-ferry` sets. The body value must be a JSON number. LiteLLM omits the header when it cannot price the call **and** when the cost is zero, so a free model behind a gateway reports nothing. | `usage.cost` / `x-litellm-response-cost` |
+| `litellm` | `response_cost`, which litellm computes from its own price map. prxref never calls `litellm.completion_cost()`. | `litellm` |
+| `claude-cli` | The CLI's `total_cost_usd`. On a subscription this is the **API-equivalent cost at list price, not your subscription bill**, so the `-v` line and the posted attribution label it `(API-equivalent)` (see [Where the cost shows](#where-the-cost-shows)). | `claude-cli` |
+| `kiro-cli` | None. Kiro reports credits, not dollars, and no token counts, so a price-table entry cannot estimate it either: a run on `kiro-cli` always reads "cost unknown". | — |
+
+prxref sends nothing extra to get a figure: the request never carries `usage: {"include": true}`. A figure that is not a finite number `>= 0` (a negative, `NaN`, a string in the body, an empty or `None` header) counts as no figure.
+
+### The price table
+
+`PRXREF_PRICE_TABLE` is inline JSON (the first non-space character is `{`) or a path to a JSON file. It maps a model name to USD per **million** tokens:
+
+```bash
+PRXREF_PRICE_TABLE='{"openai/gpt-4o-mini": {"input": 0.15, "output": 0.60}}'
+PRXREF_PRICE_TABLE=./prxref-prices.json
+```
+
+- The lookup is on the **exact** model name the call reported, which is the name shown as `model=` in the attribution. It can differ from the name in `PRXREF_LLM_MODELS`, because the endpoint's answer names the model. There is no prefix or pattern matching.
+- The table is only consulted for a call with no reported figure, and only when that call counted input tokens. Zero input tokens means the backend reported no usage, and an estimate would be a fake `$0`.
+- Give a free or local model a zero entry (`{"input": 0, "output": 0}`). Without one, a run on it reads "cost unknown", never `$0`.
+- An estimate prices every input token at the list rate, so it ignores prompt-cache discounts that a provider's own figure reflects. That is one more reason a reported figure always wins.
+- The schema is strict. Invalid JSON, an unreadable file, a missing or unknown field (`"ouput"`), a duplicate model, or a price that is not a finite number `>= 0` raises `ConfigError` naming `PRXREF_PRICE_TABLE`, and `prxref review` exits `2`.
+
+When a run ends up unknown because some model had neither a reported figure nor a usable table entry, prxref logs one INFO line naming the model(s), in the exact spelling to key the table on:
+
+```
+cost unknown: no reported cost and no usable PRXREF_PRICE_TABLE estimate for model(s) 'openai/gpt-4o-mini'
+```
+
+### Which calls count
+
+A review is its chunk workers plus the systemic sweep, and the total covers the same calls as the run's token counts:
+
+- A call whose response **arrived** is counted, including one that was then truncated or failed to parse. It was billed.
+- A call that raised (a timeout, a connection error, an HTTP error) returned nothing and adds nothing. A provider that bills abandoned generations may charge more than `cost_usd` says.
+- A run that sent requests and got no response back at all is unknown (`null`).
+- A run that made no LLM request (an empty diff, or a forge or diff error before the review) costs a known `0.0`.
+- Inside one `openai-compat` call, truncated completions that the fallback chain moved past were billed too, so they are added to that call's figure. Its token counts still cover only the answering model. If any of those completions came back without a figure, the call's figure is unknown.
+- The timeout retry (the one re-run with `context_lines=0`) replaces the first attempt's result, cost included, exactly as it replaces its tokens.
+- If the total cannot be computed at all, for example because a library caller passed a malformed table object, the run logs a WARNING and its cost is unknown. Cost accounting never fails a review.
+
+### Where the cost shows
+
+- The run record and `--format json`: `cost_usd` and `cost_estimated`.
+- `prxref review -v`: `cost: $0.0007`, `$0.0007 (API-equivalent)`, `~$0.0007 (est.)` or `cost unknown` after the token count.
+- The JSONL trace (`PRXREF_TRACE_FILE`): the `run ok` and `run fail` events carry `cost_usd` and `cost_estimated`. Each `chunk ok` and `sweep ok` event carries that unit's reported `cost_usd`; estimates are computed for the run only, so a unit priced from the table shows `null` there.
+- The per-unit trace files (`PRXREF_TRACE_DIR`): each `<unit>.meta.json` carries `cost_usd` and `cost_source`.
+- The posted comment, only with `PRXREF_POST_COST=1`. The cost is appended as the **last** field of the summary's attribution line and of the error notice's:
+
+  ```
+  Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · $0.0007
+  Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · ~$0.0007 (est.)
+  Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · cost unknown
+  Reviewed by prxref · model=claude-sonnet-5 · 7564 tok · 13.4s · $0.0202 (API-equivalent)
+  ```
+
+  `(API-equivalent)` appears on the `-v` line and in the attribution when every reported figure in the run came from `claude-cli`; an estimated run keeps `~… (est.)`, and `--format json` adds no label (each unit's `cost_source` in the `PRXREF_TRACE_DIR` meta files names the source). A notice posted before any LLM request says `$0.00`, and a cost below $0.0001 reads `<$0.0001`, never `$0.00`. Inline comments never carry a cost. With the flag off, which is the default, the attribution line is byte-identical to a build without cost accounting.
 
 ## Worker Prompt Context
 

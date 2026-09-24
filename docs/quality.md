@@ -44,7 +44,7 @@ it (noted in the table).
 | 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
 | 6 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
 | 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
-| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. |
+| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
 | 9 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap. Returns its findings in content order. |
 | 10 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate. |
 | 11 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
@@ -52,6 +52,116 @@ it (noted in the table).
 Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
 its own findings against prxref's own stale comments and then delete them.
+
+## Severity map from team review rules
+
+When the team review-rules file declares a severity map
+(`PRXREF_REVIEW_RULES` / `--rules-file`; see
+[docs/review-rules.md](review-rules.md)), `apply_severity_map` runs **before
+pass 1**. It rewrites a team severity word the model wrote (`blocker`) to the
+prxref tier the map gives it (`error`), matching case-insensitively and with
+runs of whitespace collapsed. It runs first because every later pass reads the
+severity: consistency groups by it, the sweep boundary is re-derived from it,
+and the quality gate would drop `blocker` as `invalid severity: 'blocker'`.
+
+- It **drops nothing**, so it has no row in the drop-reason table below. A
+  word the map does not name passes through and still dies at the gate as
+  `invalid severity`.
+- It never rewrites a finding that already carries one of prxref's own
+  severities or a `drop_reason`. It keeps every other field, `scope`
+  included, and the list's length and order.
+- Without rules, or with rules that map nothing, the pass is not called.
+- When it rewrites any finding, prxref logs `severity map: rewrote N
+  finding(s) from team severity words` at INFO and the JSONL trace gets a
+  `rules remap` event with `findings=N`.
+
+The map never targets `spec`, so the pass never mints a spec finding.
+
+## Spec grounding
+
+A run is **grounded** when the spec digest it built holds at least one
+constraint line (`specs.constraint_count` above 0). Only a grounded digest is
+injected into the prompts. A digest with no constraint line is not injected at
+all: no spec sources, every source failed, nothing extracted, or a
+`PRXREF_SPEC_DIGEST_TOKENS` budget too small for one line. Every review unit
+then sees the no-specs text `(no specs provided for this review)`, under which
+the prompts make `spec` an illegal severity.
+
+`apply_spec_grounding` runs right after the severity map and before
+`apply_location_validation` (pass 1 above), over chunk and sweep findings
+alike:
+
+- On an ungrounded run it relabels every `spec` finding as `warning`. The
+  severity is compared trimmed and lower-cased, so `SPEC` counts. It never
+  drops a finding and never raises one to `spec`, and because it runs before
+  `apply_severity_consistency`, an ungrounded `spec` finding can never lift a
+  same-title sibling to `spec`.
+- When it relabels anything, one INFO line gives the count (`spec grounding:
+  relabelled N spec finding(s) as warning (no spec constraint was
+  injected)`), and the run trace gets one `specs relabel` event with
+  `findings: N`. This can happen on a run with no spec sources at all, when a
+  model emits `spec` unasked.
+- On a grounded run it changes nothing.
+
+A relabel is not a drop, so it has no `drop_reason`. After this pass a `spec`
+finding is filtered like any other. `apply_severity_consistency` ranks
+`error` > `warning` > `spec` > `outofscope`, so a same-title `warning` or
+`error` raises it. The confidence floor applies to it. It never counts toward
+`PRXREF_MAX_ERROR_FINDINGS` and never moves the verdict. The hedge gate's
+`Spec: "…"` exemption (pass 8) reads the injected digest only, so an
+ungrounded run exempts nothing.
+
+Since 0.14.0 the worker and sweep prompts carry spec text on every run, with
+spec sources or without. Their system half carries the `spec` severity and the
+spec-grounded rules. Their user half carries a `### Spec constraints` block
+that reads `(no specs provided for this review)` when nothing is injected.
+
+## Ticket scope
+
+With a ticket context configured (`--context-file` / `PRXREF_TICKET_CONTEXT_FILE`,
+see [Ticket Context and Scope](../README.md#ticket-context-and-scope)), every
+finding carries a `scope` of `in`, `out`, or `unknown` relative to that ticket.
+Scope is **orthogonal to every pass on this page**: no pass reads it, it never
+changes a severity or a confidence, and it never feeds the verdict, the
+confidence floor, the error cap or its tie-break, or `PRXREF_FAIL_ON`. It is
+not the `outofscope` severity either, which only means minor. A finding never
+gains a `drop_reason` for its scope.
+
+- **Only an active ticket can set it.** The model is asked for a scope only
+  when the ticket has text. Raw chunk and sweep findings go through
+  `_enforce_scope` before the first pass: without a ticket, or with an empty
+  one, every finding is `unknown` whatever the model returned.
+- **The vocabulary is strict.** `triage.normalize_scope` keeps a value only
+  when it is exactly `in`, `out`, or `unknown` after trimming and case-folding.
+  `"In scope"`, `"yes"`, a boolean, or a missing key is `unknown`. There is no
+  synonym table, because a lenient mapping would turn a malformed answer into
+  a confident one.
+- **Sweep dedup ignores it.** `apply_sweep_dedup` matches on file and
+  normalized title, so a sweep finding that restates a surviving chunk finding
+  is still dropped when the two copies disagree on scope. The identity used to
+  re-derive the chunk/sweep boundary across the gate includes `scope`, so
+  neither copy's scope ends up on the other.
+- **It orders the inline batch within a severity.** When
+  `PRXREF_MAX_INLINE_COMMENTS` leaves room for only some findings, severity
+  decides first. Within one severity, an `out` finding yields its inline slot
+  to `in` and `unknown` ones, and confidence and content break the rest of the
+  ties. With no active ticket every scope is `unknown`, so the order is exactly
+  the severity-only one.
+- **Truncation can change the state.** Only the first
+  `PRXREF_TICKET_CONTEXT_MAX_CHARS` characters reach the model, and acceptance
+  criteria are detected on that kept text. A long ticket whose criteria come
+  after the cap therefore reads as a ticket without criteria, and the summary
+  says scope was judged from its description alone.
+
+## Replay runs and the thread passes
+
+A `--no-threads` replay gives passes 4 and 5 (`apply_thread_dedup` and
+`apply_settled_thread_suppression`) an empty thread list, so they drop nothing,
+and a `--diff-file` replay with no `--pr-url` has no threads to start with. A
+replay at pinned SHAs WITHOUT `--no-threads` still dedups against the PR's
+*current* threads, which may postdate the pinned head; the CLI logs a warning
+saying so. The stale-inline-comment prune never runs on a replay, because a
+replay never posts. See the README's "Replay Mode (Evaluation)".
 
 ## Drop reasons
 
@@ -64,7 +174,7 @@ its own findings against prxref's own stale comments and then delete them.
 | `settled in thread: <author>` | `apply_settled_thread_suppression` | A thread on the same path already argued this subject out. A **resolved** thread still settles it — resolution is a decision, not an expiry. |
 | `claims removal of a path present in the post-image: <path>` | `apply_removal_claim_check` | A removal verb governs this path, and every path the claim names is still present after the PR lands. |
 | `hedged: "<matched phrase>"` | `apply_hedge_gate` | The finding's own text conditions the defect on something the model never established. |
-| `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `outofscope`}. |
+| `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `spec`, `outofscope`}. |
 | `confidence <x> below floor <y>` | `apply_quality_gate` | Below `PRXREF_CONFIDENCE_FLOOR`. |
 | `error cap exceeded (max <n>)` | `apply_quality_gate` | Beyond `PRXREF_MAX_ERROR_FINDINGS`. Ties break on finding content, not arrival order, so the cap is reproducible. |
 | `duplicate of chunk finding` | `apply_sweep_dedup` | A whole-diff sweep finding restates a chunk finding that already survived the gate. |

@@ -1,0 +1,29 @@
+{
+  "pullRequestId": 9,
+  "status": "active",
+  "title": "pr6",
+  "sourceRefName": "refs/heads/feature-branch9",
+  "targetRefName": "refs/heads/feature-branch3",
+  "mergeStatus": "succeeded",
+  "isDraft": false,
+  "supportsIterations": true,
+  "createdBy": {
+    "displayName": "acme",
+    "uniqueName": null
+  },
+  "lastMergeSourceCommit": {
+    "commitId": "1facdc567d485a271534198953b3cf0fa21fc19d"
+  },
+  "lastMergeTargetCommit": {
+    "commitId": "249963d1b946fdeb17bd21260e5cfa7b277ceb94"
+  },
+  "repository": {
+    "name": "Acme Project",
+    "remoteUrl": "https://acme@dev.azure.com/acme/Acme%20Project/_git/Acme%20Project",
+    "webUrl": "https://dev.azure.com/acme/Acme%20Project/_git/Acme%20Project",
+    "project": {
+      "name": "Acme Project",
+      "visibility": "public"
+    }
+  }
+}

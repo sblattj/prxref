@@ -7,7 +7,9 @@ directory proximity plus risk instead of call-graph connectivity.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -27,6 +29,28 @@ DEFAULT_MAX_FILES_PER_CHUNK: int = 5
 # adds what it did not.
 DEFAULT_CONTEXT_LINES: int = 3
 
+# Where a finding sits relative to the ticket the PR is meant to implement.
+# Orthogonal to severity: scope never feeds dedup, the error cap, the verdict
+# or the fail-on exit. "unknown" is both the no-ticket state and the answer
+# for anything the model returned that is not exactly one of these words.
+SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN = "in", "out", "unknown"
+SCOPES: tuple[str, ...] = (SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN)
+
+
+def normalize_scope(raw: object) -> str:
+    """Map a model-supplied ``scope`` value onto :data:`SCOPES`.
+
+    Only a string that is exactly ``"in"``, ``"out"`` or ``"unknown"`` after
+    ``strip().casefold()`` keeps its meaning; everything else (``None``, a
+    bool, ``"In scope"``, ``"yes"``) is ``"unknown"``. There is deliberately
+    no synonym table: a lenient mapping would turn a malformed answer into a
+    confident ``in`` or ``out``.
+    """
+    if not isinstance(raw, str):
+        return SCOPE_UNKNOWN
+    value = raw.strip().casefold()
+    return value if value in SCOPES else SCOPE_UNKNOWN
+
 
 @dataclass
 class Finding:
@@ -36,6 +60,9 @@ class Finding:
     ``quality.apply_line_align`` snapping; 0 means file-level.
     ``drop_reason`` is set by quality passes instead of the finding being
     silently discarded, so run records can explain every drop.
+    ``scope`` is one of :data:`SCOPES`: where the finding sits relative to
+    the ticket the PR implements, ``unknown`` whenever no ticket is active.
+    It is the last field, so every positional construction keeps working.
     """
 
     file: str
@@ -45,6 +72,7 @@ class Finding:
     title: str
     body: str
     drop_reason: str | None = None
+    scope: str = SCOPE_UNKNOWN
 
 
 @dataclass
@@ -333,6 +361,59 @@ FILE_PENALTIES: list[tuple[str, int]] = [
     (r"\.(generated|auto)\.", -50),
     (r"\.(idea|vscode)/", -50),
 ]
+
+# The generated-file half of FILE_PENALTIES (snapshots, minified bundles,
+# source maps, ``*.generated.*`` / ``*.auto.*``) as a yes/no test for the
+# PR-size advisory rather than a chunking-priority score. The ``.lock`` and
+# ``-lock.*`` alternatives are left out on purpose: lockfiles are matched by
+# exact basename from the set the caller passes in.
+GENERATED_FILE_RE = re.compile(r"(\.snap|\.min\.js|\.map)$|__snapshots__/|\.(generated|auto)\.")
+
+
+def is_size_ignored(
+    path: str,
+    *,
+    lockfile_basenames: frozenset[str] = frozenset(),
+    ignore_globs: Sequence[str] = (),
+) -> bool:
+    """True when the PR-size advisory must not count ``path``.
+
+    That is a lockfile (its basename is in ``lockfile_basenames``), a
+    generated file (:data:`GENERATED_FILE_RE`), or a path matched by one of
+    the operator's ``ignore_globs``. The globs are added to the two built-in
+    tests, never a replacement for them. Each is matched with
+    :func:`fnmatch.fnmatchcase` against the full POSIX path, so the match is
+    case-sensitive on every host and ``*`` crosses ``/``: ``dist/*`` also
+    matches ``dist/sub/app.js``.
+    """
+    if PurePosixPath(path).name in lockfile_basenames:
+        return True
+    if GENERATED_FILE_RE.search(path):
+        return True
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in ignore_globs)
+
+
+def count_size_relevant_changes(
+    files: Sequence[FileDiff],
+    *,
+    lockfile_basenames: frozenset[str] = frozenset(),
+    ignore_globs: Sequence[str] = (),
+) -> tuple[int, int]:
+    """``(changed_lines, changed_files)`` over the files the advisory counts.
+
+    A file :func:`is_size_ignored` rejects leaves both numbers. Each counted
+    file adds ``lines_added + lines_removed`` and one file, so a binary file,
+    a pure rename or a header-only entry counts as one file and zero lines.
+    ``changed_lines`` is therefore a lower bound when a forge omits a file's
+    hunks.
+    """
+    counted = [
+        f for f in files
+        if not is_size_ignored(
+            f.path, lockfile_basenames=lockfile_basenames, ignore_globs=ignore_globs,
+        )
+    ]
+    return sum(f.lines_added + f.lines_removed for f in counted), len(counted)
 
 
 def score_file(file: FileDiff, churn: int = 0) -> float:

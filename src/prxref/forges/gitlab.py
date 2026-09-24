@@ -106,6 +106,57 @@ def _make_retry_session() -> requests.Session:
 _DEFAULT_SESSION = _make_retry_session()
 
 
+def _render_diff_entries(diffs: list[dict]) -> str:
+    """Render GitLab's structured diff entries as one git-style unified diff.
+
+    GitLab serves no raw diff for a merge request or a compare, only a list of
+    per-file entries whose ``diff`` holds the hunks without their headers. This
+    rebuilds each file's ``diff --git`` header from the entry's flags, then
+    appends the hunks, so the parser downstream sees the same text shape every
+    other forge returns.
+    """
+    diff_parts: list[str] = []
+    for d in diffs:
+        old_path = d.get("old_path") or ""
+        new_path = d.get("new_path") or ""
+        new_file = d.get("new_file", False)
+        deleted_file = d.get("deleted_file", False)
+        renamed_file = d.get("renamed_file", False)
+        raw_diff = d.get("diff") or ""
+
+        header_lines = [f"diff --git a/{old_path} b/{new_path}"]
+        if new_file:
+            header_lines.append("new file mode 100644")
+            header_lines.append("--- /dev/null")
+            header_lines.append(f"+++ b/{new_path}")
+        elif deleted_file:
+            header_lines.append("deleted file mode 100644")
+            header_lines.append(f"--- a/{old_path}")
+            header_lines.append("+++ /dev/null")
+        elif renamed_file:
+            header_lines.append(f"rename from {old_path}")
+            header_lines.append(f"rename to {new_path}")
+            header_lines.append(f"--- a/{old_path}")
+            header_lines.append(f"+++ b/{new_path}")
+        else:
+            header_lines.append(f"--- a/{old_path}")
+            header_lines.append(f"+++ b/{new_path}")
+
+        file_unified = "\n".join(header_lines)
+        if raw_diff:
+            if not raw_diff.startswith("\n"):
+                file_unified += "\n"
+            file_unified += raw_diff
+            if not file_unified.endswith("\n"):
+                file_unified += "\n"
+        else:
+            file_unified += "\n"
+
+        diff_parts.append(file_unified)
+
+    return "".join(diff_parts)
+
+
 class ForgeImpl:
     """GitLab Forge adapter."""
 
@@ -222,61 +273,89 @@ class ForgeImpl:
         )
 
     def get_diff(self, ref: PRRef) -> str:
-        """Fetch the raw unified diff of the PR (all files)."""
+        """Fetch the raw unified diff of the PR (all files).
+
+        The ``/diffs`` listing is paginated, 20 entries a page by default, so
+        a single unparameterised request reviewed the first 20 files of a
+        larger MR and silently dropped the rest. The listing is walked with
+        ``_iter_pages`` like every other GitLab collection here: a page that
+        cannot be read, or a listing that outruns the page budget, raises
+        ``FeedReadError`` rather than handing back the files that happened to
+        arrive. An entry GitLab marks ``collapsed`` or ``too_large`` carries no
+        hunks; it is rendered as a header-only file and logged at WARNING, as
+        ``get_compare_diff`` does. Raises ``ValueError`` for
+        an MR with no file entries at all.
+
+        ``access_raw_diffs`` is not sent: ``/diffs`` returns the same bodies
+        with or without it, and only the deprecated ``/changes`` endpoint
+        reads it.
+        """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
         url = f"{base}/merge_requests/{ref.number}/diffs"
-        params = {"access_raw_diffs": "true"}
 
-        resp = self._session.get(url, headers=headers, params=params, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        diffs = resp.json()
+        diffs = [
+            entry
+            for page in self._iter_pages(ref, url, headers, what="MR diff list")
+            for entry in page
+        ]
 
         if not diffs:
             raise ValueError(
                 f"Empty diff received from GitLab for {ref.owner}/{ref.repo}#{ref.number}"
             )
 
-        diff_parts: list[str] = []
         for d in diffs:
-            old_path = d.get("old_path") or ""
-            new_path = d.get("new_path") or ""
-            new_file = d.get("new_file", False)
-            deleted_file = d.get("deleted_file", False)
-            renamed_file = d.get("renamed_file", False)
-            raw_diff = d.get("diff") or ""
+            if d.get("too_large") or d.get("collapsed"):
+                logger.warning(
+                    "GitLab MR diff: %s has no inline diff (too_large/collapsed); "
+                    "it is reviewed as header-only",
+                    d.get("new_path") or d.get("old_path"),
+                )
+        return _render_diff_entries(diffs)
 
-            header_lines = [f"diff --git a/{old_path} b/{new_path}"]
-            if new_file:
-                header_lines.append("new file mode 100644")
-                header_lines.append("--- /dev/null")
-                header_lines.append(f"+++ b/{new_path}")
-            elif deleted_file:
-                header_lines.append("deleted file mode 100644")
-                header_lines.append(f"--- a/{old_path}")
-                header_lines.append("+++ /dev/null")
-            elif renamed_file:
-                header_lines.append(f"rename from {old_path}")
-                header_lines.append(f"rename to {new_path}")
-                header_lines.append(f"--- a/{old_path}")
-                header_lines.append(f"+++ b/{new_path}")
-            else:
-                header_lines.append(f"--- a/{old_path}")
-                header_lines.append(f"+++ b/{new_path}")
+    def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
+        """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
 
-            file_unified = "\n".join(header_lines)
-            if raw_diff:
-                if not raw_diff.startswith("\n"):
-                    file_unified += "\n"
-                file_unified += raw_diff
-                if not file_unified.endswith("\n"):
-                    file_unified += "\n"
-            else:
-                file_unified += "\n"
+        Uses ``repository/compare`` with ``straight=false``, the merge-base
+        form, and renders its ``diffs`` entries with the same header logic as
+        ``get_diff``. ``unidiff`` is deliberately not requested: it puts the
+        ``---``/``+++`` lines inside each entry, and the renderer would then
+        write them twice.
 
-            diff_parts.append(file_unified)
-
-        return "".join(diff_parts)
+        A ``compare_timeout`` means GitLab cut the file list short, so this
+        raises rather than hand back part of the range. An entry marked
+        ``too_large`` or ``collapsed`` carries no hunks; it is kept as a
+        header-only file and logged at WARNING. An empty range comes back as
+        ``""``. Raises on an HTTP or transport failure.
+        """
+        resp = self._session.get(
+            f"{self._api_base(ref)}/repository/compare",
+            headers=self._get_auth_headers(),
+            params={"from": base_sha, "to": head_sha, "straight": "false"},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise ValueError(
+                f"GitLab compare {base_sha}...{head_sha} returned "
+                f"{type(body).__name__}, not a comparison object"
+            )
+        if body.get("compare_timeout"):
+            raise ValueError(
+                f"GitLab compare {base_sha}...{head_sha} timed out; its diff list "
+                "would be incomplete"
+            )
+        diffs = body.get("diffs") or []
+        for d in diffs:
+            if d.get("too_large") or d.get("collapsed"):
+                logger.warning(
+                    "GitLab compare: %s has no inline diff (too_large/collapsed); "
+                    "it is reviewed as header-only",
+                    d.get("new_path") or d.get("old_path"),
+                )
+        return _render_diff_entries(diffs)
 
     def _iter_pages(
         self,

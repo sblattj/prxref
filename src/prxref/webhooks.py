@@ -1,4 +1,4 @@
-"""Webhook receiver for GitHub, Bitbucket, and GitLab PR events.
+"""Webhook receiver for GitHub, Bitbucket, GitLab, and Azure DevOps PR events.
 
 POST /webhook verifies the forge-specific signature, extracts the PR URL
 from the payload, and enqueues it; a single background daemon worker
@@ -9,6 +9,7 @@ orchestrate_review); this module knows nothing about how reviews run.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -18,12 +19,14 @@ import queue
 import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
 _GITHUB_SECRET_ENV = "PRXREF_GITHUB_WEBHOOK_SECRET"
 _BITBUCKET_SECRET_ENV = "PRXREF_BITBUCKET_WEBHOOK_SECRET"
 _GITLAB_SECRET_ENV = "PRXREF_GITLAB_WEBHOOK_SECRET"
+_AZURE_DEVOPS_SECRET_ENV = "PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET"
 _ALLOW_UNSIGNED_ENV = "PRXREF_ALLOW_UNSIGNED"
 _UNSIGNED_PREFIX = "unsigned:"
 
@@ -39,6 +42,11 @@ _BITBUCKET_CLOUD_EVENTS = ("pullrequest:created", "pullrequest:updated")
 _BITBUCKET_SERVER_EVENTS = ("pr:opened", "pr:modified", "pr:from_ref_updated")
 _BITBUCKET_EVENTS = _BITBUCKET_CLOUD_EVENTS + _BITBUCKET_SERVER_EVENTS
 _GITLAB_ACTIONS = ("open", "update")
+# Azure DevOps service hooks send no event header, so they are recognized by
+# the body's publisherId instead, and only after every header-based forge.
+_AZURE_DEVOPS_PUBLISHER = "tfs"
+_AZURE_DEVOPS_EVENTS = ("git.pullrequest.created", "git.pullrequest.updated")
+_AZURE_DEVOPS_REVIEWABLE_STATUS = "active"
 
 
 def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
@@ -48,11 +56,16 @@ def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
     X-Event-Key, or X-Gitlab-Event; header names are case-insensitive).
     Bitbucket Cloud and Bitbucket Server are both recognized by X-Event-Key
     and share one verification path; their event names and payload shapes
-    differ and both are accepted. Signature is checked per forge: GitHub
-    HMAC-SHA256 in X-Hub-Signature-256, Bitbucket HMAC-SHA256 in X-Hub-Signature,
-    GitLab plain token in X-Gitlab-Token — each against its
+    differ and both are accepted. Azure DevOps service hooks carry no event
+    header, so a request with none of the three is recognized by its JSON
+    body (``publisherId == "tfs"``); the header-based forges always win.
+    Signature is checked per forge: GitHub HMAC-SHA256 in X-Hub-Signature-256,
+    Bitbucket HMAC-SHA256 in X-Hub-Signature, GitLab plain token in
+    X-Gitlab-Token, Azure DevOps the password of the Authorization: Basic
+    header (the user name is ignored) — each against its
     PRXREF_<FORGE>_WEBHOOK_SECRET env var. Only PR-open/update events are
-    reviewable; anything else is ignored.
+    reviewable (for Azure DevOps, git.pullrequest.created/updated on a PR
+    whose status is active); anything else is ignored.
 
     Returns (True, pr_url) on success. When PRXREF_ALLOW_UNSIGNED=1 and no
     secret/signature is available, returns (True, "unsigned:<pr_url>") so
@@ -68,6 +81,9 @@ def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
         return _verify_bitbucket(body, normalized)
     if "x-gitlab-event" in normalized:
         return _verify_gitlab(body, normalized)
+    payload = _parse_json(body)
+    if payload is not None and payload.get("publisherId") == _AZURE_DEVOPS_PUBLISHER:
+        return _verify_azure_devops(payload, normalized)
     return False, "unrecognized source"
 
 
@@ -269,6 +285,89 @@ def _verify_gitlab(body: bytes, h: dict) -> tuple[bool, str]:
     if not url:
         return False, "gitlab payload missing object_attributes.url"
     return _result("unsigned" if unsigned else "ok", url)
+
+
+def _verify_azure_devops(payload: dict, h: dict) -> tuple[bool, str]:
+    password = _basic_auth_password(h.get("authorization", ""))
+    secret = os.environ.get(_AZURE_DEVOPS_SECRET_ENV)
+    unsigned = False
+    if not password or not secret:
+        if not _allow_unsigned():
+            if not secret:
+                return False, "azure devops secret not configured"
+            return False, "missing azure devops basic-auth secret"
+        unsigned = True
+    elif not hmac.compare_digest(password.encode(), secret.encode()):
+        return False, "azure devops secret mismatch"
+    event = payload.get("eventType", "")
+    if event not in _AZURE_DEVOPS_EVENTS:
+        return False, f"ignored: azure devops event {event!r} is not reviewable"
+    resource = payload.get("resource")
+    if not isinstance(resource, dict):
+        resource = {}
+    status = resource.get("status", "")
+    if status != _AZURE_DEVOPS_REVIEWABLE_STATUS:
+        return False, f"ignored: azure devops pull request status {status!r} is not reviewable"
+    url = _azure_devops_pr_url(resource)
+    if not url:
+        return False, "azure devops payload missing a pull request URL"
+    return _result("unsigned" if unsigned else "ok", url)
+
+
+def _basic_auth_password(value: object) -> str:
+    """Return the password carried by an ``Authorization: Basic`` value.
+
+    Azure DevOps service hooks authenticate with HTTP Basic auth, whose user
+    name is free-form and ignored here. Any other scheme, invalid base64,
+    credentials that are not UTF-8, or a credential with no colon yields "".
+    """
+    scheme, _, encoded = str(value).strip().partition(" ")
+    if scheme.lower() != "basic":
+        return ""
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except ValueError:
+        return ""
+    _user, colon, password = decoded.partition(":")
+    return password if colon else ""
+
+
+def _azure_devops_pr_url(resource: dict) -> str:
+    """Build the browsable PR URL from a service hook's pull request resource.
+
+    The URL is the repository's web address plus ``/pullrequest/{id}``, which
+    is the shape the Azure DevOps adapter parses. The address is
+    ``repository.webUrl``, or else ``repository.remoteUrl`` (the clone URL,
+    which is the same address with a ``user@`` prefix) with its userinfo
+    removed. Returns "" when the id is not a positive integer or neither
+    field is an http(s) URL.
+    """
+    number = resource.get("pullRequestId")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        return ""
+    repository = resource.get("repository")
+    if not isinstance(repository, dict):
+        return ""
+    web = _http_url_without_userinfo(repository.get("webUrl")) or _http_url_without_userinfo(
+        repository.get("remoteUrl")
+    )
+    if not web:
+        return ""
+    return f"{web.rstrip('/')}/pullrequest/{number}"
+
+
+def _http_url_without_userinfo(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        parts = urlsplit(value.strip())
+        hostname = parts.hostname
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https") or not hostname:
+        return ""
+    netloc = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _status_for_reason(reason: str) -> tuple[int, dict]:

@@ -1,4 +1,5 @@
 """Tests for prxref.cli: review subcommand, serve daemon, --version, and non-blocking exits."""
+import inspect
 import json
 import logging
 import os
@@ -9,11 +10,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from prxref import __version__, cli
+from prxref import __version__, cli, config
+from prxref import orchestrator as real_orchestrator
 from prxref.cli import main
 from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
 from prxref.triage import Finding
+from tests.test_orchestrator import FakeForge, FakeLLM, _added_file_diff
 
 
 def _install_fake_module(monkeypatch, fullname: str, **attrs) -> types.ModuleType:
@@ -231,13 +234,14 @@ class TestReviewSubcommand:
         # The hint has to name both halves of every forge. Three of the four
         # adapters serve self-hosted deployments, so listing only the SaaS
         # hostnames would read as a restriction that no longer exists.
-        for forge in ("Bitbucket", "GitHub", "GitLab"):
+        for forge in ("Bitbucket", "GitHub", "GitLab", "Azure DevOps"):
             assert forge in err
-        for host in ("bitbucket.org", "github.com", "gitlab.com"):
+        for host in ("bitbucket.org", "github.com", "gitlab.com", "dev.azure.com"):
             assert host in err
         assert "self-hosted" in err
         assert "Bitbucket Data Center" in err
         assert "GitHub Enterprise Server" in err
+        assert "Azure DevOps Server" in err
 
     def test_orchestration_exception_exits_0_non_blocking(
         self, fake_runtime, monkeypatch, capsys
@@ -774,6 +778,158 @@ class TestDegenerateValuesNeverReachTheOrchestrator:
         assert len(fake_runtime["orchestrate_calls"]) == 1
 
 
+class TestSpecFlag:
+    """``--spec`` collects repeatable sources and rides the ``load_config``
+    override path, exactly like ``--max-chunks``: the flag replaces the
+    PRXREF_SPEC_SOURCES environment list wholesale (no merge)."""
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+    URL = "https://github.com/org/repo/pull/7"
+
+    @pytest.fixture(autouse=True)
+    def _detect(self, monkeypatch):
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+
+    def test_the_flag_is_repeatable_and_defaults_to_none(self):
+        parser = cli._build_parser()
+        args = parser.parse_args(["review", "--pr-url", self.URL])
+        assert args.spec is None
+        args = parser.parse_args([
+            "review", "--pr-url", self.URL,
+            "--spec", "https://a/spec.md", "--spec", "docs/specs",
+        ])
+        assert args.spec == ["https://a/spec.md", "docs/specs"]
+
+    def test_flag_values_reach_the_orchestrator(self, fake_runtime):
+        """The override is observed on the kwargs the orchestrator is actually
+        handed, not on the parser or the resolved config: a value that stops at
+        ``load_config`` grounds nothing."""
+        assert main([
+            "review", "--pr-url", self.URL, "--no-post",
+            "--spec", "https://a/spec.md", "--spec", "docs/specs",
+        ]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
+            "https://a/spec.md", "docs/specs",
+        ]
+
+    def test_no_flag_and_no_env_leaves_the_default_empty(self, fake_runtime):
+        assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == []
+
+    def test_env_sources_load_through_the_normal_path(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md docs/specs")
+        assert main(["review", "--pr-url", self.URL, "--no-post"]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
+            "https://a/spec.md", "docs/specs",
+        ]
+
+    def test_the_flag_replaces_the_environment_without_merging(
+        self, fake_runtime, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://env/only.md")
+        assert main([
+            "review", "--pr-url", self.URL, "--no-post",
+            "--spec", "https://flag/only.md",
+        ]) == 0
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == [
+            "https://flag/only.md"
+        ]
+
+    def test_the_webhook_daemon_gets_the_environment_sources(
+        self, fake_runtime, monkeypatch
+    ):
+        """The daemon passes no flags, so PRXREF_SPEC_SOURCES in its environment is
+        the only way it can ground a review — and it must reach the pipeline."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
+        cli._webhook_handler(self.URL)
+        assert fake_runtime["orchestrate_calls"][0]["spec_sources"] == ["https://a/spec.md"]
+
+    def test_every_spec_key_reaches_the_orchestrator(
+        self, fake_runtime, monkeypatch
+    ):
+        """All six spec/Jira config keys ride into ``orchestrate_review``; the
+        daemon has no flags, so the environment is its only way in."""
+        monkeypatch.setenv("PRXREF_SPEC_SOURCES", "https://a/spec.md")
+        monkeypatch.setenv("PRXREF_SPEC_MAX_CHARS", "5000")
+        monkeypatch.setenv("PRXREF_SPEC_DIGEST_TOKENS", "500")
+        monkeypatch.setenv("PRXREF_JIRA_BASE_URL", "https://jira.example.com")
+        monkeypatch.setenv("PRXREF_JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("PRXREF_JIRA_API_TOKEN", "t0ken")
+        cli._webhook_handler(self.URL)
+        kwargs = fake_runtime["orchestrate_calls"][0]
+        assert kwargs["spec_sources"] == ["https://a/spec.md"]
+        assert kwargs["spec_max_chars"] == 5000
+        assert kwargs["spec_digest_tokens"] == 500
+        assert kwargs["jira_base_url"] == "https://jira.example.com"
+        assert kwargs["jira_email"] == "bot@example.com"
+        assert kwargs["jira_api_token"] == "t0ken"
+
+
+def test_run_review_passes_only_real_orchestrate_kwargs(fake_runtime, monkeypatch):
+    """Every kwarg ``_run_review`` hands the orchestrator is a real parameter.
+
+    ``fake_runtime``'s double accepts ``**kwargs``, so a misspelt kwarg passes
+    every other test here while the real call raises ``TypeError`` — which
+    ``review`` swallows to exit 0, silently dropping the review. The signature
+    comes from the module imported at the top of this file, captured before the
+    fixture swapped ``sys.modules["prxref.orchestrator"]`` for the double.
+    """
+    real = real_orchestrator.orchestrate_review
+    assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
+    params = inspect.signature(real).parameters
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    ref = PRRef(
+        forge="github", host="github.com", owner="org", repo="repo",
+        number=7, url="https://github.com/org/repo/pull/7",
+    )
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: ref)
+
+    assert main(["review", "--pr-url", ref.url, "--no-post", "--spec", "docs/specs"]) == 0
+
+    calls = fake_runtime["orchestrate_calls"]
+    assert len(calls) == 1
+    assert calls[0], "the double recorded no kwargs, so the check below is vacuous"
+    assert sorted(set(calls[0]) - set(params)) == []
+
+
+def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monkeypatch):
+    """The reverse direction: every ``orchestrate_review`` parameter that is also
+    a ``load_config`` key is handed over by ``_run_review``.
+
+    A parameter the CLI forgets silently runs at its library default, so its
+    environment variable is documented and dead: that is how the price table,
+    the cost line and the size advisory would have shipped unreachable. The
+    loaded rules, ticket context and replay stamp are not config keys, but
+    they are the CLI's to build, so they are required by name.
+    """
+    real = real_orchestrator.orchestrate_review
+    assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
+    params = inspect.signature(real).parameters
+    expected = {name for name in params if name in config._DEFAULTS}
+    assert expected, "no orchestrate parameter is a config key, so the check is vacuous"
+    ref = PRRef(
+        forge="github", host="github.com", owner="org", repo="repo",
+        number=7, url="https://github.com/org/repo/pull/7",
+    )
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: ref)
+
+    assert main(["review", "--pr-url", ref.url, "--no-post"]) == 0
+
+    calls = fake_runtime["orchestrate_calls"]
+    assert len(calls) == 1
+    assert sorted(expected - set(calls[0])) == []
+    assert {"rules", "ticket", "replay"} <= set(calls[0])
+
+
 class TestDryRun:
     """PRXREF_DRY_RUN must reach BOTH review paths, daemon included.
 
@@ -987,15 +1143,48 @@ class TestFailOnExitPolicy:
         self._install_result(fake_runtime, ["error", "error", "warning"])
         assert self._review() == 0
 
-    def test_a_result_without_countable_findings_is_not_gated(
-        self, fake_runtime, monkeypatch
+    @pytest.mark.parametrize("policy", ["error", "any"])
+    def test_an_error_verdict_exits_1_when_gating(
+        self, fake_runtime, monkeypatch, capsys, policy
     ):
         """A total-LLM-failure run degrades to verdict ``Error`` with no
-        findings list; there is nothing countable, so nothing fires."""
-        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        findings list instead of raising. It is a review that did not
+        complete, which the policy has promised to gate since 0.4.0, so the
+        missing findings must not let it through."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", policy)
+        result = {"verdict": "Error", "chunks_failed": 3}
+        fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
+        assert self._review() == 1
+        _, err = capsys.readouterr()
+        assert (
+            f"PRXREF_FAIL_ON={policy}: review did not complete (verdict Error); "
+            "exiting 1"
+        ) in err
+
+    def test_an_error_verdict_still_exits_0_under_never(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """Control: the same result under the default doctrine."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "never")
         result = {"verdict": "Error", "chunks_failed": 3}
         fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
         assert self._review() == 0
+        _, err = capsys.readouterr()
+        assert "PRXREF_FAIL_ON" not in err
+
+    @pytest.mark.parametrize("verdict", ["Approved", "Comment"])
+    def test_a_completed_result_without_countable_findings_is_not_gated(
+        self, fake_runtime, monkeypatch, capsys, verdict
+    ):
+        """Control: only verdict ``Error`` fires without findings. A completed
+        result with no findings list is tolerated as before — nothing
+        countable, so nothing to gate on, even under ``any``."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "any")
+        result = {"verdict": verdict, "chunks_failed": 0}
+        fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
+        assert self._review() == 0
+        _, err = capsys.readouterr()
+        assert "exiting 1" not in err
 
     @pytest.mark.parametrize("policy", ["error", "any"])
     def test_a_failed_review_exits_1_when_gating(
@@ -1051,6 +1240,49 @@ class TestFailOnExitPolicy:
         self._install_result(fake_runtime, ["error"])
         cli._webhook_handler(self.URL)
         assert len(fake_runtime["orchestrate_calls"]) == 1
+
+
+class TestFailOnThroughTheRealOrchestrator:
+    """The gate over an error run the real orchestrator produced.
+
+    Only the forge and the model are doubles, so verdict ``Error`` comes from
+    ``orchestrate_review``'s own handling of a failed ``get_diff`` — it returns
+    an error run instead of raising — rather than from a faked result.
+    """
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        assert sys.modules["prxref.orchestrator"] is real_orchestrator
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.add("get_diff")
+        llm = FakeLLM({})
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+        monkeypatch.setattr("prxref.cli.make_forge", lambda ref: forge)
+        monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: llm)
+        return types.SimpleNamespace(forge=forge, llm=llm)
+
+    @pytest.mark.parametrize(("policy", "expected"), [("error", 1), ("never", 0)])
+    def test_a_diff_the_forge_cannot_read_is_gated_only_when_opted_in(
+        self, rig, monkeypatch, capsys, policy, expected
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", policy)
+        argv = ["review", "--pr-url", self.REF.url, "--no-post", "--format", "json"]
+        assert main(argv) == expected
+        out, err = capsys.readouterr()
+        assert json.loads(out)["verdict"] == "Error"
+        assert rig.llm.calls == 0
+        assert rig.forge.summaries == []
+        note = "PRXREF_FAIL_ON=error: review did not complete (verdict Error); exiting 1"
+        assert (note in err) is (policy == "error")
 
 
 class TestModuleEntryPoint:
