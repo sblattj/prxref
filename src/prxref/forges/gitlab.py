@@ -10,6 +10,7 @@ from urllib.parse import quote, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 
+from prxref.forges._diff_render import render_diff_entries as _render_diff_entries
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
@@ -104,57 +105,6 @@ def _make_retry_session() -> requests.Session:
 
 
 _DEFAULT_SESSION = _make_retry_session()
-
-
-def _render_diff_entries(diffs: list[dict]) -> str:
-    """Render GitLab's structured diff entries as one git-style unified diff.
-
-    GitLab serves no raw diff for a merge request or a compare, only a list of
-    per-file entries whose ``diff`` holds the hunks without their headers. This
-    rebuilds each file's ``diff --git`` header from the entry's flags, then
-    appends the hunks, so the parser downstream sees the same text shape every
-    other forge returns.
-    """
-    diff_parts: list[str] = []
-    for d in diffs:
-        old_path = d.get("old_path") or ""
-        new_path = d.get("new_path") or ""
-        new_file = d.get("new_file", False)
-        deleted_file = d.get("deleted_file", False)
-        renamed_file = d.get("renamed_file", False)
-        raw_diff = d.get("diff") or ""
-
-        header_lines = [f"diff --git a/{old_path} b/{new_path}"]
-        if new_file:
-            header_lines.append("new file mode 100644")
-            header_lines.append("--- /dev/null")
-            header_lines.append(f"+++ b/{new_path}")
-        elif deleted_file:
-            header_lines.append("deleted file mode 100644")
-            header_lines.append(f"--- a/{old_path}")
-            header_lines.append("+++ /dev/null")
-        elif renamed_file:
-            header_lines.append(f"rename from {old_path}")
-            header_lines.append(f"rename to {new_path}")
-            header_lines.append(f"--- a/{old_path}")
-            header_lines.append(f"+++ b/{new_path}")
-        else:
-            header_lines.append(f"--- a/{old_path}")
-            header_lines.append(f"+++ b/{new_path}")
-
-        file_unified = "\n".join(header_lines)
-        if raw_diff:
-            if not raw_diff.startswith("\n"):
-                file_unified += "\n"
-            file_unified += raw_diff
-            if not file_unified.endswith("\n"):
-                file_unified += "\n"
-        else:
-            file_unified += "\n"
-
-        diff_parts.append(file_unified)
-
-    return "".join(diff_parts)
 
 
 class ForgeImpl:
