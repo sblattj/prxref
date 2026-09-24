@@ -32,7 +32,8 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/ac
 Only these three file names are read. Any other file in the directory is
 ignored with a warning; dotfiles such as `.gitkeep` are skipped silently.
 Two texts cannot be overridden: the judge prompt of `prxref eval`, so runs
-with different templates are always graded by the same judge, and the notice
+with different templates are always graded by the same judge (see
+[docs/evals.md](evals.md#the-judge-prompt)), and the notice
 prxref posts when a review cannot complete.
 
 ### `worker.md` and `systemic.md`
