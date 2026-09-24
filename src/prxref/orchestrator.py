@@ -104,7 +104,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    blockquote) — a partial review reads as a successful one, so a failure
    left only in the logs reaches nobody, and a file list left out of it
    leaves the operator guessing which files went unreviewed.
-8. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
+8. Post: summary rendered from ``reviewer.load_prompt("summary")``, or from
+   the operator's ``summary.md`` override when ``prompts`` carries one, with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {spec_count} {spec_note} {ticket_note}
    {outofscope_count} {findings} {attribution}`` filled, plus
@@ -150,6 +151,7 @@ from .forges.base import (
 )
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
+from .prompt_templates import PromptTemplates
 from .quality import (
     active,
     apply_containment_note,
@@ -381,15 +383,17 @@ def orchestrate_review(
     size_warn_files: int | None = None,
     size_ignore_globs: Sequence[str] = (),
     replay: Mapping[str, Any] | None = None,
+    prompts: PromptTemplates | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
-    spec_grounding, size_advisory}``, plus ``replay`` on a replay run only.
+    spec_grounding, size_advisory, prompt_templates}``, plus ``replay`` on a
+    replay run only.
     Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last six keys are always present and are
+    :func:`_run_record`, so the last seven keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
@@ -498,6 +502,18 @@ def orchestrate_review(
     event, the one request knob that is echoed back, so a replay can never
     be read as a live review. It changes nothing about how the review runs:
     pinning and thread hiding live in the forge the caller passes.
+
+    ``prompts`` is the loaded prompt-template overrides
+    (:class:`prxref.prompt_templates.PromptTemplates`); ``None`` turns them
+    off, and an unset run's prompts, posts, record and trace are exactly a run
+    without it. Its ``record()`` fills the ``prompt_templates`` key on every
+    exit, and is the meta of one ``prompts ok`` trace event. Each template is
+    taken through :meth:`~prxref.prompt_templates.PromptTemplates.override`,
+    so one left packaged is still read by ``reviewer.load_prompt``: the
+    ``worker`` and ``systemic`` overrides reach every chunk and the sweep
+    through the one :class:`reviewer.PromptContext`, and the ``summary``
+    override is the template of every summary render, the empty-diff summary
+    and the inline-accounting re-post included, but never of the error notice.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -515,6 +531,7 @@ def orchestrate_review(
         "spec_grounding": None,
         "size_advisory": None,
         "replay": dict(replay) if replay is not None else None,
+        "prompt_templates": None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -523,6 +540,9 @@ def orchestrate_review(
         run_inputs["review_rules"] = rules.record()
     if ticket is not None:
         run_inputs["ticket_context"] = ticket.record()
+    if prompts is not None:
+        run_inputs["prompt_templates"] = prompts.record()
+    summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
     ticket_note = ticket.note() if ticket is not None else ""
     if ticket_note and not ticket_note.endswith("\n"):
@@ -536,6 +556,8 @@ def orchestrate_review(
         tracer.event("rules", "ok", **run_inputs["review_rules"])
     if run_inputs["ticket_context"] is not None:
         tracer.event("ticket", "ok", **run_inputs["ticket_context"])
+    if run_inputs["prompt_templates"] is not None:
+        tracer.event("prompts", "ok", **run_inputs["prompt_templates"])
 
     try:
         with tracer.span("forge.get_pr"):
@@ -631,6 +653,7 @@ def orchestrate_review(
             ticket_note=ticket_note,
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
         ), run_inputs)
 
     # Pruned BEFORE the threads are listed, and both before the review units
@@ -745,6 +768,8 @@ def orchestrate_review(
         ticket_scope=ticket.scope_block() if ticket_active else "",
         ticket_context=ticket.prompt_block() if ticket_active else "",
         spec_digest=injected,
+        worker_template=prompts.override("worker") if prompts is not None else "",
+        systemic_template=prompts.override("systemic") if prompts is not None else "",
     )
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
@@ -973,6 +998,7 @@ def orchestrate_review(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
         )
         try:
             forge.post_summary(ref, summary)
@@ -1027,6 +1053,7 @@ def orchestrate_review(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
             inline_accounting=_inline_accounting(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
@@ -1717,6 +1744,7 @@ def _render_summary(
     ticket_note: str = "",
     cost_label: str = "",
     size_advisory_line: str = "",
+    summary_template: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -1736,9 +1764,14 @@ def _render_summary(
     (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
     ``""``) is prepended to the finished body, after the partial-review
     banner, so it is the first thing under the forge's summary marker.
+    ``summary_template`` is an operator override of ``summary.md``
+    (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
+    the packaged template through ``reviewer.load_prompt``, and only that
+    read can fall back to the built-in template, so an override is always
+    rendered as given.
     """
     try:
-        template = reviewer.load_prompt("summary")
+        template = summary_template or reviewer.load_prompt("summary")
     except Exception as e:  # noqa: BLE001
         logger.warning("load_prompt('summary') failed, using fallback: %s", e)
         template = _FALLBACK_SUMMARY_TEMPLATE
@@ -2024,6 +2057,7 @@ def _summary_only_run(
     release_shape_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
+    summary_template: str = "",
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -2038,10 +2072,10 @@ def _summary_only_run(
     release-shaped), so this degrades to exactly the prior empty-diff
     behaviour: ``Approved``, no findings, no banner.
 
-    ``ticket_note``, ``cost_label`` and ``size_advisory_line`` are handed to
-    :func:`_render_summary` unchanged; all three default to ``""``, which
-    renders the summary exactly as before. The run-record keys are added by
-    the caller's :func:`_run_record`, not here.
+    ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
+    ``summary_template`` are handed to :func:`_render_summary` unchanged; all
+    four default to ``""``, which renders the summary exactly as before. The
+    run-record keys are added by the caller's :func:`_run_record`, not here.
     """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -2076,6 +2110,7 @@ def _summary_only_run(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
         )
         try:
             forge.post_summary(ref, summary)
