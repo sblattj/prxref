@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -52,6 +53,46 @@ def normalize_scope(raw: object) -> str:
     return value if value in SCOPES else SCOPE_UNKNOWN
 
 
+# Longest ``rule`` label a finding may carry, counted after whitespace is
+# collapsed. A longer value is dropped, never truncated: a clipped label could
+# merge two different rules into one group.
+RULE_MAX_CHARS: int = 120
+
+# A rule label reaches posted comments and terminal output, so a label holding
+# one of these is dropped: control (Cc), surrogate (Cs) and private-use (Co)
+# code points, and the bidi embedding, override and isolate controls that can
+# reorder the text around them. Every other format character stays, because
+# ZWNJ and ZWJ are part of ordinary Persian, Urdu and emoji labels.
+_RULE_DROPPED_CATEGORIES = frozenset({"Cc", "Cs", "Co"})
+_RULE_BIDI_CONTROLS = frozenset(chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+
+
+def _rule_char_dropped(ch: str) -> bool:
+    return ch in _RULE_BIDI_CONTROLS or unicodedata.category(ch) in _RULE_DROPPED_CATEGORIES
+
+
+def normalize_rule(raw: object) -> str | None:
+    """Map a model-supplied ``rule`` value onto a short label, or ``None``.
+
+    Only a string survives. Every whitespace run, newlines included, collapses
+    to one space and the ends are stripped. ``None`` is returned for anything
+    else: a non-string (``None``, a number, a bool, a list), a value that is
+    empty after collapsing, one longer than :data:`RULE_MAX_CHARS`, or one
+    that still holds a character of Unicode category ``Cc`` (control), ``Cs``
+    (surrogate) or ``Co`` (private use), or a bidi embedding, override or
+    isolate control (U+202A to U+202E, U+2066 to U+2069). Every other
+    character is kept, including the zero-width non-joiner (U+200C) and
+    joiner (U+200D) that Persian, Urdu and emoji labels need. Case is kept as
+    given; a grouping key casefolds it itself. Never raises.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = " ".join(raw.split())
+    if not value or len(value) > RULE_MAX_CHARS or any(_rule_char_dropped(ch) for ch in value):
+        return None
+    return value
+
+
 @dataclass
 class Finding:
     """One review finding, the unit every downstream seat shares.
@@ -62,7 +103,16 @@ class Finding:
     silently discarded, so run records can explain every drop.
     ``scope`` is one of :data:`SCOPES`: where the finding sits relative to
     the ticket the PR implements, ``unknown`` whenever no ticket is active.
-    It is the last field, so every positional construction keeps working.
+    ``rule`` is the rule or standard the reviewer applied, as normalized by
+    :func:`normalize_rule`; ``None`` whenever the prompt did not ask for one
+    or the answer was not usable. ``locations`` is set only on the
+    representative of a group that :func:`prxref.quality.apply_rule_grouping`
+    folded (the ``(file, line)`` of every location its ``Also at:`` paragraph
+    lists, in the same order) or on the best finding
+    :func:`prxref.quality.apply_rule_cap` kept for a rule (every location it
+    folded in, across files, sorted), and is ``()`` on every other finding.
+    It is not part of any identity or dedup key. The new fields trail the old ones, so
+    every positional construction keeps working.
     """
 
     file: str
@@ -73,6 +123,8 @@ class Finding:
     body: str
     drop_reason: str | None = None
     scope: str = SCOPE_UNKNOWN
+    rule: str | None = None
+    locations: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass

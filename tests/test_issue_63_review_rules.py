@@ -37,6 +37,7 @@ from prxref.quality import SEVERITIES, apply_severity_map
 from prxref.reviewer import (
     _CONTEXT_MARKER,
     NO_PROMPT_CONTEXT,
+    RULE_REQUEST,
     PromptContext,
     _render_prompt,
     _render_systemic_prompt,
@@ -586,13 +587,13 @@ class TestOrchestrator:
         rules = _load(tmp_path)
         with_rules, without = _PromptLLM(), _PromptLLM()
         res, _ = _orchestrate(with_rules, tmp_path, diff=multi_chunk_diff(3), rules=rules)
-        _orchestrate(without, tmp_path, diff=multi_chunk_diff(3))
+        _orchestrate(without, tmp_path, diff=multi_chunk_diff(3), group_findings=True)
         assert res["chunks_reviewed"] == 4
         assert len(with_rules.workers()) == 3 and len(with_rules.sweeps()) == 1
         for system, _user in with_rules.workers():
-            assert system == f"{WORKER_HEAD}\n\n{rules.prompt_block('worker')}"
+            assert system == f"{WORKER_HEAD}\n\n{rules.prompt_block('worker')}\n\n{RULE_REQUEST}"
         [(sweep_system, _user)] = with_rules.sweeps()
-        assert sweep_system == f"{SWEEP_HEAD}\n\n{rules.prompt_block('sweep')}"
+        assert sweep_system == f"{SWEEP_HEAD}\n\n{rules.prompt_block('sweep')}\n\n{RULE_REQUEST}"
         assert sorted(u for _s, u in with_rules.calls) == sorted(u for _s, u in without.calls)
         for _system, user in with_rules.calls:
             assert CANARY not in user and RULES_HEADING not in user
@@ -603,7 +604,7 @@ class TestOrchestrator:
         res, events = _orchestrate(llm, tmp_path, rules=rules)
         assert len(_of(events, "chunk", "retry")) == 1
         first, retry = llm.workers()
-        assert first[0] == retry[0] == f"{WORKER_HEAD}\n\n{rules.prompt_block('worker')}"
+        assert first[0] == retry[0] == f"{WORKER_HEAD}\n\n{rules.prompt_block('worker')}\n\n{RULE_REQUEST}"
         assert res["chunks_failed"] == 0
 
     def test_mapped_team_word_survives_the_gate_as_its_tier(self, tmp_path):

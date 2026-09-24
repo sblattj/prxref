@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from collections.abc import Iterator, Sequence
+from datetime import datetime
 from urllib.parse import quote, urlparse
 
 import requests
@@ -13,11 +14,15 @@ from requests.adapters import HTTPAdapter
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
+    DescriptionVersion,
     FeedReadError,
     InlineComment,
     PRData,
+    PRHistory,
     PRRef,
     Thread,
+    TitleRename,
+    _require_aware,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -517,6 +522,229 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, removed, e,
             )
         return removed
+
+    def get_pr_history(self, ref: PRRef, *, head_sha: str | None = None) -> PRHistory:
+        """Return the PR's description versions, title renames and replay cutoff inputs.
+
+        Three reads, with the adapter's usual credentials: the pull request
+        (``created_on``, the author, the live title and description, and the
+        current head), its ``/activity`` feed, 50 entries a page for at most
+        ``_MAX_PAGES`` pages, and ``/commit/{sha}``, whose ``date`` becomes
+        ``head_committed_at`` for ``head_sha``, or for the PR's current head
+        when ``head_sha`` is ``None``.
+
+        A description edit is an ``update`` entry whose
+        ``changes.description`` carries the full ``old`` and ``new`` texts,
+        dated ``update.date``. Edits are ordered by that date, never by feed
+        position, and the oldest edit's ``old`` is the original, dated
+        ``created_on``. A title rename is read from ``changes.title`` in the
+        same shape, ``old`` and ``new`` strings, which a live check confirmed
+        on three renamed public pull requests. A ``null`` text reads as
+        ``""``, as a missing description does in ``get_pr``.
+
+        The history comes back ``complete=False`` with no description
+        versions and no renames, which pins nothing, whenever it cannot be
+        trusted whole: the feed outran the page budget, so renames in the
+        unread pages would be missing; a ``changes`` entry is not a pair of
+        texts; the edits do not chain from each one's ``new`` to the next
+        one's ``old`` and end at the live text; or an ``update`` entry's
+        ``title`` or ``description`` snapshot is neither the text in force at
+        its date nor the live text, which is how an edit missing from
+        ``changes`` shows. At an edit's own date the snapshot may be either
+        side of that edit. The live text is always accepted, so a snapshot
+        that records the PR's current state rather than its state at the
+        time can never veto the history ``changes`` records.
+
+        ``first_review_at`` is the earliest approval, request for changes or
+        comment by a ``user`` account other than the PR author, identified
+        as ``list_threads`` identifies authors. Deleted comments, whose body
+        is blanked, and prxref's own posts, whose body carries
+        ``SUMMARY_MARKER`` or ``ATTRIBUTION_MARKER``, do not count. It is
+        ``None`` when the PR's author cannot be identified, and when the feed
+        outran the budget, because the earliest review may be on a page that
+        was not read.
+
+        Raises ``requests.HTTPError`` on a non-OK response, 401 and 403
+        included; ``requests.RequestException`` on a transport failure; and
+        ``ValueError`` on a body that is not a JSON object, or on a date that
+        is missing, malformed or naive.
+        """
+        headers, auth = self._get_auth()
+        pr = self._get_history_json(self._pr_url(ref), headers, auth)
+        created_at = self._history_date(pr.get("created_on"), "pull request created_on")
+        entries, read_to_end = self._read_activity(ref, headers, auth)
+        head = head_sha or ((pr.get("source") or {}).get("commit") or {}).get("hash")
+        head_committed_at = None
+        if isinstance(head, str) and head:
+            commit = self._get_history_json(
+                f"{_API_BASE}/repositories/{ref.owner}/{ref.repo}/commit/{quote(head, safe='')}",
+                headers,
+                auth,
+            )
+            head_committed_at = self._history_date(commit.get("date"), "commit date")
+        if not read_to_end:
+            return PRHistory(created_at=created_at, head_committed_at=head_committed_at, complete=False)
+
+        first_review_at = self._first_review_at(entries, pr.get("author"))
+        live_title = pr.get("title") or ""
+        live_description = pr.get("description") or ""
+        descriptions = self._history_changes(entries, "description")
+        titles = self._history_changes(entries, "title")
+        trusted = (
+            descriptions is not None
+            and titles is not None
+            and self._chains_to(descriptions, live_description)
+            and self._chains_to(titles, live_title)
+            and self._snapshots_agree(entries, "description", descriptions, live_description)
+            and self._snapshots_agree(entries, "title", titles, live_title)
+        )
+        if not trusted:
+            return PRHistory(
+                created_at=created_at,
+                first_review_at=first_review_at,
+                head_committed_at=head_committed_at,
+                complete=False,
+            )
+
+        versions: list[DescriptionVersion] = []
+        if descriptions:
+            first_edit_at, original, _ = descriptions[0]
+            versions.append(DescriptionVersion(text=original, edited_at=min(created_at, first_edit_at)))
+            versions.extend(DescriptionVersion(text=new, edited_at=at) for at, _, new in descriptions)
+        return PRHistory(
+            created_at=created_at,
+            description_versions=tuple(versions),
+            title_renames=tuple(
+                TitleRename(previous_title=old, current_title=new, created_at=at) for at, old, new in titles
+            ),
+            first_review_at=first_review_at,
+            head_committed_at=head_committed_at,
+        )
+
+    def _get_history_json(
+        self,
+        url: str,
+        headers: dict[str, str],
+        auth: tuple[str, str] | None,
+        *,
+        params: dict[str, int] | None = None,
+    ) -> dict:
+        """GET ``url`` for ``get_pr_history``; raise unless the response is OK and a JSON object."""
+        resp = self._session.get(url, params=params, headers=headers, auth=auth, timeout=_REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"Bitbucket returned {type(data).__name__}, not an object, for {url}")
+        return data
+
+    def _read_activity(
+        self, ref: PRRef, headers: dict[str, str], auth: tuple[str, str] | None,
+    ) -> tuple[list[dict], bool]:
+        """Return the PR's activity entries in feed order, and whether the feed was read to its end."""
+        url: str | None = self._pr_url(ref, "/activity")
+        params: dict[str, int] | None = {"pagelen": 50}
+        entries: list[dict] = []
+        for _ in range(_MAX_PAGES):
+            page = self._get_history_json(url, headers, auth, params=params)
+            entries.extend(value for value in page.get("values") or [] if isinstance(value, dict))
+            url = page.get("next")
+            params = None
+            if not url:
+                return entries, True
+        return entries, False
+
+    @classmethod
+    def _history_changes(cls, entries: list[dict], field: str) -> list[tuple[datetime, str, str]] | None:
+        """The feed's ``changes.<field>`` edits as ``(date, old, new)``, oldest first; ``None`` if one is unreadable."""
+        changes: list[tuple[datetime, str, str]] = []
+        for entry in reversed(entries):
+            update = entry.get("update")
+            if not isinstance(update, dict) or update.get("changes") is None:
+                continue
+            recorded = update["changes"]
+            if not isinstance(recorded, dict):
+                return None
+            change = recorded.get(field)
+            if change is None:
+                continue
+            if not isinstance(change, dict) or "old" not in change or "new" not in change:
+                return None
+            old, new = change["old"], change["new"]
+            if not all(text is None or isinstance(text, str) for text in (old, new)):
+                return None
+            changes.append((cls._history_date(update.get("date"), "activity update date"), old or "", new or ""))
+        return sorted(changes, key=lambda change: change[0])
+
+    @staticmethod
+    def _chains_to(changes: list[tuple[datetime, str, str]], live: str) -> bool:
+        """Whether each edit starts from the text the previous one left, and the last one leaves ``live``."""
+        linked = all(changes[i][2] == changes[i + 1][1] for i in range(len(changes) - 1))
+        return linked and (not changes or changes[-1][2] == live)
+
+    @classmethod
+    def _snapshots_agree(
+        cls, entries: list[dict], field: str, changes: list[tuple[datetime, str, str]], live: str,
+    ) -> bool:
+        """Whether each ``update.<field>`` snapshot is the live text, the text in force then, or an edit's old side."""
+        original = changes[0][1] if changes else live
+        for entry in entries:
+            update = entry.get("update")
+            if not isinstance(update, dict) or update.get(field) is None:
+                continue
+            snapshot = update[field]
+            if not isinstance(snapshot, str):
+                return False
+            at = cls._history_date(update.get("date"), "activity update date")
+            reached = [change for change in changes if change[0] <= at]
+            allowed = {reached[-1][2] if reached else original, live}
+            allowed.update(old for when, old, _ in changes if when == at)
+            if snapshot not in allowed:
+                return False
+        return True
+
+    @classmethod
+    def _first_review_at(cls, entries: list[dict], author: object) -> datetime | None:
+        """The earliest approval, request for changes or comment by a user other than ``author``, not prxref's."""
+        author_key = cls._user_key(author)
+        if not author_key:
+            return None
+        earliest: datetime | None = None
+        for entry in entries:
+            for kind, date_key in (("approval", "date"), ("changes_requested", "date"), ("comment", "created_on")):
+                item = entry.get(kind)
+                if not isinstance(item, dict):
+                    continue
+                user = item.get("user")
+                user_key = cls._user_key(user)
+                if not user_key or user_key == author_key or user.get("type", "user") != "user":
+                    continue
+                if kind == "comment":
+                    body = (item.get("content") or {}).get("raw") or ""
+                    if _is_deleted(item) or SUMMARY_MARKER in body or ATTRIBUTION_MARKER in body:
+                        continue
+                at = cls._history_date(item.get(date_key), f"activity {kind} {date_key}")
+                if earliest is None or at < earliest:
+                    earliest = at
+        return earliest
+
+    @staticmethod
+    def _user_key(user: object) -> str:
+        """A Bitbucket account's identity as ``list_threads`` records it: uuid, else nickname, else display name."""
+        if not isinstance(user, dict):
+            return ""
+        return user.get("uuid") or user.get("nickname") or user.get("display_name") or ""
+
+    @staticmethod
+    def _history_date(value: object, name: str) -> datetime:
+        """Parse a Bitbucket ISO 8601 time, raising ``ValueError`` naming ``name`` unless it is timezone-aware."""
+        if not isinstance(value, str):
+            raise ValueError(f"Bitbucket {name} is missing")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as e:
+            raise ValueError(f"Bitbucket {name} is not an ISO 8601 time: {value!r}") from e
+        _require_aware(parsed, f"Bitbucket {name}")
+        return parsed
 
 
 def _is_deleted(comment: dict) -> bool:

@@ -1,0 +1,131 @@
+diff --git a/.gitignore b/.gitignore
+index 746c138..165d860 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,3 +11,4 @@ dist/
+ docs/superpowers/
+ docs/configurability/
+ docs/release-hardening/
++docs/issues/
+diff --git a/docs/live-instance-verification/followup-tasks-real-forge-fixtures.md b/docs/live-instance-verification/followup-tasks-real-forge-fixtures.md
+index 711a67c..76d221b 100644
+--- a/docs/live-instance-verification/followup-tasks-real-forge-fixtures.md
++++ b/docs/live-instance-verification/followup-tasks-real-forge-fixtures.md
+@@ -15,11 +15,10 @@ was transcribed from.
+ 
+ ## Origin
+ 
+-Produced by the `sharpen` retro of session
+-`974bbdda-6362-4426-9971-fec77fabc1d9` (2026-08-30/31). That session stood up
+-Bitbucket Data Center 10.4.2 in Docker with an unattended timebomb-license
+-setup, seeded a repo with three planted bugs, opened a real PR, and ran
+-`prxref review` against it with posting enabled.
++Produced by a retrospective of the 2026-08-30/31 live-instance session, which
++stood up Bitbucket Data Center 10.4.2 in Docker with an unattended
++timebomb-license setup, seeded a repo with three planted bugs, opened a real
++PR, and ran `prxref review` against it with posting enabled.
+ 
+ **Two genuine bugs fell out of one live run, neither of which any hand-written
+ fixture had ever caught, for the life of the project:**
+diff --git a/docs/systemic-sweep.md b/docs/systemic-sweep.md
+index 0f0197a..3cc915b 100644
+--- a/docs/systemic-sweep.md
++++ b/docs/systemic-sweep.md
+@@ -48,7 +48,10 @@ raises it anyway.
+ The fetch is best-effort: a forge that cannot list threads still gets a full
+ review, with an empty discussion block. It is deliberately ordered AFTER the
+ stale-inline-comment prune, or the run would suppress its own findings against
+-comments it is about to delete.
++comments it is about to delete. A `--no-threads` replay (and a `--diff-file`
++replay with no `--pr-url`) lists no threads, so no `### Existing discussion`
++block is printed and the two thread gates, `apply_thread_dedup` and
++`apply_settled_thread_suppression`, see no threads either.
+ 
+ ## Drop reasons
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index e08960d..304c150 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,7 +1,7 @@
+ [project]
+ name = "prxref"
+-version = "0.13.0"
+-description = "Fast automated AI code review for Bitbucket, GitLab, and GitHub"
++version = "0.14.0"
++description = "Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps"
+ readme = "README.md"
+ requires-python = ">=3.12"
+ license = "MIT"
+@@ -69,6 +69,7 @@ exclude = [
+     "docs/superpowers",
+     "docs/configurability",
+     "docs/release-hardening",
++    "docs/issues",
+ ]
+ 
+ [tool.ruff]
+diff --git a/src/prxref/heuristics.py b/src/prxref/heuristics.py
+index d899fff..009c7cf 100644
+--- a/src/prxref/heuristics.py
++++ b/src/prxref/heuristics.py
+@@ -51,6 +51,11 @@
+     "composer.lock",
+ })
+ 
++# The same set, public, for callers outside this module: the PR-size advisory
++# hands it to ``triage.count_size_relevant_changes``, because triage must never
++# import heuristics. This module's own checks keep using the private name.
++LOCKFILE_BASENAMES: frozenset[str] = _LOCKFILE_BASENAMES
++
+ # Case-insensitive basename prefixes: CHANGELOG.md, changelog.rst,
+ # HISTORY.txt, RELEASE_NOTES.md all match regardless of extension or case.
+ _PREFIX_BASENAMES = ("changelog", "history", "release_notes")
+diff --git a/tests/evals/__init__.py b/tests/evals/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/test_retry_logging.py b/tests/test_retry_logging.py
+index 0f94546..a031843 100644
+--- a/tests/test_retry_logging.py
++++ b/tests/test_retry_logging.py
+@@ -112,7 +112,7 @@ def test_a_query_string_is_not_written_to_the_log(self, caplog):
+ 
+ 
+ class TestEveryForgeUsesIt:
+-    """A policy wired into three adapters out of four is the worst outcome:
++    """A policy wired into all adapters but one is the worst outcome:
+     the one that stayed quiet is the one you stop suspecting."""
+ 
+     @pytest.mark.parametrize(
+@@ -122,14 +122,15 @@ class TestEveryForgeUsesIt:
+             "prxref.forges.gitlab",
+             "prxref.forges.bitbucket",
+             "prxref.forges.bitbucket_server",
++            "prxref.forges.azure_devops",
+         ],
+     )
+     def test_the_default_session_retries_out_loud(self, module):
+         """Built through the forge, not through its private session helper.
+ 
+-        The default session is reached differently in each adapter (a
+-        module-level singleton in three of them, a call in the fourth), so the
+-        only check that covers all four is the object a review actually uses.
++        The default session is reached differently across adapters (a
++        module-level singleton in most of them, a call in another), so the
++        only check that covers every one is the object a review actually uses.
+         """
+         import importlib
+ 
+diff --git a/uv.lock b/uv.lock
+index a8a096a..77fd358 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1153,7 +1153,7 @@ wheels = [
+ 
+ [[package]]
+ name = "prxref"
+-version = "0.13.0"
++version = "0.14.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "requests" },
