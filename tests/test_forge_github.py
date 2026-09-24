@@ -10,6 +10,8 @@ are cheaper to state directly against the adapter itself.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import logging
 import threading
@@ -20,7 +22,7 @@ import pytest
 import requests
 
 from prxref.forges import github
-from prxref.forges.base import FeedReadError, InlineComment, PRRef
+from prxref.forges.base import ATTRIBUTION_MARKER, FeedReadError, InlineComment, PRRef
 from prxref.forges.github import ForgeImpl, _create_default_session
 
 MARKER = "<!-- prxref-summary -->"
@@ -699,3 +701,114 @@ def test_get_compare_diff_raises_on_http_error():
         ForgeImpl(session=session).get_compare_diff(
             _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
         )
+
+
+# --- request timeouts -----------------------------------------------------------
+
+# The connect/read pair every other adapter passes; without one a stalled
+# connection blocks the review, and the webhook worker running it, forever.
+REQUEST_TIMEOUT = (10.0, 30.0)
+
+
+def _routed_session(summary_feed):
+    """A Session double answering every route the adapter's public methods use.
+
+    Routes on URL and Accept header, never on call order, so driving the
+    methods in any order records the same calls.
+    """
+    pr = {
+        "title": "t", "body": "", "user": {"login": "dev"},
+        "head": {"ref": "feat", "sha": HEAD_SHA}, "base": {"ref": "main", "sha": BASE_SHA},
+    }
+    review_comments = [
+        {"id": 9, "path": "src/app.py", "line": 1,
+         "body": f"finding\n\n{ATTRIBUTION_MARKER} · model=m"},
+    ]
+
+    def get(url, headers=None, params=None, **kwargs):
+        accept = (headers or {}).get("Accept", "")
+        if "/compare/" in url:
+            return _mock_response(text=COMPARE_DIFF)
+        if "/contents/" in url:
+            return _mock_response(text="x = 1\n", headers={"Content-Type": "text/plain"})
+        if url.endswith("/issues/42/comments"):
+            return _mock_response(json_data=summary_feed)
+        if url.endswith("/pulls/42/comments"):
+            return _mock_response(json_data=review_comments)
+        if url.endswith("/pulls/42"):
+            if "diff" in accept:
+                return _mock_response(text=COMPARE_DIFF)
+            return _mock_response(json_data=pr)
+        raise AssertionError(f"unrouted GET {url}")
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    session.post.return_value = _mock_response(201, json_data={"id": 1})
+    session.patch.return_value = _mock_response(200, json_data={"id": 77})
+    session.delete.return_value = _mock_response(204)
+    return session
+
+
+def test_every_request_the_adapter_sends_carries_the_timeout():
+    ref = _ref()
+    fresh = _routed_session(summary_feed=[])
+    existing = _routed_session(summary_feed=[{"id": 77, "body": f"{MARKER}\nold"}])
+    forge = ForgeImpl(session=fresh)
+
+    drive = {
+        "get_pr": lambda: forge.get_pr(ref).source_sha == HEAD_SHA,
+        "get_diff": lambda: forge.get_diff(ref) == COMPARE_DIFF,
+        "get_compare_diff": lambda: forge.get_compare_diff(
+            ref, base_sha=BASE_SHA, head_sha=HEAD_SHA
+        ) == COMPARE_DIFF,
+        "list_threads": lambda: len(forge.list_threads(ref)) == 1,
+        "post_inline_comments": lambda: forge.post_inline_comments(
+            ref, [InlineComment(path="src/app.py", line=1, body="finding")]
+        ) == 1,
+        "get_file_content": lambda: forge.get_file_content(
+            ref, "src/app.py", sha=HEAD_SHA
+        ) == "x = 1\n",
+        "prune_inline_comments": lambda: forge.prune_inline_comments(ref) == 1,
+        # Both branches: no summary yet (POST), and one to update (PATCH).
+        "post_summary": lambda: (
+            forge.post_summary(ref, "first") is None
+            and ForgeImpl(session=existing).post_summary(ref, "second") is None
+        ),
+    }
+    network_free = {"parse_pr_url"}
+    public = {
+        name for name, member in vars(ForgeImpl).items()
+        if not name.startswith("_") and callable(member)
+    }
+    # A public method added later must be driven here too, or this fails.
+    assert set(drive) == public - network_free
+
+    for name, run in drive.items():
+        assert run(), name
+
+    calls = fresh.method_calls + existing.method_calls
+    untimed = [c for c in calls if c.kwargs.get("timeout") != REQUEST_TIMEOUT]
+    assert untimed == []
+    # Not vacuous: reads and every write verb the adapter uses were seen.
+    assert {c[0] for c in calls} == {"get", "post", "patch", "delete"}
+    assert github._REQUEST_TIMEOUT == REQUEST_TIMEOUT
+
+
+def test_no_session_call_in_the_adapter_source_omits_the_timeout():
+    # The behavioural test above sees only the branches it drives; this reads
+    # every `self.session.<verb>(...)` call site in the module, so an untimed
+    # call on an error path or a new branch fails too.
+    tree = ast.parse(inspect.getsource(github))
+    sites = [
+        (node.lineno, node.func.attr, {kw.arg for kw in node.keywords})
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "session"
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == "self"
+    ]
+
+    assert sites
+    assert [s for s in sites if "timeout" not in s[2]] == []

@@ -30,6 +30,10 @@ _PR_URL_RE = re.compile(
     r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/#?].*)?$",
     re.IGNORECASE,
 )
+# Connect and read deadlines, the same pair every other adapter passes. Without
+# one a stalled connection blocks the call forever, and with it the review and
+# the webhook worker running it.
+_REQUEST_TIMEOUT = (10.0, 30.0)
 # Both comment reads used to go out unparameterised, which is GitHub's default
 # page of 30 and no second page: a summary or a thread past the 30th comment
 # did not exist as far as this adapter was concerned. 100 is the API maximum;
@@ -77,9 +81,11 @@ def _create_default_session() -> requests.Session:
         # (which the server states it did not process) while holding it back
         # on 502. Writes are therefore left to the caller, which already logs
         # a failed post and carries on; a duplicated comment needs a human to
-        # delete it. The other write verbs go with POST: no adapter issues a
-        # DELETE, and the summary update (PUT, or PATCH on GitHub) is at best
-        # a no-op on replay and at worst a version conflict. Connection
+        # delete it. The other write verbs go with POST: DELETE (the prune
+        # pass) is held back with them rather than special-cased for the
+        # idempotency a replayed delete would enjoy, and the summary update
+        # (PUT, or PATCH on GitHub) is at best a no-op on replay and at worst
+        # a version conflict. Connection
         # errors are still retried for every verb: urllib3 gates only its
         # read-error path on the method, and a connection that was never
         # established carried no write to duplicate.
@@ -142,7 +148,9 @@ class ForgeImpl:
     def get_pr(self, ref: PRRef) -> PRData:
         """Fetch normalized PR metadata."""
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}"
-        resp = self.session.get(url, headers=self._headers(ref.host))
+        resp = self.session.get(
+            url, headers=self._headers(ref.host), timeout=_REQUEST_TIMEOUT
+        )
         resp.raise_for_status()
         data: dict[str, Any] = resp.json()
 
@@ -168,7 +176,7 @@ class ForgeImpl:
             ref.host,
             {"Accept": "application/vnd.github.v3.diff, application/vnd.diff"},
         )
-        resp = self.session.get(url, headers=headers)
+        resp = self.session.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         return resp.text
 
@@ -187,7 +195,7 @@ class ForgeImpl:
             f"/compare/{base_sha}...{head_sha}"
         )
         headers = self._headers(ref.host, {"Accept": "application/vnd.github.diff"})
-        resp = self.session.get(url, headers=headers)
+        resp = self.session.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         return resp.text
 
@@ -214,6 +222,7 @@ class ForgeImpl:
                     url,
                     headers=headers,
                     params={"per_page": _PAGE_SIZE, "page": page_number},
+                    timeout=_REQUEST_TIMEOUT,
                 )
             except requests.RequestException as e:
                 raise FeedReadError(
@@ -271,10 +280,16 @@ class ForgeImpl:
 
         if existing_comment_id is not None:
             patch_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/issues/comments/{existing_comment_id}"
-            resp = self.session.patch(patch_url, json={"body": body}, headers=headers)
+            resp = self.session.patch(
+                patch_url, json={"body": body}, headers=headers,
+                timeout=_REQUEST_TIMEOUT,
+            )
             resp.raise_for_status()
         else:
-            resp = self.session.post(list_url, json={"body": body}, headers=headers)
+            resp = self.session.post(
+                list_url, json={"body": body}, headers=headers,
+                timeout=_REQUEST_TIMEOUT,
+            )
             resp.raise_for_status()
 
     def post_inline_comments(self, ref: PRRef, comments: Sequence[InlineComment]) -> int:
@@ -302,7 +317,9 @@ class ForgeImpl:
                 "side": comment.side or "RIGHT",
                 "commit_id": commit_id,
             }
-            resp = self.session.post(url, json=payload, headers=headers)
+            resp = self.session.post(
+                url, json=payload, headers=headers, timeout=_REQUEST_TIMEOUT
+            )
             if resp.status_code == 422:
                 # A line outside the diff is the expected 422 and skipping it
                 # is correct, but the same status covers a malformed payload
@@ -376,7 +393,9 @@ class ForgeImpl:
         )
         headers = self._headers(ref.host, {"Accept": "application/vnd.github.raw+json"})
         try:
-            resp = self.session.get(url, headers=headers, params={"ref": sha})
+            resp = self.session.get(
+                url, headers=headers, params={"ref": sha}, timeout=_REQUEST_TIMEOUT
+            )
         except requests.RequestException as e:
             logger.debug("get_file_content failed for %s@%s: %s", path, sha, e)
             return None
@@ -436,7 +455,9 @@ class ForgeImpl:
                         f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
                         f"/pulls/comments/{comment_id}"
                     )
-                    resp = self.session.delete(delete_url, headers=headers)
+                    resp = self.session.delete(
+                        delete_url, headers=headers, timeout=_REQUEST_TIMEOUT
+                    )
                     if resp.ok:
                         removed += 1
                     else:
