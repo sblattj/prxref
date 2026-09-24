@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from prxref import eval_judge, reviewer
+from prxref import eval_judge, eval_metrics, reviewer
 from prxref.config import load_config
 from prxref.eval_cases import EvalCase, case_from_json_record, case_to_json, is_safe_id, load_cases
 from prxref.eval_metrics import (
@@ -293,10 +293,12 @@ def eval_score(args: argparse.Namespace) -> int:
     - The other labels of a case go to one single-shot judge call
       (:func:`prxref.eval_judge.judge_case`), which sees only those labels
       and returns ``full``, ``partial`` (half credit) or ``none`` per label.
-      The judge numbers the post-gate AI findings ``A1``, ``A2``, ...;
-      each credited ``ai_ref`` is mapped back through
+      The judge numbers the post-gate AI findings ``A1``, ``A2``, ...,
+      each extra location of a grouped finding as its own finding right
+      after it; each credited ``ai_ref`` is mapped back through
       :attr:`~prxref.eval_judge.JudgeOutcome.ref_index` to its index in the
-      record's ``findings`` list, dropped rows included. The code checks that
+      record's ``findings`` list, dropped rows included, and ``ai_line`` is
+      the line of the location credited. The code checks that
       the ref is real and in the label's file, and the judge's replies are
       cached under ``<out>/<label>/judge-cache/``; a live call's prompt and
       reply are traced as ``judge.*`` in the case's ``trace/``. A judge call
@@ -307,9 +309,10 @@ def eval_score(args: argparse.Namespace) -> int:
       deterministic tier has already used a finding's slots, a judge credit
       to it becomes ``none`` with a WARNING (``full`` keeps its slot before
       ``partial``, then label order). A grouped finding's JSON ``locations``
-      make each location its own credit unit in the deterministic tier; a
-      row without the key is read as not grouped. The judge sees a grouped
-      finding as one finding at its own location.
+      make each location its own credit unit in both tiers; a row whose key
+      is missing or null is read as not grouped. A record with no grouped
+      row reaches the judge as written, so its prompt and cache key do not
+      change.
 
     A case whose review failed (``error.json``) and a record whose verdict is
     ``Error`` are scored, not skipped: the author received no findings, so
@@ -498,7 +501,15 @@ def _grade_case(
     cache_dir: Path,
     cfg: Mapping[str, Any],
 ) -> tuple[GradedCase, eval_judge.JudgeOutcome | None]:
-    """Grade one case in both tiers; the outcome is ``None`` when no judge call was needed."""
+    """Grade one case in both tiers; the outcome is ``None`` when no judge call was needed.
+
+    The deterministic tier grades the record's ``findings`` as written. The
+    judge grades :func:`_judge_record`'s copy, in which each extra location
+    of a grouped finding is its own row, and :func:`_judge_grades` maps its
+    refs back to the record, so both tiers credit a grouped finding per
+    location. The returned :class:`~prxref.eval_metrics.GradedCase` always
+    holds the record's own ``findings``.
+    """
     case, record = run_case.case, run_case.record
     findings: list[Any] = record["findings"] if record is not None else []
     grades = {grade["human_id"]: grade for grade in match_case(case.expected, findings)}
@@ -506,14 +517,15 @@ def _grade_case(
     outcome = None
     active = any(_row_value(row, "drop_reason") is None for row in findings)
     if judged and record is not None and active and judge_model is not None:
+        judge_record, origin = _judge_record(record)
         outcome = eval_judge.judge_case(
-            client, judge_model, replace(case, expected=judged), record,
+            client, judge_model, replace(case, expected=judged), judge_record,
             cache_dir=cache_dir,
             price_table=cfg["price_table"],
             max_tokens=cfg["llm_max_tokens"],
             trace_dir=str(run_case.case_dir / "trace"),
         )
-        grades.update(_judge_grades(outcome, judged, findings))
+        grades.update(_judge_grades(outcome, judged, judge_record["findings"], origin))
     else:
         grades.update((label.id, _grade(label.id, NONE)) for label in judged)
     _cap_across_tiers(case, grades)
@@ -529,10 +541,49 @@ def _grade_case(
     return graded, outcome
 
 
+def _judge_record(record: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
+    """The record the judge grades, and the record index each of its ``findings`` rows came from.
+
+    Every row of ``record["findings"]`` is kept, in order. An active row
+    (``drop_reason`` null) that is a grouped representative is followed by
+    one copy per extra location of
+    :func:`prxref.eval_metrics.credit_locations`, with that location's
+    ``file`` and ``line`` and a null
+    :data:`~prxref.eval_metrics.LOCATIONS_FIELD`. The judge then numbers
+    each location as its own AI finding, under its own per-finding cap, as
+    the deterministic tier counts it. A dropped row is never expanded, so
+    the judge still skips it. A record with nothing to expand is returned
+    itself, so its judge prompt and cache key are exactly those of the
+    record as written.
+    """
+    findings = record["findings"]
+    rows: list[Any] = []
+    origin: list[int] = []
+    for index, row in enumerate(findings):
+        rows.append(row)
+        origin.append(index)
+        if not isinstance(row, Mapping) or row.get("drop_reason") is not None:
+            continue
+        for file, line in eval_metrics.credit_locations(row)[1:]:
+            rows.append({**row, "file": file, "line": line, eval_metrics.LOCATIONS_FIELD: None})
+            origin.append(index)
+    if len(rows) == len(findings):
+        return record, origin
+    return {**record, "findings": rows}, origin
+
+
 def _judge_grades(
-    outcome: eval_judge.JudgeOutcome, judged: Sequence[Any], findings: Sequence[Any]
+    outcome: eval_judge.JudgeOutcome, judged: Sequence[Any], rows: Sequence[Any], origin: Sequence[int]
 ) -> dict[str, dict[str, Any]]:
-    """Turn a judge outcome into eval_metrics grades whose ``ai_ref`` indexes ``findings``."""
+    """Turn a judge outcome into eval_metrics grades whose ``ai_ref`` indexes the record's ``findings``.
+
+    ``rows`` and ``origin`` are :func:`_judge_record`'s. The judge's ref
+    names a row of ``rows`` through ``outcome.ref_index``; ``ai_ref`` is the
+    index ``origin`` gives that row in the record, dropped rows included,
+    and ``ai_line`` is that row's own ``line``: for a grouped finding, the
+    location the judge credited. So ``(ai_ref, label file, ai_line)`` is one
+    credit unit per location, as in the deterministic tier.
+    """
     if not outcome.ok or outcome.grades is None:
         return {label.id: _grade(label.id, JUDGE_ERROR) for label in judged}
     grades: dict[str, dict[str, Any]] = {}
@@ -542,7 +593,7 @@ def _judge_grades(
             grades[grade.human_id] = _grade(grade.human_id, NONE)
             continue
         ref = outcome.ref_index[grade.ai_ref]
-        grades[grade.human_id] = _grade(grade.human_id, value, ref, _row_value(findings[ref], "line"))
+        grades[grade.human_id] = _grade(grade.human_id, value, origin[ref], _row_value(rows[ref], "line"))
     return grades
 
 
