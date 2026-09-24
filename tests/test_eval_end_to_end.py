@@ -344,7 +344,7 @@ def pipeline(rig, tmp_path, monkeypatch, capsys, caplog):
 
 
 RUN_KEYS = ["version", "label", "cases_path", "created_at", "case_ids", "prompts", "sampling", "review_rules",
-            "config"]
+            "scoped_rules", "config"]
 SCORE_KEYS = ["version", "label", "run", "judge", "failed", "metrics", "cases"]
 JUDGE_KEYS = ["model", "sampling", "prompt_version", "prompt_sha256", "self_judged", "cost_usd", "cost_estimated",
               "llm_calls", "cached", "errors"]
