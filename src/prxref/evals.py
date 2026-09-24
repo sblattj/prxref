@@ -833,15 +833,385 @@ def _score_markdown(score: Mapping[str, Any]) -> str:
 def eval_compare(args: argparse.Namespace) -> int:
     """Print two scored runs side by side, then every label whose credit changed.
 
-    Reads ``args.run_a``, ``args.run_b`` and ``args.out``. Each of ``run_a``
-    and ``run_b`` is a label under ``--out`` or a run directory.
+    Reads ``args.run_a``, ``args.run_b`` and ``args.out``. Each of ``A``
+    (``run_a``) and ``B`` (``run_b``) names a run that :func:`eval_score` has
+    scored. It is a label when it is one safe path segment
+    (:func:`prxref.eval_cases.is_safe_id`) and ``<out>/<label>/`` is a
+    directory, even when a directory of the same name sits in the working
+    directory; otherwise it is the path of a run directory. Only the run's
+    ``score.json`` is compared; each case's ``record.json`` is read for its
+    replay stamp alone.
 
-    - The metrics come first, side by side, then every human label whose
-      credit changed between the two runs, sorted and without timestamps, so
-      comparing the same two runs twice prints byte-identical output.
-    - A WARNING says so when the two runs' judge prompt sha or judge model
-      differ.
-    - A run that is not there exits 2 naming it, as ``trace render`` does for
-      a missing trace.
+    Standard output is Markdown in this order, and holds no timestamp and no
+    path other than ``A`` and ``B`` as given, so comparing the same two runs
+    twice prints byte-identical output:
+
+    - ``# prxref eval compare``, then ``- A: <A>`` and ``- B: <B>``.
+    - ``## Metrics``: the table ``| Metric | A | B | Change |`` with the rows
+      ``Cases``, ``Recall (micro)``, ``Judge errors``, one ``Recall,
+      severity ...`` row per severity and one ``Recall, category ...`` row
+      per category of either run (each sorted), ``Recall, accepted labels``,
+      ``Unmatched AI per PR``, ``Severity agreement``, ``Chunks failed``,
+      ``Elapsed``, ``Review cost`` and ``Judge cost``. A severity or category
+      that only one run has is ``n/a`` on the other side. A recall or agreement change is in percentage points (``pp``).
+      The change is ``unknown``, never a number, when either side is unknown:
+      a ``None`` value, a missing key, or a total that leaves some case out.
+      A run with no judge has the judge cost ``none``, counted as 0.
+    - ``## Changed labels``: a table ``| Case | Label | Location | A | B |``
+      of every label, keyed by case id and label id and sorted by that key,
+      whose ``grade`` or ``credit`` differs between the runs. A grade reads
+      ``<grade> (<credit>)``, or ``judge_error`` when the credit is ``None``.
+    - ``## Only in one run``: one bullet per case or label that only one run
+      holds, sorted; these are not counted as changes.
+
+    An empty section reads ``None.``. A WARNING is logged, and the comparison
+    still printed, when:
+
+    - the judge prompt sha256 or the judge model differ. A run with no judge
+      (every label has ``must_match``) differs from a judged run only when
+      both runs graded labels in the judge tier; two runs without a judge
+      never differ;
+    - the runs cover different cases;
+    - a case holds a ``record.json`` in both runs and their replay stamps'
+      ``description`` differ (a missing key reads as ``null``). A failed
+      case, which holds ``error.json``, is skipped.
+
+    Each of these raises ``ConfigError`` naming ``A`` or ``B``, so the command
+    exits 2: a run with no ``score.json`` (when it holds ``run.json``, the
+    message says to run ``prxref eval score`` first); a ``score.json`` or
+    ``record.json`` that cannot be read; a ``score.json`` whose ``version``
+    is not :data:`SCORE_VERSION` or whose shape is not a score. The return
+    value is 0.
     """
-    raise NotImplementedError("prxref eval compare is not built yet (seat E14-H)")
+    run_a = _read_scored_run("A", args.run_a, args.out)
+    run_b = _read_scored_run("B", args.run_b, args.out)
+    _warn_judge(run_a.score, run_b.score)
+    _warn_cases(run_a.score, run_b.score)
+    _warn_replay(run_a, run_b)
+    print(_compare_text(run_a, run_b), end="", flush=True)
+    return 0
+
+
+@dataclass(frozen=True)
+class _ScoredRun:
+    """One side of ``eval compare``: its argument, the run as given, its directory and ``score.json``."""
+
+    argument: str
+    given: str
+    run_dir: Path
+    score: dict[str, Any]
+
+
+def _read_scored_run(argument: str, given: str, out: str) -> _ScoredRun:
+    """Resolve ``A`` or ``B`` to a scored run and read its ``score.json``."""
+    label_dir = Path(out) / given
+    as_label = is_safe_id(given) and label_dir.is_dir()
+    run_dir = label_dir if as_label else Path(given)
+    path = run_dir / "score.json"
+    if not path.is_file():
+        if (run_dir / "run.json").is_file():
+            resolved = run_dir.resolve()
+            name, parent = (given, out) if as_label else (resolved.name, str(resolved.parent))
+            raise ConfigError(
+                f"{argument}: the run {given!r} is not scored yet (no score.json in {run_dir}); "
+                f"run 'prxref eval score --label {name} --out {parent}' first"
+            )
+        raise ConfigError(
+            f"{argument}: there is no scored run {given!r}: it is neither a label under --out {out!r} "
+            "nor a run directory holding a score.json"
+        )
+    score = _read_compare_json(argument, path)
+    if not isinstance(score, dict):
+        raise ConfigError(f"{argument}: {path}: not a score.json (a JSON object)")
+    version = score.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != SCORE_VERSION:
+        raise ConfigError(
+            f"{argument}: {path}: score.json version {version!r} is not {SCORE_VERSION}; "
+            "rescore the run with this prxref's 'prxref eval score'"
+        )
+    judge = score.get("judge")
+    if not isinstance(score.get("metrics"), dict) or not isinstance(score.get("cases"), list) or not (
+        judge is None or isinstance(judge, dict)
+    ):
+        raise ConfigError(f"{argument}: {path}: not a score.json (metrics, cases and judge are malformed)")
+    return _ScoredRun(argument, given, run_dir, score)
+
+
+def _read_compare_json(argument: str, path: Path) -> Any:
+    """Parse one JSON file of a compared run; an unreadable one names ``A`` or ``B``."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{argument}: cannot read {path}: {exc}") from exc
+
+
+def _shown(value: Any) -> str:
+    return json.dumps(value)
+
+
+def _judge_tier_labels(score: Mapping[str, Any]) -> bool:
+    return any(entry.get("method") == JUDGE_METHOD for row in score["cases"] for entry in row.get("findings") or [])
+
+
+def _warn_judge(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> None:
+    """Warn when the two runs' judges differ in prompt sha256 or model."""
+    judge_a, judge_b = score_a.get("judge"), score_b.get("judge")
+    if judge_a is None and judge_b is None:
+        return
+    if (judge_a is None or judge_b is None) and not (_judge_tier_labels(score_a) and _judge_tier_labels(score_b)):
+        return
+    for key, what in (("prompt_sha256", "judge prompt sha256"), ("model", "judge model")):
+        value_a = judge_a.get(key) if judge_a is not None else None
+        value_b = judge_b.get(key) if judge_b is not None else None
+        if value_a != value_b:
+            logger.warning(
+                "the %s differs: A %s, B %s; the judge grades are not like for like",
+                what, _shown(value_a), _shown(value_b),
+            )
+
+
+def _case_ids(score: Mapping[str, Any]) -> set[str]:
+    return {row["case_id"] for row in score["cases"]}
+
+
+def _warn_cases(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> None:
+    """Warn when the two runs do not cover the same cases."""
+    ids_a, ids_b = _case_ids(score_a), _case_ids(score_b)
+    if ids_a != ids_b:
+        logger.warning(
+            "the runs cover different cases (only in A: %s; only in B: %s); the metrics are not like for like",
+            ", ".join(sorted(ids_a - ids_b)) or "none", ", ".join(sorted(ids_b - ids_a)) or "none",
+        )
+
+
+def _replay_description(run: _ScoredRun, case_id: str) -> tuple[bool, Any]:
+    """Whether the case holds a ``record.json``, and its replay stamp's ``description``."""
+    path = run.run_dir / "cases" / case_id / "record.json"
+    if not path.is_file():
+        return False, None
+    record = _read_compare_json(run.argument, path)
+    replay = record.get("replay") if isinstance(record, dict) else None
+    return True, replay.get("description") if isinstance(replay, dict) else None
+
+
+def _warn_replay(run_a: _ScoredRun, run_b: _ScoredRun) -> None:
+    """Warn, per case recorded in both runs, when the replay description stamps differ."""
+    for case_id in sorted(_case_ids(run_a.score) & _case_ids(run_b.score)):
+        if not is_safe_id(case_id):
+            continue
+        recorded_a, description_a = _replay_description(run_a, case_id)
+        recorded_b, description_b = _replay_description(run_b, case_id)
+        if recorded_a and recorded_b and description_a != description_b:
+            logger.warning(
+                "case %r: the replay description differs: A %s, B %s; the two arms did not see the same "
+                "PR description, so this case is not a like-for-like comparison",
+                case_id, _shown(description_a), _shown(description_b),
+            )
+
+
+def _compare_text(run_a: _ScoredRun, run_b: _ScoredRun) -> str:
+    """Render the comparison printed to standard output."""
+    score_a, score_b = run_a.score, run_b.score
+    lines = ["# prxref eval compare", "", f"- A: {run_a.given}", f"- B: {run_b.given}"]
+    lines += ["", "## Metrics", "", *_metric_table(score_a, score_b)]
+    lines += ["", "## Changed labels", "", *_changed_labels(score_a, score_b)]
+    lines += ["", "## Only in one run", "", *_only_in_one_run(score_a, score_b)]
+    return "\n".join(lines) + "\n"
+
+
+_Side = tuple[Any, str]
+
+
+def _signed(value: float, digits: int) -> str:
+    rounded = round(value, digits) + 0.0
+    return f"{rounded:.{digits}f}" if rounded == 0 else f"{rounded:+.{digits}f}"
+
+
+def _points_change(delta: float) -> str:
+    return f"{_signed(delta * 100, 1)} pp"
+
+
+def _count_change(delta: float) -> str:
+    return _signed(delta, 0)
+
+
+def _per_pr_change(delta: float) -> str:
+    return _signed(delta, 2)
+
+
+def _seconds_change(delta: float) -> str:
+    return f"{_signed(delta / 1000, 1)} s"
+
+
+def _usd_change(delta: float) -> str:
+    rounded = round(delta, 4) + 0.0
+    if rounded == 0:
+        return "$0.0000"
+    return f"{'+' if rounded > 0 else '-'}${abs(rounded):.4f}"
+
+
+def _recall_side(block: Mapping[str, Any] | None) -> _Side:
+    if block is None:
+        return None, "n/a"
+    return block["recall"], f"{_pct(block['recall'])} ({_num(block['credit'])} of {block['scored']})"
+
+
+def _count_side(value: int | None) -> _Side:
+    return value, _count(value)
+
+
+def _unmatched_side(block: Mapping[str, Any] | None) -> _Side:
+    if block is None or block["per_pr"] is None:
+        return None, "n/a"
+    return block["per_pr"], f"{block['per_pr']:.2f} ({block['total']} of {block['ai_findings']})"
+
+
+def _agreement_side(block: Mapping[str, Any] | None) -> _Side:
+    if block is None:
+        return None, "n/a"
+    return block["rate"], f"{_pct(block['rate'])} ({block['agreed']} of {block['compared']})"
+
+
+def _total_side(block: Mapping[str, Any] | None, render: Callable[[Any], str]) -> _Side:
+    if block is None:
+        return None, "n/a"
+    if block["missing"]:
+        return None, f"{render(block['total'])} ({block['missing']} unknown)"
+    return block["total"], render(block["total"])
+
+
+def _review_cost_side(block: Mapping[str, Any] | None) -> _Side:
+    if block is None:
+        return None, "n/a"
+    total = block["total_usd"]
+    return total, _usd(total) + (" (est.)" if total is not None and block["estimated"] else "")
+
+
+def _judge_cost_side(judge: Mapping[str, Any] | None) -> _Side:
+    if judge is None:
+        return 0.0, "none"
+    cost = judge["cost_usd"]
+    return cost, _usd(cost) + (" (est.)" if cost is not None and judge["cost_estimated"] else "")
+
+
+def _metric_row(name: str, side_a: _Side, side_b: _Side, change: Callable[[Any], str]) -> str:
+    (value_a, cell_a), (value_b, cell_b) = side_a, side_b
+    delta = "unknown" if value_a is None or value_b is None else change(value_b - value_a)
+    return f"| {name} | {cell_a} | {cell_b} | {delta} |"
+
+
+def _metric_table(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> list[str]:
+    """The ``Metrics`` table: A, B and the change, one row per metric."""
+    a, b = score_a["metrics"], score_b["metrics"]
+    recall_a, recall_b = a.get("recall"), b.get("recall")
+    rows = [
+        _metric_row("Cases", _count_side(a.get("case_count")), _count_side(b.get("case_count")), _count_change),
+        _metric_row("Recall (micro)", _recall_side(recall_a), _recall_side(recall_b), _points_change),
+        _metric_row(
+            "Judge errors",
+            _count_side(recall_a["judge_error"] if recall_a is not None else None),
+            _count_side(recall_b["judge_error"] if recall_b is not None else None),
+            _count_change,
+        ),
+    ]
+    for key, what in (("recall_by_severity", "severity"), ("recall_by_category", "category")):
+        blocks_a, blocks_b = a.get(key) or {}, b.get(key) or {}
+        rows += [
+            _metric_row(
+                f"Recall, {what} `{_cell(name)}`", _recall_side(blocks_a.get(name)), _recall_side(blocks_b.get(name)),
+                _points_change,
+            )
+            for name in sorted(blocks_a.keys() | blocks_b.keys())
+        ]
+    rows += [
+        _metric_row(
+            "Recall, accepted labels", _recall_side(a.get("recall_accepted")), _recall_side(b.get("recall_accepted")),
+            _points_change,
+        ),
+        _metric_row(
+            "Unmatched AI per PR", _unmatched_side(a.get("unmatched_ai")), _unmatched_side(b.get("unmatched_ai")),
+            _per_pr_change,
+        ),
+        _metric_row(
+            "Severity agreement", _agreement_side(a.get("severity_agreement")),
+            _agreement_side(b.get("severity_agreement")), _points_change,
+        ),
+        _metric_row(
+            "Chunks failed", _total_side(a.get("chunks_failed"), str), _total_side(b.get("chunks_failed"), str),
+            _count_change,
+        ),
+        _metric_row(
+            "Elapsed", _total_side(a.get("elapsed_ms"), _seconds), _total_side(b.get("elapsed_ms"), _seconds),
+            _seconds_change,
+        ),
+        _metric_row(
+            "Review cost", _review_cost_side(a.get("review_cost")), _review_cost_side(b.get("review_cost")),
+            _usd_change,
+        ),
+        _metric_row(
+            "Judge cost", _judge_cost_side(score_a.get("judge")), _judge_cost_side(score_b.get("judge")),
+            _usd_change,
+        ),
+    ]
+    return ["| Metric | A | B | Change |", "|---|---:|---:|---:|", *rows]
+
+
+def _labels(score: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
+    return {(row["case_id"], str(entry["human_id"])): entry for row in score["cases"] for entry in row["findings"]}
+
+
+def _label_location(entry: Mapping[str, Any]) -> str:
+    file, line = entry.get("file"), entry.get("line")
+    text = "unknown" if file is None else str(file)
+    return text if line is None else f"{text}:{line}"
+
+
+def _grade_text(entry: Mapping[str, Any]) -> str:
+    if entry["credit"] is None:
+        return JUDGE_ERROR
+    return f"{entry['grade']} ({_num(entry['credit'])})"
+
+
+def _changed_labels(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> list[str]:
+    """The ``Changed labels`` table: labels in both runs whose grade or credit differs."""
+    labels_a, labels_b = _labels(score_a), _labels(score_b)
+    changed = [
+        key for key in sorted(labels_a.keys() & labels_b.keys())
+        if (labels_a[key]["grade"], labels_a[key]["credit"]) != (labels_b[key]["grade"], labels_b[key]["credit"])
+    ]
+    if not changed:
+        return ["None."]
+    lines = ["| Case | Label | Location | A | B |", "|---|---|---|---|---|"]
+    for key in changed:
+        entry_a, entry_b = labels_a[key], labels_b[key]
+        location_a, location_b = _label_location(entry_a), _label_location(entry_b)
+        location = location_a if location_a == location_b else f"{location_a} (B: {location_b})"
+        lines.append(
+            f"| {_cell(key[0])} | {_cell(key[1])} | {_cell(location)} | {_grade_text(entry_a)} | "
+            f"{_grade_text(entry_b)} |"
+        )
+    return lines
+
+
+def _only_in_one_run(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> list[str]:
+    """The ``Only in one run`` bullets: cases, then labels of shared cases, that one run lacks."""
+    scores = {"A": score_a, "B": score_b}
+    rows = {side: {row["case_id"]: row for row in score["cases"]} for side, score in scores.items()}
+    labels = {side: _labels(score) for side, score in scores.items()}
+    entries: list[tuple[str, str, str, str]] = []
+    for side, other in (("A", "B"), ("B", "A")):
+        for case_id in sorted(rows[side].keys() - rows[other].keys()):
+            count = len(rows[side][case_id]["findings"])
+            entries.append((
+                case_id, "", side,
+                f"- Case `{case_id}`: only in {side} ({count} label{'' if count == 1 else 's'})",
+            ))
+    for side, other in (("A", "B"), ("B", "A")):
+        for case_id, label_id in sorted(labels[side].keys() - labels[other].keys()):
+            if case_id in rows[other]:
+                location = _label_location(labels[side][(case_id, label_id)])
+                entries.append((
+                    case_id, label_id, side,
+                    f"- Label `{label_id}` of case `{case_id}` at `{location}`: only in {side}",
+                ))
+    return [text for *_, text in sorted(entries)] or ["None."]
