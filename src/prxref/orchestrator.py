@@ -552,7 +552,7 @@ def orchestrate_review(
     try:
         with tracer.span("forge.get_diff") as sp:
             raw = forge.get_diff(ref)
-            sp["bytes"] = len(raw)
+            sp["bytes"] = len(raw.encode("utf-8"))
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
