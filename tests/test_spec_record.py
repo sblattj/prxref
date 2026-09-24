@@ -222,6 +222,15 @@ class TestFailedSourceWarning:
         assert record.args[3] == missing
         assert f"(unknown, {missing})" in record.getMessage()
 
+    def test_an_empty_directory_is_logged_as_a_dir_with_its_path(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="prxref")
+        empty = tmp_path / "empty specs"
+        empty.mkdir()
+        _review(tmp_path, [str(empty)], post=False)
+        (record,) = _source_warnings(caplog)
+        assert record.args[:4] == (1, 1, "dir", str(empty))
+        assert record.getMessage().startswith(f"spec source 1/1 (dir, {empty}) failed (best-effort): no ")
+
     def test_an_ok_source_logs_no_warning(self, tmp_path, caplog):
         caplog.set_level(logging.INFO, logger="prxref")
         _review(tmp_path, [_spec_file(tmp_path)], post=False)
@@ -364,6 +373,26 @@ class TestSpecGroundingRecord:
         assert res["spec_grounding"]["digest_sha256"] == hashlib.sha256(
             digests[0].encode("utf-8", "surrogatepass"),
         ).hexdigest()
+
+    def test_a_note_crash_after_the_digest_leaves_the_run_ungrounded(
+        self, tmp_path, monkeypatch, digests,
+    ):
+        def boom(*a, **k):
+            raise RuntimeError("note")
+
+        monkeypatch.setattr(orchestrator, "_spec_note", boom)
+        llm = CleanLLM()
+        forge, res, events = _review(tmp_path, [_spec_file(tmp_path)], llm=llm)
+        assert digests and specs.constraint_count(digests[0]) == SPEC_DOC_CONSTRAINTS
+        assert res["spec_grounding"]["failed"] == ["spec stage crashed: RuntimeError"]
+        assert llm.prompts and all(NO_SPECS in p for p in llm.prompts)
+        assert "Spec-grounded" not in forge.summaries[0]
+        assert _stage_events(events) == [
+            ("fail", {
+                "sources": 1, "ok": 0, "constraints": 0,
+                "reasons": ["spec stage crashed: RuntimeError: note"],
+            }),
+        ]
 
     def test_the_total_failure_exit_still_carries_the_record(self, tmp_path):
         _forge, res, _events = _review(
