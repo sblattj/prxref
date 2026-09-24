@@ -8,6 +8,333 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.15.0] — 2026-09-24
+
+The tuning release. A team can now replace the review prompts, scope its review
+rules to paths, fold findings that break the same rule into one comment, cap
+warnings and minor findings, and measure a configuration against labelled human
+findings with `prxref eval`. A `--pr-url` replay shows the title and description
+the PR had at review time, and GitHub pull requests past GitHub's diff size
+limit are reviewed. Each new option is off until you configure it.
+
+### Added
+
+- **Reworded-duplicate dedup (#10).** Set `PRXREF_DEDUP_SIMILARITY` (above 0,
+  at most 1.0) to make the sweep dedup also drop reworded restatements: two
+  active findings in the same file and on the same line whose titles reach that
+  Jaccard similarity over a dedicated title tokenizer, and share at least 3
+  title tokens, count as one. Across the chunk/sweep boundary the chunk copy
+  always survives, and the sweep copy is dropped only when it is no more
+  severe, so the review's worst severity never drops. On one side of the
+  boundary the more severe copy is kept, then the more confident one.
+  File-level findings are never compared. The dropped copy is kept for audit in
+  the run record, with the drop reason `duplicate of chunk finding (reworded,
+  similarity 0.57)` or `duplicate of sweep finding (reworded, similarity
+  0.57)`. It is an environment variable only, with no CLI flag, and the webhook
+  server reads it the same way. Unset, the default, only the exact-title dedup
+  runs, as before.
+- **Prompt-template overrides (#11).** `PRXREF_PROMPTS_DIR`, or `--prompts-dir
+  DIR` for one run, names a directory that may replace any of `worker.md`,
+  `systemic.md` and `summary.md`; a template it lacks falls back to the packaged
+  one. The worker template reaches every chunk, the systemic template the
+  whole-PR sweep, and the summary template every posted summary, the empty-diff
+  summary and the inline-accounting re-post included, but not the error notice.
+  Overrides are checked before any network call. A review template must keep
+  the `## Review Context` marker and every packaged placeholder below it
+  (`{scope_example}` and `{rule_example}` are optional), and `summary.md` must
+  keep `{findings}`. A URL, a missing directory, a template over 256 KiB, text
+  that is not UTF-8 or holds NUL bytes, and a symlink out of the directory are
+  each a configuration error (exit 2) naming the flag or the variable. An
+  unknown placeholder, a placeholder above the marker and an unrecognised file
+  each log a warning. The flag wins over the variable, `--prompts-dir ""` turns
+  it off, and the webhook server re-reads the variable on every webhook. The
+  run record and `--format json` gain `prompt_templates` (always present,
+  `null` when unset), holding each overridden template's path, SHA-256 of the
+  raw bytes and character count; the trace gains a `prompts ok` event, and `-v`
+  prints a `prompts:` line with the first 12 characters of each hash. See
+  `docs/prompt-templates.md`.
+- **`prxref prompts export DIR [--force]` (#11).** It writes the packaged
+  `worker.md`, `systemic.md` and `summary.md` into `DIR` byte for byte, as the
+  starting point for an override directory, creating `DIR` when missing and
+  printing each path it wrote. If any of the three already exists, nothing is
+  written and the command exits 2 naming the file; `--force` overwrites. The
+  `prxref eval` judge prompt cannot be overridden and is not exported.
+- **Path-scoped review rules (#12).** `PRXREF_SCOPED_RULES`, or the repeatable
+  `--scoped-rules PATH` that replaces it for one run (`--scoped-rules ""` turns
+  it off), names rules files and directories. A directory is read one level
+  deep for `*.md` files in name order, and a run loads at most 50 files. Each
+  file's `applies_to:` front matter (alias `applyTo`, the `.github/instructions`
+  spelling) decides which chunks receive it: a glob, a comma-separated string,
+  a one-line `["...", "..."]` list, or indented `- <glob>` lines. Globs match
+  the whole path case-sensitively, `*` crosses `/`, a `!` glob excludes
+  wherever it sits in the list, and `**/` also matches zero directories, so
+  `**/*.java` selects a root-level `Foo.java`; a renamed file's old path
+  selects too. A file without the key reaches every chunk, and the whole-PR
+  sweep receives the union. Scoped files add to the always-on
+  `PRXREF_REVIEW_RULES` file, and their `severity:` maps merge into one
+  run-wide map, which applies even without an always-on file; one word mapped
+  to two tiers across the files is a configuration error. Each file is capped
+  at `PRXREF_REVIEW_RULES_MAX_CHARS`, and `PRXREF_SCOPED_RULES_MAX_CHARS`
+  (default 24000) caps the scoped text one review unit receives: files go in
+  whole in load order, the first that does not fit is truncated, and later ones
+  are omitted behind a marker, with one WARNING per run. Every file is checked
+  before any network call. A URL, a path that escapes the working directory,
+  text that is not UTF-8 or holds NUL bytes, and malformed front matter
+  (`applies_to: []`, an entry that is not a string, a glob starting with `/`,
+  or only `!` globs) each exit 2 naming the flag or the variable, the path and,
+  where known, the line. The run record and `--format json` gain
+  `scoped_rules` (`null` when off; otherwise the entries, each file with its
+  SHA-256 and globs, the per-unit cap, and the files each unit received), `-v`
+  prints a `scoped rules:` line, and the trace gains a `scoped_rules ok` event
+  and a `rules` field on each `chunk start` and `sweep start` event. The
+  webhook server re-reads the variable and the files on every webhook. See
+  `docs/review-rules.md` "Path-scoped rules".
+- **Finding grouping (#13).** With `PRXREF_GROUP_FINDINGS=1`, chunk findings
+  in one file that break the same rule, or that name no rule and share a
+  normalized title, fold into one comment at the group's first line. That
+  comment takes the group's highest severity and highest confidence and ends
+  with `Also at:` and the group's other lines as `file:line`; the other
+  findings are kept for audit with the drop reason `grouped into
+  <file>:<line>`. The worker and sweep prompts ask the model to name, in a
+  per-finding `rule` key, the team review rule or standard a finding applies,
+  and the example finding shows the key through a new optional
+  `{rule_example}` slot in both packaged templates. A rule is kept as a
+  one-line label of at most 120 characters with whitespace collapsed, and
+  compared without regard to case. It is dropped, never truncated, when it is
+  not a string, is empty or too long, or holds a control, surrogate or
+  private-use character or a bidi embedding, override or isolate control
+  (U+202A to U+202E, U+2066 to U+2069); a zero-width joiner or non-joiner is
+  kept. A prompt override without the slot still loads and still asks for a
+  rule, but its example shows no `rule` key, and a review with grouping on logs
+  one WARNING naming each such override file; re-export with `prxref prompts
+  export DIR --force` and re-apply your edits to pick the slot up. Grouping
+  runs before the finding caps, so every cap, `PRXREF_MAX_ERROR_FINDINGS`
+  included, counts a group once. Whole-PR sweep findings are never grouped,
+  and a sweep finding that restates a grouped finding is still dropped as
+  `duplicate of chunk finding`. Off by default: the model is not asked for a
+  rule, and output is unchanged apart from the `rule` and `locations` JSON keys
+  being `null`.
+- **Per-severity finding caps (#13).** `PRXREF_MAX_WARNING_FINDINGS` and
+  `PRXREF_MAX_OUTOFSCOPE_FINDINGS` cap how many `warning` and how many
+  `outofscope` findings one review posts, ranked like
+  `PRXREF_MAX_ERROR_FINDINGS`: the most confident survive, then by file and
+  line. The rest are kept for audit with the drop reason `warning cap exceeded
+  (max N)` or `outofscope cap exceeded (max N)`, and `0` drops every finding of
+  that severity; `spec` findings are never capped. `outofscope` here is the
+  minor severity (style and nits), not the ticket scope `out`: a finding the
+  ticket puts out of scope is capped by its severity like any other. Both caps
+  also apply to a release-only PR's summary-only review. Under
+  `PRXREF_FAIL_ON=any`, a cap of `0` can turn exit 1 into exit 0, since a cap
+  narrows the gate and never widens it. Unset means unlimited.
+- **`rule` and `locations` in the output (#13).** Every `--format json`
+  finding row carries two more keys after `scope`: `rule`, the rule the finding
+  names (`null` when it names none), and `locations`, which on a grouped
+  finding lists the other places its `Also at:` paragraph names as `{"file",
+  "line"}` objects, in that order, and is `null` on every other row, including
+  each member dropped as `grouped into <file>:<line>`. In text output, a
+  finding that names a rule ends its line with ` [rule: <rule>]`, after any
+  scope tag.
+- **`prxref eval run` (#14).** `prxref eval run --cases PATH --label NAME
+  [--out DIR] [--resume]` replays every labelled case in process, never
+  posting, and writes the run to `DIR/NAME/` (default `--out` is
+  `./prxref-eval/`). Cases come from a `cases.json` file (`{"version": 1,
+  "cases": [...]}`) or a directory of `case-*/` directories in the
+  `tests/evals` layout, and every case is validated before the first review; a
+  bad one exits 2 naming `--cases`, the case and the field. `--rules-file`, the
+  repeatable `--scoped-rules` and `--prompts-dir` give every case the same team
+  rules, path-scoped rules and prompt templates, as `review` takes them, and
+  `PRXREF_SCOPED_RULES` and `PRXREF_PROMPTS_DIR` reach every case unless those
+  flags override them. `run.json` records the case ids, the SHA-256 of each
+  packaged prompt template and any overrides, the reviewer's sampling, review
+  rules and scoped rules, and an allowlist of non-secret settings, so no
+  credential is written; each case keeps its `--format json` record and a
+  trace. A crash or a per-case configuration error is recorded as that case's
+  `error.json`, the next case still runs, and the command exits 0. A bad
+  `--label`, or an existing run without `--resume`, exits 2 naming the flag,
+  and `--resume` skips every case already recorded. A bare `prxref eval`
+  prints usage and exits 2, and `eval` adds no environment variable. See
+  `docs/evals.md`.
+- **`prxref eval score` (#14).** `prxref eval score --label NAME
+  [--judge-model MODEL] [--out DIR]` grades a run against its human labels and
+  writes `score.json` and `score.md` into the run directory. A label with a
+  `must_match` predicate is graded in code with no LLM call: the same file,
+  within 5 lines, and a match on the finding's title and body (a plain value
+  ignores case and markup, a `re:` pattern is case-insensitive). Every other
+  label goes to one single-shot judge call per case, which grades it `full`,
+  `partial` or `none` under a versioned judge prompt. The judge runs on the
+  review's own backend, base URL and credentials with only the model changed;
+  `--judge-model` is required whenever such a label exists, and leaving it out
+  exits 2 before any call. Judge replies are cached under
+  `DIR/NAME/judge-cache/`, so a rescore makes no call, and a failed or
+  malformed judge reply counts as `judge_error`, left out of every denominator
+  rather than scored as a miss. One AI finding credits at most two labels, and
+  a grouped finding is credited at each of its locations in both tiers. A case
+  whose review failed is scored with every label a miss. The report gives
+  micro recall with per-case rows, recall by severity, by category and over
+  accepted labels (a `partial` grade counts 0.5), unmatched AI findings per
+  PR, severity agreement (a human `minor` counts as `warning`), chunks failed,
+  elapsed time, and review and judge cost, where an unknown cost is shown as
+  unknown and never summed. A judge model that is also a reviewer model logs a
+  warning and is stamped `self_judged`.
+- **`prxref eval compare` (#14).** `prxref eval compare A B [--out DIR]`
+  compares two scored runs, each named by a label under `--out` or by a run
+  directory; a label wins over a same-named directory. It prints a Markdown
+  report with no timestamps, so the same two runs always give byte-identical
+  output: a metrics table with A, B and the change (recall in percentage
+  points, and `unknown` rather than a number when either side is unknown),
+  every label whose grade or credit changed, and the cases and labels only one
+  run has. It warns when the runs used a different judge prompt or judge
+  model, cover different cases, or carry different replay `description`
+  stamps for a case, since a pinned run against a live one is not a
+  like-for-like comparison. A run with no `score.json` exits 2 naming `A` or
+  `B`.
+- **Replay description flags (#16).** `prxref review --as-of TIME`,
+  `--description-file PATH` and `--no-description` choose which PR description
+  a replay shows. Each makes the run a replay with posting off, and they
+  exclude each other: giving two or more exits 2 naming each one. `--as-of`
+  takes an ISO-8601 time with a UTC offset (`2026-05-01T09:30:00Z`) and needs
+  `--pr-url`; a date alone or a time without an offset exits 2 rather than
+  being read in the local time zone. `--description-file` is read like
+  `--rules-file`, so a missing, unreadable or non-regular file, text that is
+  not UTF-8 or holds NUL bytes, and a path under the working directory that
+  symlinks out of it each exit 2 naming the flag. `--no-description` reviews
+  with an empty description.
+- **Replays record the title and description they showed (#16).** The
+  `replay` stamp in the run record and `--format json` gains `description`
+  (`pinned`, `live`, `file` for `--description-file` or a `--diff-file` without
+  `--pr-url`, `none` for `--no-description`), `as_of` (the cutoff as a UTC
+  ISO-8601 time ending in `Z`, else `null`) and `as_of_source` (`flag`,
+  `first-review` or `head-commit`, else `null`). All seven keys are present on
+  every replay, and an `as_of` passed back as `--as-of` names the same instant.
+  The text `replay:` line gains `description=<status>` and, when a cutoff was
+  chosen, `as_of=<time> (<source>)`.
+- **Description history on GitHub and Bitbucket Cloud (#16).** The GitHub
+  adapter reads a pull request's description versions, title renames, first
+  human review or comment (not by the author, a bot or prxref) and head commit
+  date through GitHub's GraphQL API, which refuses anonymous reads, so it needs
+  `PRXREF_GITHUB_TOKEN` (or `PRXREF_GITHUB_ENTERPRISE_TOKEN` on GitHub
+  Enterprise Server). The Bitbucket Cloud adapter reads the same from the pull
+  request's `/activity` feed and the head commit. A history that cannot be
+  trusted whole, such as a feed longer than the page budget, an unreadable
+  change entry or edits that do not chain to the live text, pins nothing, and
+  the replay keeps the live text. A custom forge can take part by implementing
+  the optional `get_pr_history` method, which returns a `PRHistory`. See
+  `docs/forges.md`.
+
+### Changed
+
+- **A `--pr-url` replay shows the title and description in force at review
+  time (#16).** The cutoff is the `--as-of` time, else the first human review,
+  else the head commit's date. When the forge cannot read description history
+  (GitLab, Azure DevOps and Bitbucket Server cannot), the read fails, or the
+  history does not reach the cutoff, the replay falls back to the current title
+  and description and logs a WARNING saying why; an explicit `--as-of` on a
+  forge that cannot read description history exits 2 naming `--as-of`.
+  `--description-file` and `--no-description` read no history, and the webhook
+  server never replays. Every `prxref eval run` case is a replay, so it pins
+  too. In 0.14.0 a replay always showed the current title and description.
+- **An `applies_to:` key in the always-on rules file logs a WARNING (#12).**
+  The `PRXREF_REVIEW_RULES` / `--rules-file` file still ignores an
+  `applies_to:` or `applyTo:` key and still reaches every unit, but it now
+  names that key in a WARNING instead of the INFO line for ignored keys. Its
+  prompts are unchanged.
+
+### Fixed
+
+- **GitHub pull requests past the diff size limit are reviewed (#15).** GitHub
+  refuses the unified diff of a pull request past 20,000 lines or 300 files
+  with HTTP `406` (`too_large`), and every earlier release ended such a review
+  with verdict `Error`. prxref now reads GitHub's compare diff (`base...head`)
+  instead and accepts it only when its file and line counts match the pull
+  request's. On a mismatch or a failed request it logs one WARNING and falls
+  back to the paged `/pulls/{number}/files` listing, which fails closed: past
+  GitHub's 3,000-file listing cap, or when the listing's line totals disagree
+  with the pull request's, the review ends as `Error` rather than reviewing
+  part of the pull request. A listed file without a patch is reviewed
+  header-only, with a warning when GitHub withheld a patch that has changed
+  lines (commonly a large lockfile). Any other `406` fails as before, a pull
+  request under the limit makes the same single request as before, and pinned
+  `--base-sha`/`--head-sha` replays already read the compare diff and are
+  unchanged.
+- **A finding that copies the prompt's example finding is dropped.** A new
+  deterministic pass compares each chunk and sweep finding's normalized title
+  with the example-finding titles of the worker and sweep templates the run
+  used, packaged or overridden, and drops an exact match with the drop reason
+  `echoes the prompt's example: "<title>"`; a near-miss title is kept. It is
+  the first pass that drops, so an echo never anchors a group, raises another
+  finding's severity or takes a cap slot. A run with an echo logs one INFO line
+  and emits one `prompts echo` trace event, and a run without one is
+  unchanged.
+- **The worker prompt no longer promises a size.** It told the model its input
+  "stays under roughly 30k tokens", which nothing guarantees: the chunk budget
+  is an estimate, and `PRXREF_MAX_CHUNKS` overflow can grow a chunk past it.
+  The sentence now reads "The diff below is the complete chunk.", so worker
+  prompt hashes change.
+
+### Known limitations
+
+- **Reworded-duplicate dedup is untuned.** `PRXREF_DEDUP_SIMILARITY` has no
+  default and no recommended value: no threshold has been measured on real
+  review data. A live check found no candidate pair in eight runs, so the tier
+  has not yet been seen to fire on a real pull request.
+- **A chunk receives the scoped rules of every file it holds.** Chunks are
+  filled by token budget and file count, preferring the chunk whose files share
+  the deepest directory, not by language, so a chunk holding both a Java and a
+  TypeScript file receives both files' scoped rules.
+- **A finding without a rule groups by title only.** Grouping keys on the rule
+  the model names. A finding with no rule, or whose label was dropped, groups
+  only with other rule-less findings of the same normalized title, and never
+  joins a group whose findings name a rule, even with the same title in the
+  same file.
+- **A group member moved to file level adds no `Also at` location.** When line
+  alignment moves a member to file level, it is still folded into the group,
+  but its place is not listed.
+- **A capped group loses all its locations.** The finding caps rank by
+  confidence, then file and line, not by group size, so when a cap drops a
+  group's comment, every location folded into it leaves the posted review too.
+- **A finding on a file outside its chunk has a guessed line.** A chunk worker
+  also sees the PR's other files, as short excerpts without line numbers under
+  `### Other files changed in this PR`, and can report on them. Line alignment
+  snaps such a finding to an added line of that file within 5 lines, else
+  moves it to file level. It can restate what the chunk holding that file
+  reported: grouping merges the two only when they name the same rule or share
+  a title, and the reworded-duplicate dedup compares only findings on the same
+  line, never a file-level one.
+- **The eval judge shares the review's backend.** It runs on the review's own
+  backend, base URL and credentials, and `--judge-model` picks only the model.
+  Self-judging is caught only when the judge's model name matches a reviewer
+  model's, ignoring case: it logs a warning and is stamped `self_judged`, not
+  refused, and another model of the same family passes unremarked. Scoring
+  needs human-labelled cases; the repository ships three.
+- **Some very large GitHub pull requests still fail.** When the compare diff
+  cannot be used, a pull request past GitHub's 3,000-file listing cap, or one
+  whose listing's line totals disagree with the pull request's because GitHub
+  withheld patches, ends as `Error` instead of being reviewed in part. A file
+  whose patch GitHub withholds while keeping its line counts is reviewed
+  header-only.
+- **A push during a large GitHub review can fail it.** On the file-listing
+  path, a push between the read of the pull request and the listing pages makes
+  the line totals disagree, and the review ends as `Error`; it is never
+  reviewed in part.
+- **The large-PR fallback can be slow.** A compare read that times out is
+  retried under the GitHub session's retry policy, so reaching the file listing
+  can take several 30-second read timeouts.
+- **Only GitHub and Bitbucket Cloud replays pin the description.** On GitLab,
+  Azure DevOps and Bitbucket Server a `--pr-url` replay shows the current title
+  and description with a warning, and `--as-of` exits 2.
+- **Description history on GitHub Enterprise Server is untested.** Its GraphQL
+  endpoint, `https://{host}/api/graphql`, has not been probed live.
+- **Very busy GitHub pull requests replay the live text.** A pull request with
+  more than 5,000 reviews, conversation comments or title renames keeps its
+  current title and description, even under `--as-of`.
+- **Unauthenticated Bitbucket Cloud replays can fall back to the live text.**
+  Without a credential Bitbucket Cloud allows few API reads an hour, and a
+  history read costs at least three of them (the pull request, its activity
+  feed and the head commit), so a rate-limited read keeps the live text.
+- **Bitbucket Cloud's `changes_requested` activity entry is unverified.** It
+  has not been seen in a live feed, so a change request that is the first human
+  review may not set the cutoff.
+
 ## [0.14.0] — 2026-09-24
 
 The inputs release. A review can now be grounded in the spec a PR implements,
