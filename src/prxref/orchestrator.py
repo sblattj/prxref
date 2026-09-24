@@ -1172,12 +1172,24 @@ def _stamp_run_cost(
     """Set ``run_inputs["cost_usd"]`` and ``["cost_estimated"]`` from the units.
 
     Called once, after the sweep, with every review unit's result (the chunk
-    workers plus the sweep) and the parsed price table. Inert in this build:
-    the cost is recorded as unknown (``None``, never ``0``) until the
-    per-unit cost plumbing lands.
+    workers plus the sweep) and the parsed price table (``{}`` when unset).
+    The total is :func:`prxref.costs.run_cost`: each received unit's reported
+    cost, else a price-table estimate for its exact model name, else the whole
+    run is unknown (``None``, never ``0`` and never a partial sum). A run
+    left unknown by models with neither figure logs one INFO line naming
+    them, so a table keyed on the wrong model name diagnoses itself. A table
+    that is not a valid parsed table raises, and the caller records the cost
+    as unknown.
     """
-    run_inputs["cost_usd"] = None
-    run_inputs["cost_estimated"] = False
+    cost_usd, cost_estimated, unpriced = costs.run_cost(units, price_table)
+    if unpriced:
+        logger.info(
+            "cost unknown: no reported cost and no usable PRXREF_PRICE_TABLE "
+            "estimate for model(s) %s",
+            ", ".join(repr(m) for m in unpriced),
+        )
+    run_inputs["cost_usd"] = cost_usd
+    run_inputs["cost_estimated"] = cost_estimated
 
 
 def _attribution(
@@ -1356,6 +1368,7 @@ def _run_workers(
                         "findings": [], "error": f"worker crashed: {e}",
                         "input_tokens": 0, "output_tokens": 0,
                         "model": "", "elapsed_ms": 0,
+                        "cost_usd": None, "cost_source": "",
                     })
             return results
         finally:
@@ -1407,6 +1420,11 @@ def _invoke_chunk(
     unchanged on both attempts: it is intent, not bulk context, and a
     dict-shaped finding keeps its ``scope`` only when
     :attr:`reviewer.PromptContext.scope_active`.
+
+    The shape carries the reviewer's reported ``cost_usd`` and
+    ``cost_source`` beside the token counts; a call that raised, or a stub
+    whose meta lacks them, gives ``None`` and ``""``. Pricing is left to
+    :func:`_stamp_run_cost`, over the whole run.
     """
     blocks = _context_blocks(chunk, reader, include_definitions=include_definitions)
     try:
@@ -1421,7 +1439,7 @@ def _invoke_chunk(
         return {
             "findings": [], "error": str(e),
             "input_tokens": 0, "output_tokens": 0, "model": "",
-            "elapsed_ms": 0,
+            "elapsed_ms": 0, "cost_usd": None, "cost_source": "",
         }
 
     # reviewer returns (findings, meta); legacy dict stubs still accepted.
@@ -1434,6 +1452,8 @@ def _invoke_chunk(
             "model": meta.get("model", ""),
             "elapsed_ms": meta.get("elapsed_ms", 0),
             "error": meta.get("error", ""),
+            "cost_usd": meta.get("cost_usd"),
+            "cost_source": meta.get("cost_source", ""),
         }
 
     findings = []
@@ -1449,6 +1469,8 @@ def _invoke_chunk(
         "output_tokens": res.get("output_tokens", 0),
         "model": res.get("model", ""),
         "elapsed_ms": res.get("elapsed_ms", 0),
+        "cost_usd": res.get("cost_usd"),
+        "cost_source": res.get("cost_source", ""),
     }
 
 
@@ -1521,6 +1543,7 @@ def _run_worker(
             model=res["model"],
             input_tokens=res["input_tokens"],
             output_tokens=res["output_tokens"],
+            cost_usd=res["cost_usd"],
         )
     return {
         "findings": res["findings"],
@@ -1529,6 +1552,8 @@ def _run_worker(
         "output_tokens": res["output_tokens"],
         "model": res["model"],
         "elapsed_ms": _elapsed_ms(t0),
+        "cost_usd": res["cost_usd"],
+        "cost_source": res["cost_source"],
     }
 
 
@@ -1586,6 +1611,7 @@ def _run_sweep(
             "findings": [], "error": f"systemic sweep: {e}",
             "input_tokens": 0, "output_tokens": 0, "model": "",
             "elapsed_ms": _elapsed_ms(t0),
+            "cost_usd": None, "cost_source": "",
         }
 
     findings = []
@@ -1610,6 +1636,7 @@ def _run_sweep(
             model=meta.get("model", ""),
             input_tokens=meta.get("input_tokens", 0),
             output_tokens=meta.get("output_tokens", 0),
+            cost_usd=meta.get("cost_usd"),
         )
     return {
         "findings": findings,
@@ -1618,6 +1645,8 @@ def _run_sweep(
         "output_tokens": meta.get("output_tokens", 0),
         "model": meta.get("model", ""),
         "elapsed_ms": _elapsed_ms(t0),
+        "cost_usd": meta.get("cost_usd"),
+        "cost_source": meta.get("cost_source", ""),
     }
 
 
