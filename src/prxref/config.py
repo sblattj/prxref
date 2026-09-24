@@ -617,13 +617,14 @@ def make_forge(ref: PRRef, session=None) -> Forge:
     ``session`` optionally injects a custom ``requests.Session`` (tests,
     shared connection pools). Unknown forge names raise ``ValueError``.
     """
-    from prxref.forges import bitbucket, bitbucket_server, github, gitlab
+    from prxref.forges import azure_devops, bitbucket, bitbucket_server, github, gitlab
 
     impls = {
         "bitbucket": bitbucket.ForgeImpl,
         "bitbucket-server": bitbucket_server.ForgeImpl,
         "github": github.ForgeImpl,
         "gitlab": gitlab.ForgeImpl,
+        "azure-devops": azure_devops.ForgeImpl,
     }
     impl = impls.get(ref.forge)
     if impl is None:

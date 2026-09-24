@@ -1,0 +1,92 @@
+{
+  "allChangesIncluded": true,
+  "changeCounts": {
+    "Edit": 16,
+    "Add": 66,
+    "Rename": 131,
+    "Edit, Rename": 1,
+    "Delete, SourceRename": 132
+  },
+  "commonCommit": "ec96dfa180813f7d43ccd1ba9290112c0e094839",
+  "baseCommit": "ec96dfa180813f7d43ccd1ba9290112c0e094839",
+  "targetCommit": "842c5b7010211a8e3d4049cd98c02d712120caa0",
+  "aheadCount": 17,
+  "behindCount": 0,
+  "changes": [
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "f16b0fd2e8d1416a891a595cdbf35a48f7184a5d",
+        "originalObjectId": "aba7bca13f1c7facb67c8d7f508c9fd6dec141d9",
+        "gitObjectType": "tree",
+        "path": "/AcmeWeb",
+        "isFolder": true
+      }
+    },
+    {
+      "changeType": "rename",
+      "sourceServerItem": "/AcmeWeb/AcmeWeb2.Web/appsettings.Development.json",
+      "item": {
+        "objectId": "e203e9407e74a6b9662aab8fde5d73ae64665f18",
+        "originalObjectId": "e203e9407e74a6b9662aab8fde5d73ae64665f18",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Service2/appsettings.Development.json"
+      }
+    },
+    {
+      "changeType": "delete, sourceRename",
+      "item": {
+        "objectId": "",
+        "originalObjectId": "7706d1d067632b5fa95a144ffc23567c232b64a6",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb2.Web/ApplicationInsightsFilter.cs"
+      }
+    },
+    {
+      "changeType": "add",
+      "item": {
+        "objectId": "b5efa777ff0a21795960137d007795d9f778dbd1",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Service2/AI/BingImageSearch.cs"
+      }
+    },
+    {
+      "changeType": "rename",
+      "sourceServerItem": "/AcmeWeb/AcmeWeb2.Web/ApplicationInsightsFilter.cs",
+      "item": {
+        "objectId": "7706d1d067632b5fa95a144ffc23567c232b64a6",
+        "originalObjectId": "7706d1d067632b5fa95a144ffc23567c232b64a6",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Web2/ApplicationInsightsFilter.cs"
+      }
+    },
+    {
+      "changeType": "delete, sourceRename",
+      "item": {
+        "objectId": "",
+        "originalObjectId": "e203e9407e74a6b9662aab8fde5d73ae64665f18",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb2.Web/appsettings.Development.json"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "33dc92b1faa9a98e58cc3776dd2db5d4fc9b9885",
+        "originalObjectId": "f69d80b28d23e992ffa95f9c4b69401773653150",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/DeploymentCommands.ps1"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "b079454ad5ccded4b1d1dad0b021ee73dbf41b2b",
+        "originalObjectId": "298ed2f839aa8fc1dd3e3e66c854be5260e3ea5b",
+        "gitObjectType": "tree",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate",
+        "isFolder": true
+      }
+    }
+  ]
+}
