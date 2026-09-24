@@ -648,7 +648,9 @@ class TestCoverageAwareVerdict:
         forge = FakeForge(diff=TWO_FILE_DIFF)
         result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
         assert result["verdict"] == "Error"
-        assert result["chunks_reviewed"] == 0
+        # Every chunk failed; only the stubbed sweep counts as reviewed.
+        assert result["chunks_reviewed"] == 1
+        assert result["chunks_failed"] == result["chunk_count"] - 1
 
     def test_partial_failure_keeps_verdict_and_reports_coverage(self, monkeypatch):
         counter = itertools.count(1)
@@ -2717,7 +2719,9 @@ class TestSystemicSweep:
         forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
         res = orchestrate_review(forge, REF, FakeLLM("{}"), post=True)
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        # The sweep that answered is counted as reviewed; the verdict holds.
+        assert res["chunks_failed"] == 1
+        assert res["chunks_reviewed"] == 1
         assert "Partial review" not in forge.summaries[0]
 
     def test_an_empty_diff_runs_no_sweep(self, monkeypatch):
@@ -2982,10 +2986,11 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 2
         # The only chunk failed, so this is the total-failure notice path
-        # (both units counted failed), and the notice names the timeout.
+        # (the chunk counted failed, the stubbed sweep reviewed), and the
+        # notice names the timeout.
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
-        assert res["chunks_reviewed"] == 0
+        assert res["chunks_failed"] == 1
+        assert res["chunks_reviewed"] == 1
         assert "timeout" in forge.summaries[0]
 
     def test_a_non_timeout_error_is_not_retried(self, monkeypatch):
@@ -2999,7 +3004,7 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 1
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        assert res["chunks_failed"] == 1
 
     def test_a_timeout_at_zero_context_is_not_retried(self, monkeypatch):
         """context_lines=0 is already the smallest rendering; an identical
@@ -3014,7 +3019,7 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 1
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        assert res["chunks_failed"] == 1
 
     def test_truncation_is_never_retried(self, monkeypatch):
         """finish_reason=length is the RESPONSE-side budget, not the deadline;
@@ -3029,7 +3034,7 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 1
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        assert res["chunks_failed"] == 1
 
     def test_the_retry_predicate_is_the_backend_timeout_vocabulary(self):
         assert orchestrator._is_timeout_error(

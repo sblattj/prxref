@@ -285,6 +285,10 @@ class ForgeImpl:
         hunks; it is rendered as a header-only file and logged at WARNING, as
         ``get_compare_diff`` does. Raises ``ValueError`` for
         an MR with no file entries at all.
+
+        ``access_raw_diffs`` is not sent: ``/diffs`` returns the same bodies
+        with or without it, and only the deprecated ``/changes`` endpoint
+        reads it.
         """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
@@ -292,10 +296,7 @@ class ForgeImpl:
 
         diffs = [
             entry
-            for page in self._iter_pages(
-                ref, url, headers, what="MR diff list",
-                extra_params={"access_raw_diffs": "true"},
-            )
+            for page in self._iter_pages(ref, url, headers, what="MR diff list")
             for entry in page
         ]
 
