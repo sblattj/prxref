@@ -146,6 +146,7 @@ class TestPromptContext:
         assert [f.name for f in dataclasses.fields(PromptContext)] == [
             "rules_worker", "rules_sweep", "ticket_scope", "ticket_context",
             "spec_digest",
+            "worker_template", "systemic_template",
         ]
 
     def test_it_is_frozen(self):
