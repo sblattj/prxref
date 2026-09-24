@@ -181,6 +181,7 @@ from .triage import (
     added_lines_by_file,
     build_chunks,
     count_size_relevant_changes,
+    normalize_rule,
     normalize_scope,
     parse_unified_diff,
 )
@@ -1074,7 +1075,9 @@ def _origin_key(finding: Finding) -> tuple:
     first survivor to the sweep side — dropping the higher-confidence chunk
     copy as a "duplicate of chunk finding". ``scope`` is in it for the same
     reason: with a ticket active the two copies can disagree on it, and a
-    swap would put the sweep copy's scope in the chunk copy's slot.
+    swap would put the sweep copy's scope in the chunk copy's slot. ``rule``
+    is in it for that reason too, and sits before ``scope``, which stays the
+    last element.
     """
     return (
         finding.file,
@@ -1083,6 +1086,7 @@ def _origin_key(finding: Finding) -> tuple:
         finding.body,
         finding.severity,
         finding.confidence,
+        finding.rule,
         finding.scope,
     )
 
@@ -1102,6 +1106,23 @@ def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
     for f in findings:
         scope = normalize_scope(f.scope) if active else SCOPE_UNKNOWN
         out.append(f if scope == f.scope else replace(f, scope=scope))
+    return out
+
+
+def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
+    """Hold every finding's ``rule`` to what the run asked the model for.
+
+    The ``rule`` twin of :func:`_enforce_scope`. When the prompts never asked
+    for a rule, any value (from a test double, a library reviewer, or a
+    backend that bypasses the reviewer's own gate) is reset to ``None``. When
+    they did, the value is normalized (:func:`triage.normalize_rule`), so an
+    unusable one is ``None`` too. Returns a new list in the same order; only a
+    finding whose rule changes is replaced, with :func:`dataclasses.replace`.
+    """
+    out: list[Finding] = []
+    for f in findings:
+        rule = normalize_rule(f.rule) if active else None
+        out.append(f if rule == f.rule else replace(f, rule=rule))
     return out
 
 
@@ -1443,7 +1464,8 @@ def _invoke_chunk(
     bulk context. ``prompt_context`` (rules, ticket, spec digest) is passed
     unchanged on both attempts: it is intent, not bulk context, and a
     dict-shaped finding keeps its ``scope`` only when
-    :attr:`reviewer.PromptContext.scope_active`.
+    :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
+    the context's ``rule_active`` is true.
 
     The shape carries the reviewer's reported ``cost_usd`` and
     ``cost_source`` beside the token counts; a call that raised, or a stub
@@ -1482,7 +1504,10 @@ def _invoke_chunk(
 
     findings = []
     for item in res.get("findings") or []:
-        finding = _coerce_finding(item, accept_scope=prompt_context.scope_active)
+        finding = _coerce_finding(
+            item, accept_scope=prompt_context.scope_active,
+            accept_rule=getattr(prompt_context, "rule_active", False),
+        )
         if finding is not None:
             findings.append(finding)
 
@@ -1600,7 +1625,8 @@ def _run_sweep(
     rides along into the sweep prompt (sweep rules and ticket scope in the
     system half, ticket context and the spec digest in the user half), and a
     dict-shaped finding keeps its ``scope`` only when
-    :attr:`reviewer.PromptContext.scope_active`. A failure is that
+    :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
+    the context's ``rule_active`` is true. A failure is that
     shape with ``error`` set prefixed ``systemic sweep:``, so the
     partial-review banner names the unit that failed; it counts as one
     failed chunk in the caller's coverage accounting.
@@ -1640,7 +1666,10 @@ def _run_sweep(
 
     findings = []
     for item in findings_raw:
-        finding = _coerce_finding(item, accept_scope=prompt_context.scope_active)
+        finding = _coerce_finding(
+            item, accept_scope=prompt_context.scope_active,
+            accept_rule=getattr(prompt_context, "rule_active", False),
+        )
         if finding is not None:
             findings.append(finding)
 
@@ -1674,7 +1703,9 @@ def _run_sweep(
     }
 
 
-def _coerce_finding(item, *, accept_scope: bool = False) -> Finding | None:
+def _coerce_finding(
+    item, *, accept_scope: bool = False, accept_rule: bool = False,
+) -> Finding | None:
     if isinstance(item, Finding):
         return item
     if isinstance(item, dict):
@@ -1690,6 +1721,7 @@ def _coerce_finding(item, *, accept_scope: bool = False) -> Finding | None:
                     normalize_scope(item.get("scope")) if accept_scope
                     else SCOPE_UNKNOWN
                 ),
+                rule=normalize_rule(item.get("rule")) if accept_rule else None,
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)
