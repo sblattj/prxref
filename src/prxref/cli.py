@@ -359,6 +359,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="team review rules for every case, as review --rules-file",
     )
     ev_run.add_argument(
+        "--scoped-rules",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="path-scoped team review rules for every case, as review --scoped-rules; repeatable",
+    )
+    ev_run.add_argument(
+        "--prompts-dir",
+        default=None,
+        metavar="DIR",
+        help="prompt templates for every case, as review --prompts-dir",
+    )
+    ev_run.add_argument(
         "--resume",
         action="store_true",
         help="continue an existing --label run instead of refusing it",

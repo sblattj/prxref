@@ -259,7 +259,7 @@ class TestGolden:
         assert score["version"] == evals.SCORE_VERSION == 1
         assert score["label"] == "L"
         assert score["run"] == {"prompts": RUN_PROMPTS, "sampling": SAMPLING, "review_rules": None,
-                                "config": RUN_CONFIG}
+                                "scoped_rules": None, "config": RUN_CONFIG}
         assert list(score["judge"]) == [
             "model", "sampling", "prompt_version", "prompt_sha256", "self_judged",
             "cost_usd", "cost_estimated", "llm_calls", "cached", "errors",

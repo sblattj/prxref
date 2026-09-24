@@ -17,6 +17,7 @@ call it makes is single-shot, and it never posts to a forge.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -43,6 +44,8 @@ from prxref.eval_metrics import (
 )
 from prxref.judge import GRADE_FULL, GRADE_NONE, GRADE_PARTIAL
 from prxref.llm import ConfigError
+from prxref.prompt_templates import load_prompt_templates
+from prxref.rules import load_review_rules, load_scoped_rules
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +65,7 @@ RUN_CONFIG_KEYS = (
     "scoped_rules_max_chars",
 )
 SCORE_VERSION = 1
-SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "config")
+SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "scoped_rules", "config")
 JUDGE_METHOD = "judge"
 
 
@@ -74,8 +77,9 @@ def eval_run(
 ) -> int:
     """Replay every case of ``--cases`` and write one labelled run under ``--out``.
 
-    Reads ``args.cases``, ``args.label``, ``args.out``, ``args.rules_file`` and
-    ``args.resume``. ``run_review`` is the CLI's ``_run_review`` and
+    Reads ``args.cases``, ``args.label``, ``args.out``, ``args.rules_file``,
+    ``args.scoped_rules``, ``args.prompts_dir`` and ``args.resume``.
+    ``run_review`` is the CLI's ``_run_review`` and
     ``build_record`` its ``_build_json_result`` (the ``--format json``
     payload); the CLI passes both, because this module cannot import it.
 
@@ -88,6 +92,11 @@ def eval_run(
     - a bad ``--cases`` dataset, from :func:`prxref.eval_cases.load_cases`,
       naming ``--cases``, the case id and the field;
     - a malformed environment, from ``load_config``, naming the variable;
+    - an unusable rules file, scoped rules entry or prompts directory, loaded
+      once as ``review`` loads it (the scoped rules against the always-on
+      file), naming ``--rules-file``, ``--scoped-rules`` or ``--prompts-dir``
+      when the flag was given and ``PRXREF_REVIEW_RULES``,
+      ``PRXREF_SCOPED_RULES`` or ``PRXREF_PROMPTS_DIR`` otherwise;
     - an existing ``<out>/<label>`` without ``--resume``, naming ``--label``;
     - a run directory that cannot be created, naming ``--out``.
 
@@ -95,17 +104,20 @@ def eval_run(
     and ``no_threads=True``, so nothing is ever posted. ``context_file`` is
     ``""`` and ``spec_sources`` is ``[]`` unless the case sets them, so the
     environment's ticket and spec inputs cannot leak into a case.
-    ``args.rules_file`` applies to every case, as ``review --rules-file`` does.
-    A case with a ``pr_url`` gets the replay pinning ``run_review`` applies by
-    default; nothing extra is passed.
+    ``args.rules_file``, ``args.scoped_rules`` and ``args.prompts_dir`` are
+    passed to every case as given, as ``review --rules-file``,
+    ``--scoped-rules`` and ``--prompts-dir`` take them: ``None`` leaves the
+    variable in force, and ``""`` (``[""]`` for the scoped rules) turns it
+    off. A case with a ``pr_url`` gets the replay pinning ``run_review``
+    applies by default; nothing extra is passed.
 
     Each case is fenced. A crash, a ``None`` result (an unrecognised URL) or
     any other exception is recorded as that case's ``error.json`` and the next
     case still runs. That includes a ``ConfigError`` the review raises for one
-    case (an unreadable ``diff_file``, or an unusable ``--rules-file``, which
-    is read per case): it is a failed case, not exit 2. A review whose verdict
-    is ``Error`` is recorded as a normal ``record.json`` carrying that verdict.
-    The run returns 0 whatever the cases did.
+    case, such as an unreadable ``diff_file``: it is a failed case, not exit
+    2. A review whose verdict is ``Error`` is recorded as a normal
+    ``record.json`` carrying that verdict. The run returns 0 whatever the
+    cases did.
 
     The run directory ``<out>/<label>/`` holds:
 
@@ -125,13 +137,13 @@ def eval_run(
     invocation's start, ISO-8601 UTC with a ``Z``); ``case_ids`` in dataset
     order; ``prompts``, holding ``sha256`` (the sha256 of each packaged
     template of :data:`RUN_PROMPTS`, as ``reviewer.load_prompt`` reads it)
-    and ``prompt_templates``; ``sampling`` and ``review_rules``; and
-    ``config``, the keys of :data:`RUN_CONFIG_KEYS` from ``load_config``.
-    ``config`` is an allowlist, so no credential is ever written.
-    ``prompt_templates``, ``sampling`` and ``review_rules`` are copied from
-    the first case, in dataset order, whose ``record.json`` has a verdict
-    other than ``Error``; each is ``null`` when there is no such case or the
-    record lacks the key.
+    and ``prompt_templates``; ``sampling``, ``review_rules`` and
+    ``scoped_rules``; and ``config``, the keys of :data:`RUN_CONFIG_KEYS`
+    from ``load_config``. ``config`` is an allowlist, so no credential is
+    ever written. ``prompt_templates``, ``sampling``, ``review_rules`` and
+    ``scoped_rules`` are copied from the first case, in dataset order, whose
+    ``record.json`` has a verdict other than ``Error``; each is ``null`` when
+    there is no such case, the record lacks the key, or the feature is off.
 
     With ``--resume`` an existing run directory is continued: every case that
     already has a ``record.json`` or an ``error.json`` is skipped, and
@@ -149,7 +161,17 @@ def eval_run(
             f"that starts with a letter or digit, got {args.label!r}"
         )
     cases = load_cases(args.cases, source="--cases")
-    cfg = load_config()
+    cfg = load_config(
+        review_rules=args.rules_file,
+        scoped_rules=args.scoped_rules,
+        prompts_dir=args.prompts_dir,
+        source_labels={
+            "review_rules": "--rules-file",
+            "scoped_rules": "--scoped-rules",
+            "prompts_dir": "--prompts-dir",
+        },
+    )
+    _check_review_inputs(args, cfg)
     created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     run_dir = Path(args.out) / args.label
     if run_dir.exists() and not args.resume:
@@ -178,6 +200,43 @@ def eval_run(
     return 0
 
 
+def _check_review_inputs(args: argparse.Namespace, cfg: Mapping[str, Any]) -> None:
+    """Load the rules files and the prompts directory every case shares, so a bad one exits 2 once.
+
+    Each is loaded as ``review`` loads it, named by its flag when given and
+    by its variable otherwise, and the scoped rules are checked against the
+    always-on file. The loaded objects are discarded: each case loads its own.
+    """
+    rules = _load_shared_input(
+        load_review_rules, cfg["review_rules"],
+        source="--rules-file" if args.rules_file is not None else "PRXREF_REVIEW_RULES",
+        max_chars=cfg["review_rules_max_chars"],
+    )
+    _load_shared_input(
+        functools.partial(load_scoped_rules, always_on=rules), cfg["scoped_rules"],
+        source="--scoped-rules" if args.scoped_rules is not None else "PRXREF_SCOPED_RULES",
+        max_chars=cfg["review_rules_max_chars"],
+    )
+    _load_shared_input(
+        load_prompt_templates, cfg["prompts_dir"],
+        source="--prompts-dir" if args.prompts_dir is not None else "PRXREF_PROMPTS_DIR",
+    )
+
+
+def _load_shared_input(loader: Callable[..., Any], path: Any, *, source: str, **kwargs: Any) -> Any:
+    """Call ``loader(path, source=source, **kwargs)``, fenced as the CLI fences its loaders.
+
+    An ``OSError`` or ``ValueError`` that escapes the loader becomes a
+    ``ConfigError`` naming ``source``.
+    """
+    try:
+        return loader(path, source=source, **kwargs)
+    except ConfigError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
+
+
 def _run_case(
     case: EvalCase,
     case_dir: Path,
@@ -203,6 +262,8 @@ def _run_case(
             context_file=case.context_file or "",
             spec_sources=list(case.spec),
             rules_file=args.rules_file,
+            scoped_rules=args.scoped_rules,
+            prompts_dir=args.prompts_dir,
             trace_dir=str(trace_dir),
         )
         if result is None:
@@ -234,7 +295,12 @@ def _run_json(
     *,
     created_at: str,
 ) -> dict[str, Any]:
-    """Build ``run.json`` from the run's inputs and the records on disk."""
+    """Build ``run.json`` from the run's inputs and the records on disk.
+
+    ``prompts.prompt_templates``, ``sampling``, ``review_rules`` and
+    ``scoped_rules`` come from the first reviewed record and are always
+    present, ``null`` when that record has none.
+    """
     case_ids = [case.id for case in cases]
     first = _first_reviewed_record(cases_dir, case_ids) or {}
     return {
@@ -252,6 +318,7 @@ def _run_json(
         },
         "sampling": first.get("sampling"),
         "review_rules": first.get("review_rules"),
+        "scoped_rules": first.get("scoped_rules"),
         "config": {key: cfg[key] for key in RUN_CONFIG_KEYS},
     }
 
@@ -341,8 +408,9 @@ def eval_score(args: argparse.Namespace) -> int:
 
     - ``version``: :data:`SCORE_VERSION`;
     - ``label``: ``--label``;
-    - ``run``: the run's ``prompts``, ``sampling``, ``review_rules`` and
-      ``config``, copied from ``run.json`` (:data:`SCORE_RUN_KEYS`);
+    - ``run``: the run's ``prompts``, ``sampling``, ``review_rules``,
+      ``scoped_rules`` and ``config``, copied from ``run.json``
+      (:data:`SCORE_RUN_KEYS`), each ``null`` when ``run.json`` lacks it;
     - ``judge``: ``null`` when no judge was built, otherwise
       :func:`prxref.eval_judge.judge_stamp` (``model``, ``sampling``,
       ``prompt_version``, ``prompt_sha256``, ``self_judged``) followed by
