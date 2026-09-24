@@ -206,7 +206,34 @@ Every setting: [docs/env-vars.md](docs/env-vars.md). How grounding meets the qua
 
 ## Ticket Context and Scope
 
-<!-- 0.14 placeholder: W64A -->
+Give prxref the ticket a PR is meant to implement, and every finding is marked `in`, `out`, or `unknown` against that ticket's scope:
+
+```bash
+prxref review --pr-url https://github.com/owner/repository/pull/108 --context-file ticket.md
+
+# or for every run
+export PRXREF_TICKET_CONTEXT_FILE=ticket.md
+```
+
+The file is plain text or Markdown: the ticket's title, description, and acceptance criteria, fetched from your tracker by a CI step. It must be a local file, and `prxref review` reads it before any network call. A URL, a missing file, a directory or other non-regular file, an unreadable file, or a file that is not UTF-8 is a configuration error: the run exits `2`, and the message names `--context-file` or `PRXREF_TICKET_CONTEXT_FILE`, whichever supplied the path. A path under the working directory that symlinks out of it is refused the same way. `--context-file PATH` wins over the variable for one run, and `--context-file ""` turns it off. Read the file from a trusted checkout or your CI, never from the PR under review, or the PR's author writes the ticket their change is judged against.
+
+A configured ticket is in one of three states:
+
+| File | Prompts | Summary note |
+|---|---|---|
+| Empty or whitespace only: "this PR has no ticket" | unchanged | `No ticket context for this PR — findings were not checked against a ticket's scope.` |
+| Text without acceptance criteria | ticket and scope ask added | `The ticket context has no acceptance criteria — scope was judged from its description alone.` |
+| Text with acceptance criteria | ticket and scope ask added | none |
+
+Acceptance criteria are recognized by any one of these: a heading or label standing alone on its line (`Acceptance criteria`, `Acceptance test(s)`, or `Definition of done` in any case, or `AC` in capitals, optionally as a `#` heading, in bold, or with a trailing colon), a Markdown task-list item (`- [ ] …` or `- [x] …`), or a Gherkin `Given` line followed later by a `Then` line.
+
+**What each finding's `scope` means.** `in`: the finding concerns what the ticket asks for, including code that visibly contradicts one of its acceptance criteria. `out`: it concerns a change the ticket does not ask for, such as an unrelated refactor or a drive-by edit. `unknown`: the ticket and the diff do not let the model tell. Without a ticket, or with an empty one, every finding is `unknown`, and so is any answer from the model other than exactly one of those three words. Scope is advisory only: it never changes a finding's severity or confidence, the verdict, the error cap, or `PRXREF_FAIL_ON`. The `outofscope` severity is unrelated and only means minor. How a scope shows on a posted comment is covered in [Finding Markers](#finding-markers).
+
+**How the ticket reaches the model.** The ticket text goes into the user prompt of every chunk worker and of the whole-PR sweep, under a `### Ticket context` heading. It sits inside a code fence it cannot close, with a line telling the model that it is data, not instructions. The request to add a `scope` to every finding is prxref's own policy, so it goes into the system prompt instead. `PRXREF_TICKET_CONTEXT_MAX_CHARS` (default `6000`) caps the text. A longer ticket is cut, and a line after the fence says how many of its characters are shown. Criteria past the cap are not in view, so they do not count toward the state above.
+
+**What is recorded.** The `ticket_context` key of `--format json` and the run's `ticket ok` trace event hold the path, the SHA-256 of the file's raw bytes, its length in characters, the cap, whether it was truncated, whether it has acceptance criteria, and whether it was empty. The `-v` line shows the path, the start of the SHA-256, the length, and the active findings' `in`/`out`/`unknown` counts. None of these ever holds the ticket text. The text does appear in the prompt files that `--trace-dir` writes (`chunk0.user.md`, `sweep.user.md`), so treat that directory like the ticket itself.
+
+**The webhook daemon ignores the file.** One file cannot describe every PR a daemon sees, so `prxref serve` never reads `PRXREF_TICKET_CONTEXT_FILE` and logs a warning once at startup when it is set.
 
 ## Team Review Rules
 

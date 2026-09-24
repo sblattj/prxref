@@ -98,7 +98,40 @@ that reads `(no specs provided for this review)` when nothing is injected.
 
 ## Ticket scope
 
-<!-- 0.14 placeholder: W64A -->
+With a ticket context configured (`--context-file` / `PRXREF_TICKET_CONTEXT_FILE`,
+see [Ticket Context and Scope](../README.md#ticket-context-and-scope)), every
+finding carries a `scope` of `in`, `out`, or `unknown` relative to that ticket.
+Scope is **orthogonal to every pass on this page**: no pass reads it, it never
+changes a severity or a confidence, and it never feeds the verdict, the
+confidence floor, the error cap or its tie-break, or `PRXREF_FAIL_ON`. It is
+not the `outofscope` severity either, which only means minor. A finding never
+gains a `drop_reason` for its scope.
+
+- **Only an active ticket can set it.** The model is asked for a scope only
+  when the ticket has text. Raw chunk and sweep findings go through
+  `_enforce_scope` before the first pass: without a ticket, or with an empty
+  one, every finding is `unknown` whatever the model returned.
+- **The vocabulary is strict.** `triage.normalize_scope` keeps a value only
+  when it is exactly `in`, `out`, or `unknown` after trimming and case-folding.
+  `"In scope"`, `"yes"`, a boolean, or a missing key is `unknown`. There is no
+  synonym table, because a lenient mapping would turn a malformed answer into
+  a confident one.
+- **Sweep dedup ignores it.** `apply_sweep_dedup` matches on file and
+  normalized title, so a sweep finding that restates a surviving chunk finding
+  is still dropped when the two copies disagree on scope. The identity used to
+  re-derive the chunk/sweep boundary across the gate includes `scope`, so
+  neither copy's scope ends up on the other.
+- **It orders the inline batch within a severity.** When
+  `PRXREF_MAX_INLINE_COMMENTS` leaves room for only some findings, severity
+  decides first. Within one severity, an `out` finding yields its inline slot
+  to `in` and `unknown` ones, and confidence and content break the rest of the
+  ties. With no active ticket every scope is `unknown`, so the order is exactly
+  the severity-only one.
+- **Truncation can change the state.** Only the first
+  `PRXREF_TICKET_CONTEXT_MAX_CHARS` characters reach the model, and acceptance
+  criteria are detected on that kept text. A long ticket whose criteria come
+  after the cap therefore reads as a ticket without criteria, and the summary
+  says scope was judged from its description alone.
 
 ## Replay runs and the thread passes
 
