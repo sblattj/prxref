@@ -1139,7 +1139,10 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/sblattj/prxref/releases/tag/v0.14.0
+[0.13.0]: https://github.com/sblattj/prxref/releases/tag/v0.13.0
+[0.12.2]: https://github.com/sblattj/prxref/releases/tag/v0.12.2
 [0.12.1]: https://github.com/sblattj/prxref/releases/tag/v0.12.1
 [0.12.0]: https://github.com/sblattj/prxref/releases/tag/v0.12.0
 [0.11.1]: https://github.com/sblattj/prxref/releases/tag/v0.11.1
