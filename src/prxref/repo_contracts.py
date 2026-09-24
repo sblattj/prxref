@@ -7,28 +7,49 @@ operation for the route, the schema a payload must satisfy, the unique index on
 a table. The excerpters here cut the matching slice out of such a file so a
 worker can check the change against it.
 
-The module is pure and stdlib only. It performs no I/O: callers pass the file's
-text. There is deliberately no YAML parser, because the core ships none, so
-YAML is sliced by indentation, JSON goes through :mod:`json`, and SQL and XML
-are scanned with regular expressions. Every excerpter degrades to ``[]`` on
-text it cannot read rather than raising, because a review must never fail over
-missing context. Each excerpt is capped at :data:`MAX_CONTRACT_LINES` lines and
+The module is pure. It is stdlib plus the pure :mod:`prxref.repo_context`,
+:mod:`prxref.chunk_context` and :func:`prxref.rules.match_globs`, and it
+performs no I/O: callers pass the file's text, and :func:`contract_entries`
+reads only through the ``read`` callable it is handed. There is deliberately
+no YAML parser, because the core ships none, so YAML is sliced by indentation,
+JSON goes through :mod:`json`, and SQL and XML are scanned with regular
+expressions. Every excerpter degrades to ``[]`` on text it cannot read rather
+than raising, because a review must never fail over missing context. Each
+excerpt is capped at :data:`MAX_CONTRACT_LINES` lines and
 :data:`MAX_CONTRACT_CHARS` characters.
 
 Names compare through :func:`normalize_name`, so a table called
 ``idempotency_keys`` matches a schema or class called ``IdempotencyKey``.
 Routes compare through :func:`route_key`, so the code route
 ``/connectors/:id`` matches the spec path ``/connectors/{connectorId}``.
+
+The second half of the module turns a worker chunk into contract entries.
+:func:`contract_triggers` reads a changed file's added lines for the routes,
+tables, names and operation ids a contract can match.
+:func:`select_contract_files` picks the repository's contract files from the
+configured globs once per run, and :func:`literal_contract_paths` names the
+globs that are plain paths. :func:`earlier_migrations` finds the migrations a
+changed one builds on, :func:`contract_excerpts` sends one contract file to
+the excerpter its format needs, and :func:`contract_entries` ties them
+together for one chunk as :class:`prxref.repo_context.ContextEntry` records.
+Every regular expression here runs in linear time on a 512 KiB line.
 """
 from __future__ import annotations
 
 import json
+import posixpath
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+
+from . import chunk_context
+from .repo_context import _JAVA_KEYWORDS, ContextEntry, language_of, referenced_names
+from .rules import match_globs
 
 MAX_CONTRACT_LINES = 40
 MAX_CONTRACT_CHARS = 2000
+MAX_EARLIER_MIGRATIONS = 4
+MAX_SPEC_FILES = 6
 
 _BOM = chr(0xFEFF)
 _HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
@@ -679,3 +700,473 @@ def _liquibase_json(text: str, keys: frozenset[str]) -> list[Excerpt]:
                 hits.append(_Hit(pointer, value, "changeSet", node, line))
                 break
     return _json_excerpts(hits)
+
+
+_SPEC_SUFFIXES = (".yaml", ".yml", ".json")
+_MIGRATION_SUFFIXES = (".sql", ".xml", ".yaml", ".yml", ".json")
+_PREFIX_LOOKBACK_LINES = 40
+
+_OPEN_CALL = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*+)\(")
+_WORD = re.compile(r"\w")
+_DIGITS = re.compile(r"(\d+)")
+
+_SQL_VERB = re.compile(r"(?<![\w$])(?:create|alter)(?![\w$])", re.I)
+_SQL_REFERENCES = re.compile(
+    rf"(?<![\w$])references\s+{_SQL_NAME}"
+    r"(?=\s*(?:[(,;)]|$)|\s+(?:on|match|deferrable|not|initially)\b)",
+    re.I | re.M,
+)
+_LIQUIBASE_TABLE = re.compile(
+    r"""(?<![\w$])(?:tableName|baseTableName|referencedTableName)["']?\s*[:=]\s*"""
+    r"""(?:"([^"\n]*)"|'([^'\n]*)'|([\w$.]+))"""
+)
+
+_JAVA_STRING = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+_ANNOTATION_ARG = re.compile(r"""(?<![\w$])(?:([A-Za-z_$][\w$]*+)\s*=\s*)?(\{[^{}]*\}|"(?:[^"\\\n]|\\.)*")""")
+_SPRING_MAPPING = re.compile(r"@(Get|Post|Put|Delete|Patch|Request)Mapping\s*\(([^()]*)\)")
+_JAXRS_PATH = re.compile(r"@Path\s*\(([^()]*)\)")
+_PY_ROUTE = re.compile(
+    r"""@[A-Za-z_]\w*+(?:\.[A-Za-z_]\w*+)*\.(?:get|post|put|delete|patch|route|api_route)\s*\(\s*"""
+    r"""(?:(?:path|rule)\s*=\s*)?[rRbBuUfF]{0,2}(?:"([^"\\\n]*)"|'([^'\\\n]*)')"""
+)
+_EXPRESS_ROUTE = re.compile(
+    r"""(?<![\w$])[A-Za-z_$][\w$]*+\s*\.\s*(?:get|post|put|delete|patch|all|use)\s*\(\s*"""
+    r"""(?:"(/[^"\\\n]*)"|'(/[^'\\\n]*)'|`(/[^`\\\n]*)`)"""
+)
+_JAVA_TYPE_DECL = re.compile(
+    r"[ \t]*(?:(?:@[\w$.]++(?:[ \t]*\([^()]*\))?|public|protected|private|abstract|final|static|sealed"
+    r"|non-sealed|strictfp)[ \t]+)*(?P<kw>class|interface)[ \t]+[A-Za-z_$]"
+)
+_FLASK_PREFIX = re.compile(
+    r"""(?<![\w$])Blueprint\s*\([^()]*?(?<![\w$])url_prefix\s*=\s*[rRbBuUfF]{0,2}"""
+    r"""(?:"([^"\\\n]*)"|'([^'\\\n]*)')"""
+)
+_FASTAPI_PREFIX = re.compile(
+    r"""(?<![\w$])APIRouter\s*\([^()]*?(?<![\w$])prefix\s*=\s*[rRbBuUfF]{0,2}"""
+    r"""(?:"([^"\\\n]*)"|'([^'\\\n]*)')"""
+)
+
+_YAML_OPENAPI = re.compile(r"""^["']?(?:openapi|swagger)["']?[ \t]*:""", re.M)
+_YAML_CHANGELOG = re.compile(r"""^["']?databaseChangeLog["']?[ \t]*:""", re.M)
+
+
+@dataclass(frozen=True)
+class ContractTriggers:
+    """What a changed file's added lines can match in a contract file.
+
+    ``routes`` are HTTP route templates, ``tables`` bare SQL table names,
+    ``names`` referenced identifiers (candidate schema names) and
+    ``operation_ids`` identifiers written directly before a ``(``. Each tuple
+    is deduplicated and in first-appearance order.
+    """
+
+    routes: tuple[str, ...] = ()
+    tables: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    operation_ids: tuple[str, ...] = ()
+
+
+def contract_triggers(path: str, added: Sequence[str], *, text: str | None = None) -> ContractTriggers:
+    """The contract triggers on one changed file's added lines.
+
+    ``added`` holds the file's ``+`` lines; they are scanned joined by
+    newlines, so a statement or annotation that wraps across added lines
+    still counts. ``text`` is the file's full content at the head, or None.
+
+    - ``routes``: the path literals of route declarations. Spring
+      ``@GetMapping``, ``@PostMapping``, ``@PutMapping``, ``@DeleteMapping``,
+      ``@PatchMapping`` and ``@RequestMapping`` give their positional string,
+      their ``value =`` or ``path =`` string, or every string of an array
+      form ``{"/a", "/b"}``, never a ``produces``, ``consumes``, ``name``,
+      ``headers`` or ``params`` string. JAX-RS ``@Path("...")`` counts, as do
+      FastAPI and Flask ``@<ident>.get|post|put|delete|patch|route|api_route("...")``
+      and Express ``<ident>.get|post|put|delete|patch|all|use('/...')`` when
+      the literal starts with ``/``. Empty literals are dropped. When
+      ``text`` is given and a route was found, class-level prefixes are read
+      from it: a Spring ``@RequestMapping`` or JAX-RS ``@Path`` in the
+      annotations directly above a class or interface declaration, a Flask
+      ``Blueprint(..., url_prefix="...")`` and a FastAPI
+      ``APIRouter(prefix="...")``, at most the first of each kind in the
+      file. After the bare routes come, for each prefix, the prefix joined to
+      every route with exactly one ``/`` between them, because Spring and
+      Flask accept a segment written without its leading slash.
+    - ``tables``: every ``CREATE TABLE``, ``ALTER TABLE`` and
+      ``CREATE [UNIQUE] INDEX ... ON <table>`` head this module's
+      :func:`sql_excerpts` recognizes (the table, never the index name), each
+      ``REFERENCES <table>`` foreign-key target, and every Liquibase
+      ``tableName``, ``baseTableName`` and ``referencedTableName`` value, in
+      XML (``tableName="t"``), YAML (``tableName: t``) or JSON
+      (``"tableName": "t"``). Each is reduced to its bare name. This applies
+      to every language, because SQL also shows up in Python and Java
+      migrations. An index head is read only up to the next ``CREATE`` or
+      ``ALTER`` keyword, which keeps the scan linear.
+    - ``names``: :func:`prxref.repo_context.referenced_names` of the added
+      lines in the path's language.
+    - ``operation_ids``: the identifiers written directly before a ``(``
+      (declarations and calls alike), minus the language's keywords.
+    """
+    body = "\n".join(added)
+    language = language_of(path)
+    routes = _routes(body)
+    if routes and text is not None:
+        prefixes = _route_prefixes(text.removeprefix(_BOM))
+        routes += [_join_route(prefix, route) for prefix in prefixes for route in routes]
+    keywords = _JAVA_KEYWORDS if language == "java" else chunk_context._keywords(language)
+    return ContractTriggers(
+        routes=_unique(routes),
+        tables=_unique(_tables(body)),
+        names=_unique(referenced_names(added, language)),
+        operation_ids=_unique(name for name in _OPEN_CALL.findall(body) if name not in keywords),
+    )
+
+
+def literal_contract_paths(globs: Sequence[str]) -> list[str]:
+    """The contract globs that are plain paths, in glob order, deduplicated.
+
+    A glob is literal when it holds no ``*``, ``?`` or ``[`` and does not
+    start with ``!``. It names one repository-relative path, which is read
+    directly even when no listing shows it: a miss costs one read. A literal
+    that a ``!`` negation in the same list vetoes is left out, as
+    :func:`prxref.rules.match_globs` would leave it out. Blank globs are
+    ignored.
+    """
+    out: dict[str, None] = {}
+    for glob in globs:
+        if not glob.strip() or glob.startswith("!") or any(c in glob for c in "*?["):
+            continue
+        if match_globs(glob, globs):
+            out.setdefault(glob)
+    return list(out)
+
+
+def select_contract_files(
+    globs: Sequence[str],
+    *,
+    listing: Collection[str] | None,
+    diff_paths: Sequence[str],
+) -> list[str]:
+    """The run's contract files: sorted, deduplicated repository-relative paths.
+
+    A path from ``listing`` (the repository's file listing at the head, or
+    None when there is none) or from ``diff_paths`` counts when
+    :func:`prxref.rules.match_globs` selects it with ``globs``, and every
+    :func:`literal_contract_paths` path counts even when absent from both.
+    The caller passes the diff paths that were not removed; nothing is
+    filtered by status here. The result depends on no chunk, so it is
+    computed once per run.
+    """
+    selected = {path for path in (*(listing or ()), *diff_paths) if path and match_globs(path, globs)}
+    selected.update(literal_contract_paths(globs))
+    return sorted(selected)
+
+
+def earlier_migrations(path: str, contract_paths: Sequence[str]) -> list[str]:
+    """The contract files a migration at ``path`` builds on, in ascending order.
+
+    A candidate sits in the same directory as ``path``, has an extension
+    :func:`contract_excerpts` handles as a migration (``.sql``, ``.xml``,
+    ``.yaml``, ``.yml`` or ``.json``, case-insensitive), and sorts before
+    ``path`` under a natural sort of the basenames, where digit runs compare
+    as numbers, so ``V9__a.sql`` sorts before ``V10__b.sql``. At most
+    :data:`MAX_EARLIER_MIGRATIONS` are returned: the ones nearest to
+    ``path``. ``path`` itself is never returned.
+    """
+    directory = posixpath.dirname(path)
+    own = _natural_key(posixpath.basename(path))
+    earlier = sorted(
+        {
+            candidate
+            for candidate in contract_paths
+            if candidate != path
+            and posixpath.dirname(candidate) == directory
+            and _suffix(candidate) in _MIGRATION_SUFFIXES
+            and _natural_key(posixpath.basename(candidate)) < own
+        },
+        key=lambda candidate: _natural_key(posixpath.basename(candidate)),
+    )
+    return earlier[-MAX_EARLIER_MIGRATIONS:]
+
+
+def contract_excerpts(path: str, text: str, triggers: ContractTriggers) -> list[Excerpt]:
+    """The excerpts one contract file gives for ``triggers``, chosen by extension.
+
+    The extension is compared case-insensitively. ``names + tables`` below is
+    the two tuples concatenated and deduplicated.
+
+    - ``.sql`` goes to :func:`sql_excerpts` with the tables.
+    - ``.xml`` goes to :func:`liquibase_excerpts` with the tables.
+    - ``.yaml`` and ``.yml``: a top-level ``openapi:`` or ``swagger:`` key (a
+      line that starts in column 0, the key optionally quoted) goes to
+      :func:`openapi_yaml_excerpts` with the routes, the operation ids and
+      ``names + tables`` as schemas. Otherwise a top-level
+      ``databaseChangeLog:`` goes to :func:`liquibase_excerpts`. Otherwise
+      the file is a fragment, such as one schema of a split spec: when the
+      :func:`normalize_name` of its stem equals that of a name or table, the
+      whole file is one excerpt at line 1 whose symbol is the stem, capped as
+      every excerpt is; otherwise it gives nothing. A text whose first
+      non-blank character is ``{`` is JSON and takes the ``.json`` branch.
+    - ``.json`` is parsed once to sniff its top-level keys: ``openapi`` or
+      ``swagger`` goes to :func:`openapi_json_excerpts`,
+      ``databaseChangeLog`` to :func:`liquibase_excerpts`, and anything else,
+      invalid JSON included, to :func:`json_schema_excerpts` with
+      ``names + tables``.
+    - Any other extension gives ``[]``.
+
+    The stem is the basename up to its first dot, so
+    ``transport-config.schema.json`` has the stem ``transport-config``.
+    """
+    suffix = _suffix(path)
+    text = text.removeprefix(_BOM)
+    schemas = _unique((*triggers.names, *triggers.tables))
+    if suffix == ".sql":
+        return sql_excerpts(text, tables=triggers.tables)
+    if suffix == ".xml":
+        return liquibase_excerpts(text, tables=triggers.tables)
+    if suffix not in _SPEC_SUFFIXES:
+        return []
+    if suffix != ".json" and not text.lstrip().startswith("{"):
+        if _YAML_OPENAPI.search(text):
+            return openapi_yaml_excerpts(
+                text, routes=triggers.routes, operation_ids=triggers.operation_ids, schemas=schemas
+            )
+        if _YAML_CHANGELOG.search(text):
+            return liquibase_excerpts(text, tables=triggers.tables)
+        return _fragment_excerpts(path, text, schemas)
+    doc = _load_json(text)
+    keys = doc if isinstance(doc, dict) else {}
+    if "openapi" in keys or "swagger" in keys:
+        return openapi_json_excerpts(
+            text, routes=triggers.routes, operation_ids=triggers.operation_ids, schemas=schemas
+        )
+    if "databaseChangeLog" in keys:
+        return liquibase_excerpts(text, tables=triggers.tables)
+    return json_schema_excerpts(text, names=schemas)
+
+
+def contract_entries(
+    chunk: Sequence[object],
+    *,
+    contract_paths: Sequence[str],
+    read: Callable[[str], str | None] | None,
+    priority: Sequence[str] = (),
+) -> list[ContextEntry]:
+    """The contract entries for one worker chunk, ordered by ``(path, line)``.
+
+    ``chunk`` is the chunk's file diffs, duck-typed on ``path``, ``hunks`` and
+    ``lines`` (``kind``, ``text``, ``new_line``) as
+    :func:`prxref.chunk_context.chunk_files` reads them. ``contract_paths`` is
+    :func:`select_contract_files`'s result. ``read`` is the chunk's capped
+    reader: each call may cost a read, and a path it excludes or cannot read
+    gives None, which is skipped silently. ``read`` None gives ``[]`` with no
+    work. ``priority`` lists paths that rank first among the spec files,
+    normally :func:`literal_contract_paths` of the globs.
+
+    Each chunk file's triggers come from :func:`contract_triggers`. The file's
+    own text is read only when its added lines hold a route, so its
+    class-level prefix can be found. The triggers of all the chunk's files
+    are merged in first-appearance order, and when every field is empty the
+    result is ``[]`` with no read at all.
+
+    The files then read, in this order and once each, are:
+
+    1. when there are tables, the :func:`earlier_migrations` of each chunk
+       file that is itself a contract path, at most
+       :data:`MAX_EARLIER_MIGRATIONS` per file;
+    2. at most :data:`MAX_SPEC_FILES` spec candidates, the contract paths
+       ending in ``.yaml``, ``.yml`` or ``.json``, ranked: a path in
+       ``priority``, then a path whose stem matches a name or table by
+       :func:`normalize_name`, then a basename that starts with ``openapi``
+       or ``swagger`` or ends with ``.schema.json`` (case-insensitive), then
+       the rest, ties broken by path. The ranking is deterministic, so every
+       chunk picks the same root spec.
+
+    A contract path that is itself a file of this chunk is never read, and
+    ``.sql`` and ``.xml`` contract files are read only as earlier
+    migrations. Each file read goes through :func:`contract_excerpts`, and
+    each :class:`Excerpt` becomes a ``ContextEntry`` of kind and reason
+    ``"contract"``. Entries that share a ``(path, line)`` keep the first.
+    No character budget applies here: the only caps are the per-excerpt
+    ones, :data:`MAX_EARLIER_MIGRATIONS` and :data:`MAX_SPEC_FILES`.
+    """
+    if read is None:
+        return []
+    files = chunk_context.chunk_files(chunk)
+    per_file: list[ContractTriggers] = []
+    for changed in files:
+        triggers = contract_triggers(changed.path, changed.added)
+        if triggers.routes:
+            text = read(changed.path)
+            if text is not None:
+                triggers = contract_triggers(changed.path, changed.added, text=text)
+        per_file.append(triggers)
+    merged = ContractTriggers(
+        routes=_unique(route for t in per_file for route in t.routes),
+        tables=_unique(table for t in per_file for table in t.tables),
+        names=_unique(name for t in per_file for name in t.names),
+        operation_ids=_unique(op for t in per_file for op in t.operation_ids),
+    )
+    if not (merged.routes or merged.tables or merged.names or merged.operation_ids):
+        return []
+    in_chunk = {changed.path for changed in files}
+    queue: dict[str, None] = {}
+    if merged.tables:
+        contract_set = set(contract_paths)
+        for changed in files:
+            if changed.path in contract_set:
+                earlier = earlier_migrations(changed.path, contract_paths)
+                queue.update(dict.fromkeys(p for p in earlier if p not in in_chunk))
+    wanted = _keys((*merged.names, *merged.tables), normalize_name)
+    ranks = frozenset(priority)
+    specs = sorted(
+        {p for p in contract_paths if _suffix(p) in _SPEC_SUFFIXES and p not in in_chunk and p not in queue},
+        key=lambda p: (_spec_rank(p, ranks, wanted), p),
+    )
+    queue.update(dict.fromkeys(specs[:MAX_SPEC_FILES]))
+    entries: dict[tuple[str, int], ContextEntry] = {}
+    for path in queue:
+        text = read(path)
+        if text is None:
+            continue
+        for excerpt in contract_excerpts(path, text, merged):
+            entries.setdefault(
+                (path, excerpt.line),
+                ContextEntry(
+                    path=path, line=excerpt.line, symbol=excerpt.symbol, kind="contract", reason="contract",
+                    text=excerpt.text,
+                ),
+            )
+    return [entries[key] for key in sorted(entries)]
+
+
+def _unique(values: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _suffix(path: str) -> str:
+    return posixpath.splitext(path)[1].lower()
+
+
+def _stem(path: str) -> str:
+    return posixpath.basename(path).split(".", 1)[0]
+
+
+def _natural_key(name: str) -> tuple[tuple[object, ...], str]:
+    """A natural sort key: digit runs compare by value, without converting them to ``int``."""
+    parts = _DIGITS.split(name)
+    return (
+        tuple((len(part.lstrip("0")), part.lstrip("0")) if i % 2 else part for i, part in enumerate(parts)),
+        name,
+    )
+
+
+def _spec_rank(path: str, priority: frozenset[str], wanted: frozenset[str]) -> int:
+    if path in priority:
+        return 0
+    if normalize_name(_stem(path)) in wanted:
+        return 1
+    base = posixpath.basename(path).lower()
+    if base.startswith(("openapi", "swagger")) or base.endswith(".schema.json"):
+        return 2
+    return 3
+
+
+def _fragment_excerpts(path: str, text: str, schemas: Iterable[str]) -> list[Excerpt]:
+    stem = _stem(path)
+    if normalize_name(stem) not in _keys(schemas, normalize_name):
+        return []
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    if not lines:
+        return []
+    capped, _ = _cap(lines)
+    return [Excerpt(1, stem, capped)]
+
+
+def _first_group(match: re.Match[str]) -> str:
+    return next(group for group in match.groups() if group is not None)
+
+
+def _tables(body: str) -> list[str]:
+    """Bare table names in ``body``, in order of appearance."""
+    found: list[tuple[int, str]] = []
+    verbs = [match.start() for match in _SQL_VERB.finditer(body)]
+    for start, end in zip(verbs, [*verbs[1:], len(body)], strict=False):
+        for head in _SQL_HEADS:
+            match = head.match(body, start, end)
+            if match:
+                found.append((start, match.group("name")))
+                break
+    found += [(match.start(), match.group("name")) for match in _SQL_REFERENCES.finditer(body)]
+    found += [(match.start(), _first_group(match)) for match in _LIQUIBASE_TABLE.finditer(body)]
+    bare = (_bare_table(name.strip()) for _, name in sorted(found))
+    return [name for name in bare if _WORD.search(name)]
+
+
+def _annotation_paths(args: str) -> list[str]:
+    """The route strings of a Java annotation's arguments: positional, ``value =`` or ``path =``."""
+    out: list[str] = []
+    for match in _ANNOTATION_ARG.finditer(args):
+        key, value = match.groups()
+        if key is not None and key not in ("value", "path"):
+            continue
+        out += _JAVA_STRING.findall(value) if value.startswith("{") else [value[1:-1]]
+    return out
+
+
+def _routes(body: str) -> list[str]:
+    found: list[tuple[int, int, str]] = []
+    for match in _SPRING_MAPPING.finditer(body):
+        found += [(match.start(), i, route) for i, route in enumerate(_annotation_paths(match.group(2)))]
+    for match in _JAXRS_PATH.finditer(body):
+        found += [(match.start(), i, route) for i, route in enumerate(_annotation_paths(match.group(1)))]
+    for regex in (_PY_ROUTE, _EXPRESS_ROUTE):
+        found += [(match.start(), 0, _first_group(match)) for match in regex.finditer(body)]
+    return [route for _, _, route in sorted(found) if route]
+
+
+def _annotation_block(lines: list[str], index: int) -> list[str]:
+    """The annotation lines directly above line ``index``, a wrapped annotation's arguments included."""
+    block: list[str] = []
+    depth = 0
+    for j in range(index - 1, max(index - 1 - _PREFIX_LOOKBACK_LINES, -1), -1):
+        line = lines[j]
+        depth += line.count(")") - line.count("(")
+        if depth <= 0 and not line.lstrip().startswith("@"):
+            break
+        block.append(line)
+    return block[::-1]
+
+
+def _class_prefixes(text: str) -> tuple[str | None, str | None]:
+    """The first class-level Spring ``@RequestMapping`` and JAX-RS ``@Path`` paths, or None."""
+    lines = text.split("\n")
+    spring: str | None = None
+    jaxrs: str | None = None
+    for index, line in enumerate(lines):
+        if "class" not in line and "interface" not in line:
+            continue
+        decl = _JAVA_TYPE_DECL.match(line)
+        if decl is None:
+            continue
+        head = "\n".join([*_annotation_block(lines, index), line[: decl.start("kw")]])
+        if spring is None:
+            mappings = (m for m in _SPRING_MAPPING.finditer(head) if m.group(1) == "Request")
+            spring = next((p for m in mappings for p in _annotation_paths(m.group(2))), None)
+        if jaxrs is None:
+            jaxrs = next((p for m in _JAXRS_PATH.finditer(head) for p in _annotation_paths(m.group(1))), None)
+        if spring is not None and jaxrs is not None:
+            break
+    return spring, jaxrs
+
+
+def _route_prefixes(text: str) -> list[str]:
+    prefixes = list(_class_prefixes(text))
+    for regex in (_FLASK_PREFIX, _FASTAPI_PREFIX):
+        match = regex.search(text)
+        prefixes.append(_first_group(match) if match else None)
+    return [prefix for prefix in prefixes if prefix]
+
+
+def _join_route(prefix: str, route: str) -> str:
+    return prefix.rstrip("/") + "/" + route.lstrip("/")
