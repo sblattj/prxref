@@ -628,7 +628,8 @@ class TestCaseJsonRoundTrip:
     def test_the_keys_come_in_the_cases_json_spelling_and_a_fixed_order(self):
         record = case_to_json(_full_case())
         assert list(record) == [
-            "id", "pr_url", "base_sha", "head_sha", "diff_file", "context_file", "spec", "expected",
+            "id", "pr_url", "base_sha", "head_sha", "diff_file", "context_file", "repo_dir", "spec",
+            "expected",
         ]
         assert list(record["expected"][0]) == [
             "id", "file", "line", "severity", "category", "accepted", "text", "must_match",
