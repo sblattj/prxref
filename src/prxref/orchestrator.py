@@ -148,7 +148,7 @@ from .forges.base import (
     Thread,
 )
 from .llm import LLMClient
-from .markers import SEVERITY_MARKERS, severity_marker
+from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
 from .quality import (
     active,
     apply_containment_note,
@@ -1702,7 +1702,13 @@ def _render_summary(
     receiving that placeholder's value. ``spec_note`` and ``ticket_note``
     ride ``{spec_note}{ticket_note}`` on the line after the counts; each
     carries its own trailing newline when non-empty, so empty notes leave the
-    summary byte-identical. ``cost_label`` is the attribution's last field
+    summary byte-identical. ``{findings}`` lists the in-ticket and unjudged
+    findings first; findings outside the ticket (scope ``"out"``) follow
+    under a bold ``Outside the ticket (N)`` heading led by
+    :data:`markers.OUT_OF_TICKET_MARKER`; when no other finding exists,
+    ``No in-ticket findings.`` stands in for the first list. Without an
+    active ticket every scope is ``"unknown"``, so the list stays flat.
+    ``cost_label`` is the attribution's last field
     (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
     ``""``) is prepended to the finished body, after the partial-review
     banner, so it is the first thing under the forge's summary marker.
@@ -1719,14 +1725,19 @@ def _render_summary(
     for f in findings_active:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
-    if findings_active:
-        bullets = "\n".join(
-            f"- {severity_marker(f.severity)} "
-            f"`{f.file}:{f.line if f.line > 0 else '—'}` — {f.title}"
-            for f in findings_active
-        )
+    inside = [f for f in findings_active if f.scope != SCOPE_OUT]
+    outside = [f for f in findings_active if f.scope == SCOPE_OUT]
+    if inside:
+        bullets = _summary_bullets(inside)
+    elif outside:
+        bullets = "No in-ticket findings."
     else:
         bullets = "No findings — nice work."
+    if outside:
+        bullets = (
+            f"{bullets}\n\n**{OUT_OF_TICKET_MARKER} Outside the ticket ({len(outside)})**"
+            f"\n\n{_summary_bullets(outside)}"
+        )
     if inline_accounting:
         bullets = f"{bullets}\n\n{inline_accounting}"
 
@@ -1905,11 +1916,18 @@ def _failure_reason_lines(
 
 
 
+def _summary_bullets(findings: Sequence[Finding]) -> str:
+    """One ``- <marker> `file:line` — title`` summary bullet per finding, in order."""
+    return "\n".join(
+        f"- {marker_for(f.severity, f.scope)} "
+        f"`{f.file}:{f.line if f.line > 0 else '—'}` — {f.title}"
+        for f in findings
+    )
+
+
 def _format_finding(f: Finding, model: str) -> str:
-    marker = severity_marker(f.severity)
-    loc = f"{f.file}:{f.line}" if f.line > 0 else f.file
     return (
-        f"🤖 {marker} **[{f.severity.upper()}] {f.title}** (`{loc}`)\n\n"
+        f"{inline_header(f)}\n\n"
         f"{f.body}\n\n"
         f"---\n*Reviewed by prxref · model={model}*"
     )

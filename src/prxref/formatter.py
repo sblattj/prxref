@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+from .markers import SCOPE_LABELS, marker_for
 from .markers import SEVERITY_MARKERS as _SEVERITY_MARKERS
 from .triage import Finding
 
@@ -62,7 +63,11 @@ def _escape_cell(text: str) -> str:
 
 
 def _findings_table(findings: list[Finding]) -> str:
-    """Render the ``| severity | file:line | title |`` table, error-first."""
+    """Render the ``| severity | file:line | title |`` table, error-first.
+
+    The severity cell is :func:`markers.marker_for`, so a finding outside the
+    ticket shows the out-of-ticket marker in front of its severity glyph.
+    """
     if not findings:
         return "No findings survived the quality passes."
     ordered = sorted(
@@ -80,7 +85,7 @@ def _findings_table(findings: list[Finding]) -> str:
         "| --- | --- | --- |",
     ]
     rows.extend(
-        f"| {_SEVERITY_MARKERS[_norm_severity(f.severity)]} "
+        f"| {marker_for(_norm_severity(f.severity), f.scope)} "
         f"| {_escape_cell(_fmt_location(f))} "
         f"| {_escape_cell(f.title)} |"
         for f in ordered
@@ -145,9 +150,17 @@ def build_attribution(model: str, elapsed_ms: int, tokens: int) -> str:
 
 
 def format_inline_comment(f: Finding, attribution: str) -> str:
-    """Render one finding as a forge-neutral inline-comment body."""
-    marker = _SEVERITY_MARKERS[_norm_severity(f.severity)]
-    return f"{marker} **{f.title}**\n\n{f.body}\n\n*{attribution}*"
+    """Render one finding as a forge-neutral inline-comment body.
+
+    A finding outside the ticket (scope ``"out"``) gets the
+    :func:`markers.marker_for` prefix and its :data:`markers.SCOPE_LABELS`
+    entry, as ``<prefix> <glyph> **[OUTSIDE TICKET] <title>**``; scope
+    ``"in"`` and ``"unknown"`` render exactly the severity-only body.
+    """
+    marker = marker_for(_norm_severity(f.severity), f.scope)
+    scope_label = SCOPE_LABELS.get(f.scope)
+    title = f"[{scope_label}] {f.title}" if scope_label else f.title
+    return f"{marker} **{title}**\n\n{f.body}\n\n*{attribution}*"
 
 
 def format_summary(
