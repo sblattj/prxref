@@ -155,7 +155,13 @@ gains a `drop_reason` for its scope.
 
 ## Replay runs and the thread passes
 
-<!-- 0.14 placeholder: W65C -->
+A `--no-threads` replay gives passes 4 and 5 (`apply_thread_dedup` and
+`apply_settled_thread_suppression`) an empty thread list, so they drop nothing,
+and a `--diff-file` replay with no `--pr-url` has no threads to start with. A
+replay at pinned SHAs WITHOUT `--no-threads` still dedups against the PR's
+*current* threads, which may postdate the pinned head; the CLI logs a warning
+saying so. The stale-inline-comment prune never runs on a replay, because a
+replay never posts. See the README's "Replay Mode (Evaluation)".
 
 ## Drop reasons
 
