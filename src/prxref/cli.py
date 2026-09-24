@@ -33,13 +33,25 @@ The replay flags review a pinned, reproducible input for evaluation:
 ``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
 repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
 optional, and no forge is contacted without it), and ``--no-threads`` hides
-the PR's existing threads. At most one of ``--as-of TIME`` (the description
-in force at that time), ``--description-file PATH`` and ``--no-description``
-chooses the PR description a replay shows; each is CLI-only, with no
-environment variable. Any replay flag makes the run a replay: it never
+the PR's existing threads. Any replay flag makes the run a replay: it never
 posts, and its run record gains a ``replay`` stamp. They are validated
 before the URL is parsed, and a bad set exits 2 naming the flag. The webhook
 daemon never replays.
+
+A ``--pr-url`` replay also pins the PR's title and description by default
+(issue #16): it shows the ones in force at a cutoff, which is ``--as-of
+TIME`` when given, else the PR's first human review, else its head commit's
+date. Reading that history is one call to the forge's history reader, made
+before the review starts and not recorded in the run trace. A forge with no
+history reader, a read that fails, or a history that does not reach the
+cutoff keeps the current title and description and logs a WARNING, except
+that an explicit ``--as-of`` on a forge with no history reader exits 2.
+``--description-file PATH`` (that file's text) and ``--no-description`` (an
+empty description) read no history and leave the title current. At most one
+of the three flags may be given; each is CLI-only, with no environment
+variable, and each makes the run a replay. The stamp's ``description``
+(``pinned``, ``live``, ``file`` or ``none``), ``as_of`` and ``as_of_source``
+record which title and description the review saw.
 
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
@@ -471,6 +483,9 @@ def _print_summary(
     Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
     ``size advisory:`` when the PR-size advisory fired; and ``replay:`` when
     the run was a replay, so a replay can never be read as a live review.
+    The ``replay:`` line carries the stamp as ``key=value`` pairs, ending in
+    ``description=<status>`` and, when a cutoff was chosen,
+    `` as_of=<time> (<source>)``.
     Under ``-v`` it adds the finding counts, the ``elapsed/tokens/cost`` line,
     and one line for each configured input: ``rules:``, ``prompts:`` (the
     directory, then ``<name>=<sha256 prefix>`` for each overridden template
@@ -491,9 +506,12 @@ def _print_summary(
         print(f"size advisory: {size['message']}", file=target)
     replay = record.get("replay")
     if isinstance(replay, dict):
+        as_of = replay.get("as_of")
+        cutoff = f" as_of={as_of} ({_dash(replay.get('as_of_source'))})" if as_of else ""
         print(
             f"replay: base={_dash(replay.get('base_sha'), 12)} head={_dash(replay.get('head_sha'), 12)} "
-            f"threads={_dash(replay.get('threads'))} diff_file={_dash(replay.get('diff_file'))}",
+            f"threads={_dash(replay.get('threads'))} diff_file={_dash(replay.get('diff_file'))} "
+            f"description={_dash(replay.get('description'))}{cutoff}",
             file=target,
         )
     if not verbose:
@@ -695,19 +713,59 @@ class _ReplayRequest:
     description_text: str | None = None
     no_description: bool = False
 
-    def stamp(self, *, has_forge: bool) -> dict[str, Any]:
-        """The run record's ``replay`` stamp: four keys, in a fixed order, all present.
+    def stamp(self, *, has_forge: bool, pin: Any = None) -> dict[str, Any]:
+        """The run record's ``replay`` stamp: seven keys, in a fixed order, all present.
 
         ``threads`` is ``"hidden"`` whenever the PR's threads were not
         consulted: under ``--no-threads``, or with no forge at all
         (``--diff-file`` without ``--pr-url``).
+
+        ``description``, ``as_of`` and ``as_of_source`` (issue #16) say which
+        title and description the review saw. ``pin`` is the replay forge's
+        :class:`~prxref.forges.replay.DescriptionPin`, and its status, cutoff
+        and cutoff source are copied as they are. ``as_of`` is written as a
+        UTC ISO-8601 time ending in ``Z``, with the fraction of a second only
+        when there is one, so ``--as-of`` given that value picks the same
+        cutoff. Anything else as ``pin`` (``None``, as from a
+        :class:`~prxref.forges.replay.LocalDiffForge`) is read from the
+        flags: ``"file"`` under ``--description-file``, ``"none"`` under
+        ``--no-description``, else ``"file"`` without a forge (the diff
+        file supplies the description) and ``"live"`` with one; ``as_of``
+        and ``as_of_source`` are then ``None``. There is no title key: the
+        title is pinned exactly when the description is.
         """
+        if isinstance(pin, DescriptionPin):
+            description, as_of, as_of_source = pin.status, _iso_z(pin.as_of), pin.as_of_source
+        else:
+            description, as_of, as_of_source = self._flag_description(has_forge=has_forge), None, None
         return {
             "base_sha": self.base_sha,
             "head_sha": self.head_sha,
             "threads": "hidden" if self.no_threads or not has_forge else "shown",
             "diff_file": self.diff_file,
+            "description": description,
+            "as_of": as_of,
+            "as_of_source": as_of_source,
         }
+
+    def _flag_description(self, *, has_forge: bool) -> str:
+        if self.description_file is not None:
+            return "file"
+        if self.no_description:
+            return "none"
+        return "live" if has_forge else "file"
+
+
+def _iso_z(value: datetime | None) -> str | None:
+    """``value`` (timezone-aware) as a UTC ISO-8601 string ending in ``Z``; ``None`` stays ``None``.
+
+    Whole seconds print as ``YYYY-MM-DDTHH:MM:SSZ``; a fraction of a second
+    is kept (``.ffffff``) rather than floored, so the string names the same
+    instant.
+    """
+    if value is None:
+        return None
+    return value.astimezone(UTC).replace(tzinfo=None).isoformat() + "Z"
 
 
 def _resolve_replay(
@@ -1191,7 +1249,10 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
-        replay=replay.stamp(has_forge=url is not None) if replay is not None else None,
+        replay=(
+            replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))
+            if replay is not None else None
+        ),
         prompts=prompts,
     )
 

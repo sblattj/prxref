@@ -512,7 +512,8 @@ def orchestrate_review(
     summary. It never touches the verdict.
 
     ``replay`` is the evaluation-replay stamp built by the CLI
-    (``{base_sha, head_sha, threads, diff_file}``). When given it is copied
+    (``{base_sha, head_sha, threads, diff_file, description, as_of,
+    as_of_source}``). When given it is copied
     into the returned dict under ``replay`` and into the ``run start`` trace
     event, the one request knob that is echoed back, so a replay can never
     be read as a live review. It changes nothing about how the review runs:

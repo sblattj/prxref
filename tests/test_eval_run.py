@@ -773,6 +773,7 @@ class TestThroughTheCli:
             assert record["replay"] == {
                 "base_sha": None, "head_sha": None, "threads": "hidden",
                 "diff_file": str(dataset / case_id / "diff.patch"),
+                "description": "file", "as_of": None, "as_of_source": None,
             }
             assert {"chunk0.user.md", "sweep.user.md"} <= {p.name for p in (case_dir / "trace").iterdir()}
             assert _read(case_dir / "case.json")["expected"][0]["must_match"] == "print"
