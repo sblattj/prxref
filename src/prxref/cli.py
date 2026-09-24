@@ -10,16 +10,21 @@ Provides these subcommands:
   * ``prompts export DIR [--force]`` — the packaged prompt templates, written
     to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
 
-``review`` takes three optional inputs besides the PR itself, and they
+``review`` takes four optional inputs besides the PR itself, and they
 compose: ``--spec URL_OR_PATH`` (repeatable) grounds the review against specs
 or tickets and replaces ``PRXREF_SPEC_SOURCES``; ``--rules-file PATH`` adds a
-team review-rules file (``PRXREF_REVIEW_RULES``); ``--context-file PATH``
-names the ticket the PR implements (``PRXREF_TICKET_CONTEXT_FILE``), so each
-finding is marked in, out of, or of unknown ticket scope. Each flag wins over
-its variable, and ``--rules-file ""`` / ``--context-file ""`` turn the
-variable off for one run. Both files are read before any network call, so an
-unusable one is a configuration error. The webhook daemon reads the rules
-file from its own environment and never reads a ticket-context file.
+team review-rules file (``PRXREF_REVIEW_RULES``) that reaches every review
+unit; ``--scoped-rules PATH`` (repeatable) adds path-scoped rules files and
+directories and replaces ``PRXREF_SCOPED_RULES``, each file reaching only
+the chunks its ``applies_to:`` globs match, and the sweep their union;
+``--context-file PATH`` names the ticket the PR implements
+(``PRXREF_TICKET_CONTEXT_FILE``), so each finding is marked in, out of, or
+of unknown ticket scope. Each flag wins over its variable, and
+``--rules-file ""`` / ``--scoped-rules ""`` / ``--context-file ""`` turn the
+variable off for one run. The rules and ticket files are read before any
+network call, so an unusable one is a configuration error. The webhook
+daemon reads both kinds of rules file from its own environment, re-reading
+them on every webhook, and never reads a ticket-context file.
 
 ``--prompts-dir DIR`` (``PRXREF_PROMPTS_DIR``) replaces the packaged
 ``worker.md``, ``systemic.md`` and ``summary.md`` prompt templates with the
@@ -88,6 +93,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import errno
+import functools
 import importlib
 import json
 import logging
@@ -108,7 +114,7 @@ from prxref.forges.base import detect_forge
 from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
 from prxref.llm import ConfigError
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
-from prxref.rules import load_review_rules
+from prxref.rules import load_review_rules, load_scoped_rules
 from prxref.text_inputs import check_readable_path, decode_text
 from prxref.ticket import load_ticket_context
 from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
@@ -176,6 +182,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "team review rules (Markdown/text) added to every review prompt; "
             "overrides PRXREF_REVIEW_RULES, and '' turns it off for this run; "
             "read it from a trusted checkout, never from the PR under review"
+        ),
+    )
+    rev.add_argument(
+        "--scoped-rules",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path-scoped team review rules: a rules file, or a directory of "
+            "*.md rules files, each reaching only the chunks its applies_to: "
+            "globs match; repeatable; replaces PRXREF_SCOPED_RULES, and '' "
+            "turns it off for this run; read it from a trusted checkout, never "
+            "from the PR under review"
         ),
     )
     rev.add_argument(
@@ -487,7 +506,9 @@ def _print_summary(
     ``description=<status>`` and, when a cutoff was chosen,
     `` as_of=<time> (<source>)``.
     Under ``-v`` it adds the finding counts, the ``elapsed/tokens/cost`` line,
-    and one line for each configured input: ``rules:``, ``prompts:`` (the
+    and one line for each configured input: ``rules:``, ``scoped rules:``
+    (the number of scoped rules files, then ``<path>=<sha256 prefix>`` for
+    each in load order, then ``cap=<per-unit cap>``), ``prompts:`` (the
     directory, then ``<name>=<sha256 prefix>`` for each overridden template
     in name order), ``ticket:`` (with the active findings' scope counts), and
     ``spec:``. ``result`` may be partial, or not a dict at all; a missing or
@@ -528,6 +549,12 @@ def _print_summary(
             f"chars={_dash(rules.get('chars'))}{truncated}",
             file=target,
         )
+    scoped = record.get("scoped_rules")
+    if isinstance(scoped, dict):
+        files = scoped.get("files")
+        files = [info if isinstance(info, dict) else {} for info in files] if isinstance(files, list) else []
+        stamps = "".join(f" {_dash(info.get('path'))}={_dash(info.get('sha256'), 12)}" for info in files)
+        print(f"scoped rules: {len(files)} file(s){stamps} cap={_dash(scoped.get('max_chars'))}", file=target)
     prompts = record.get("prompt_templates")
     if isinstance(prompts, dict):
         templates = prompts.get("templates")
@@ -655,16 +682,18 @@ def _build_json_result(result: Any) -> dict:
     ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
-    ``prompt_templates``, then ``sampling`` and ``replay`` when present.
+    ``prompt_templates``, ``scoped_rules``, then ``sampling`` and ``replay``
+    when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
     to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
     run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) and
-    0.15's ``prompt_templates`` are always emitted and are ``null`` when their
-    feature is off; ``cost_usd`` is also ``null`` when no source could price
-    the run, never ``0``. Every ``findings`` row, active or dropped, carries
-    0.15's ``rule`` and ``locations`` the same way (see :func:`_finding_json`).
+    0.15's ``prompt_templates`` and ``scoped_rules`` are always emitted and
+    are ``null`` when their feature is off; ``cost_usd`` is also ``null``
+    when no source could price the run, never ``0``. Every ``findings`` row,
+    active or dropped, carries 0.15's ``rule`` and ``locations`` the same way
+    (see :func:`_finding_json`).
     ``sampling`` and ``replay`` are forwarded only when the result already
     carries them. ``replay`` is on replay runs only, so a normal run's
     payload has no ``replay`` key at all.
@@ -695,6 +724,7 @@ def _build_json_result(result: Any) -> dict:
         "spec_grounding": result.get("spec_grounding"),
         "size_advisory": result.get("size_advisory"),
         "prompt_templates": result.get("prompt_templates"),
+        "scoped_rules": result.get("scoped_rules"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1076,9 +1106,11 @@ def _resolve_description(
     return {"history": history, "cutoff": cutoff}, DescriptionPin("pinned", cutoff, source)
 
 
-def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> Any:
+def _load_text_input(loader: Any, path: str | list[str], *, max_chars: int, source: str) -> Any:
     """Run the rules or ticket-context ``loader``, fencing every failure into a ``ConfigError``.
 
+    ``path`` is handed to ``loader`` as given: one path for the rules and
+    ticket files, the configured list for the path-scoped rules.
     The loaders raise ``ConfigError`` naming ``source`` themselves; an
     ``OSError`` or ``ValueError`` that escapes one is re-raised as a
     ``ConfigError`` naming it too. So an unusable file always exits 2 before
@@ -1119,6 +1151,7 @@ def _run_review(
     trace_dir: str | None = None,
     spec_sources: list[str] | None = None,
     rules_file: str | None = None,
+    scoped_rules: list[str] | None = None,
     context_file: str | None = None,
     prompts_dir: str | None = None,
     base_sha: str | None = None,
@@ -1149,13 +1182,14 @@ def _run_review(
         ref = detect_forge(url)
         if ref is None:
             return None
-    # --max-chunks, --timeout, --spec, --rules-file, --context-file and
-    # --prompts-dir arrive as load_config overrides (None is ignored, "" is
-    # not), so each flag rides exactly the path its environment variable does:
-    # --max-chunks and --timeout are range-checked on the same pass as
-    # PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, --spec replaces
-    # PRXREF_SPEC_SOURCES wholesale rather than merging with it, and
-    # --rules-file "" / --context-file "" / --prompts-dir "" blank their
+    # --max-chunks, --timeout, --spec, --rules-file, --scoped-rules,
+    # --context-file and --prompts-dir arrive as load_config overrides (None is
+    # ignored, "" is not), so each flag rides exactly the path its environment
+    # variable does: --max-chunks and --timeout are range-checked on the same
+    # pass as PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, --spec and
+    # --scoped-rules replace PRXREF_SPEC_SOURCES / PRXREF_SCOPED_RULES
+    # wholesale rather than merging with them, and --rules-file "" /
+    # --scoped-rules "" / --context-file "" / --prompts-dir "" blank their
     # variable for one run. Precedence is derived once, here. There is
     # deliberately no way to inject a pre-built config dict: that would bypass
     # _check_ranges and make every range guarantee conditional on nobody using
@@ -1167,6 +1201,7 @@ def _run_review(
         trace_dir=trace_dir,
         spec_sources=spec_sources,
         review_rules=rules_file,
+        scoped_rules=scoped_rules,
         ticket_context_file=context_file,
         prompts_dir=prompts_dir,
         # The operator typed a flag, so a rejection has to name the flag. Only
@@ -1176,19 +1211,27 @@ def _run_review(
             "llm_timeout": "--timeout",
             "spec_sources": "--spec",
             "review_rules": "--rules-file",
+            "scoped_rules": "--scoped-rules",
             "ticket_context_file": "--context-file",
             "prompts_dir": "--prompts-dir",
         },
     )
-    # Both files and the prompts directory are read here, after config and
-    # before make_forge and the LLM client, so an unusable one exits 2 before
-    # any network I/O. load_config stays I/O-free. Each is reported under the
-    # input that supplied its path: the flag whenever it was given, else the
-    # variable.
+    # The rules files, the ticket file and the prompts directory are read
+    # here, after config and before make_forge and the LLM client, so an
+    # unusable one exits 2 before any network I/O. load_config stays I/O-free.
+    # Each is reported under the input that supplied its path: the flag
+    # whenever it was given, else the variable. The scoped rules are checked
+    # against the always-on file, so one team word mapped to two tiers across
+    # them exits 2 here rather than silently taking the scoped tier.
     rules = _load_text_input(
         load_review_rules, cfg["review_rules"],
         max_chars=cfg["review_rules_max_chars"],
         source="--rules-file" if rules_file is not None else "PRXREF_REVIEW_RULES",
+    )
+    scoped = _load_text_input(
+        functools.partial(load_scoped_rules, always_on=rules), cfg["scoped_rules"],
+        max_chars=cfg["review_rules_max_chars"],
+        source="--scoped-rules" if scoped_rules is not None else "PRXREF_SCOPED_RULES",
     )
     ticket = _load_text_input(
         load_ticket_context, cfg["ticket_context_file"],
@@ -1278,6 +1321,8 @@ def _run_review(
             if replay is not None else None
         ),
         prompts=prompts,
+        scoped_rules=scoped,
+        scoped_rules_max_chars=cfg["scoped_rules_max_chars"],
     )
 
 
@@ -1290,10 +1335,10 @@ def _webhook_handler(url: str) -> None:
 
     ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
     webhook: one static ticket file cannot describe every PR the daemon sees,
-    so its findings always carry scope ``unknown``. The team rules file and
-    the ``PRXREF_PROMPTS_DIR`` templates still come from the daemon's
-    environment, re-read on every webhook. The daemon passes no replay flag,
-    so it never replays.
+    so its findings always carry scope ``unknown``. The team rules file, the
+    ``PRXREF_SCOPED_RULES`` files and the ``PRXREF_PROMPTS_DIR`` templates
+    still come from the daemon's environment, re-read on every webhook. The
+    daemon passes no replay flag, so it never replays.
     """
     try:
         _run_review(url, post=True, context_file="")
@@ -1365,6 +1410,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             trace_dir=args.trace_dir,
             spec_sources=args.spec,
             rules_file=args.rules_file,
+            scoped_rules=args.scoped_rules,
             context_file=args.context_file,
             prompts_dir=args.prompts_dir,
             base_sha=args.base_sha,
