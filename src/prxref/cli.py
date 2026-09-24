@@ -1,9 +1,11 @@
 """prxref command-line interface.
 
-Provides three subcommands:
+Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
+  * ``eval run|score|compare`` — replay labelled cases, score the findings
+    against the human labels, and compare two scored runs (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
 
 ``review`` takes three optional inputs besides the PR itself, and they
@@ -229,6 +231,86 @@ def _build_parser() -> argparse.ArgumentParser:
         "--host",
         default="0.0.0.0",
         help="bind address (default 0.0.0.0)",
+    )
+
+    ev = sub.add_parser(
+        "eval", help="replay labelled cases, score them, and compare runs"
+    )
+    ev_sub = ev.add_subparsers(dest="eval_command")
+    eval_out = "./prxref-eval/"
+    ev_run = ev_sub.add_parser(
+        "run", help="replay every case and write one labelled run"
+    )
+    ev_run.add_argument(
+        "--cases",
+        required=True,
+        metavar="PATH",
+        help="the labelled cases: a cases.json file or a directory of case-*/ directories",
+    )
+    ev_run.add_argument(
+        "--label",
+        required=True,
+        metavar="NAME",
+        help=(
+            "name of this run and of its directory under --out; an existing "
+            "one is refused unless --resume is given"
+        ),
+    )
+    ev_run.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
+    )
+    ev_run.add_argument(
+        "--rules-file",
+        default=None,
+        metavar="PATH",
+        help="team review rules for every case, as review --rules-file",
+    )
+    ev_run.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue an existing --label run instead of refusing it",
+    )
+    ev_score = ev_sub.add_parser(
+        "score", help="grade a run against its human labels"
+    )
+    ev_score.add_argument(
+        "--label",
+        required=True,
+        metavar="NAME",
+        help="the run to score, under --out",
+    )
+    ev_score.add_argument(
+        "--judge-model",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "model that grades the labels without a must_match predicate, on "
+            "the review's own LLM backend; required when any label lacks one"
+        ),
+    )
+    ev_score.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
+    )
+    ev_cmp = ev_sub.add_parser(
+        "compare", help="compare two scored runs, label by label"
+    )
+    ev_cmp.add_argument(
+        "run_a", metavar="A", help="first run: a label under --out, or a run directory"
+    )
+    ev_cmp.add_argument(
+        "run_b", metavar="B", help="second run: a label under --out, or a run directory"
+    )
+    ev_cmp.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
     )
 
     tr = sub.add_parser("trace", help="work with a JSONL run trace")
@@ -935,6 +1017,26 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_eval(args: argparse.Namespace) -> int:
+    """Route ``eval run|score|compare`` to ``prxref.evals`` and return its exit code.
+
+    ``prxref.evals`` is imported here rather than at module top, because the
+    eval modules must never import the CLI back. A ``ConfigError`` from any
+    action exits 2, printed exactly as ``review`` prints one.
+    """
+    evals = importlib.import_module("prxref.evals")
+    action = {
+        "run": evals.eval_run,
+        "score": evals.eval_score,
+        "compare": evals.eval_compare,
+    }[args.eval_command]
+    try:
+        return action(args)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+
+
 def _cmd_trace_render(args: argparse.Namespace) -> int:
     """Render a JSONL trace to a self-contained HTML pipeline view.
 
@@ -975,6 +1077,11 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_review(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "eval":
+        if args.eval_command is not None:
+            return _cmd_eval(args)
+        parser.print_help(sys.stderr)
+        return 2
     if args.command == "trace":
         if args.trace_command == "render":
             return _cmd_trace_render(args)
