@@ -1,0 +1,56 @@
+diff --git a/db/changelog/003-idempotency-unique.sql b/db/changelog/003-idempotency-unique.sql
+new file mode 100644
+--- /dev/null
++++ b/db/changelog/003-idempotency-unique.sql
+@@ -0,0 +1,4 @@
++--liquibase formatted sql
++
++--changeset acme:3
++CREATE UNIQUE INDEX ux_idempotency_keys ON idempotency_keys (tenant_id, key);
+diff --git a/src/main/java/com/acme/connectors/TransportConfig.java b/src/main/java/com/acme/connectors/TransportConfig.java
+--- a/src/main/java/com/acme/connectors/TransportConfig.java
++++ b/src/main/java/com/acme/connectors/TransportConfig.java
+@@ -8,6 +8,15 @@
+  */
+ public record TransportConfig(String url, String legacyUrl) {
+
++    public TransportConfig {
++        boolean hasUrl = url != null;
++        boolean hasLegacyUrl = legacyUrl != null;
++        if (hasUrl == hasLegacyUrl) {
++            throw new IllegalArgumentException(
++                "exactly one of url or legacyUrl must be set");
++        }
++    }
++
+     public String effectiveUrl() {
+         return url != null ? url : legacyUrl;
+     }
+diff --git a/src/main/java/com/acme/connectors/ConnectorService.java b/src/main/java/com/acme/connectors/ConnectorService.java
+--- a/src/main/java/com/acme/connectors/ConnectorService.java
++++ b/src/main/java/com/acme/connectors/ConnectorService.java
+@@ -1,5 +1,8 @@
+ package com.acme.connectors;
+
++import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
+ import org.springframework.web.bind.annotation.RequestHeader;
+ import org.springframework.web.bind.annotation.RestController;
+
+@@ -10,4 +13,15 @@
+ public class ConnectorService {
+
+     private final Map<String, TransportConfig> transportsByKey = new ConcurrentHashMap<>();
++
++    @PostMapping("/connectors/{connectorId}/transports")
++    public TransportConfig createTransport(
++            @RequestHeader("X-Tenant-Id") String tenantId,
++            @PathVariable String connectorId,
++            @RequestBody CreateTransportRequest request) {
++        String idempotencyKey = tenantId + ":" + request.idempotencyKey();
++        TransportConfig config = new TransportConfig(request.url(), request.legacyUrl());
++        transportsByKey.put(idempotencyKey, config);
++        return config;
++    }
+ }
