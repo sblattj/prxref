@@ -4,9 +4,9 @@
 ``PRXREF_TICKET_CONTEXT_FILE`` ride the ``load_config`` override path (``""``
 blanks the variable for one run) and are loaded after config and before the
 forge and the LLM client exist. The replay flags are validated before the URL
-is even parsed. In this build all three fail closed: a configured path or any
-replay flag exits 2 naming the input that asked for it, so nothing configured
-is ever silently ignored.
+is even parsed. In this build the rules file and the replay flags fail closed,
+and a ticket file that cannot be read does too: each exits 2 naming the input
+that asked for it, so nothing configured is ever silently ignored.
 
 The daemon never reads a ticket file and says so once at startup. ``--spec``
 is proven end to end here: through the real orchestrator and the real
@@ -44,7 +44,7 @@ from tests.test_orchestrator import REF, FakeForge, _added_file_diff
 CLI_URL = "https://github.com/org/repo/pull/7"
 
 RULES_WIRED = "loading a team review-rules file is not wired in this build"
-TICKET_WIRED = "loading a ticket-context file is not wired in this build"
+TICKET_MISSING = "cannot read ticket-context file 'team.md': No such file or directory"
 REPLAY_WIRED = "replay mode is not wired in this build"
 
 NEW_KWARGS = (
@@ -107,13 +107,12 @@ def _assert_nothing_ran(rec) -> None:
 
 
 class TestStubLoaders:
-    """``rules`` and ``ticket`` fail closed in this build."""
+    """``rules`` fails closed in this build; ``ticket`` fails closed on a file
+    it cannot read."""
 
     LOADERS = [
         (load_review_rules, "--rules-file", RULES_WIRED),
         (load_review_rules, "PRXREF_REVIEW_RULES", RULES_WIRED),
-        (load_ticket_context, "--context-file", TICKET_WIRED),
-        (load_ticket_context, "PRXREF_TICKET_CONTEXT_FILE", TICKET_WIRED),
     ]
 
     @pytest.mark.parametrize("loader", [load_review_rules, load_ticket_context])
@@ -188,6 +187,15 @@ class TestStubLoaders:
         assert empty.record()["empty"] is True
         assert full.active is True
 
+    @pytest.mark.parametrize("source", ["--context-file", "PRXREF_TICKET_CONTEXT_FILE"])
+    def test_a_missing_ticket_path_fails_closed_naming_its_source(self, source, tmp_path):
+        missing = str(tmp_path / "input.md")
+        with pytest.raises(ConfigError) as exc:
+            load_ticket_context(missing, max_chars=100, source=source)
+        assert str(exc.value) == (
+            f"{source}: cannot read ticket-context file {missing!r}: No such file or directory"
+        )
+
     @pytest.mark.parametrize(("text", "ticks"), [
         ("plain", 3),
         ("has ``` inside", 4),
@@ -227,12 +235,14 @@ def _real_run(**kw):
 
 class TestStubSurfaceRidesTheRealPipeline:
     """The stub types satisfy the orchestrator's duck-typed surface: loaded
-    objects run the real pipeline, are recorded, and change no prompt."""
+    objects run the real pipeline, are recorded, and change no prompt. The
+    ticket is an EMPTY one, the only state that adds nothing to the prompts;
+    a ticket with text is proven in tests/test_issue_64_ticket_context.py."""
 
     def test_loaded_objects_are_recorded_and_change_no_prompt(self, tmp_path):
         rules = ReviewRules(path="r.md", body=cap_text("rules", 100), severity_map={})
         ticket = TicketContext(
-            path="t.md", capped=cap_text("ticket", 100), text="ticket",
+            path="t.md", capped=cap_text("", 100), text="",
             has_acceptance_criteria=False,
         )
         trace = tmp_path / "run.jsonl"
@@ -277,7 +287,7 @@ class TestParser:
 class TestRulesAndContextFailClosed:
     CASES = [
         ("--rules-file", "PRXREF_REVIEW_RULES", RULES_WIRED),
-        ("--context-file", "PRXREF_TICKET_CONTEXT_FILE", TICKET_WIRED),
+        ("--context-file", "PRXREF_TICKET_CONTEXT_FILE", TICKET_MISSING),
     ]
 
     @pytest.mark.parametrize(("flag", "env", "phrase"), CASES)
