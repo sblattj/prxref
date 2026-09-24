@@ -151,7 +151,7 @@ The container includes a built-in curl-free health check using Python standard l
 
 | Code | Meaning | Pipeline effect |
 |---|---|---|
-| `0` | The run finished. This **includes every review error**: a network failure, an LLM timeout, bad forge credentials, an unrecognized PR URL, or a review in which every chunk failed. An empty diff is not an error at all: it is reviewed as `Approved`. Diagnostics are printed to stderr. With `PRXREF_FAIL_ON` set to `error` or `any`, only a completed review whose active findings trip that policy, or a review that does not complete — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed) — exits `1` instead (next row). An empty PR diff is not a failure (verdict `Approved`, exit `0`). | Step stays green. |
+| `0` | The run finished. This **includes every review error**: a network failure, an LLM timeout, bad forge credentials, an unrecognized PR URL, or a review in which every chunk failed. Diagnostics are printed to stderr. With `PRXREF_FAIL_ON` set to `error` or `any`, only a completed review whose active findings trip that policy, or a review that does not complete — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed) — exits `1` instead (next row). An empty PR diff is not a failure (verdict `Approved`, exit `0`). | Step stays green. |
 | `1` | A **gated review outcome**, only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that does not complete also exits `1` — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed). An empty PR diff is not a failure (verdict `Approved`, exit `0`). The reason is printed to stderr. An unrecognized PR URL still exits `0`. | Step fails, because the lane opted in. |
 | `2` | A **usage or configuration error**: no subcommand, invalid arguments, or a required value missing, malformed, out of range, or outside its key's allowed vocabulary (`PRXREF_FAIL_ON` accepts only `never`, `error`, `any`). The message names the source that supplied it — the environment variable, or the CLI flag when a flag was what the operator typed. | Step fails. This is the intended failure: it means prxref was invoked wrong or is misconfigured, not that your code is bad. |
 
@@ -162,10 +162,10 @@ unrecognized PR URL 'https://github.com/org/repo/issues/42' — expected a Bitbu
 $ echo $?
 0
 
-# Every chunk failed — still exit 0 under the default PRXREF_FAIL_ON=never, and the forge gets an error notice
+# Both chunk workers failed; the sweep answered, but a sweep alone is not a review, so the verdict is Error — still exit 0 under the default PRXREF_FAIL_ON=never, and the forge gets an error notice
 $ prxref review --pr-url https://github.com/org/repo/pull/1
 verdict: Error
-coverage: 0/3 chunks reviewed
+coverage: 1/3 chunks reviewed
 $ echo $?
 0
 

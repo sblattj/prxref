@@ -333,5 +333,11 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   listing, any other failed blob fetch, and a listing longer than 50 pages. While the
   adapter was designed, a prototype of this method returned a PR's own diff from a
   public Azure DevOps Services project, and a probe there saw `true` leave out files
-  that `false` listed. This method itself has **not been run against a live server**;
-  its tests use recorded response shapes. Azure DevOps Server is untested, as above.
+  that `false` listed. On 2026-09-23 the shipped method was run live, read-only and with
+  no token, against a public Azure DevOps Services project. Given a PR's own target and
+  source commits, it returned the adapter's diff of that PR byte for byte, also for two
+  PRs whose target had gained a commit since they forked: for those, its file list
+  matched git's three-dot `target...source` diff, and the `false` listing named extra
+  files that it left out. A range whose two ends are the same commit returned empty
+  text. Beyond that run, its tests use recorded response shapes. Azure DevOps Server is
+  untested, as above.
