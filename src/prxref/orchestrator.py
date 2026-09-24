@@ -393,16 +393,18 @@ def orchestrate_review(
     size_ignore_globs: Sequence[str] = (),
     replay: Mapping[str, Any] | None = None,
     prompts: PromptTemplates | None = None,
+    scoped_rules: Any = None,
+    scoped_rules_max_chars: int = 24000,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
-    spec_grounding, size_advisory, prompt_templates}``, plus ``replay`` on a
-    replay run only.
+    spec_grounding, size_advisory, prompt_templates, scoped_rules}``, plus
+    ``replay`` on a replay run only.
     Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last seven keys are always present and are
+    :func:`_run_record`, so the last eight keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
@@ -528,6 +530,40 @@ def orchestrate_review(
     through the one :class:`reviewer.PromptContext`, and the ``summary``
     override is the template of every summary render, the empty-diff summary
     and the inline-accounting re-post included, but never of the error notice.
+
+    ``scoped_rules`` is the loaded path-scoped review rules
+    (:class:`prxref.rules.ScopedRules`, as
+    :func:`prxref.rules.load_scoped_rules` returns them, taken duck-typed
+    like ``rules``: ``record()``, ``files``, ``unit_block()`` and
+    ``merged_severity_map()``), and
+    ``scoped_rules_max_chars`` is the per-unit cap on their text
+    (``PRXREF_SCOPED_RULES_MAX_CHARS``; the default restates
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does). ``None`` turns them
+    off, and an unset run's prompts, posts, trace and logs are exactly a run
+    without it; its record differs only by the ``scoped_rules`` key, which is
+    ``None``. When set, each chunk's paths (every file's ``path``, plus its
+    ``old_path`` on a rename) select the chunk's rules through
+    :meth:`~prxref.rules.ScopedRules.unit_block`, with ``rules`` as the
+    always-on file, and that block replaces ``rules_worker`` in the chunk's
+    own copy of the :class:`reviewer.PromptContext`, on the first attempt and
+    on the timeout retry alike. The sweep's block, selected by the union of
+    the chunks' paths, replaces ``rules_sweep``. When the cap cuts or omits a
+    file in any unit, one WARNING for the run names
+    ``PRXREF_SCOPED_RULES_MAX_CHARS`` and every such file. The
+    severity-remapping pass applies
+    :meth:`~prxref.rules.ScopedRules.merged_severity_map` in place of the
+    rules' own map, so a scoped file's map applies with no always-on file.
+    The ``scoped_rules`` key of every exit is ``record()`` plus ``max_chars``
+    (this per-unit cap; each ``files`` row keeps its own per-file
+    ``max_chars``) and ``units``, which is ``{"chunks": [[<row>, ...], ...],
+    "sweep": [<row>, ...]}`` with one list per chunk in chunk order and one
+    ``{"path": ..., "chars": ...}`` row per scoped file the unit carries, in
+    load order, ``chars`` being that file's ``chars`` in ``files``; ``units``
+    is ``None`` on an exit before the units are planned (a forge, parse or
+    chunking failure, or the empty diff). ``record()`` plus ``max_chars`` is
+    the meta of one ``scoped_rules ok`` trace event, and the ``chunk start``
+    and ``sweep start`` events carry their unit's rows as ``rules``. A cap
+    below 1 is an error run, not a ``ValueError``, as ``max_chunks=0`` is.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -546,6 +582,7 @@ def orchestrate_review(
         "size_advisory": None,
         "replay": dict(replay) if replay is not None else None,
         "prompt_templates": None,
+        "scoped_rules": None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -556,6 +593,10 @@ def orchestrate_review(
         run_inputs["ticket_context"] = ticket.record()
     if prompts is not None:
         run_inputs["prompt_templates"] = prompts.record()
+    scoped_meta: dict[str, Any] | None = None
+    if scoped_rules is not None:
+        scoped_meta = {**scoped_rules.record(), "max_chars": scoped_rules_max_chars}
+        run_inputs["scoped_rules"] = {**scoped_meta, "units": None}
     summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
     ticket_note = ticket.note() if ticket is not None else ""
@@ -568,6 +609,8 @@ def orchestrate_review(
     )
     if run_inputs["review_rules"] is not None:
         tracer.event("rules", "ok", **run_inputs["review_rules"])
+    if scoped_meta is not None:
+        tracer.event("scoped_rules", "ok", **scoped_meta)
     if run_inputs["ticket_context"] is not None:
         tracer.event("ticket", "ok", **run_inputs["ticket_context"])
     if run_inputs["prompt_templates"] is not None:
@@ -669,6 +712,32 @@ def orchestrate_review(
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
         ), run_inputs)
+
+    # Planned once the chunks are final and before anything is written to the
+    # forge, so a degenerate cap is an error run that pruned nothing.
+    scoped_blocks: list[Any] | None = None
+    sweep_block: Any = None
+    if scoped_rules is not None:
+        try:
+            scoped_blocks, sweep_block = _scoped_unit_blocks(
+                scoped_rules, chunks, rules, max_chars=scoped_rules_max_chars,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("scoped rules failed: %s", e)
+            tracer.event("run", "fail", **_cost_meta(run_inputs))
+            return _run_record(_error_run(
+                forge, ref, post, 0, f"scoped rules failed: {e}", t0,
+                post_mode=post_mode, tracer=tracer, sampling=sampling,
+                cost_label=_cost_label(run_inputs, post_cost),
+            ), run_inputs)
+        run_inputs["scoped_rules"] = {
+            **run_inputs["scoped_rules"],
+            "units": {
+                "chunks": [_scoped_rows(block) for block in scoped_blocks],
+                "sweep": _scoped_rows(sweep_block),
+            },
+        }
+        _warn_scoped_cap(scoped_rules, [*scoped_blocks, sweep_block], scoped_rules_max_chars)
 
     # Pruned BEFORE the threads are listed, and both before the review units
     # run. The prune-then-list order is load-bearing: reading threads first
@@ -790,7 +859,7 @@ def orchestrate_review(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
         reader=reader, all_files=files, trace_dir=trace_dir,
-        prompt_context=prompt_context,
+        prompt_context=prompt_context, scoped_blocks=scoped_blocks,
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -803,7 +872,7 @@ def orchestrate_review(
             llm, files, pr, max_tokens=max_tokens,
             token_budget=token_budget, tracer=tracer, threads=threads,
             trace_dir=trace_dir,
-            prompt_context=prompt_context,
+            prompt_context=prompt_context, scoped_block=sweep_block,
         )
     )
 
@@ -887,9 +956,14 @@ def orchestrate_review(
     # FIRST among the passes: a team word the map knows ("blocker") would
     # otherwise die at the gate as an invalid severity, and consistency and
     # _origin_key both read the severity. 1:1 and order-preserving, so
-    # sweep_start still marks the boundary.
-    if rules is not None and rules.severity_map:
-        mapped = apply_severity_map(findings, rules.severity_map)
+    # sweep_start still marks the boundary. Scoped rules bring the run-wide
+    # merged map, which applies with or without an always-on file.
+    if scoped_rules is not None:
+        severity_map = scoped_rules.merged_severity_map(rules)
+    else:
+        severity_map = rules.severity_map if rules is not None else None
+    if severity_map:
+        mapped = apply_severity_map(findings, severity_map)
         remapped = sum(
             1
             for before, after in zip(findings, mapped, strict=True)
@@ -1400,12 +1474,72 @@ def _context_blocks(chunk, reader, *, include_definitions: bool) -> str:
         return ""
 
 
+def _scoped_unit_blocks(
+    scoped_rules: Any, chunks, always_on, *, max_chars: int,
+) -> tuple[list[Any], Any]:
+    """Build every review unit's scoped-rules block: one per chunk, in chunk order, then the sweep's.
+
+    A chunk's paths are each file's ``path`` plus its ``old_path``, so a rules
+    file scoped to a renamed file's old location still reaches it; the sweep's
+    paths are the union of the chunks' paths, which selects the union of the
+    chunks' files. ``always_on`` is the always-on rules file, or ``None``.
+    Raises what :meth:`prxref.rules.ScopedRules.unit_block` raises (a
+    ``max_chars`` below 1).
+    """
+    chunk_paths = [[p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks]
+    blocks = [
+        scoped_rules.unit_block("worker", paths, always_on, max_chars=max_chars)
+        for paths in chunk_paths
+    ]
+    sweep = scoped_rules.unit_block(
+        "sweep", [p for paths in chunk_paths for p in paths], always_on, max_chars=max_chars,
+    )
+    return blocks, sweep
+
+
+def _scoped_rows(block: Any) -> list[dict[str, Any]]:
+    """One unit's scoped files as ``{"path", "chars"}`` rows, in load order.
+
+    ``chars`` is the file's body length after its front matter, the same
+    number as its ``chars`` in :meth:`prxref.rules.ScopedRules.record`, so a
+    row joins its ``files`` row on ``path``. Shared by the run record and the
+    ``chunk start`` / ``sweep start`` trace events.
+    """
+    return [{"path": f.path, "chars": f.body.chars} for f in block.files]
+
+
+def _warn_scoped_cap(
+    scoped_rules: Any, blocks: Sequence[Any], max_chars: int,
+) -> None:
+    """Log ONE warning for the run when the per-unit cap cut or omitted any scoped file.
+
+    Names ``PRXREF_SCOPED_RULES_MAX_CHARS``, how many units it touched, and
+    the distinct truncated and omitted paths in load order. Silent when
+    every unit's scoped text fit.
+    """
+    cut = {block.truncated for block in blocks if block.truncated}
+    left_out = {path for block in blocks for path in block.omitted}
+    if not cut and not left_out:
+        return
+    order = [f.path for f in scoped_rules.files]
+    logger.warning(
+        "scoped rules exceed PRXREF_SCOPED_RULES_MAX_CHARS (%d characters per review unit) "
+        "in %d of %d review unit(s); truncated: %s; omitted: %s",
+        max_chars,
+        sum(1 for block in blocks if block.truncated or block.omitted),
+        len(blocks),
+        ", ".join(p for p in order if p in cut) or "none",
+        ", ".join(p for p in order if p in left_out) or "none",
+    )
+
+
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    scoped_blocks: Sequence[Any] | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -1442,6 +1576,7 @@ def _run_workers(
                 max_tokens, context_lines, tracer, reader, all_files,
                 trace_label=f"chunk{i}", trace_dir=trace_dir,
                 prompt_context=prompt_context,
+                scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -1573,9 +1708,16 @@ def _run_worker(
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
     *, prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    scoped_block: Any = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
+    # The chunk's own scoped rules replace the run-wide worker block; both
+    # attempts below take this context, so the retry keeps the chunk's rules.
+    unit_context = (
+        prompt_context if scoped_block is None
+        else replace(prompt_context, rules_worker=scoped_block.text)
+    )
     # Logged on ENTRY, not only on completion. A chunk that never finishes
     # otherwise leaves no evidence it ever started, so a hang cannot be
     # attributed to a chunk, a file, or a model.
@@ -1586,10 +1728,11 @@ def _run_worker(
     tracer.event(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
+        **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
     )
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
-        trace_label=trace_label, trace_dir=trace_dir, prompt_context=prompt_context,
+        trace_label=trace_label, trace_dir=trace_dir, prompt_context=unit_context,
     )
     if (
         res["error"]
@@ -1615,7 +1758,7 @@ def _run_worker(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,
             trace_label=trace_label, trace_dir=trace_dir,
-            prompt_context=prompt_context,
+            prompt_context=unit_context,
         )
 
     error = res["error"]
@@ -1658,6 +1801,7 @@ def _run_sweep(
     threads: Sequence[Thread] = (),
     trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    scoped_block: Any = None,
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -1673,10 +1817,15 @@ def _run_sweep(
     the context's ``rule_active`` is true. A failure is that
     shape with ``error`` set prefixed ``systemic sweep:``, so the
     partial-review banner names the unit that failed; it counts as one
-    failed chunk in the caller's coverage accounting.
+    failed chunk in the caller's coverage accounting. ``scoped_block``, the
+    sweep's path-scoped rules block, replaces ``rules_sweep`` in the context
+    and its files ride the ``sweep start`` event as ``rules``; ``None`` (no
+    scoped rules) leaves both exactly as they were.
     """
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
+    if scoped_block is not None:
+        prompt_context = replace(prompt_context, rules_sweep=scoped_block.text)
     digest = systemic.build_digest(files, token_budget)
     digested = {f.path for f in files}
     discussion = [t for t in threads if t.path in digested]
@@ -1687,6 +1836,7 @@ def _run_sweep(
     tracer.event(
         "sweep", "start", files=len(files), digest_chars=len(digest),
         threads=len(discussion),
+        **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
     )
     try:
         findings_raw, meta = reviewer.review_systemic(

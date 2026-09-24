@@ -915,6 +915,7 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
     params = inspect.signature(real).parameters
     expected = {name for name in params if name in config._DEFAULTS}
+    expected -= {"scoped_rules", "scoped_rules_max_chars"}  # P12-F wires them in cli and deletes this carve-out
     assert expected, "no orchestrate parameter is a config key, so the check is vacuous"
     ref = PRRef(
         forge="github", host="github.com", owner="org", repo="repo",
