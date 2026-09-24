@@ -28,6 +28,7 @@ import pytest
 
 from prxref import config, orchestrator, viz
 from prxref.llm import InvokeResult
+from prxref.reviewer import RULE_REQUEST
 from prxref.rules import ScopedRules, load_review_rules, load_scoped_rules
 from prxref.triage import build_chunks, parse_unified_diff
 from tests.test_orchestrator import REF, FakeForge, _added_file_diff, multi_chunk_diff
@@ -185,6 +186,13 @@ def _with_block(system: str, block: str) -> str:
     return f"{system}\n\n{block.strip()}" if block.strip() else system
 
 
+def _before_request(system: str, block: str) -> str:
+    """``system`` with ``block`` put in ahead of its trailing :data:`RULE_REQUEST`."""
+    head = system.removesuffix(f"\n\n{RULE_REQUEST}")
+    assert head != system, "the base run must carry the rule request"
+    return f"{_with_block(head, block)}\n\n{RULE_REQUEST}"
+
+
 def _rows(scoped: ScopedRules, *paths: str) -> list[dict]:
     by_path = {f.path: f for f in scoped.files}
     return [{"path": p, "chars": by_path[p].body.chars} for p in paths]
@@ -249,24 +257,29 @@ class TestUnsetRun:
 
     @pytest.mark.parametrize("with_always_on", [False, True])
     def test_a_scoped_set_that_reaches_no_unit_renders_the_unset_prompts(self, work, with_always_on):
-        """No file selected and no new severity word: every unit keeps the prompt it had without them."""
+        """No file selected and no new severity word: every unit keeps the prompt it had without them.
+
+        A loaded set still turns the per-rule cap on, so the base run turns grouping on for the same rule request.
+        """
         rules = _always_on(work) if with_always_on else None
         scoped = _scoped(work, {"docs.md": DOCS_MD}, always_on=rules)
-        base, base_forge, base_llm = _review(stack_diff(), rules=rules)
+        base, base_forge, base_llm = _review(stack_diff(), rules=rules, group_findings=True)
         res, forge, llm = _review(stack_diff(), rules=rules, scoped_rules=scoped)
         assert _units(llm) == _units(base_llm)
         assert DOCS_RULE not in "".join(system for system, _ in llm.calls)
         assert forge.summaries == base_forge.summaries
-        assert {k: v for k, v in res.items() if k != "scoped_rules"} == {
-            k: v for k, v in base.items() if k != "scoped_rules"
+        assert {k: v for k, v in res.items() if k not in ("scoped_rules", "rule_counts")} == {
+            k: v for k, v in base.items() if k not in ("scoped_rules", "rule_counts")
         }
         assert res["scoped_rules"]["units"] == {"chunks": [[], []], "sweep": []}
+        assert res["rule_counts"] == []
 
 
 class TestPerUnitSelection:
     def test_each_chunk_carries_only_its_own_rules_and_the_sweep_carries_both(self, work):
+        """The base run turns grouping on for the rule request the set's per-rule cap adds."""
         scoped = _scoped(work, {"java.md": JAVA_MD, "helm.md": HELM_MD})
-        _, _, base_llm = _review(stack_diff())
+        _, _, base_llm = _review(stack_diff(), group_findings=True)
         _, _, llm = _review(stack_diff(), scoped_rules=scoped)
         assert len(llm.calls) == 3
         (grouped, sweep), (base_grouped, base_sweep) = _units(llm), _units(base_llm)
@@ -278,9 +291,9 @@ class TestPerUnitSelection:
         java_block = scoped.unit_block("worker", JAVA_PATHS, None, max_chars=DEFAULT_CAP)
         helm_block = scoped.unit_block("worker", HELM_PATHS, None, max_chars=DEFAULT_CAP)
         sweep_block = scoped.unit_block("sweep", JAVA_PATHS + HELM_PATHS, None, max_chars=DEFAULT_CAP)
-        assert java_system == _with_block(base_grouped["java"][0][0], java_block.text)
-        assert helm_system == _with_block(base_grouped["helm"][0][0], helm_block.text)
-        assert sweep[0] == _with_block(base_sweep[0], sweep_block.text)
+        assert java_system == _before_request(base_grouped["java"][0][0], java_block.text)
+        assert helm_system == _before_request(base_grouped["helm"][0][0], helm_block.text)
+        assert sweep[0] == _before_request(base_sweep[0], sweep_block.text)
         assert (java_user, helm_user, sweep[1]) == (
             base_grouped["java"][0][1], base_grouped["helm"][0][1], base_sweep[1],
         )
@@ -294,8 +307,9 @@ class TestPerUnitSelection:
         [(helm_system, _)] = grouped["helm"]
         for system in (java_system, helm_system, sweep[0]):
             assert system.count(ALWAYS_RULE) == 1
-        assert java_system.endswith(scoped.unit_block("worker", JAVA_PATHS, rules, max_chars=DEFAULT_CAP).text)
-        assert helm_system.endswith(scoped.unit_block("worker", HELM_PATHS, rules, max_chars=DEFAULT_CAP).text)
+        for system, paths in ((java_system, JAVA_PATHS), (helm_system, HELM_PATHS)):
+            block = scoped.unit_block("worker", paths, rules, max_chars=DEFAULT_CAP).text
+            assert system.endswith(f"{block}\n\n{RULE_REQUEST}")
         assert JAVA_RULE not in helm_system and HELM_RULE not in java_system
 
     def test_a_rename_is_selected_by_its_old_path(self, work):

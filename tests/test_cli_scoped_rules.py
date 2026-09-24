@@ -309,7 +309,8 @@ class TestJson:
         payload = cli._build_json_result({"scoped_rules": {"entries": [], "files": []}, "sampling": {}})
         keys = list(payload)
         assert keys.index("scoped_rules") == keys.index("prompt_templates") + 1
-        assert keys[keys.index("scoped_rules") + 1] == "sampling"
+        assert keys[keys.index("scoped_rules") + 1] == "rule_counts"
+        assert keys.index("sampling") == keys.index("scoped_rules") + 2
 
     def test_the_key_is_null_for_a_pre_0_15_result(self):
         assert cli._build_json_result({})["scoped_rules"] is None
