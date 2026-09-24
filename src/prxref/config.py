@@ -97,9 +97,14 @@ LLM / pipeline:
                                 completed review carries an active
                                 error-severity finding; "any" exits 1 on
                                 any active finding. Under "error" and
-                                "any", a review that fails to complete
-                                also exits 1. The webhook daemon has no
-                                exit code and is unaffected.
+                                "any", a review that does not complete
+                                also exits 1: it crashes, or it ends with
+                                verdict "Error" (the forge could not be
+                                read, the diff could not be parsed or
+                                chunked, or every chunk review failed).
+                                An empty PR diff is not a failure
+                                (verdict "Approved", exit 0). The webhook
+                                daemon has no exit code and is unaffected.
   PRXREF_POST_MODE              What gets posted to the forge:
                                 "summary+inline" (default) | "summary" |
                                 "inline". Any other value is a
