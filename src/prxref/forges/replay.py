@@ -24,9 +24,11 @@ import email.policy
 import email.utils
 import re
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
-from .base import Forge, InlineComment, PRData, PRRef, Thread
+from .base import Forge, InlineComment, PRData, PRHistory, PRRef, Thread, _require_aware
 
 NEVER_POSTS = "replay runs never write to a forge"
 
@@ -253,3 +255,88 @@ class ReplayForge:
     def prune_inline_comments(self, *args: object, **kwargs: object) -> int:
         """Always raises ``RuntimeError``: a replay never writes to a forge."""
         raise RuntimeError(NEVER_POSTS)
+
+
+PinStatus = Literal["pinned", "live"]
+CutoffSource = Literal["flag", "first-review", "head-commit"]
+
+
+@dataclasses.dataclass(frozen=True)
+class PinnedMetadata:
+    """The title and description a replay shows, and whether they were pinned.
+
+    ``status`` is ``"pinned"`` when both are the ones in force at the cutoff,
+    and ``"live"`` when both are the PR's current ones because the history
+    could not answer. The title never has a status of its own: it is pinned
+    exactly when the description is.
+    """
+
+    title: str
+    description: str
+    status: PinStatus
+
+
+def pin_pr_metadata(
+    history: PRHistory, *, live_title: str, live_description: str, cutoff: datetime,
+) -> PinnedMetadata:
+    """Return the title and description in force at ``cutoff``, or the live ones.
+
+    The description in force is the last version, ordered by ``edited_at``
+    and never by position, whose ``edited_at`` is at or before the cutoff.
+    A complete history with no such version gives its oldest, which is the
+    original, so a cutoff before ``history.created_at`` clamps to the
+    original. With no versions at all, a complete history was never edited,
+    so ``live_description`` is the original and is ``pinned``.
+    The result is ``live``, with ``live_title`` and ``live_description``,
+    when the version in force has no text (deleted), or when an incomplete
+    history holds no version at or before the cutoff and so does not reach
+    it. When the description is pinned, the title is the ``previous_title``
+    of the first rename, ordered by ``created_at``, made strictly after the
+    cutoff, else ``live_title``.
+
+    Raises ``ValueError`` when ``cutoff`` is naive.
+    """
+    _require_aware(cutoff, "cutoff")
+    live = PinnedMetadata(title=live_title, description=live_description, status="live")
+    versions = sorted(history.description_versions, key=lambda version: version.edited_at)
+    if versions:
+        reached = [version for version in versions if version.edited_at <= cutoff]
+        if reached:
+            in_force = reached[-1]
+        elif history.complete:
+            in_force = versions[0]
+        else:
+            return live
+        if in_force.text is None:
+            return live
+        description = in_force.text
+    elif history.complete:
+        description = live_description
+    else:
+        return live
+    renames = sorted(history.title_renames, key=lambda rename: rename.created_at)
+    title = next((rename.previous_title for rename in renames if rename.created_at > cutoff), live_title)
+    return PinnedMetadata(title=title, description=description, status="pinned")
+
+
+def choose_cutoff(as_of: datetime | None, history: PRHistory | None) -> tuple[datetime, CutoffSource] | None:
+    """Return the replay cutoff and where it came from, or ``None`` when nothing gives one.
+
+    The ladder is ``as_of`` (``"flag"``, from ``--as-of``), else the
+    history's ``first_review_at`` (``"first-review"``), else its
+    ``head_committed_at`` (``"head-commit"``). ``history`` is ``None`` for a
+    forge with no ``get_pr_history``, which leaves only the flag. The cutoff
+    is returned as given, unclamped; ``pin_pr_metadata`` clamps it.
+
+    Raises ``ValueError`` when ``as_of`` is naive.
+    """
+    if as_of is not None:
+        _require_aware(as_of, "as_of")
+        return as_of, "flag"
+    if history is None:
+        return None
+    if history.first_review_at is not None:
+        return history.first_review_at, "first-review"
+    if history.head_committed_at is not None:
+        return history.head_committed_at, "head-commit"
+    return None
