@@ -582,6 +582,28 @@ SCOPED_RULES_MAX_FILES = 50
 
 
 @dataclass(frozen=True)
+class ScopedBlock:
+    """One review unit's team-rules block, as :meth:`ScopedRules.unit_block` builds it.
+
+    ``text`` is the system-prompt block (``""`` adds nothing). ``files`` holds
+    the scoped files the block carries, in load order: every selected file
+    that was not omitted, the truncated one included. ``truncated`` is the
+    path of the file the per-unit cap cut short, or ``None``; ``omitted``
+    holds the paths of the selected files the cap left out entirely, in load
+    order.
+
+    Building a block logs nothing. The orchestrator reads ``truncated`` and
+    ``omitted`` across every unit of a run and logs one WARNING for the run
+    when any unit reports either, naming ``PRXREF_SCOPED_RULES_MAX_CHARS``.
+    """
+
+    text: str
+    files: tuple[ReviewRules, ...] = ()
+    truncated: str | None = None
+    omitted: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ScopedRules:
     """Path-scoped team review rules, as :func:`load_scoped_rules` loads them.
 
@@ -598,11 +620,177 @@ class ScopedRules:
     unit. ``severity_map`` merges the files' maps, each team word at its
     first position in load order; no two files map one word to different
     tiers.
+
+    The orchestrator reads :meth:`select` and :meth:`unit_block` per review
+    unit, :meth:`merged_severity_map` for the severity-remapping pass, and
+    :meth:`record` for the run record.
     """
 
     entries: tuple[str, ...]
     files: tuple[ReviewRules, ...]
     severity_map: Mapping[str, str]
+
+    def select(self, paths: Sequence[str]) -> tuple[ReviewRules, ...]:
+        """The files that reach a review unit whose diff touches ``paths``, in load order.
+
+        A file with no ``applies_to`` reaches every unit, even one with no
+        paths. Any other file is selected when :func:`match_globs` selects at
+        least one of ``paths`` with its ``applies_to``, so a ``!`` pattern
+        vetoes only the paths it matches. A chunk's paths are the ``path`` of
+        each of its files plus the ``old_path`` of a renamed one, so a rules
+        file scoped to a file's old location still reaches the rename; the
+        sweep's paths are the union of every chunk's, which selects the union
+        of the chunks' files. A bare string counts as one path, and empty or
+        ``None`` entries are skipped, so a caller may pass ``(f.path,
+        f.old_path)`` for every file.
+        """
+        if isinstance(paths, str):
+            paths = (paths,)
+        wanted = tuple(path for path in paths if path)
+        return tuple(
+            rules for rules in self.files
+            if rules.applies_to is None or any(match_globs(path, rules.applies_to) for path in wanted)
+        )
+
+    def merged_severity_map(self, always_on: ReviewRules | None) -> dict[str, str]:
+        """The run-wide severity map: the always-on file's map, then the scoped files' map.
+
+        ``always_on`` is the loaded ``PRXREF_REVIEW_RULES`` file, or ``None``.
+        The result is ``{**always_on.severity_map, **self.severity_map}``, a
+        new plain dict: always-on words first in their order, then the words
+        only scoped files map, in load order. It is what the orchestrator's
+        severity-remapping pass applies, so a scoped file's map applies even
+        when no always-on file is set. It is conflict-free when the same
+        ``always_on`` was passed to :func:`load_scoped_rules`, which refuses
+        a word the two map to different tiers.
+        """
+        always_map = dict(always_on.severity_map or {}) if always_on is not None else {}
+        return {**always_map, **self.severity_map}
+
+    def unit_block(
+        self, unit: str, paths: Sequence[str], always_on: ReviewRules | None, *, max_chars: int
+    ) -> ScopedBlock:
+        """Build the team-rules block for one review unit (``"worker"`` or ``"sweep"``).
+
+        ``paths`` are the unit's diff paths, passed to :meth:`select` (for the
+        sweep, the union of every chunk's paths). ``always_on`` is the loaded
+        ``PRXREF_REVIEW_RULES`` file, or ``None``. ``max_chars`` is the
+        per-unit cap on scoped-rules text, ``PRXREF_SCOPED_RULES_MAX_CHARS``.
+
+        When no scoped file is selected and :meth:`merged_severity_map` equals
+        the always-on map (no scoped file maps a word the always-on file does
+        not), the text is exactly ``always_on.prompt_block(unit)``, or ``""``
+        with no always-on file, so a unit the scoped rules do not reach gets
+        the prompt it had without them.
+
+        Otherwise the block is the always-on file's
+        :meth:`ReviewRules.prompt_block` rendered with the merged map: one
+        :data:`RULES_HEADING`, the unit's framing paragraph, one severity
+        paragraph over the merged map (omitted when it is empty), then the
+        always-on body in ``<team_rules>`` and its truncation line. Each
+        selected scoped file follows in load order as ``<team_rules
+        source="<path>" applies_to="<glob>, <glob>">``, the ``applies_to``
+        attribute left out for a file that reaches every unit and ``&`` and
+        ``"`` in either value written as ``&amp;`` and ``&quot;``. A file with
+        an empty body adds no element; its map is already in the severity
+        paragraph. A scoped word the always-on file also maps adds nothing to
+        that paragraph. The text is ``""`` when the block would hold no map
+        and no rules text.
+
+        The cap counts scoped body characters only, not the always-on body
+        (capped per file on its own) or the tags. Whole files go in while
+        they fit, and one that fits exactly is not cut. The first file that
+        does not fit is truncated to the room left and followed by the same
+        truncation line a file cut by ``PRXREF_REVIEW_RULES_MAX_CHARS`` gets;
+        when no room is left at all, it is omitted instead. Every later file
+        with a body is omitted, and one marker naming the omitted paths
+        closes the block. Pure: it logs nothing (see :class:`ScopedBlock`).
+        Any other ``unit``, or ``max_chars`` below 1, raises ``ValueError``.
+        """
+        if unit not in _FRAMING:
+            raise ValueError(f"unit must be one of {', '.join(_UNITS)}, got {unit!r}")
+        if max_chars < 1:
+            raise ValueError(f"max_chars must be at least 1, got {max_chars!r}")
+        selected = self.select(paths)
+        always_map = dict(always_on.severity_map or {}) if always_on is not None else {}
+        merged = self.merged_severity_map(always_on)
+        if not selected and merged == always_map:
+            return ScopedBlock(always_on.prompt_block(unit) if always_on is not None else "")
+        body = always_on.body if always_on is not None else _NO_BODY
+        head = ReviewRules(path="", body=body, severity_map=merged).prompt_block(unit)
+        parts: list[str] = []
+        files: list[ReviewRules] = []
+        omitted: list[str] = []
+        truncated: str | None = None
+        room = max_chars
+        for rules in selected:
+            text = rules.body.text
+            if text and not room:
+                omitted.append(rules.path)
+                continue
+            files.append(rules)
+            if not text:
+                continue
+            shown = text[:room]
+            parts.append(_team_rules_element(rules, shown))
+            if len(shown) < len(text):
+                truncated = rules.path
+            if len(shown) < len(text) or rules.body.truncated:
+                parts.append(_truncation_note(len(shown), rules.body.chars))
+            room -= len(shown)
+        if omitted:
+            parts.append(
+                f"[team rules omitted: {', '.join(omitted)} (over the {max_chars}-character limit "
+                "on scoped rules for one review unit)]"
+            )
+        if parts:
+            head = head or f"{RULES_HEADING}\n\n{_FRAMING[unit]}"
+            text = "\n\n".join([head, *parts])
+        else:
+            text = head
+        return ScopedBlock(text, tuple(files), truncated, tuple(omitted))
+
+    def record(self) -> dict[str, object]:
+        """Return the run-record view, JSON-native values only and never the rules text.
+
+        The shape is ``{"entries": [<entry>, ...], "files": [<file>, ...]}``.
+        ``entries`` lists the configured entries as given, blank ones
+        dropped. ``files`` has one object per loaded file in load order: the
+        keys of :meth:`ReviewRules.record` (``path``, ``sha256``, ``chars``,
+        ``max_chars``, ``truncated``, ``severity_map``) followed by
+        ``applies_to``, the file's globs as a list in file order, ``!``
+        patterns kept, or ``null`` when the file reaches every unit.
+        ``files`` is ``[]`` when the configured directories hold no rules
+        file. The per-unit cap and the per-unit selections are not part of
+        it.
+        """
+        return {
+            "entries": list(self.entries),
+            "files": [
+                {**rules.record(), "applies_to": list(rules.applies_to) if rules.applies_to is not None else None}
+                for rules in self.files
+            ],
+        }
+
+
+_NO_BODY = CappedText(text="", sha256="", chars=0, truncated=False, max_chars=1)
+
+
+def _team_rules_element(rules: ReviewRules, text: str) -> str:
+    """Wrap ``text``, a scoped file's body or its first part, in its ``<team_rules>`` element."""
+    attributes = f' source="{_attribute(rules.path)}"'
+    if rules.applies_to is not None:
+        attributes += f' applies_to="{_attribute(", ".join(rules.applies_to))}"'
+    return f"<team_rules{attributes}>\n{text}\n</team_rules>"
+
+
+def _attribute(value: str) -> str:
+    return value.replace("&", "&amp;").replace('"', "&quot;")
+
+
+def _truncation_note(shown: int, chars: int) -> str:
+    """The line :meth:`ReviewRules.prompt_block` writes after a truncated body."""
+    return f"[team rules truncated: only the first {shown} of {chars} characters are shown]"
 
 
 def load_scoped_rules(
