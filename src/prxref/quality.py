@@ -1,8 +1,11 @@
 """Deterministic quality passes over worker findings.
 
-Thirteen passes run before posting, in the order ``orchestrate_review``
+Sixteen passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map. A fourteenth deterministic check, the release-shaped-PR
+severity map, pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 13 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A seventeenth
+deterministic check, the release-shaped-PR
 heuristic, is not a pass at all: ``heuristics.release_shape_findings``
 ADDS a finding before pass 1 and it then flows through every pass below
 exactly like a model finding. Every ``drop_reason`` prefix these passes
@@ -23,11 +26,20 @@ emit is tabulated for operators in ``docs/quality.md``.
    map, so ``apply_severity_consistency`` never raises a same-title
    sibling to ``spec`` on the strength of an ungrounded label. It drops
    nothing.
-3. ``apply_location_validation``: drop findings whose ``file`` names no
+3. ``apply_example_echo_check``: drop a finding whose normalized title
+   equals the title of an example finding in the worker or sweep prompt
+   template in force for the run, packaged or overridden
+   (``echoes the prompt's example: "<title>"``): the model copied the
+   output example rather than reporting a defect. It is the first pass that
+   drops, so an echo never reaches a thread, consistency or grouping
+   comparison, a cap, or sweep dedup, and its audit copy keeps the model's
+   own anchor. The match is exact, so a title that only resembles an
+   example stays.
+4. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-4. ``apply_manifest_claim_check``: for findings on a manifest or
+5. ``apply_manifest_claim_check``: for findings on a manifest or
    npm-family lockfile (``package.json``, ``bun.lock``, ...), drop a
    claim whose named dependency is not the key on the anchored line
    (``anchor mismatch:``) or sits under a different dependency section
@@ -35,7 +47,7 @@ emit is tabulated for operators in ``docs/quality.md``.
    own hunk holds no section header, the served full-file lines decide
    the enclosing section. It runs BEFORE ``apply_line_align`` so it
    reads the model's raw anchor.
-5. ``apply_line_align``: a line explicitly cited in the finding's own
+6. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
    line lands on an added line — or a context line within tolerance of
@@ -51,45 +63,75 @@ emit is tabulated for operators in ``docs/quality.md``.
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-6. ``apply_thread_dedup``: drop findings that duplicate an already-open
+7. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``.
-7. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+8. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing thread already argued out — same path plus shared
    distinctive tokens, with NO line test, because line alignment has already
    demoted a file-level finding to line 0 by this point
    (``settled in thread: <author>``).
-8. ``apply_severity_consistency``: findings sharing one normalized title —
+9. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-9. ``apply_removal_claim_check``: drop findings whose removal verb governs
-   a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
-   path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
-   header produces when a worker reads a copy as a move (issue #03).
-   Only a claim that NAMES a diff path is judged, so a finding about a
-   removed guard or constant is untouched.
-10. ``apply_hedge_gate``: drop findings whose title or body conditions the
+10. ``apply_removal_claim_check``: drop findings whose removal verb governs
+    a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
+    path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
+    header produces when a worker reads a copy as a move (issue #03).
+    Only a claim that NAMES a diff path is judged, so a finding about a
+    removed guard or constant is untouched.
+11. ``apply_hedge_gate``: drop findings whose title or body conditions the
     defect on a precondition the worker never established from the diff
     ("If X still leases a client", "unless the backfill already ran"),
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-11. ``apply_quality_gate``: drop findings below the confidence floor
+12. ``apply_rule_grouping``: fold chunk findings in one file that name the
+    same ``rule`` (casefolded), or that name none and share a normalized
+    title, into one finding at the group's smallest positive line, with
+    the group's highest severity and highest confidence and an
+    ``Also at: `<file>:<line>`, ...`` paragraph listing the other lines;
+    the other members are dropped as ``grouped into <file>:<line>``. Sweep
+    findings are never grouped. It runs before the gate, so the caps count
+    groups rather than lines.
+13. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+    chunk findings per ``rule`` (casefolded), or per normalized title for
+    findings that name none, across every file of the review. The kept
+    findings are the most severe, then the most confident; the rest are
+    folded onto the first of them, whose ``locations`` and ``Also at:``
+    paragraph list theirs (at most five named, then ``(+N more)``), and
+    are dropped as ``rule cap exceeded (max N): listed at <file>:<line>``.
+    Sweep findings are never capped. It runs only when the caller turns
+    it on: a team rules file is loaded and the cap is above 0. It runs
+    after grouping, so a group counts once, and before the gate, so the
+    severity caps count what it kept.
+14. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
-    (``error cap exceeded (max N)``), and enforce the
+    (``error cap exceeded (max N)``), optionally cap warnings and
+    outofscope findings the same way (``warning cap exceeded (max N)``,
+    ``outofscope cap exceeded (max N)``), and enforce the
     {error, warning, spec, outofscope} severity vocabulary
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-12. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+15. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
-    duplicate and then die at the gate itself.
-13. ``apply_containment_note``: a finding that asserts a throw, panic,
+    duplicate and then die at the gate itself. With a similarity
+    threshold set, a second tier then drops reworded restatements: two
+    active findings in the same file on the same line (line 0 is never
+    compared) whose titles pass ``titles_similar``
+    (``duplicate of chunk finding (reworded, similarity 0.57)``, or
+    ``duplicate of sweep finding ...`` between two sweep findings).
+    Across the boundary the chunk copy always survives and a sweep copy
+    is dropped only when it is no more severe; on one side the more
+    severe, then higher-confidence, copy is kept. Without a threshold
+    the tier does not run.
+16. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -102,11 +144,12 @@ so review runstores and logs can explain every filter decision. Use
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -1012,6 +1055,82 @@ def normalize_title(title: str) -> str:
     return " ".join(trimmed.split())
 
 
+_TITLE_WORD_RE = re.compile(r"[a-z0-9]+")
+
+_TITLE_TOKEN_MIN_LEN = 3
+
+_TITLE_STOPWORDS: frozenset[str] = frozenset({
+    "the", "and", "but", "for", "nor", "with", "without", "within", "into",
+    "onto", "from", "via", "per", "instead", "rather", "than", "then",
+    "that", "this", "these", "those", "its", "their", "when", "where",
+    "which", "while", "can", "could", "should", "would", "must", "may",
+    "might", "will", "are", "was", "were", "been", "being", "has", "have",
+    "had", "does", "did",
+    "use", "uses", "using", "replace", "add", "restore", "missing",
+    "remove", "avoid", "ensure", "consider", "prefer", "fix", "make",
+    "potential", "possible", "possibly", "likely",
+})
+
+TITLE_MIN_SHARED_TOKENS: int = 3
+"""Fewest distinct title tokens two findings must share to count as similar.
+
+Jaccard alone over-merges short titles: "SQL injection" against "SQL
+injection in search query" scores exactly 0.5 while naming only two
+words. Requiring three shared tokens keeps such a pair apart and still
+admits every reworded duplicate measured for issue #10, which share
+four or five.
+"""
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Content words of a finding title, for reworded-duplicate scoring.
+
+    The ASCII ``[a-z0-9]+`` words of :func:`normalize_title`, at least
+    three characters long, minus English function words and the generic
+    remedy verbs and hedges (``use``, ``replace``, ``add``, ``restore``,
+    ``missing``, ``potential``) that reworded titles swap freely. Hyphens
+    and other punctuation split words, so ``string-literal`` and
+    ``string literal`` yield the same tokens. Deliberately separate from
+    :func:`_tokens`: its stopword list drops ``null`` and ``string`` and
+    its four-character floor drops ``key``, which are exactly the words
+    that tell two same-line titles apart.
+    """
+    return {
+        word
+        for word in _TITLE_WORD_RE.findall(normalize_title(title))
+        if len(word) >= _TITLE_TOKEN_MIN_LEN and word not in _TITLE_STOPWORDS
+    }
+
+
+def title_similarity(a: str, b: str) -> tuple[float, int]:
+    """Score how closely two finding titles restate one problem.
+
+    Returns ``(jaccard, shared)``: the Jaccard index of the two titles'
+    :func:`_title_tokens` sets and the number of distinct tokens they
+    share. Two titles with no tokens between them score ``(0.0, 0)``.
+    Symmetric in its arguments and a pure function of the two strings.
+    """
+    tokens_a = _title_tokens(a)
+    tokens_b = _title_tokens(b)
+    shared = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    if union == 0:
+        return 0.0, 0
+    return shared / union, shared
+
+
+def titles_similar(a: str, b: str, threshold: float) -> bool:
+    """Return True when two finding titles are reworded restatements.
+
+    Similar means :func:`title_similarity` reaches ``threshold`` on the
+    Jaccard index AND the titles share at least
+    :data:`TITLE_MIN_SHARED_TOKENS` tokens. The token floor is what keeps
+    a short title from merging into any longer one that contains it.
+    """
+    jaccard, shared = title_similarity(a, b)
+    return jaccard >= threshold and shared >= TITLE_MIN_SHARED_TOKENS
+
+
 def finding_sort_key(finding: Finding) -> tuple[str, int, str]:
     """Content-derived ordering key for a finding: ``(file, line, title)``.
 
@@ -1045,7 +1164,10 @@ logger = logging.getLogger(__name__)
 
 
 def apply_sweep_dedup(
-    findings: Sequence[Finding], sweep_start: int
+    findings: Sequence[Finding],
+    sweep_start: int,
+    *,
+    similarity: float | None = None,
 ) -> list[Finding]:
     """Drop systemic-sweep findings that restate a chunk finding.
 
@@ -1055,8 +1177,45 @@ def apply_sweep_dedup(
     finding adds no recall — it is the same pattern the chunk seat already
     reported — and is dropped with ``drop_reason="duplicate of chunk
     finding"``, the same retained-not-silenced convention every other pass
-    uses. Chunk findings are never dropped by this pass, even when the sweep
-    phrased the pattern first: the chunk seat cited the exact line.
+    uses. A sweep finding never causes a chunk finding to be dropped, even
+    when the sweep phrased the pattern first: the chunk seat cited the exact
+    line.
+
+    A chunk finding that :func:`apply_rule_grouping` folded into its group
+    (``drop_reason`` ``grouped into <file>:<line>``) still adds its key: its
+    location is listed on the group's representative, so a sweep copy that
+    restates it adds no recall either, and the key set is the same whether
+    grouping ran before this pass or not. A member adds its key even when a
+    cap later drops its representative. So does a chunk finding
+    :func:`apply_rule_cap` folded (``drop_reason`` ``rule cap exceeded (max
+    <n>): listed at <file>:<line>``), whose location the best kept finding
+    of its rule now lists.
+
+    ``similarity`` switches on a second, reworded tier that runs after the
+    exact tier; ``None`` (the default) skips it entirely, so the pass is
+    the exact tier alone. The tier compares findings that are still active,
+    in the same file and on the same line; a line-0 (file-level) finding is
+    never compared. Two such findings are duplicates when
+    :func:`titles_similar` holds at ``similarity``.
+
+    - Across the chunk/sweep boundary the chunk copy always survives. The
+      sweep copy is dropped only when its severity is no higher than the
+      chunk copy's; a MORE severe sweep copy is kept alongside it, so the
+      tier can never lower a review's worst severity. Confidence plays no
+      part here.
+    - Between two findings on the same side (chunk vs chunk, or sweep vs
+      sweep), the more severe one is kept, then the one ranked first by
+      :func:`finding_rank_key`: higher confidence, then content.
+
+    Chunk findings are settled among themselves first; each sweep finding
+    is then compared with the chunk copies kept on its line before the
+    sweep copies kept there. A finding is only ever compared with copies
+    already kept, in a fixed content order, so the result does not depend
+    on input order and a dropped copy never drops a third. The dropped
+    copy's ``drop_reason`` names the side of the copy it restates and the
+    :func:`title_similarity` Jaccard score to two decimals:
+    ``duplicate of chunk finding (reworded, similarity 0.57)`` or
+    ``duplicate of sweep finding (reworded, similarity 0.57)``.
 
     Runs after :func:`apply_quality_gate`, so the duplicate set is built
     from chunk findings that SURVIVED it — a sub-floor chunk finding never
@@ -1071,6 +1230,8 @@ def apply_sweep_dedup(
         (f.file, normalize_title(f.title))
         for f in findings[:start]
         if f.drop_reason is None
+        or f.drop_reason.startswith(GROUPED_INTO_PREFIX)
+        or f.drop_reason.startswith(RULE_CAP_PREFIX)
     }
     result: list[Finding] = []
     for i, f in enumerate(findings):
@@ -1082,6 +1243,88 @@ def apply_sweep_dedup(
             result.append(replace(f, drop_reason="duplicate of chunk finding"))
         else:
             result.append(f)
+    if similarity is None:
+        return result
+    return _dedup_reworded(result, start, similarity)
+
+
+def _reworded_severity_rank(finding: Finding) -> int:
+    severity = (finding.severity or "").strip().lower()
+    return _SEVERITY_RANK.get(severity, len(_SEVERITY_RANK))
+
+
+def _reworded_keep_key(
+    finding: Finding,
+) -> tuple[int, tuple[float, str, int, str], str]:
+    return (
+        _reworded_severity_rank(finding),
+        finding_rank_key(finding),
+        repr(finding),
+    )
+
+
+def _first_reworded_match(
+    findings: Sequence[Finding],
+    candidate: int,
+    kept: Sequence[int],
+    threshold: float,
+) -> float | None:
+    title = findings[candidate].title or ""
+    for k in kept:
+        kept_title = findings[k].title or ""
+        if titles_similar(title, kept_title, threshold):
+            return title_similarity(title, kept_title)[0]
+    return None
+
+
+def _reworded_drop(finding: Finding, side: str, jaccard: float) -> Finding:
+    return replace(
+        finding,
+        drop_reason=f"duplicate of {side} finding (reworded, similarity {jaccard:.2f})",
+    )
+
+
+def _dedup_reworded(
+    findings: list[Finding], start: int, threshold: float
+) -> list[Finding]:
+    lines: dict[tuple[str, int], list[int]] = {}
+    for i, f in enumerate(findings):
+        if f.drop_reason is None and (f.line or 0) > 0:
+            lines.setdefault((f.file, f.line), []).append(i)
+    result = list(findings)
+    for indices in lines.values():
+        if len(indices) < 2:
+            continue
+        chunk_side = sorted(
+            (i for i in indices if i < start),
+            key=lambda i: _reworded_keep_key(findings[i]),
+        )
+        sweep_side = sorted(
+            (i for i in indices if i >= start),
+            key=lambda i: _reworded_keep_key(findings[i]),
+        )
+        kept_chunk: list[int] = []
+        for i in chunk_side:
+            jaccard = _first_reworded_match(findings, i, kept_chunk, threshold)
+            if jaccard is None:
+                kept_chunk.append(i)
+            else:
+                result[i] = _reworded_drop(findings[i], "chunk", jaccard)
+        kept_sweep: list[int] = []
+        for i in sweep_side:
+            rank = _reworded_severity_rank(findings[i])
+            at_least_as_severe = [
+                k for k in kept_chunk if _reworded_severity_rank(findings[k]) <= rank
+            ]
+            jaccard = _first_reworded_match(findings, i, at_least_as_severe, threshold)
+            if jaccard is not None:
+                result[i] = _reworded_drop(findings[i], "chunk", jaccard)
+                continue
+            jaccard = _first_reworded_match(findings, i, kept_sweep, threshold)
+            if jaccard is None:
+                kept_sweep.append(i)
+            else:
+                result[i] = _reworded_drop(findings[i], "sweep", jaccard)
     return result
 
 
@@ -1544,6 +1787,24 @@ def _resolve_max_errors(explicit: int | None) -> int:
     return DEFAULT_MAX_ERRORS
 
 
+def _apply_severity_cap(staged: list[Finding], severity: str, cap: int) -> None:
+    active_indices: list[int] = [
+        i for i, f in enumerate(staged)
+        if f.drop_reason is None and f.severity == severity
+    ]
+
+    if len(active_indices) > cap:
+        ranked = sorted(
+            active_indices,
+            key=lambda idx: finding_rank_key(staged[idx]),
+        )
+        for dropped_idx in ranked[cap:]:
+            staged[dropped_idx] = replace(
+                staged[dropped_idx],
+                drop_reason=f"{severity} cap exceeded (max {cap})",
+            )
+
+
 def _hedge_span(text: str) -> str | None:
     for _name, pattern in HEDGE_RULES:
         m = pattern.search(text)
@@ -1626,13 +1887,412 @@ def apply_hedge_gate(
     return out
 
 
+GROUPED_INTO_PREFIX: str = "grouped into "
+"""``drop_reason`` prefix of a finding :func:`apply_rule_grouping` folded away.
+
+The full reason is ``grouped into <file>:<line>``, naming the location of
+the representative that now lists the finding's own location.
+"""
+
+RULE_CAP_PREFIX: str = "rule cap exceeded "
+"""``drop_reason`` prefix of a finding :func:`apply_rule_cap` folded away.
+
+The full reason is ``rule cap exceeded (max <n>): listed at <file>:<line>``,
+naming the per-rule cap and the location of the best kept finding of the
+rule, whose ``locations`` and ``Also at:`` paragraph now list the folded
+finding's own location.
+"""
+
+RULE_CAP_LISTED_LOCATIONS: int = 5
+"""Most locations the ``Also at:`` paragraph of :func:`apply_rule_cap` names.
+
+Any further ones are counted in a `` (+<k> more)`` suffix; the kept
+finding's ``locations`` carries every one of them.
+"""
+
+
+def _grouping_line(finding: Finding) -> int | None:
+    line = finding.line
+    if line is None:
+        return 0
+    if isinstance(line, bool) or not isinstance(line, int):
+        return None
+    return line if line > 0 else 0
+
+
+def _grouping_confidence(finding: Finding) -> float | None:
+    raw = finding.confidence
+    if raw is None:
+        return 0.0
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return float(raw)
+
+
+def _grouping_key(finding: Finding) -> tuple[str, str, str] | None:
+    title = finding.title
+    if title is not None and not isinstance(title, str):
+        return None
+    rule = finding.rule
+    if rule is not None and not isinstance(rule, str):
+        return None
+    label = " ".join(rule.split()).casefold() if rule is not None else ""
+    if label:
+        return (finding.file, "rule", label)
+    normalized = normalize_title(title or "")
+    if not normalized:
+        return None
+    return (finding.file, "title", normalized)
+
+
+def _grouping_candidate_key(
+    finding: Finding, floor: float
+) -> tuple[str, str, str] | None:
+    if finding.drop_reason is not None:
+        return None
+    if not isinstance(finding.file, str) or not finding.file:
+        return None
+    if finding.body is not None and not isinstance(finding.body, str):
+        return None
+    severity = finding.severity
+    if not isinstance(severity, str) or severity.strip().lower() not in SEVERITIES:
+        return None
+    confidence = _grouping_confidence(finding)
+    if confidence is None or not confidence >= floor:
+        return None
+    if _grouping_line(finding) is None:
+        return None
+    return _grouping_key(finding)
+
+
+def _group_anchor_key(
+    findings: Sequence[Finding], index: int
+) -> tuple[int, int, tuple[float, str, int, str], int]:
+    finding = findings[index]
+    line = _grouping_line(finding) or 0
+    return (0 if line > 0 else 1, line, finding_rank_key(finding), index)
+
+
+def _fold_group(
+    findings: Sequence[Finding], members: Sequence[int], result: list[Finding]
+) -> None:
+    anchor = min(members, key=lambda i: _group_anchor_key(findings, i))
+    representative = findings[anchor]
+    anchor_line = _grouping_line(representative) or 0
+    top_severity = min(
+        (findings[i].severity.strip().lower() for i in members),
+        key=lambda s: _SEVERITY_RANK[s],
+    )
+    most_confident = max(
+        members,
+        key=lambda i: (_grouping_confidence(findings[i]) or 0.0, -i),
+    )
+    other_lines = sorted({
+        line
+        for i in members
+        if (line := _grouping_line(findings[i]) or 0) > 0 and line != anchor_line
+    })
+    body = representative.body or ""
+    if other_lines:
+        locations = ", ".join(
+            f"`{representative.file}:{line}`" for line in other_lines
+        )
+        also_at = f"Also at: {locations}"
+        body = f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
+    result[anchor] = replace(
+        representative,
+        severity=top_severity,
+        confidence=findings[most_confident].confidence,
+        body=body,
+        locations=tuple((representative.file, line) for line in other_lines),
+    )
+    reason = f"{GROUPED_INTO_PREFIX}{representative.file}:{anchor_line}"
+    for i in members:
+        if i != anchor:
+            result[i] = replace(findings[i], drop_reason=reason)
+
+
+def apply_rule_grouping(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[Finding]:
+    """Fold chunk findings that break one rule in one file into one finding.
+
+    Opt-in with ``PRXREF_GROUP_FINDINGS``: the caller runs this pass only
+    when grouping is on, so a run without it never reaches this code.
+
+    A finding is a candidate when it has no ``drop_reason``, its severity is
+    in :data:`SEVERITIES` after trimming and lower-casing, its confidence is
+    at or above the floor :func:`apply_quality_gate` would apply
+    (``confidence_floor``, else ``PRXREF_CONFIDENCE_FLOOR``, else
+    :data:`DEFAULT_CONFIDENCE_FLOOR`), and it sits on the chunk side of the
+    list, before ``sweep_start``. Whole-PR sweep findings are never grouped
+    and never anchor a group. ``sweep_start`` below zero is treated as zero
+    (everything is sweep output); past the end, every finding is on the
+    chunk side.
+
+    Candidates group on their file plus their ``rule``, compared after
+    whitespace collapsing and ``casefold()``. A finding without a rule
+    groups on its file plus its :func:`normalize_title` title instead, and
+    never with a finding that has one. The file is part of the key, so the
+    same rule in two files forms two groups. Scope is not part of the key.
+
+    Only a group of two or more changes anything. Its representative is the
+    member on the smallest positive line; a file-level (line 0) member
+    anchors only when no member has a positive line. A tie on the line goes
+    to the member :func:`finding_rank_key` ranks first, then to the earlier
+    one. The representative keeps its own position, title and scope, takes
+    the group's highest severity (``error`` > ``warning`` > ``spec`` >
+    ``outofscope``) and, independently, its highest confidence. Its body
+    gains a last paragraph, after a blank line, that reads ``Also at:``
+    followed by every other positive line of the group as a backticked
+    ``<file>:<line>``, comma-separated, once each, in line order. A line
+    the representative sits on, and a file-level member, add no location;
+    when nothing is left the body is unchanged. The representative's
+    ``locations`` is set to exactly the ``(file, line)`` pairs that paragraph
+    lists, in the same order, and to ``()`` when it lists none.
+    Every other member keeps its identity and gains ``drop_reason``
+    ``grouped into <file>:<line>``, naming the representative's location.
+
+    Runs after the thread, removal and hedge passes, so each member is judged
+    at its own line and a dropped member is never listed, and before
+    :func:`apply_quality_gate`, so the caps count groups rather than lines.
+    Pure apart from reading ``PRXREF_CONFIDENCE_FLOOR`` when
+    ``confidence_floor`` is ``None``; the result has the input's length and
+    order, and a finding whose fields are not the documented types is
+    passed through untouched rather than raising.
+    """
+    floor = _resolve_confidence_floor(confidence_floor)
+    start = max(0, sweep_start)
+    groups: dict[tuple[str, str, str], list[int]] = {}
+    for i, f in enumerate(findings[:start]):
+        key = _grouping_candidate_key(f, floor)
+        if key is not None:
+            groups.setdefault(key, []).append(i)
+    result = list(findings)
+    for members in groups.values():
+        if len(members) >= 2:
+            _fold_group(findings, members, result)
+    return result
+
+
+def _rule_cap_active(cap: object) -> bool:
+    return isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
+
+
+def _rule_cap_rank_key(
+    findings: Sequence[Finding], index: int
+) -> tuple[int, tuple[float, str, int, str], int]:
+    finding = findings[index]
+    return (
+        _SEVERITY_RANK[finding.severity.strip().lower()],
+        finding_rank_key(finding),
+        index,
+    )
+
+
+def _rule_cap_groups(
+    findings: Sequence[Finding], floor: float, sweep_start: int
+) -> dict[tuple[str, str], list[int]]:
+    groups: dict[tuple[str, str], list[int]] = {}
+    for i, f in enumerate(findings[:max(0, sweep_start)]):
+        key = _grouping_candidate_key(f, floor)
+        if key is not None:
+            groups.setdefault((key[1], key[2]), []).append(i)
+    for members in groups.values():
+        members.sort(key=lambda i: _rule_cap_rank_key(findings, i))
+    return groups
+
+
+def _own_locations(finding: Finding) -> list[tuple[str, int]]:
+    raw = finding.locations
+    if not isinstance(raw, tuple | list):
+        return []
+    return [
+        (entry[0], entry[1])
+        for entry in raw
+        if isinstance(entry, tuple | list)
+        and len(entry) == 2
+        and isinstance(entry[0], str)
+        and isinstance(entry[1], int)
+        and not isinstance(entry[1], bool)
+    ]
+
+
+def _rule_cap_body(
+    best: Finding, merged: Sequence[tuple[str, int]]
+) -> str:
+    body = best.body or ""
+    own = _own_locations(best)
+    if own:
+        grouped = "Also at: " + ", ".join(f"`{file}:{line}`" for file, line in own)
+        if body == grouped:
+            body = ""
+        elif body.endswith("\n\n" + grouped):
+            body = body[: -len("\n\n" + grouped)]
+    listed = ", ".join(
+        f"`{file}`" if line == 0 else f"`{file}:{line}`"
+        for file, line in merged[:RULE_CAP_LISTED_LOCATIONS]
+    )
+    unlisted = len(merged) - RULE_CAP_LISTED_LOCATIONS
+    also_at = f"Also at: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
+    return f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
+
+
+def _fold_over_cap(
+    findings: Sequence[Finding],
+    members: Sequence[int],
+    cap: int,
+    result: list[Finding],
+) -> None:
+    best = findings[members[0]]
+    best_line = _grouping_line(best) or 0
+    folded = members[cap:]
+    merged = set(_own_locations(best))
+    for i in folded:
+        member = findings[i]
+        merged.add((member.file, _grouping_line(member) or 0))
+        merged.update(_own_locations(member))
+    merged.discard((best.file, best_line))
+    ordered = tuple(sorted(merged))
+    body = _rule_cap_body(best, ordered) if ordered else best.body
+    result[members[0]] = replace(best, locations=ordered, body=body)
+    reason = f"{RULE_CAP_PREFIX}(max {cap}): listed at {best.file}:{best_line}"
+    for i in folded:
+        result[i] = replace(findings[i], drop_reason=reason)
+
+
+def apply_rule_cap(
+    findings: Sequence[Finding],
+    *,
+    cap: int,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[Finding]:
+    """Fold the findings of one rule beyond ``cap`` onto the best one kept.
+
+    Issue #18. The caller runs this pass only when a team rules file is
+    loaded and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A ``cap`` below
+    1, or one that is not an ``int`` (a ``bool`` included), returns
+    ``list(findings)`` unchanged without reading the environment.
+
+    A finding is a candidate on exactly the terms of
+    :func:`apply_rule_grouping`: it has no ``drop_reason``, its severity is
+    in :data:`SEVERITIES` after trimming and lower-casing, its confidence is
+    at or above the floor :func:`apply_quality_gate` would apply
+    (``confidence_floor``, else ``PRXREF_CONFIDENCE_FLOOR``, else
+    :data:`DEFAULT_CONFIDENCE_FLOOR`), and it sits on the chunk side of the
+    list, before ``sweep_start``. Whole-PR sweep findings are never counted,
+    capped or folded, and never absorb a folded finding. ``sweep_start``
+    below zero is treated as zero (everything is sweep output); past the
+    end, every finding is on the chunk side.
+
+    Candidates count together when they name the same ``rule``, compared
+    after whitespace collapsing and ``casefold()``, in ANY file: unlike
+    :func:`apply_rule_grouping`, the file is not part of the key. A finding
+    without a rule counts on its :func:`normalize_title` title instead, and
+    never with a finding that has one. Scope is not part of the key.
+
+    Only a key with more than ``cap`` candidates changes anything. Its
+    candidates are ranked by severity (``error`` > ``warning`` > ``spec`` >
+    ``outofscope``), then by :func:`finding_rank_key` (higher confidence,
+    then file, line and normalized title), then by position. The first
+    ``cap`` are kept with their own severity, confidence, title, rule and
+    scope: nothing is promoted, and because severity ranks first an error
+    is never folded under a warning. The rest are folded onto the
+    first-ranked finding, the best, which gains:
+
+    - ``locations``: its own ``locations``, plus each folded finding's
+      ``(file, line)`` (``(file, 0)`` for a file-level one) and every entry
+      of that finding's own ``locations``, once each, without the best's
+      own ``(file, line)``, sorted by file then line.
+    - a last body paragraph, after a blank line, that reads ``Also at:``
+      followed by the first :data:`RULE_CAP_LISTED_LOCATIONS` of those
+      locations as a backticked ``<file>:<line>`` (``<file>`` alone for
+      line 0), comma-separated, then `` (+<k> more)`` when ``k`` of them
+      are not named. The ``Also at:`` paragraph
+      :func:`apply_rule_grouping` wrote for the best's own ``locations`` is
+      replaced by it, never repeated. When no location is left, the body
+      is unchanged.
+
+    Every folded finding keeps its identity and gains ``drop_reason``
+    ``rule cap exceeded (max <cap>): listed at <file>:<line>``
+    (:data:`RULE_CAP_PREFIX`), naming the best's location. A folded group
+    representative hands its group's lines to the best; its own
+    ``grouped into <file>:<line>`` members keep their reason.
+
+    Runs after :func:`apply_rule_grouping`, so a within-file group counts
+    once, and before :func:`apply_quality_gate`, so the severity caps count
+    what this cap kept. Pure apart from reading ``PRXREF_CONFIDENCE_FLOOR``
+    when ``confidence_floor`` is ``None``; the result has the input's
+    length and order, and a finding whose fields are not the documented
+    types is passed through untouched rather than raising. The best of
+    every key over the cap is a new object, even when no location was left
+    to list; every other finding the pass does not fold is returned as the
+    SAME object, so a caller can count rewrites by identity.
+    """
+    if not _rule_cap_active(cap):
+        return list(findings)
+    floor = _resolve_confidence_floor(confidence_floor)
+    result = list(findings)
+    for members in _rule_cap_groups(findings, floor, sweep_start).values():
+        if len(members) > cap:
+            _fold_over_cap(findings, members, cap, result)
+    return result
+
+
+def rule_cap_counts(
+    findings: Sequence[Finding],
+    *,
+    cap: int,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[dict]:
+    """Tally, per cap key, how many findings :func:`apply_rule_cap` counts and keeps.
+
+    Computed on the findings BEFORE the pass, over exactly the candidates
+    and keys :func:`apply_rule_cap` uses (the same private helper groups and
+    ranks both), so the two never disagree. One dict per key with at least
+    two candidates, with keys in this order: ``rule`` (the first-ranked
+    candidate's ``rule`` with its whitespace collapsed and its case kept,
+    or, for a title key, its title with the whitespace collapsed), ``kind``
+    (``"rule"`` or ``"title"``), ``total`` (the candidates) and ``kept``
+    (``min(total, cap)``, or ``total`` when ``cap`` is below 1 or not an
+    ``int``). Sorted by ``total`` descending, then ``kind`` (``"rule"``
+    first), then the casefolded name, then the name. ``[]`` when no key
+    reaches two. Pure apart from reading ``PRXREF_CONFIDENCE_FLOOR`` when
+    ``confidence_floor`` is ``None``.
+    """
+    floor = _resolve_confidence_floor(confidence_floor)
+    limited = _rule_cap_active(cap)
+    rows: list[dict] = []
+    for (kind, _label), members in _rule_cap_groups(findings, floor, sweep_start).items():
+        total = len(members)
+        if total < 2:
+            continue
+        first = findings[members[0]]
+        name = " ".join((first.rule if kind == "rule" else first.title).split())
+        rows.append({
+            "rule": name,
+            "kind": kind,
+            "total": total,
+            "kept": min(total, cap) if limited else total,
+        })
+    rows.sort(key=lambda row: (-row["total"], row["kind"], row["rule"].casefold(), row["rule"]))
+    return rows
+
+
 def apply_quality_gate(
     findings: Sequence[Finding],
     *,
     confidence_floor: float | None = None,
     max_errors: int | None = None,
+    max_warning_findings: int | None = None,
+    max_outofscope_findings: int | None = None,
 ) -> list[Finding]:
-    """Filter findings through vocabulary, confidence, and per-review error caps.
+    """Filter findings through vocabulary, confidence, and per-severity caps.
 
     Order:
     1. Severity vocabulary: non-empty lowercase must be in
@@ -1640,10 +2300,29 @@ def apply_quality_gate(
        invalid severities are dropped.
     2. Confidence floor: drop findings below the threshold (default 0.6).
     3. Error cap: among surviving errors, keep the top N ranked by
-       :func:`finding_rank_key` and drop the rest, so ties are broken by
-       content rather than by arrival order. ``spec`` findings never count
-       toward the cap: a spec-heavy review is neither crowded out by it nor
-       crowding it out.
+       :func:`finding_rank_key` and drop the rest
+       (``error cap exceeded (max N)``), so ties are broken by content
+       rather than by arrival order. ``max_errors`` falls back to
+       ``PRXREF_MAX_ERROR_FINDINGS``, then to its legacy alias
+       ``PRXREF_MAX_ERRORS``, and then to :data:`DEFAULT_MAX_ERRORS`.
+    4. Warning and outofscope caps: ``max_warning_findings`` and
+       ``max_outofscope_findings`` apply the same ranking to the surviving
+       findings of their own severity, dropping the excess as
+       ``warning cap exceeded (max N)`` and
+       ``outofscope cap exceeded (max N)``. ``None`` (the default) means
+       unlimited and reads no environment variable, so a call that omits
+       both is identical to one without these caps; ``0`` drops every
+       finding of that severity.
+
+    Each cap counts only its own severity, and only findings that are still
+    active after steps 1 and 2. ``spec`` findings are never capped and never
+    count toward a cap: a spec-heavy review is neither crowded out by one
+    nor crowding one out. A capped finding is kept with its ``drop_reason``
+    set, never removed.
+
+    A cap narrows ``PRXREF_FAIL_ON`` and never widens it: under ``any``, a
+    cap of ``0`` removes that severity from the active findings, so a run
+    whose only findings were of that severity exits 0 instead of 1.
 
     The returned list is sorted by :func:`finding_sort_key`.
     """
@@ -1677,21 +2356,11 @@ def apply_quality_gate(
 
         staged.append(norm)
 
-    active_error_indices: list[int] = [
-        i for i, f in enumerate(staged)
-        if f.drop_reason is None and f.severity == "error"
-    ]
-
-    if len(active_error_indices) > cap:
-        ranked = sorted(
-            active_error_indices,
-            key=lambda idx: finding_rank_key(staged[idx]),
-        )
-        for dropped_idx in ranked[cap:]:
-            staged[dropped_idx] = replace(
-                staged[dropped_idx],
-                drop_reason=f"error cap exceeded (max {cap})",
-            )
+    _apply_severity_cap(staged, "error", cap)
+    if max_warning_findings is not None:
+        _apply_severity_cap(staged, "warning", max_warning_findings)
+    if max_outofscope_findings is not None:
+        _apply_severity_cap(staged, "outofscope", max_outofscope_findings)
 
     return sorted(staged, key=finding_sort_key)
 
@@ -1763,3 +2432,95 @@ def apply_spec_grounding(
         else f
         for f in findings
     ]
+
+
+EXAMPLE_ECHO_PREFIX: str = "echoes the prompt's example: "
+
+_EXAMPLE_FENCE_INFO: frozenset[str] = frozenset({"json", ""})
+_EXAMPLE_TITLE_RE = re.compile(r'"title"\s*:\s*"((?:[^"\\\n]|\\.)*)"')
+
+
+def prompt_example_titles(*templates: str) -> tuple[str, ...]:
+    """The example-finding titles written into prompt templates, in first-seen order.
+
+    Reads each template's fenced code blocks whose info string is ``json``
+    (any case) or empty, and takes every ``"title": "<text>"`` string pair
+    in them, JSON escapes decoded; a block of any other language (the
+    worker's ``diff`` block) is never read. It scans rather than parses,
+    because a packaged example is not valid JSON before rendering: the
+    ``{scope_example}{rule_example}`` slots follow its last value. An empty
+    title and a repeat are skipped. Pure; reads no file.
+    """
+    titles: list[str] = []
+    for template in templates:
+        for block in _fenced_blocks(template if isinstance(template, str) else ""):
+            for raw in _EXAMPLE_TITLE_RE.findall(block):
+                title = _json_string(raw)
+                if title.strip() and title not in titles:
+                    titles.append(title)
+    return tuple(titles)
+
+
+def _fenced_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    info: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        fence = line.strip().startswith("```")
+        if info is None:
+            if fence:
+                info = line.strip()[3:].strip().casefold()
+                body = []
+        elif fence:
+            if info in _EXAMPLE_FENCE_INFO:
+                blocks.append("\n".join(body))
+            info = None
+        else:
+            body.append(line)
+    return blocks
+
+
+def _json_string(raw: str) -> str:
+    try:
+        value = json.loads(f'"{raw}"')
+    except ValueError:
+        return raw
+    return value if isinstance(value, str) else raw
+
+
+def apply_example_echo_check(
+    findings: Sequence[Finding], example_titles: Iterable[str],
+) -> list[Finding]:
+    """Drop a finding whose title repeats a prompt template's example finding.
+
+    ``example_titles`` are the titles of the example findings in the
+    templates the run's review units were shown (:func:`prompt_example_titles` of
+    the worker and sweep templates in force, packaged or overridden). A
+    finding whose :func:`normalize_title` equals one of theirs copied the
+    output example instead of reporting a defect, and gains ``drop_reason``
+    ``echoes the prompt's example: "<title>"``, naming the example's title
+    as the template writes it. The match is exact after normalization, so
+    a title that only resembles an example stays. Chunk and sweep findings
+    are treated alike, against every title given.
+
+    Pure and order-preserving: returns a new list of the same length,
+    already-dropped findings and findings without a string title pass
+    through untouched, and with no usable example title it drops nothing.
+    """
+    examples: dict[str, str] = {}
+    for title in example_titles:
+        key = normalize_title(title) if isinstance(title, str) else ""
+        if key:
+            examples.setdefault(key, title)
+    out: list[Finding] = []
+    for f in findings:
+        example = (
+            examples.get(normalize_title(f.title))
+            if examples and f.drop_reason is None and isinstance(f.title, str)
+            else None
+        )
+        out.append(
+            f if example is None
+            else replace(f, drop_reason=f'{EXAMPLE_ECHO_PREFIX}"{example}"')
+        )
+    return out

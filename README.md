@@ -58,9 +58,11 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through eleven more deterministic passes: location validation, `package.json` claim
+through fourteen more deterministic passes: the example-echo check, location validation, `package.json` claim
 checks, line alignment, thread dedup, settled-thread suppression, severity
-consistency, the removal-claim check, the hedge gate, the quality gate, sweep
+consistency, the removal-claim check, the hedge gate, finding grouping (opt-in
+with `PRXREF_GROUP_FINDINGS`), the per-rule cap (on by default when review
+rules are loaded; `PRXREF_MAX_FINDINGS_PER_RULE`), the quality gate, sweep
 dedup, and the containment note. A filtered finding is never discarded
 silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
@@ -259,9 +261,30 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --rules-file "$RUN
 - `--rules-file PATH`, or `PRXREF_REVIEW_RULES` for every run, names a Markdown or plain-text file. Its body is added to the **system** prompt of every review unit under a `## Team review rules` heading. The chunk workers check their chunk against it, and the sweep applies only the whole-PR and cross-file rules. Unset, nothing changes.
 - Optional front matter can map your team's severity words onto prxref's tiers in a `severity:` block (`blocker: error`, `major: warning`, `nit: outofscope`). A mapped word the model writes anyway is rewritten before every quality pass, so it is never dropped as an invalid severity. Other front-matter keys are ignored, so a skill file works unmodified.
 - `PRXREF_REVIEW_RULES_MAX_CHARS` (default `12000`) caps the body, with a warning when it truncates. The run record's `review_rules` carries the file's `sha256`, its character count, and the parsed map, never the rules text. It appears in `--format json`, the `-v` output, and the JSONL trace.
-- A missing, unreadable, or malformed file exits `2` before any network call, naming `--rules-file` or `PRXREF_REVIEW_RULES`.
+- **Path-scoped rules.** `--scoped-rules PATH` (repeatable), or `PRXREF_SCOPED_RULES` for every run, adds rules files that reach only part of the PR, next to that one file: each entry is a rules file, or a directory whose `*.md` files are read one level deep. A file's `applies_to:` front matter (alias `applyTo`, the `.github/instructions` spelling) lists the paths it covers, for example `applies_to: ["**/*.java", "!**/src/test/**"]`. Each chunk worker then gets only the files that match one of its paths, and the sweep gets the union; a file without `applies_to` reaches every unit. `PRXREF_SCOPED_RULES_MAX_CHARS` (default `24000`) caps the scoped text one unit receives. The run record's `scoped_rules` stamps each file's `sha256` and which unit received which file, and `-v` prints `scoped rules: 2 file(s) rules/helm.md=<first 12 hex> rules/java.md=<first 12 hex> cap=24000`. See [Path-scoped rules](docs/review-rules.md#path-scoped-rules).
+- **Per-rule cap (0.15.0).** With either kind of rules file loaded, the model is asked to name the rule each finding applies, and one rule may produce at most `PRXREF_MAX_FINDINGS_PER_RULE` findings per review (default `2`), across files. The rest fold into the best one (highest severity, then confidence), whose comment lists them as `Also at: …`. `0` turns the cap off; without a rules file it does nothing. See [docs/quality.md](docs/quality.md).
+- A missing, unreadable, or malformed file exits `2` before any network call, naming `--rules-file` or `PRXREF_REVIEW_RULES` (`--scoped-rules` or `PRXREF_SCOPED_RULES` for a scoped file).
 
 **Read the rules from a trusted checkout, never from the PR under review.** In CI the workspace is usually the PR's own code, so a rules file inside it lets the PR rewrite its own review rules. Copy the file from the target branch or keep it outside the repository. See [docs/review-rules.md](docs/review-rules.md) for the grammar, the CI recipes, and the daemon.
+
+## Prompt Template Overrides
+
+Team rules add to prxref's review prompts but cannot take a line out of them. To change the prompts themselves, give prxref a directory of your own templates:
+
+```bash
+prxref prompts export ~/acme-prompts    # the packaged templates, byte for byte
+# edit ~/acme-prompts/worker.md, and delete the templates you leave unchanged
+prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/acme-prompts
+
+# or for every run, the webhook daemon included
+export PRXREF_PROMPTS_DIR=~/acme-prompts
+```
+
+- **What can be overridden.** `worker.md` (each chunk worker's prompt), `systemic.md` (the whole-PR sweep's prompt) and `summary.md` (the posted summary comment). A template missing from the directory keeps the packaged one. The judge prompt of `prxref eval` cannot be overridden, so runs with different prompts are always graded by the same judge.
+- **Checked before any network call.** A directory or template that fails a check exits `2`, naming `--prompts-dir` or `PRXREF_PROMPTS_DIR`, whichever supplied it. The checks are stated once, under `PRXREF_PROMPTS_DIR` in [docs/env-vars.md](docs/env-vars.md). `--prompts-dir DIR` wins over the variable for one run, and `--prompts-dir ""` turns it off.
+- **Stamped on every run.** The run record's `prompt_templates` holds the directory and, for each template file present in it (edited or not, so an unchanged exported copy is stamped too), its path, the SHA-256 of its raw bytes and its length in characters, never its text; a template absent from the directory has no entry. It appears in `--format json` (`null` without a prompts directory) and the JSONL trace. The `-v` line reads `prompts: DIR summary=<sha256> worker=<sha256>`, showing the first 12 characters of each SHA-256, so every review names the exact templates that produced it.
+
+**Read the templates from a trusted checkout, never from the PR under review.** Whoever controls the directory controls the whole review, so a PR that commits templates into the checkout CI reviews rewrites its own review. Copy the directory from the target branch or keep it outside the repository. See [docs/prompt-templates.md](docs/prompt-templates.md) for each template's placeholders, the CI recipe, the daemon, and upgrading.
 
 ## Finding Markers
 
@@ -278,7 +301,7 @@ Each severity has one glyph. It is the same in the summary's counts line, the su
 
 - **Summary:** those findings are listed after the others, under their own heading, for example `**🟦 Outside the ticket (2)**` followed by ``- 🟦 🟧 `src/app.py:12` — …``. If every finding is outside the ticket, the first list reads `No in-ticket findings.`.
 - **Inline comments:** the header reads, for example, `🤖 🟦 🟧 **[WARNING · OUTSIDE TICKET] …**`.
-- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket.
+- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket. With finding grouping on, or the per-rule cap active (review rules loaded), a finding that names a rule gets ` [rule: <rule>]` after that tag (see [docs/quality.md](docs/quality.md)).
 
 Findings inside the ticket (`in`) and findings the reviewer could not place (`unknown`) carry no scope marker, so a run without a ticket context renders exactly the severity glyphs. Scope never changes a finding's severity. It is not counted separately either: the counts line counts every active finding by severity, and the verdict, the error cap, and `PRXREF_FAIL_ON` ignore scope.
 
@@ -294,26 +317,55 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
 - `--timeout SECONDS` — override the per-model request deadline (default `45.0`, or `PRXREF_LLM_TIMEOUT` when set); the flag wins for the current invocation only.
 - `--spec URL_OR_PATH` — a spec or ticket to review the PR against: a public web URL, a local file or directory, or a Jira ticket URL. Repeatable. When given, the flags replace `PRXREF_SPEC_SOURCES` entirely rather than adding to it. See [Review Against a Spec or Ticket](#review-against-a-spec-or-ticket).
 - `--rules-file PATH` — your team's review rules (Markdown or text, with optional front matter carrying a `severity:` map), added to every review prompt. Overrides `PRXREF_REVIEW_RULES` for this run, and `--rules-file ""` turns an environment-configured file off. Read it from a trusted checkout, never from the PR under review. See [Team Review Rules](#team-review-rules).
+- `--scoped-rules PATH` — path-scoped team review rules: a rules file, or a directory whose `*.md` files are read one level deep. Each file reaches only the chunks whose paths match its `applies_to:` globs, and the whole-PR sweep gets the union. Repeatable. When given, the flags replace `PRXREF_SCOPED_RULES` entirely rather than adding to it, and `--scoped-rules ""` turns it off for this run. A file that fails its checks exits `2` before any network call. Read it from a trusted checkout, never from the PR under review. See [Path-scoped rules](docs/review-rules.md#path-scoped-rules).
 - `--context-file PATH` — the ticket the PR is meant to implement (plain text or Markdown). Every finding is then marked in, out of, or of unknown ticket scope, and an empty file means "this PR has no ticket". Overrides `PRXREF_TICKET_CONTEXT_FILE` for this run, and `--context-file ""` turns it off. See [Ticket Context and Scope](#ticket-context-and-scope).
-- `--trace-dir DIR` — write each review unit's exact prompt halves, raw model response, and metadata to `DIR` (`chunk0.system.md`, `chunk0.user.md`, `chunk0.response.json`, `chunk0.meta.json`, and so on for each chunk and for the whole-PR `sweep`). `PRXREF_TRACE_DIR` does the same for every run; the flag wins when both are set.
-- `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
+- `--prompts-dir DIR` — a directory of `worker.md`, `systemic.md` and `summary.md` templates that replace the packaged prompts; a template missing from it keeps the packaged one. Overrides `PRXREF_PROMPTS_DIR` for this run, and `--prompts-dir ""` turns it off. A directory that fails its checks exits `2` before any network call. Read it from a trusted checkout, never from the PR under review. See [Prompt Template Overrides](#prompt-template-overrides).
+- `--trace-dir DIR` — write each review unit's exact prompt halves, raw model response, and metadata to `DIR` (`chunk0.system.md`, `chunk0.user.md`, `chunk0.response.json`, `chunk0.meta.json`, and so on for each chunk and for the whole-PR `sweep`). `PRXREF_TRACE_DIR` does the same for every run; the flag wins when both are set. The files number chunks from 0, while the JSONL trace's `chunk` events (`PRXREF_TRACE_FILE`) number them from 1 in `index`, so the event with `index` N pairs with `chunk{N-1}.*`.
+- `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the scoped rules files, the prompt templates, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
 - `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout, with these keys in this order:
   - `verdict`;
-  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `title`, `body`, `drop_reason`;
+  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `rule` (the rule the finding names; `null` when it names none, and always `null` with finding grouping off and the per-rule cap inactive), `locations` (on a grouped finding, the other places its `Also at:` list names, in that order, as `{"file", "line"}` objects; on the best finding of a rule the per-rule cap folded, every location folded into it, across files, even past the five its `Also at:` list shows; `null` on every other row, including each member dropped as `grouped into <file>:<line>`, which keeps its own rule; see [docs/quality.md](docs/quality.md)), `title`, `body`, `drop_reason`;
   - `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`;
   - `cost_usd`: the run's cost in USD, `null` when no source could price it (never `0` for an unknown cost), and `cost_estimated`: `true` when any part of it came from `PRXREF_PRICE_TABLE`. See [Cost accounting](docs/llm.md#cost-accounting);
   - `posted`;
   - `review_rules` (`path`, `sha256`, `chars`, `max_chars`, `truncated`, `severity_map`), `ticket_context` (`path`, `sha256`, `chars`, `max_chars`, `truncated`, `has_acceptance_criteria`, `empty`; never the ticket text), `spec_grounding` (`sources`, `ok`, `failed`, `constraints`, `digest_sha256`), and `size_advisory` (`changed_lines`, `changed_files`, `lines_limit`, `files_limit`, `triggered`, `message`). These four are always present and `null` when their feature is off;
+  - `prompt_templates`: the prompt-template directory in force (`dir`, plus `templates` holding the `path`, `sha256` and `chars` of each template file present in the directory, edited or not; never the template text). Always present, and `null` when no prompts directory is configured. See [Prompt Template Overrides](#prompt-template-overrides);
+  - `scoped_rules`: the path-scoped rules in force (`entries` as configured; `files`, one row per loaded file in load order with its `path`, `sha256`, `chars`, `max_chars`, `truncated`, `severity_map` and `applies_to`; `max_chars`, the per-unit cap; and `units`, the `path` and `chars` of the files each chunk and the sweep received; never the rules text). Always present, and `null` when no scoped rules are configured. See [Path-scoped rules](docs/review-rules.md#path-scoped-rules);
+  - `rule_counts`: the per-rule cap's tally, one `{"rule", "kind", "total", "kept"}` object for each rule (`kind` `rule`), or for each normalized title among findings that name no rule (`kind` `title`), that at least two chunk findings share: `total` of them, `kept` active, most findings first. A rule or title with one finding gets no row. Always present: `[]` when the cap ran and nothing repeated, and `null` when it did not run (no review rules file, `PRXREF_MAX_FINDINGS_PER_RULE=0`, or a run that ended before the quality passes). See [docs/quality.md](docs/quality.md);
   - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
-  - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`), on replay runs only.
+  - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`, `description`, `as_of`, `as_of_source`), on replay runs only.
 
 Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evaluation)). Any of them turns posting off for the run:
 
 - `--base-sha SHA` / `--head-sha SHA` — review the pinned range `BASE...HEAD` of the `--pr-url` repository (the merge-base diff, as the PR's own diff is), with file context read at `HEAD`. The two come as a pair, must be full 40- or 64-character hex commit SHAs, must differ, and need `--pr-url`.
 - `--no-threads` — hide the PR's existing threads from the prompt and from the thread-dedup passes.
 - `--diff-file PATH` — review this unified diff (`git diff` or `git format-patch` output) instead of fetching one; `--pr-url` becomes optional.
+- `--as-of TIME` — show the reviewer the PR's title and description as they were at `TIME`: an ISO-8601 time with a UTC offset, such as `2026-05-01T09:30:00Z` or `2026-05-01T11:30:00+02:00`. A date alone or a time without an offset exits `2` rather than being read in the local time zone, and so does a value that is not ISO-8601. Needs `--pr-url`, and a forge that can read description history (GitHub or Bitbucket Cloud); on any other forge it exits `2`. Without it, a `--pr-url` replay pins the title and description to the PR's first human review, else to its head commit's date.
+- `--description-file PATH` — use this file's text as the PR description, with or without `--pr-url`. It is read like `--rules-file`: a missing, unreadable or non-regular file, a file that is not UTF-8 or contains NUL bytes, and a path under the working directory that symlinks out of it each exit `2`. A blank file is an empty description.
+- `--no-description` — review with an empty PR description.
+
+`--as-of`, `--description-file` and `--no-description` are mutually exclusive: giving two or more exits `2` naming each one given. They are CLI-only, with no environment variable.
 
 The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
+
+`prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
+
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its three actions:
+
+- `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume]` replays every case and writes the run to `DIR/NAME/`:
+  - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
+  - `--label NAME` — the run's name and its directory under `--out`. Required. An existing label exits `2` unless `--resume` is given.
+  - `--out DIR` — the directory that holds the runs (default `./prxref-eval/`). `score` and `compare` take it too.
+  - `--rules-file PATH` — team review rules for every case, as for `review`: it overrides `PRXREF_REVIEW_RULES`, and `--rules-file ""` turns it off.
+  - `--scoped-rules PATH` — path-scoped rules for every case, as for `review`: it overrides `PRXREF_SCOPED_RULES`, and `--scoped-rules ""` turns it off. Repeatable.
+  - `--prompts-dir DIR` — prompt templates for every case, as for `review`: it overrides `PRXREF_PROMPTS_DIR`, and `--prompts-dir ""` turns it off.
+  - Each of the three is checked once, before the first case runs: a file or directory that fails its checks exits `2`, naming the flag, or the variable when the flag is not given. The run's `run.json` and `score.json` record the scoped rules in force, as `review` records them.
+  - `--resume` — continue an existing `--label` run instead of refusing it.
+- `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
+  - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.
+- `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed and the cases and labels only one run has. `A` and `B` are each a label under `--out` or a run directory. It warns when the runs are not like for like.
+
+The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
 ## Replay Mode (Evaluation)
 
@@ -337,16 +389,42 @@ prxref review --diff-file tests/evals/<case>/diff.patch --context-file tests/eva
 - **A replay never posts.** Any replay flag turns posting off for the run, with or without `--no-post`; when nothing else had already turned it off, the run logs `replay run: posting to the forge is disabled`. The replay forges also refuse every write, and a replay never prunes older comments.
 - **Pinned SHAs:** `--base-sha` and `--head-sha` come as a pair, must be full 40- or 64-character hex commit SHAs (resolve a short one with `git rev-parse`), are lowercased, must name two different commits, and need `--pr-url`. The review reads the merge-base diff `BASE...HEAD` and file context at `HEAD`; the endpoint each forge uses is under "Pinned Commit Range (Replay)" in [docs/forges.md](docs/forges.md).
 - **`--diff-file PATH`** reviews that file (`git diff` or `git format-patch` output) instead of fetching a diff. Without `--pr-url` nothing is contacted: there are no threads and no file context, and a `git format-patch` file supplies the title, description and author. With `--pr-url` the file replaces the PR's diff, and without `--head-sha` a warning says that file context is still read at the PR's current head.
-- **What a pinned replay does not pin.** The PR's *current* title and description still reach the prompt, and so do its current threads unless you add `--no-threads`; a replay at pinned SHAs without `--no-threads` logs a warning saying so.
-- **The record.** A replay's JSON record gains a `replay` stamp, always with all four keys, and the text summary prints it as a `replay:` line. A normal run's record has no `replay` key.
+- **The title and description are pinned too.** A `--pr-url` replay shows the PR's title and description as they were at a cutoff, not as they are now, because a description edited after review (a table of the review fixes, say) tells the model what the reviewers found. The cutoff is the first of these that exists:
+  1. `--as-of TIME`, when you give it;
+  2. the PR's first human review or comment: not by the PR's author, not by a bot account, and not one of prxref's own posts;
+  3. the date of the head commit (`--head-sha` when given, else the PR's current head).
+
+  The history is read once, before the review starts, by one call to the forge's history reader; that network read is not recorded in the run trace. GitHub and Bitbucket Cloud can read it, and GitHub needs a token to (see "Description History (Replay)" in [docs/forges.md](docs/forges.md)). The title is pinned exactly when the description is. A cutoff before the PR was opened shows the original description.
+- **Falling back to the current text.** When the history cannot pin them, the replay keeps the PR's *current* title and description, stamps `"description": "live"`, and logs a WARNING that starts `replay shows the PR's CURRENT title and description` and gives the reason: the forge cannot read description history (Bitbucket Server, GitLab and Azure DevOps cannot), the read failed (no GitHub token, a 401 or 403, a transport error), the history has neither a first review nor a head commit date, or it does not reach the cutoff (it is incomplete, or the version then in force was deleted). None of these stops the review. An explicit `--as-of` on a forge that cannot read history is the exception: it exits `2` naming `--as-of`, because the time you asked for cannot be honoured.
+- **`--description-file PATH` and `--no-description`** replace the description with that file's text or with nothing, read no history, and leave the title as it is now. Both also work without `--pr-url`, replacing the description a `git format-patch` file supplies. At most one of `--as-of`, `--description-file` and `--no-description` may be given.
+- **What a pinned replay does not pin.** The PR's current threads still reach the prompt unless you add `--no-threads`; a replay at pinned SHAs without `--no-threads` logs a warning saying so. With `--pr-url`, `--diff-file` and no `--head-sha`, file context is read at the PR's current head, with a warning. The title stays the current one under `--description-file` and `--no-description`, and after a fall back to the current text.
+- **The record.** A replay's JSON record gains a `replay` stamp, always with all seven keys, and the text summary prints it as a `replay:` line. A normal run's record has no `replay` key.
 
   ```json
-  "replay": {"base_sha": null, "head_sha": null, "threads": "hidden", "diff_file": "change.diff"}
+  "replay": {"base_sha": null, "head_sha": null, "threads": "hidden", "diff_file": "change.diff", "description": "file", "as_of": null, "as_of_source": null}
   ```
 
-  `threads` is `"hidden"` under `--no-threads` or with no `--pr-url`, else `"shown"`; `diff_file` is the path as you typed it.
+  `threads` is `"hidden"` under `--no-threads` or with no `--pr-url`, else `"shown"`; `diff_file` is the path as you typed it. `description` is `"pinned"` (the title and description in force at the cutoff), `"live"` (the current ones), `"file"` (`--description-file`, or `--diff-file` without `--pr-url`, where any description comes from the file) or `"none"` (`--no-description`). `as_of` is the cutoff as a UTC time ending in `Z`, with a fraction of a second only when the source time had one, and `as_of_source` is `"flag"`, `"first-review"` or `"head-commit"`. Both are set whenever a cutoff was chosen, on a `"live"` stamp too: one whose history did not reach the cutoff, or whose history read failed after `--as-of` had chosen it. Both are `null` when no cutoff was chosen. Given back as `--as-of`, `as_of` names the same instant. The text line then ends `description=pinned as_of=2026-05-01T09:30:00Z (first-review)`.
 - **Exit codes.** A bad set of replay flags exits `2` naming the flag, and it is checked before the PR URL is parsed. A review error inside a replay — an empty pinned range (a head already merged into the base) or a blank diff file — ends the run as an `Error` run: it exits `0` under the default `PRXREF_FAIL_ON=never`, and `1` under `error` or `any`, like any review that does not complete. See [Exit Codes](#exit-codes).
 - The replay flags have no environment variable, on purpose, and the [webhook server](#webhook-server) never replays.
+
+## Evaluating prxref
+
+`prxref eval` turns replays into numbers. Give it pull requests that human reviewers have already reviewed, each labelled with the findings they left, and it replays every case through the real pipeline, grades prxref's findings against the labels, and compares two runs, so a new model, prompt template, rules file or setting can be judged across a dataset rather than on one PR:
+
+```bash
+prxref eval run --cases tests/evals --label base
+PRXREF_LLM_MODELS=example-model-b prxref eval run --cases tests/evals --label cand
+prxref eval score --label base
+prxref eval score --label cand
+prxref eval compare base cand
+```
+
+- **Cases** come as a `cases.json` file or as a directory of `case-*/` directories, the layout of [`tests/evals/`](tests/evals/README.md). A label is graded deterministically when it carries a `must_match` predicate, and by an LLM judge on the review's own backend (`--judge-model`) when it does not.
+- **Recall** is micro recall over every label, with half credit for a `partial` judge grade, broken down by severity and by category. The score also reports unmatched AI findings per PR, severity agreement, failed chunks, time and cost, and never sums an unknown cost.
+- **Runs** go to `./prxref-eval/<label>/` by default; add `prxref-eval/` to your `.gitignore`. A run never posts, and a case that fails is recorded and scored, never fatal.
+
+The full reference is [docs/evals.md](docs/evals.md).
 
 ## Exit Codes
 
@@ -363,6 +441,6 @@ $ prxref review --pr-url https://github.com/org/repo/pull/1 --max-chunks 0
 configuration error: --max-chunks: must be a finite number greater than 0, got 0
 ```
 
-[Replay mode](#replay-mode-evaluation) keeps the same split. A bad set of replay flags exits `2` naming the flag: neither `--pr-url` nor `--diff-file`, a lone `--base-sha` or `--head-sha`, a SHA that is not full 40- or 64-character hex, two equal SHAs, SHAs without `--pr-url`, or an unreadable `--diff-file`. These are checked before the PR URL is parsed, so they exit `2` even next to an unrecognized URL; pinned SHAs on a forge that cannot fetch a commit range also exit `2`, once the forge is known. An empty pinned range or a blank diff file is a review error, unlike an empty PR diff: the run ends as an `Error` run, which exits `0` under the default `PRXREF_FAIL_ON=never` and `1` under `error` or `any`.
+[Replay mode](#replay-mode-evaluation) keeps the same split. A bad set of replay flags exits `2` naming the flag: neither `--pr-url` nor `--diff-file`, a lone `--base-sha` or `--head-sha`, a SHA that is not full 40- or 64-character hex, two equal SHAs, SHAs without `--pr-url`, an unreadable `--diff-file`, two or more of `--as-of`, `--description-file` and `--no-description`, an `--as-of` that is not an ISO-8601 time with a UTC offset (a date alone included), `--as-of` without `--pr-url`, or an unreadable `--description-file`. These are checked before the PR URL is parsed, so they exit `2` even next to an unrecognized URL; pinned SHAs on a forge that cannot fetch a commit range also exit `2`, once the forge is known, and so does `--as-of` on a forge that cannot read description history (Bitbucket Server, GitLab, Azure DevOps). A description history that cannot be read is not an error: the replay keeps the current title and description and logs a warning. An empty pinned range or a blank diff file is a review error, unlike an empty PR diff: the run ends as an `Error` run, which exits `0` under the default `PRXREF_FAIL_ON=never` and `1` under `error` or `any`.
 
 `PRXREF_FAIL_ON` is the one opt-out of the advisory contract, and its default `never` is the doctrine above, unchanged. Setting it to `error` or `any` turns the reviewer into a merge gate — failing a build on a finding turns a probabilistic reviewer into a gate, and the first false positive teaches a team to bypass the gate, so think hard before you set it. Read the verdict from the posted summary, which also carries a partial-review banner when some chunks did not make it. Do not build a security control on the exit code. The webhook daemon has no exit code and is unaffected.

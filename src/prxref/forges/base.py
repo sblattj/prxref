@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 
@@ -61,6 +62,97 @@ class PRData:
     source_sha: str
     target_sha: str
     raw: dict  # forge-native payload, for forge-specific needs
+
+
+def _require_aware(value: datetime, name: str) -> None:
+    """Raise ``ValueError`` naming ``name`` unless ``value`` is a timezone-aware datetime.
+
+    A naive datetime is refused rather than assumed to be UTC: comparing it
+    with an aware one either raises a ``TypeError`` that names nothing or, for
+    ``==``, is silently ``False``, and a cutoff an hour off picks the wrong
+    description version without any error at all.
+    """
+    if not isinstance(value, datetime):
+        raise ValueError(f"{name} must be a datetime, got {type(value).__name__}")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware, got the naive {value.isoformat()}")
+
+
+@dataclass(frozen=True)
+class DescriptionVersion:
+    """One version of a PR description: its full ``text`` from ``edited_at`` onwards.
+
+    ``text`` is ``None`` when the forge no longer holds that version (GitHub
+    nulls the ``diff`` of a deleted edit), which pins nothing.
+    """
+
+    text: str | None
+    edited_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self.edited_at, "DescriptionVersion.edited_at")
+
+
+@dataclass(frozen=True)
+class TitleRename:
+    """One PR title rename: ``previous_title`` became ``current_title`` at ``created_at``."""
+
+    previous_title: str
+    current_title: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self.created_at, "TitleRename.created_at")
+
+
+@dataclass(frozen=True)
+class PRHistory:
+    """What a replay needs to pin a PR's title and description to a cutoff, from ``get_pr_history``.
+
+    ``description_versions`` holds one entry per version of the description,
+    the original included and the live text last, in any order: consumers
+    order them by ``edited_at``, never by position. It is empty for a PR whose
+    description was never edited, whose live description is then the
+    original. ``title_renames`` holds every rename, in any order.
+    ``first_review_at`` is the earliest human review or comment by someone
+    other than the author (prxref's own posts excluded), and
+    ``head_committed_at`` the commit date of the
+    head the history was read for; either is ``None`` when unknown.
+
+    ``complete`` is ``False`` when the description versions stop short of
+    the original. Every forge pages its history newest first, so the
+    versions held are then the newest ones, contiguous back from the live
+    text, and the older ones are missing. A forge that cannot read every
+    title rename returns ``complete=False`` with no description versions,
+    which pins nothing.
+
+    Every datetime must be timezone-aware; a naive one raises ``ValueError``.
+    Both sequences are stored as tuples, so a history is immutable and hashable.
+    """
+
+    created_at: datetime
+    description_versions: tuple[DescriptionVersion, ...] = ()
+    title_renames: tuple[TitleRename, ...] = ()
+    first_review_at: datetime | None = None
+    head_committed_at: datetime | None = None
+    complete: bool = True
+
+    def __post_init__(self) -> None:
+        _require_aware(self.created_at, "PRHistory.created_at")
+        if self.first_review_at is not None:
+            _require_aware(self.first_review_at, "PRHistory.first_review_at")
+        if self.head_committed_at is not None:
+            _require_aware(self.head_committed_at, "PRHistory.head_committed_at")
+        object.__setattr__(self, "description_versions", tuple(self.description_versions))
+        object.__setattr__(self, "title_renames", tuple(self.title_renames))
+        for version in self.description_versions:
+            if not isinstance(version, DescriptionVersion):
+                raise ValueError(
+                    f"PRHistory.description_versions must hold DescriptionVersion, got {type(version).__name__}"
+                )
+        for rename in self.title_renames:
+            if not isinstance(rename, TitleRename):
+                raise ValueError(f"PRHistory.title_renames must hold TitleRename, got {type(rename).__name__}")
 
 
 SUMMARY_MARKER = "<!-- prxref-summary -->"
@@ -161,6 +253,19 @@ class Forge(Protocol):
         shows when ``base_sha``/``head_sha`` are the PR's target/source commits.
         Raises on transport or HTTP failure like ``get_diff``; returns ``""`` for an
         empty range and leaves the judgement to the caller.
+        """
+        ...
+
+    def get_pr_history(self, ref: PRRef, *, head_sha: str | None = None) -> PRHistory:
+        """Return the PR's description versions, title renames and replay cutoff inputs.
+
+        Optional: callers resolve it with ``getattr(forge, "get_pr_history", None)``,
+        so a Forge without it is still valid, and not every forge implements it
+        (a replay then keeps the live title and description). ``head_sha`` is
+        the pinned head whose commit date becomes ``head_committed_at``; with
+        ``None`` it is the PR's current head. Raises on transport, HTTP or
+        authentication failure like ``get_diff``; a history that could not be
+        paged to the end is returned with ``complete=False``, never raised.
         """
         ...
 

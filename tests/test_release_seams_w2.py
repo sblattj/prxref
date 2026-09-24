@@ -59,7 +59,10 @@ from tests.test_orchestrator import FakeForge, FakeLLM, _added_file_diff
 from tests.test_replay import BASE, HEAD, RAW_OK
 
 URL = "https://github.com/acme/widget/pull/7"
-PINNED_STAMP = {"base_sha": BASE, "head_sha": HEAD, "threads": "hidden", "diff_file": None}
+PINNED_STAMP = {
+    "base_sha": BASE, "head_sha": HEAD, "threads": "hidden", "diff_file": None,
+    "description": "none", "as_of": None, "as_of_source": None,
+}
 CHUNKS = 3
 REVIEW_DIFF = "".join(_added_file_diff(f"src/mod_{i}.py", 6) for i in range(CHUNKS))
 CALL_COST = 0.125
@@ -110,7 +113,12 @@ def _case_url(name: str) -> str:
 
 
 class TestPinnedReplayOverEveryBuiltinForge:
-    """#65 x #62: no real adapter hits the pinned-range configuration error."""
+    """#65 x #62: no real adapter hits the pinned-range configuration error.
+
+    ``--no-description`` keeps these runs off the network: since #16 a
+    ``--pr-url`` replay reads the description history by default, which is
+    a deliberate request covered in ``tests/test_replay_pinning.py``.
+    """
 
     def test_the_forge_set_is_discovered_and_includes_azure_devops(self):
         assert "azure_devops" in BUILTIN_FORGES
@@ -122,7 +130,7 @@ class TestPinnedReplayOverEveryBuiltinForge:
         session = _NoNetworkSession()
         forge = _forge_impl(name)(session=session)
         ref = PRRef(forge=name, host="", owner="acme", repo="api", number=1, url="")
-        replay = cli._ReplayRequest(base_sha=BASE, head_sha=HEAD, no_threads=no_threads)
+        replay = cli._ReplayRequest(base_sha=BASE, head_sha=HEAD, no_threads=no_threads, no_description=True)
         assert isinstance(cli._replay_forge(forge, ref, replay), ReplayForge)
         assert session.sent == []
 
@@ -155,7 +163,7 @@ class TestPinnedReplayOverEveryBuiltinForge:
         monkeypatch.setattr(orchestrator, "orchestrate_review", fake_orchestrate_review)
         assert main([
             "review", "--pr-url", url, "--base-sha", BASE, "--head-sha", HEAD,
-            "--no-threads", "--format", "json",
+            "--no-threads", "--no-description", "--format", "json",
         ]) == 0
         assert "configuration error" not in capsys.readouterr().err
         [adapter] = built
@@ -253,7 +261,10 @@ class TestReplayCarriesTheCost:
 
     def test_diff_file_replay_json_carries_the_stamp_and_the_summed_cost(self, rig, capsys, diff_file):
         payload, record, events = _review(rig, capsys, ["--diff-file", diff_file])
-        stamp = {"base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": diff_file}
+        stamp = {
+            "base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": diff_file,
+            "description": "file", "as_of": None, "as_of_source": None,
+        }
         assert rig.made == []
         assert payload["replay"] == stamp
         assert record["replay"] == stamp

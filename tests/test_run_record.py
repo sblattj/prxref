@@ -1,8 +1,9 @@
 """The run record: one choke point stamps every exit of ``orchestrate_review``.
 
-``_run_record`` wraps all seven returns — the ``get_pr``, ``get_diff``,
+``_run_record`` wraps all eight returns — the ``get_pr``, ``get_diff``,
 ``parse_unified_diff`` and ``build_chunks`` failures, the empty-diff
-summary-only exit, the total LLM failure, and the completed review — so the
+summary-only exit, the scoped-rules cap failure, the total LLM failure, and
+the completed review — so the
 0.14 run-record keys (``cost_usd``, ``cost_estimated``, ``review_rules``,
 ``ticket_context``, ``spec_grounding``, ``size_advisory``) are present on every
 one of them, null when their feature is off, and ``replay`` rides a replay run
@@ -30,6 +31,7 @@ from prxref import costs, orchestrator
 from prxref.cli import _build_json_result
 from prxref.forges.base import ATTRIBUTION_MARKER
 from prxref.orchestrator import orchestrate_review
+from prxref.rules import load_scoped_rules
 from prxref.triage import parse_unified_diff
 from tests.test_orchestrator import (
     HAPPY_FINDINGS,
@@ -48,15 +50,22 @@ BASE_KEYS = {
 }
 RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
-    "spec_grounding", "size_advisory",
+    "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
+    "rule_counts",
 }
-NULL_WHEN_OFF = ("review_rules", "ticket_context", "spec_grounding", "size_advisory")
+NULL_WHEN_OFF = (
+    "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
+    "scoped_rules", "rule_counts",
+)
 
 REPLAY = {
     "base_sha": "b" * 40,
     "head_sha": "a" * 40,
     "threads": "hidden",
     "diff_file": None,
+    "description": "pinned",
+    "as_of": "2026-05-01T09:30:00Z",
+    "as_of_source": "first-review",
 }
 
 PATHS = (
@@ -66,6 +75,7 @@ PATHS = (
 BEFORE_ANY_REQUEST = ("get_pr", "get_diff", "parse", "build_chunks", "empty_diff")
 AFTER_REQUESTS = ("total_failure", "success")
 BEFORE_THE_PARSE = ("get_pr", "get_diff", "parse")
+SCOPED_PATHS = ("scoped_cap",)
 VERDICT = {
     "get_pr": "Error", "get_diff": "Error", "parse": "Error",
     "build_chunks": "Error", "empty_diff": "Approved",
@@ -93,6 +103,13 @@ def _boom(*args, **kwargs):
     raise ValueError("boom parse")
 
 
+def _scoped_rules(monkeypatch, tmp_path):
+    """Real path-scoped rules for the one exit only they reach, loaded from ``tmp_path``."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.md").write_text('---\napplies_to: ["src/**"]\n---\nCheck it.\n', encoding="utf-8")
+    return load_scoped_rules(["app.md"], max_chars=12000, source="--scoped-rules")
+
+
 def _run(monkeypatch, path, tmp_path, **kw):
     """Drive ``orchestrate_review`` out through one named exit.
 
@@ -112,6 +129,9 @@ def _run(monkeypatch, path, tmp_path, **kw):
     elif path == "total_failure":
         llm = FakeLLM(error=RuntimeError("no model"))
     tmp_path.mkdir(parents=True, exist_ok=True)
+    if path == "scoped_cap":
+        kw.setdefault("scoped_rules", _scoped_rules(monkeypatch, tmp_path))
+        kw.setdefault("scoped_rules_max_chars", 0)
     trace = tmp_path / "run.jsonl"
     kw.setdefault("post", False)
     res = orchestrate_review(forge, REF, llm, trace_file=str(trace), **kw)
@@ -160,9 +180,9 @@ class TestOneChokePoint:
 
     def test_every_return_is_a_run_record_call(self):
         returns = self._returns()
-        assert len(returns) == 7, (
+        assert len(returns) == 8, (
             "orchestrate_review has a new exit: wrap it in _run_record and add "
-            "it to PATHS in this module"
+            "it to PATHS in this module (SCOPED_PATHS if only a set feature reaches it)"
         )
         for ret in returns:
             call = ret.value
@@ -170,7 +190,7 @@ class TestOneChokePoint:
             assert isinstance(call.func, ast.Name) and call.func.id == "_run_record"
             assert isinstance(call.args[1], ast.Name) and call.args[1].id == "run_inputs"
 
-    def test_the_seven_paths_here_reach_seven_distinct_returns(self, monkeypatch, tmp_path):
+    def test_the_eight_paths_here_reach_eight_distinct_returns(self, monkeypatch, tmp_path):
         """So the parametrised tests below really do cover every exit."""
         real = orchestrator._run_record
         callers: list[tuple[str, int]] = []
@@ -181,13 +201,13 @@ class TestOneChokePoint:
             return real(result, run_inputs)
 
         monkeypatch.setattr(orchestrator, "_run_record", spy)
-        for name in PATHS:
+        for name in PATHS + SCOPED_PATHS:
             with monkeypatch.context() as m:
                 _run(m, name, tmp_path / name)
         names, lines = callers[0::2], callers[1::2]
         assert set(names) == {"orchestrate_review"}
-        assert len(lines) == 7
-        assert len(set(lines)) == 7
+        assert len(lines) == 8
+        assert len(set(lines)) == 8
 
 
 class TestTheRecordKeys:
@@ -199,6 +219,18 @@ class TestTheRecordKeys:
         for key in NULL_WHEN_OFF:
             assert res[key] is None, key
         assert res["cost_estimated"] is False
+
+    @pytest.mark.parametrize("path", SCOPED_PATHS)
+    def test_the_scoped_rules_exit_carries_the_same_keys(self, monkeypatch, tmp_path, path):
+        res, forge, _ = _run(monkeypatch, path, tmp_path, post=True)
+        assert res["verdict"] == "Error"
+        assert set(res) == BASE_KEYS | RECORD_KEYS
+        for key in NULL_WHEN_OFF:
+            assert (res[key] is None) is (key != "scoped_rules"), key
+        assert res["scoped_rules"]["max_chars"] == 0
+        assert res["scoped_rules"]["units"] is None
+        assert res["cost_usd"] == 0.0 and res["cost_estimated"] is False
+        assert len(forge.summaries) == 1 and forge.inline_batches == []
 
     @pytest.mark.parametrize("path", BEFORE_ANY_REQUEST)
     def test_cost_is_zero_before_any_llm_request(self, monkeypatch, tmp_path, path):
@@ -225,7 +257,9 @@ class TestTheRecordKeys:
         res, _, _ = _run(monkeypatch, path, tmp_path, replay=dict(REPLAY))
         assert set(res) == BASE_KEYS | RECORD_KEYS | {"replay"}
         assert res["replay"] == REPLAY
-        assert list(res["replay"]) == ["base_sha", "head_sha", "threads", "diff_file"]
+        assert list(res["replay"]) == [
+            "base_sha", "head_sha", "threads", "diff_file", "description", "as_of", "as_of_source",
+        ]
 
     def test_the_stamp_is_a_copy_of_the_callers_mapping(self, monkeypatch, tmp_path):
         stamp = dict(REPLAY)

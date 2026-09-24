@@ -1,107 +1,191 @@
-# HANDOFF — v0.14.0 shipped: the inputs release
+# HANDOFF — v0.15.0 shipped: the tuning release
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-24 · **Supersedes** the
-v0.5.0 handoff.
+v0.14.0 handoff.
 
-0.14.0 lets a review read more than the diff: the spec a PR implements, a team's
-own review rules, and the ticket the PR is for. It also adds a replay mode for
-evaluation, Azure DevOps as the fifth forge, two backends that run on a Claude
-Code or Kiro CLI login, a dollar cost for every run, and a PR size advisory. The
-user-facing account is the `[0.14.0]` section of `CHANGELOG.md`. This file is for
-whoever cuts the next release.
-
-This is the first release on the rewritten history. The repository was recreated
-on 2026-09-24. Every tag and nearly every commit before 0.14.0 has a new SHA, so
-re-clone rather than pull, and treat any SHA quoted in an older note as dead.
-Issue numbers restarted too: the eight 0.14.0 issues are #1 to #8 on the new
-tracker.
+0.15.0 gives a team the knobs to tune a review, and a harness to measure what
+the tuning did. The knobs are prompt template overrides, path-scoped review
+rules, finding grouping with per-severity caps, a per-rule cap that a review
+rules file turns on, and an opt-in tier for reworded duplicates. The harness is
+`prxref eval run|score|compare`. GitHub pull requests past the diff endpoint's
+size limit are now reviewed, and a replay pins the PR's title and description to
+the time it replays. The user-facing account is the `[0.15.0]` section of
+`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.14.0
+handoff is in git history.
 
 ## What landed
 
-- **Spec-grounded review.** `--spec` / `PRXREF_SPEC_SOURCES` fetch web pages,
-  local files or directories, and Jira tickets. `specs.build_spec_digest` prunes
-  them to the constraints relevant to the diff, and the digest goes into every
-  worker and sweep prompt. A diff that breaks a quoted constraint draws an
-  advisory `spec` finding. The finding has to be earned. When no constraint
-  reached the prompts, `quality.apply_spec_grounding` relabels any `spec` finding
-  as a `warning`. On a grounded run, `quality.apply_hedge_gate(...,
-  spec_digest=...)` skips the text a finding quotes verbatim from the digest.
-  The run record carries `spec_grounding`.
-- **#1 litellm without a base URL.** Only `openai-compat`, `ferry` and `http`
-  need `PRXREF_LLM_BASE_URL`. The other backends ignore it and log one INFO line.
-- **#2 Azure DevOps.** `forges/azure_devops.py` covers Services and Server, and
-  `detect_forge` asks it last. Azure DevOps has no unified-diff endpoint, so the
-  adapter rebuilds the diff from the Diffs API change list plus blob contents.
-  Webhooks arrive as service hooks, checked against a Basic-auth secret.
-- **#3 Team review rules.** `rules.py` reads `--rules-file` /
-  `PRXREF_REVIEW_RULES` into the system prompt. Optional `severity:` front matter
-  maps team words onto prxref severities, and `quality.apply_severity_map`
-  rewrites them before every other quality pass.
-- **#4 Ticket context and scope.** `ticket.py` reads `--context-file` /
-  `PRXREF_TICKET_CONTEXT_FILE`, and every finding is judged `in`, `out` or
-  `unknown` against it (`triage.normalize_scope`). 🟦 now marks an
-  out-of-ticket finding, so minor findings moved to ⬜.
-- **#5 Replay.** `--base-sha` / `--head-sha`, `--no-threads` and `--diff-file`
-  review a pinned range or a diff file. Every forge implements
-  `Forge.get_compare_diff`, `forges/replay.py` holds `LocalDiffForge` and
-  `ReplayForge`, and a replay never posts. `tests/evals/test_eval_replay.py`
-  replays each eval case with one offline CLI call.
-- **#6 Subscription CLI backends.** `llm_cli_backends.py` adds `claude-cli` and
-  `kiro-cli`. Each model attempt is one process started in a fresh temporary
-  directory, the credential-routing variables are stripped from its
-  environment, and a missed deadline kills the whole process group.
-- **#7 Dollar cost.** In `costs.py`, a figure the backend reported always wins.
-  Otherwise `PRXREF_PRICE_TABLE` gives an estimate, and without one the cost is
-  `null`, never `0` and never a partial sum.
-- **#8 Size advisory.** `PRXREF_SIZE_WARN_LINES` / `PRXREF_SIZE_WARN_FILES` flag
-  an oversized PR. `triage.count_size_relevant_changes` counts the parsed diff,
-  skipping lockfiles, generated files and `PRXREF_SIZE_IGNORE_GLOBS` matches.
-- **Fixes found on the way.** GitLab's MR diff listing now reads every page and
-  fails on a short read instead of stopping at 20 files. GitHub calls time out.
-  Prompts and the summary fill in a single pass, so a `{diff}` in PR text stays
-  literal. `load_config` no longer shares list defaults between calls. An
-  unrecognized `PRXREF_LLM_BACKEND` exits 2. Under `PRXREF_FAIL_ON=error` or
-  `any`, a review that ends with verdict `Error` exits 1. A total LLM failure
-  counts the sweep that answered, and the `forge.get_diff` trace span counts
-  bytes, not characters.
-- **Config went from 36 to 55 keys.** The 19 new keys are the CLI path and
-  concurrency, cost, size, spec, rules and ticket keys, the Jira credentials, and
-  the Azure DevOps token and webhook secret.
+- **#10 Reworded duplicates.** `quality.apply_sweep_dedup(..., similarity=)`
+  has a second tier that runs after the exact one. It treats two active
+  findings in the same file on the same line as duplicates when
+  `quality.titles_similar` holds. That test is a Jaccard index over title
+  tokens (`quality.title_similarity`). `PRXREF_DEDUP_SIMILARITY` sets the
+  threshold, and leaving it unset skips the tier. A chunk copy always outlives
+  a sweep copy, and the tier never lowers a review's worst severity.
+- **#11 Prompt template overrides.** `prompt_templates.load_prompt_templates`
+  reads `worker.md`, `systemic.md` and `summary.md` from `--prompts-dir` /
+  `PRXREF_PROMPTS_DIR`. A template that is not there falls back to the packaged
+  one. An override must carry every placeholder the packaged template has after
+  its context marker, except those in `OPTIONAL_PLACEHOLDERS`; a missing one
+  exits 2. `prxref prompts export` (`cli._cmd_prompts_export` →
+  `export_prompt_templates`) writes the packaged templates out as a starting
+  point. The run record's `prompt_templates` lists each override.
+- **#12 Path-scoped rules.** `--scoped-rules` / `PRXREF_SCOPED_RULES` name rules
+  files whose `applies_to:` front-matter globs pick the chunks each one reaches.
+  They add to `PRXREF_REVIEW_RULES` and never replace it. Start at
+  `rules.load_scoped_rules`, `rules.match_globs` (where `**/` also matches zero
+  directories) and `ScopedRules.select` / `unit_block`. `unit_block` fits the
+  rules into `PRXREF_SCOPED_RULES_MAX_CHARS`. The orchestrator builds one block
+  per chunk in `_scoped_unit_blocks`, and the sweep gets the union.
+- **#13 Grouping and per-severity caps.** With `PRXREF_GROUP_FINDINGS` on, the
+  worker prompt asks each finding for a `rule` (`triage.normalize_rule`,
+  `orchestrator._enforce_rule`). `quality.apply_rule_grouping` then folds the
+  chunk findings that break one rule in one file into one representative. Its
+  body ends `Also at:` and its `locations` lists the other lines.
+  `--format json` emits `rule` and `locations` (`cli._finding_json`), with
+  `locations` null on an ungrouped finding unless the per-rule cap (#18)
+  folded others into it. `PRXREF_MAX_WARNING_FINDINGS` and
+  `PRXREF_MAX_OUTOFSCOPE_FINDINGS` cap those two severities in
+  `quality.apply_quality_gate`, ranked by `quality.finding_rank_key`, and every
+  cap counts groups.
+- **#14 Eval harness.** `prxref eval run|score|compare` goes from
+  `cli._cmd_eval` to `evals.eval_run`, `eval_score` and `eval_compare`. `eval`
+  adds no environment variable, since every setting is a flag, and it never
+  posts. `eval_cases.load_cases` reads a case: a diff file or a pinned `pr_url`
+  range, plus its expected labels. `eval_metrics` grades a label that has a
+  `must_match` predicate deterministically. Every other label goes to an LLM
+  judge, whose code is in `judge.py` and `eval_judge.py` and whose prompt is
+  `prompts/judge.md`. `compare` also warns when two runs' replay description
+  stamps differ.
+- **#15 GitHub PRs past the diff limit.** In `forges/github.py`, `get_diff`
+  handles a 406 whose error code is `too_large` by calling
+  `_get_diff_past_the_limit`. That reads `get_pr` and then
+  `get_compare_diff(base.sha...head.sha)`. The compare diff is accepted only
+  when `_compare_mismatch` finds its file count and its `+`/`-` line sums equal
+  to the PR's `changed_files`, `additions` and `deletions`. On a mismatch or any
+  HTTP or transport failure, it logs one WARNING and falls back to
+  `_get_diff_from_files`. That pages `/pulls/{number}/files` and renders the
+  diff through `forges/_diff_render.render_diff_entries`. The fallback fails
+  closed: a listing shorter than `changed_files`, or totals that disagree with
+  the PR's (`_refuse_short_totals`), end the run as `Error`, never as a partial
+  review.
+- **GitHub file content.** Start at `get_file_content` in `forges/github.py`.
+  `_is_json_envelope` judges the response by its media type: a type in
+  `_RAW_MEDIA_TYPES` is the file, and `application/json` or any other `+json`
+  type is an envelope that reads as no content. `orchestrator._make_file_reader`
+  wraps the adapter's reader in a per-run cache and feeds it to the chunk
+  context blocks (dependency versions and symbol definitions) and to
+  `quality.apply_manifest_claim_check`. The bug itself is under "Fixes found on
+  the way" below.
+- **#16 Replay pins the title and description.** A `--pr-url` replay goes
+  through `cli._replay_forge` → `_resolve_description`. That reads the forge's
+  `get_pr_history` once: GitHub over GraphQL, Bitbucket Cloud over `/activity`.
+  `forges/replay.choose_cutoff` then picks the cutoff: `--as-of`, else the first
+  human review, else the head commit's date. `ReplayForge` shows the title and
+  description in force at the cutoff (`pin_pr_metadata`). `--description-file`
+  and `--no-description` fix the description instead. Every other outcome
+  replays the live text and logs a WARNING that says why. The run's `replay`
+  stamp records `description` (`pinned`, `live`, `file` or `none`) with the
+  cutoff and its source.
+- **#18 Per-rule cap.** Start at `quality.apply_rule_cap`. `orchestrate_review`
+  calls it through `_cap_rules`, after the grouping pass and before
+  `apply_quality_gate`, only when `rule_cap_active` holds:
+  `max_findings_per_rule` (`PRXREF_MAX_FINDINGS_PER_RULE`, default 2) is above 0
+  and `rules` or `scoped_rules` is not `None`. The same flag turns on #13's rule
+  request through `rule_active`, so a rules-file run asks every unit for a
+  `rule` with grouping off. The pass keys on the rule, or the normalized title,
+  across files, keeps the first `cap` ranked by severity and then
+  `finding_rank_key`, and folds the rest onto the first one's `locations` and
+  `Also at:` paragraph. `quality.rule_cap_counts` builds the run record's
+  `rule_counts`.
+- **Fixes found on the way.**
+  - `quality.apply_example_echo_check` drops a finding whose title echoes a
+    prompt template's example finding. It is the first pass that drops
+    anything.
+  - `worker.md` lost a false sentence claiming the input "stays under roughly
+    30k tokens".
+  - The GitHub adapter's `get_file_content` took GitHub's raw media type,
+    `application/vnd.github.raw+json`, for a JSON envelope and dropped every
+    file it read, so GitHub reviews got no full-file context. Earlier releases
+    are affected too. `_is_json_envelope` now decides by the media type.
+  - `orchestrator._split_at_sweep` re-derives the chunk/sweep boundary across
+    the quality gate by counting the chunk side. The old walk counted the sweep
+    side, and because the gate's stable sort puts a chunk copy ahead of its
+    identical sweep twin, it swapped every twin pair: a sweep finding repeating
+    a grouped or rule-capped chunk finding was posted twice.
+    `tests/test_sweep_boundary_drops.py` pins the gate's tie order it relies on.
+- **Config went from 55 to 63 keys.** The eight new keys are:
+  - `PRXREF_DEDUP_SIMILARITY` (#10)
+  - `PRXREF_PROMPTS_DIR` (#11)
+  - `PRXREF_SCOPED_RULES` and `PRXREF_SCOPED_RULES_MAX_CHARS` (#12; the second
+    defaults to 24,000)
+  - `PRXREF_GROUP_FINDINGS`, `PRXREF_MAX_WARNING_FINDINGS` and
+    `PRXREF_MAX_OUTOFSCOPE_FINDINGS` (#13)
+  - `PRXREF_MAX_FINDINGS_PER_RULE` (#18; defaults to 2, and applies only while
+    a review rules file is loaded)
+
+  The first seven are off or unset by default. The per-rule cap is on by
+  default whenever a review rules file is loaded. No existing config default
+  changed.
 
 ## What this release taught
 
-Written down because each one cost a seat real time.
+Written down because each one cost real time.
 
-1. **Lay the seams first, and make every stub fail closed.** A foundation stage
-   landed every shared surface with a placeholder body before any feature seat
-   started: config keys, run-record and JSON keys, prompt slots, trace events,
-   the glyph table and the new `Forge` method. That let the eight issue seats run
-   in parallel on disjoint files. A stub that fails closed cannot ship as a
-   silent no-op. The cost is that placeholder prose outlives the placeholder.
-   Docstrings saying the loaders "fail closed in this build" and the cost hooks
-   are "inert in this build" survived after the real bodies landed, and the
-   release had to sweep them. Grep for `in this build` before cutting.
-2. **Cite the symbol, not the line.** Several seats found the `file:line` pins in
-   their briefs stale against the base they had been given, and every one of
-   them still resolved by symbol name. Pin a SHA if you must give a line, and
-   prefer `module.function`.
-3. **Keep one table per cross-cutting literal.** Every severity and scope glyph
-   comes from `prxref.markers`, and `tests/test_markers.py`
-   (`TestGlyphsLiveInOnePlace`) fails when a glyph literal turns up anywhere else
-   in the package. So a glyph change is made in one table, and the test finds
-   any stray copy.
-4. **`Tracer.event(node, phase, **meta)` reserves two keyword names.** A dict
-   splatted into it must not carry a `node` or `phase` key. Such a call raises
-   `TypeError` at the call site, before tracing's never-raise guard can catch it.
-5. **A mutation check needs `PYTHONDONTWRITEBYTECODE=1`.** To prove a test can
-   fail, revert a line, watch the test go red, then restore the line and `cmp` it.
-   Without the variable, the mutant's bytecode gets cached. A same-size restore
-   within the same second can then run the mutant again.
-6. **Two contract rules over one field need a tiebreak.** One rule said every
-   new JSON key is always present and `null` when its feature is off. Another
-   said `replay` is absent on a normal run. The code followed the second, and a
-   seam test now pins that. The next contract should say which rule wins before
-   any seat starts.
+1. **A new run-record or JSON key moves eight test pins in three files.**
+   - `tests/test_orchestrator.py`: three `set(res) == {...}` literals and
+     `RESULT_KEYS`.
+   - `tests/test_run_record.py`: `RECORD_KEYS` and `NULL_WHEN_OFF`.
+   - `tests/test_cli_output.py`: `JSON_KEYS` and `NEW_RECORD_KEYS`.
+
+   All eight spell out the full key set, and the key order is pinned too. A new
+   exit from `orchestrate_review` also moves `TestOneChokePoint`'s count.
+2. **Trace-event order is nondeterministic.** Chunk workers run on a
+   `ThreadPoolExecutor` capped at `max_workers`. A test that asserts trace
+   events must compare them as a multiset, or pin `max_workers=1`.
+3. **A new prompt slot belongs in `prompt_templates.OPTIONAL_PLACEHOLDERS`.**
+   An override must carry every other placeholder the packaged template has. So
+   a slot left out of that set becomes required, and every existing override
+   that lacks it stops loading. A new slot also needs its `replace` line in
+   `tests/test_prompt_context.py`'s `_old_user`.
+4. **The hub files take every issue's kwargs, so merge them one at a time.**
+   `orchestrator.py` was touched by six issues and `cli.py` by seven. Merging
+   one branch at a time kept them green. Each merge got a full gate, and each
+   kwarg-order conflict was resolved as the union of both sides. The order is
+   pinned by tests such as
+   `test_both_kwargs_are_keyword_only_and_follow_prompts` and the record-key
+   order tests in `tests/test_cli_prompts_dir.py` and
+   `tests/test_cli_scoped_rules.py`.
+5. **With its feature off, a new key is present and null, and the output stays
+   byte-identical.** That was decided before any feature work, and every 0.15
+   key keeps to it. The one deliberate exception is removing `worker.md`'s
+   false "stays under roughly 30k tokens" sentence. That moved every worker
+   user-prompt hash, including on runs with every feature off. It shows in the
+   trace, in `--trace-dir`, and in the golden tests of
+   `tests/test_rule_prompt_slot.py` and `tests/test_orchestrator_grouping.py`.
+   The system, sweep and summary-only hashes did not move. A run with a review
+   rules file moved further: the per-rule cap (#18) is on there by default, and
+   its rule request changes both prompt halves of every chunk and of the sweep,
+   which `PRXREF_MAX_FINDINGS_PER_RULE=0` undoes. Keep this in mind when
+   comparing hashes across 0.14 and 0.15 runs.
+6. **Read a packaged template through `prompt_templates.packaged_text`.** The
+   stub `_contract_load_prompt` in `tests/test_orchestrator.py` asserts that the
+   orchestrator asks `reviewer.load_prompt` for the summary template only.
+   Route a new orchestrator read through `load_prompt` instead, and 248 tests
+   fail with a misleading `'worker.md' == 'summary'`.
+7. **Mock the headers the server really sends.** The GitHub file-content bug
+   went unnoticed because the tests' success mocks answered
+   `text/plain`. github.com answers `application/vnd.github.raw+json`, and
+   only a live check showed it. So the `json` substring test that dropped
+   every file stayed green through five releases, 0.12.0 to 0.14.0. Copy
+   content types from a recorded response.
+8. **An unverified API shape may add evidence, never veto verified evidence.**
+   Bitbucket Cloud's history reader was first built so that an unverified
+   snapshot field could fail the verified `changes.description` history of
+   every edited PR. The full gate was green, and only a final review caught it.
+9. **A mutation check still needs `PYTHONDONTWRITEBYTECODE=1`.** Restore the
+   file and `cmp` it afterwards, or a same-size restore can run the cached
+   mutant again.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -110,30 +194,54 @@ against `config._DEFAULTS` **in both directions**. It also asserts two hard-code
 integers, built as `f"**{len(_DEFAULTS)}** configuration keys"` and
 `f"for {len(_DEFAULTS)+len(_LEGACY_ENV_ALIASES)} accepted variable names"`.
 
-So a new config key is not a source change. It is an atomic change across four
-surfaces: `_DEFAULTS` plus the `_INT_KEYS` / `_FLOAT_KEYS` / `_RANGES` /
-`_CHOICE_KEYS` tables, the `config.py` docstring, `.env.example`, and
-`docs/env-vars.md`, including its counts and its per-section headings. 0.14.0
-added 19 keys this way. Current values: **55** keys, **1** legacy alias, **56**
-accepted names.
+So a new config key is not a one-file change. It changes four surfaces
+together:
+
+- `_DEFAULTS`, plus whichever of the `_INT_KEYS`, `_FLOAT_KEYS`, `_BOOL_KEYS`,
+  `_LIST_KEYS`, `_RANGES` and `_CHOICE_KEYS` tables apply to it (the v0.14.0
+  handoff listed only four of these)
+- the `config.py` docstring
+- `.env.example`
+- `docs/env-vars.md`, including its counts and its per-section headings
+
+A key that feeds `orchestrate_review` needs one more step. `tests/test_cli.py`
+(`test_run_review_passes_every_configured_orchestrate_kwarg`) requires
+`cli._run_review` to pass every orchestrator kwarg whose name equals a config
+key. Of the 8 keys 0.15.0 added, 7 feed it this way; `prompts_dir` does not,
+since `orchestrate_review` takes the loaded templates as `prompts`. Current
+values: **63** keys, **1** legacy alias, **64** accepted names.
 
 ## Release shape (follow this next time)
 
-How 0.14.0 was built:
+How 0.15.0 was built:
 
-1. **Foundation.** Seats lay the shared seams every feature needs, each with a
-   placeholder body that fails closed. Nothing user-visible lands here.
-2. **Wave 1.** One seat per issue runs in parallel, each in its own worktree
-   with a disjoint file list. A seat fills a placeholder; it does not add a seam.
-3. **Wave 2.** Next come the pieces that needed two wave-1 bodies in place (the
-   replay CLI, replay over Azure DevOps, the second CLI backend) and the forge
-   fixes wave 1 surfaced.
-4. **One integration gate per merge.** Each seat branch merges into
-   `release/X.Y.Z` on its own, and a merge stays only if the full
-   `uv run pytest` and `uv run ruff check src tests` pass on the merged tree.
-5. **REL.** Parallel seats sweep stale docs, add cross-seat seam tests, and
-   write the version bump, the CHANGELOG and this file. Read-only live checks
-   follow against public PRs and real CLIs (see "Live checks" below).
+1. **Maps and one plan first.** Each issue got a read-only map of the code it
+   would touch. One plan merged the maps, and the owner decided the cross-issue
+   questions before any code was written, including the rule that a new key is
+   null when its feature is off.
+2. **Foundation.** One task landed every new config key, off by default, before
+   any feature work started. #18, which joined later, brought its own key.
+3. **Lanes in waves.** Work was split into lanes by subsystem: quality (#10,
+   #13, #18), prompts (#11, #12), eval (#14), forge (#15) and replay (#16).
+   - Tasks ran in waves of parallel agents, each agent in its own worktree
+     against a pinned base commit.
+   - Each task was rated at most 5 of 10 for complexity and brought its own new
+     test file.
+   - 45 tasks merged in eight waves before the release documents were written:
+     the foundation, 5 forge, 9 quality, 11 prompts, 12 eval and 6 replay
+     tasks, and the example-echo fix. #18 joined the release after that, as 4
+     more tasks in three waves: the pass and its config surfaces in parallel,
+     then the wiring, then the sweep-boundary fix its wiring turned up.
+4. **One integration gate per merge.** Each branch merged into `release/X.Y.Z`
+   on its own. A merge stayed only if the full `uv run pytest` and
+   `uv run ruff check src tests` passed on the merged tree.
+5. **Read-only live checks.** They ran against public PRs, with a guard that
+   blocked forge writes. Six ran:
+   - One found GitHub silently withholding patches once a listing page nears
+     1 MB. That brought in the compare-first path before release.
+   - A later one found the GitHub file-content bug.
+6. **Release.** Parallel tasks swept stale docs, bumped the version, and wrote
+   the CHANGELOG and this file. The file-content fix merged alongside them.
 
 Cutting the release:
 
@@ -143,90 +251,202 @@ uv lock                              # uv.lock carries the version too
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. Its `release` job runs
-`uv build` and creates the GitHub release with the wheel **and** the sdist
-attached. The job lists both by explicit pattern, not `dist/*`, which once
-shipped a stray `.gitignore` as an asset. Its `publish` job builds again and
-publishes to PyPI by OIDC trusted publishing, so no token is stored anywhere. The
-two jobs build separately, which makes the PyPI files and the release assets two
-builds of the same tag. Keep the attached sdist: at least one consumer updates
-itself with `gh release download --pattern '*.tar.gz'`, and that pattern does not
-match GitHub's auto-generated source archive.
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which has two jobs:
 
-The repository was recreated, so check three things before its first tag push:
-Actions is enabled, the `pypi` environment exists, and the PyPI trusted
-publisher still names owner `sblattj`, repository `prxref`, workflow
-`release.yml` and environment `pypi`.
+- The `release` job runs `uv build` and creates the GitHub release with the
+  wheel **and** the sdist attached. It lists both by explicit pattern, not
+  `dist/*`, because `dist/*` once shipped a stray `.gitignore` as an asset.
+- The `publish` job builds again and publishes to PyPI by OIDC trusted
+  publishing, so no token is stored anywhere.
+
+Because the two jobs build separately, the PyPI files and the release assets
+are two builds of the same tag. Keep the attached sdist: at least one consumer
+updates itself with `gh release download --pattern '*.tar.gz'`, and that
+pattern does not match GitHub's auto-generated source archive.
 
 ## Verified at release
 
 ```
-4222 passed                                   uv run pytest -q
+6797 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.14.0                                        uv run prxref --version
+0.15.0                                        uv run prxref --version
 ```
 
-These counts come from the release tip, after every feature, fix and test
-branch had merged.
+These counts come from the release branch, measured at the commit that last
+updated this file.
 
 ### Live checks
 
-All ran on 2026-09-23 and were read-only: reviews ran with `--no-post` or with
-the forge's write methods captured, and a guard blocked forge writes. The
-targets were psf/requests#6963 on GitHub, a PR in a public Azure DevOps
-Services project (read anonymously), merge requests in the gitlab-org group on
-gitlab.com, and the bundled eval cases.
-
-- **#1 litellm without `PRXREF_LLM_BASE_URL`.** It answered with a cost and no
-  configuration error. With a URL set, it logged the "set but not used" INFO
-  line.
-- **#2 Azure DevOps.** The forge-level check passed 43 of 43. The dry-run JSON
-  key set equalled the GitHub control's in 3 of 3 runs. The first two lost
-  chunks to LLM timeouts and a malformed model reply, and the third reviewed
-  every chunk. The compare range matched `get_diff` byte for byte, including
-  two PRs one commit behind their target. A pinned-range replay passed 25 of
-  25.
-- **#3 Team review rules.** 19 of 19 checks passed: the prompts, the run
-  record's hash and severity map, truncation, and exit 2 on a bad path.
-- **#4 Ticket context and scope.** Passed after the scope fix, which shows a
-  `"scope"` key in the prompt's JSON example while a ticket is active. On the
-  case-002 eval, gpt-4.1-mini went from 0 of 10 findings labelled to 12 of 12,
-  and prompts without a ticket stayed byte-identical. With an off-ticket file
-  added, 5 of 5 off-ticket findings came back `out`. The example's value does
-  not anchor the answer: with the example set to `out`, 12 of 12 on-ticket
-  findings still came back `in`.
-- **#5 Replay.** The mechanics passed: the stamp, the pinned diff, the hidden
-  threads, a forge-less `--diff-file` run with no token, and exit 2 on 6 of 6
-  bad flag sets. A replay pinned to a different PR's range is model-fragile:
-  the PR's current title and description are kept, as documented, and the
-  model returned non-JSON in 3 of 3 tries, while the matching control was
-  approved in 2 of 2.
-- **#6 Subscription CLI backends.** `claude-cli` ran on the subscription login,
-  with no `ANTHROPIC_API_KEY` in the child's environment and `--effort low`
-  passed through. `kiro-cli` read "cost unknown", logged its credits, and
-  honoured the model in its agent file. The `(API-equivalent)` cost label
-  landed after this check. It is covered by `tests/test_issue_67_cost.py` and
-  was not re-run live.
-- **#7 Dollar cost.** A reported cost matched the sum of its units, a
-  cost-stripping relay gave `null`, a price table's estimate matched the
-  formula, and a malformed table exited 2. The `-v` line showed `$…`,
-  `~$… (est.)` and `cost unknown`.
-- **#8 Size advisory.** 4 of 4 checks passed, and the parsed diff's counts
-  equalled the GitHub API's.
-- **Spec grounding.** On the bundled eval, grounded against ungrounded runs
-  surfaced 8 of 10 against 3 of 10 planted spec violations on gpt-4.1-mini,
-  and 10 of 10 against 4 of 10 on claude-haiku-4.5.
-- **GitLab paging.** A 130-file MR was read across 2 pages, and `too_large`
-  files were listed header-only with a warning.
-- **Spend.** About $0.31 of LLM calls in total. That is an upper bound,
-  because it counts calls that timed out before reporting a cost at their
-  largest possible cost. The `claude-cli` runs
-  (about $0.09 API-equivalent) and the `kiro-cli` runs (about 0.09 credits)
-  used subscriptions and are not included.
+- **#15, before the fix: GitHub withholds patches.** sblattj/prxref#9 (127
+  files, +32,003/-612) gets a 406 from the diff endpoint. An interim build
+  rebuilt it from the `/files` listing: the 110 files whose patch came back
+  matched the compare diff line for line, but 16 ordinary text files
+  (+6,880/-15, 21% of the added lines) came back at 0/0 with no patch at
+  `per_page=100`, and whole at `per_page=30`. That defect brought in the
+  compare-first path. 0.14.0 ends the same review as `Error`.
+- **#15: GitHub's counts on 23 public PRs.** Across 11 repositories (binaries,
+  renames, a submodule, mode-only, empty and deleted files, 211- and 438-file
+  PRs, 48k-line lockfiles, 10 open PRs, 8 of them from forks), the `/files`
+  sums and the compare diff each matched the PR's counts on 23 of 23. The
+  compare diff was byte-identical to the PR diff on 22 of 22, resolved fork
+  SHAs on 17 of 17, and on 10 of 10 open PRs started from the base tip's merge
+  base. GitHub dropped the patch but kept the counts on 10 lockfile entries in
+  4 ordinary PRs, so such a file is reviewed header-only with a warning.
+- **#15: the shipped fix.** `get_diff` reads sblattj/prxref#9 (127 files,
+  +32,003/-612, refused at 20,000 lines) and ObiterDictum/obiter#226 (438
+  files, refused at 300 files) whole from the compare endpoint in 3 GETs, with
+  no `/files` request; the listing alone would refuse #9 (+25,123/-597 against
+  +32,003/-612). The no-post review of #9 completes: `Request-Changes`, 8
+  chunks plus the sweep, 3 findings, USD 0.0745. The same check found the
+  GitHub file-content bug fixed in this release: that review dropped 83 of 83
+  file reads.
+- **#11, #12 and #13 on pallets/click#3860.** It ran as 3 diff chunks at
+  `PRXREF_CHUNK_TOKEN_BUDGET=1500`. #12: each chunk got exactly the scoped
+  rules its globs matched, the sweep got both, and `--scoped-rules ""` turned
+  them off. #13: gpt-4o-mini named a rule on 20 of 20 raw findings and
+  gpt-4.1-mini on 20 of 26; 2 groups per model, `locations` matching `Also
+  at`; the warning cap left 1 warning each. #11: the record stamped the edited
+  `worker.md`'s SHA-256, and a copy without the marker exited 2 before any
+  network call. #10: 0 candidate pairs in 4 on/off pairs. USD 0.046 over 23
+  runs.
+- **Zero chunk findings on sblattj/prxref#9.** Chunk size is not the cause: 8
+  chunks at 39,962-59,470 input tokens and 32 chunks at 9,488-19,532 both
+  returned 0 findings, as did an exact repeat and gpt-4.1-mini (0 of 56 chunk
+  calls). A positive control found 5 of 8 planted labels, all spec-tier, and 0
+  of 3 generic bugs. `worker.md`'s "roughly 30k tokens" sentence was false at
+  defaults (8 of 8 chunks over it) and is removed. 9 of 12 gpt-4o-mini sweep
+  findings were `tests/evals/` fixture text. USD 0.323.
+- **#16 on GitHub and Bitbucket Cloud.** On astral-sh/ruff#28750 (5
+  description versions, 1 rename), `get_pr_history` read a complete history
+  ending at the live body. Two `--as-of` cutoffs pinned versions 2 and 3 with
+  the pre-rename title, no `--as-of` chose the first review, and with no token
+  the replay fell back to the live text with a WARNING naming
+  `PRXREF_GITHUB_TOKEN`. On Bitbucket Cloud, 4 of 4 cutoffs matched a hand
+  derivation, a 25-PR scan found live `changes.title` renames, a PR renamed
+  twice pinned at 6 of 6 cutoffs, and a two-page feed at 10 of 10. USD 0.0034.
+- **This release's own pull request, sblattj/prxref#19.** GitHub refused its
+  unified diff with HTTP 406 (105 files, 33,096 changed lines), and a
+  `--no-post` review read the compare diff instead and reviewed all 105 files
+  in 8 chunks and the sweep. Every chunk prompt carried the full-file context
+  blocks (dependency versions, referenced definitions) that the GitHub
+  file-content fix restores. The example-echo pass dropped 1 sweep finding.
+  One chunk failed: gpt-4o-mini returned an empty reply with `finish=stop`
+  after 518 billed output tokens, and the review went on with
+  `chunks_failed: 1`. Verdict `Approved`, 38 s, USD 0.080.
 
 ## Still open — not part of this release
 
+- **#17 Repository context outside the diff.** Mapped and planned for 0.16.0.
+- **An empty model reply is not retried.** A reply with no text and
+  `finish=stop` fails its unit at parse time (`parser.py`, `no parseable
+  content`) and is not re-asked, though the provider billed it. The review of
+  this release's own pull request lost 1 of 8 chunks this way. 0.14.0 behaves
+  the same.
+
 The known limitations, in full in the CHANGELOG:
+
+- **#10 The reworded tier is unproven.** It ships off. Its suggested threshold
+  was chosen on invented negatives. A live check found no candidate pair in
+  eight runs, so the tier has not yet been seen to fire on a real PR.
+- **#12 Chunks are not packed by language.**
+  - `triage.build_chunks` fills chunks by token budget and file cap. Among the
+    chunks with room, it prefers the one sharing the deepest directory
+    (`_shared_dir_depth`).
+  - So a chunk that holds two kinds of file gets the union of both files'
+    scoped rules. A live check saw exactly this.
+- **#13 Grouping keys on the rule the model names.**
+  - A finding with no rule groups by title only. It never joins a group whose
+    findings name a rule, even with the same title in the same file.
+  - A member that line alignment moved to file level adds no `Also at`
+    location.
+  - The caps rank by `finding_rank_key` (confidence, then file path), not by
+    group size. So capping a representative drops all its folded locations from
+    the output. The same goes for the finding the per-rule cap (#18) folded a
+    rule's other findings into.
+- **Findings on files outside the chunk.** A worker can report on a file it saw
+  only in the bounded `### Other files changed in this PR` excerpt
+  (`chunk_context.sibling_summary_block`). Location validation and line
+  alignment run over the whole PR's files, so such a finding is kept and
+  anchored like any other. Nothing marks it as coming from an excerpt.
+- **#14 The judge shares the review's backend.**
+  - Only `--judge-model` changes which model judges.
+  - Self-judging is detected by exact model name. It warns and stamps
+    `self_judged`, and is never refused.
+  - Scoring needs human-labelled cases, and the repository ships three.
+- **#15 Two ways a GitHub run past the diff limit can take long or fail.**
+  - A PR pushed to between the PR read and the listing pages can fail the
+    totals check. The run then ends as `Error`, never as a partial review.
+  - A compare read that times out is retried by the session. The retry policy
+    is `LoggingRetry(total=3)` with a 30-second read timeout, so reaching the
+    fallback can take up to four such timeouts.
+- **#16 Only GitHub and Bitbucket Cloud read description history.**
+  - **Other forges.** On GitLab, Azure DevOps and Bitbucket Server, a replay
+    logs a WARNING and uses the live title and description. An explicit
+    `--as-of` there exits 2.
+  - **Unprobed endpoint.** GitHub Enterprise Server's GraphQL endpoint
+    (`https://<host>/api/graphql`) has not been probed live.
+  - **Large PRs.** A PR with more than 5,000 reviews, comments or title renames
+    pins nothing, so it replays the live text even under `--as-of`.
+  - **Rate limit.** Bitbucket Cloud allows 60 anonymous reads an hour, and a
+    history read costs at least three. So a replay without a credential can
+    fall back to the live text.
+  - **Unverified Bitbucket Cloud shapes.** The `changes_requested` activity
+    entry has not been seen live (0 in 4 feeds) and is read by analogy with an
+    approval. It is also unverified whether the commit `date` used as the head
+    commit's date is the author date or the committer date.
+  - **CRLF.** GitHub stores some description versions with CRLF line endings,
+    and a pinned replay passes them to the prompt verbatim.
+
+Sizing, recall and GitHub notes:
+
+- **The size advisory is opt-in.** `size_warn_lines` and `size_warn_files`
+  default to `None` in `config._DEFAULTS`, so nothing warns on a 30,000-line
+  PR.
+- **Chunk sizing on very large PRs.**
+  - Once `max_chunks` binds, the overflow branch of `triage.build_chunks` puts
+    each remaining file into the smallest chunk and ignores the token budget.
+    So a very large PR packs thousands of changed lines into each chunk.
+  - The budget is compared against an estimate of 40 tokens per changed line,
+    which is above real prompt tokens.
+  - A live check found that shrinking chunks fourfold did not change the result
+    on one large PR. So this is a sizing note, not a known recall loss.
+  - Weigh it against #17's context budget.
+- **Generic-bug recall is unmeasured beyond a small sample.** On the three
+  bundled eval cases, gpt-4o-mini found every spec-grounded label and none of
+  the three generic bug labels. `worker.md`'s "Prefer zero findings over one
+  speculative finding" is an untested suspect. Measure with `prxref eval`
+  before tuning the prompt.
+- **Review has no path-ignore setting.** `PRXREF_SIZE_IGNORE_GLOBS` affects only
+  the size counts. A repository's test fixtures that contain deliberate
+  violations are reviewed as code. In this repository, the sweep reviews the
+  eval fixtures under `tests/evals/` and reports their planted violations as
+  findings.
+- **GitHub's limits are undocumented.**
+  - The 406 `too_large` fires past 20,000 lines **or** 300 files.
+  - The `/files` listing withholds `patch` in two ways:
+    - Silently: 0/0 counts once a listing page nears about 1 MB, which the
+      listing-sum check catches.
+    - Declared: the true counts are kept. This is commonly a lockfile added or
+      removed whole, and the file is reviewed header-only with a warning.
+  - GitHub documents neither trigger's exact threshold.
+- **Keep the listing-sum check.**
+  - The withheld entries in sblattj/prxref#9 all report 0/0/0. So only
+    `_refuse_short_totals` catches silent withholding. Removing it would reopen
+    #9 whenever the compare leg also fails.
+  - `tests/fixtures/github/` is trimmed from recordings of sblattj/prxref#9.
+    The compare fixture is an 8-file subset, not the whole 1.67 MB diff.
+  - It is a hypothesis, not isolated, that the 20,000-line trigger skips
+    patch-withheld files.
+- **A review past GitHub's diff limit reads the pull request twice.**
+  `orchestrate_review` reads `get_pr` for the review's metadata, and
+  `_get_diff_past_the_limit` reads it again before the compare read. That is
+  one redundant GET per oversized review.
+- **Four #15 branches are covered by unit tests only.** No live check reached
+  the patch-less 0/0 header-only branch, GitHub's 3,000-file listing cap, a
+  406 without `too_large`, or a compare diff whose counts disagree with the
+  PR's.
+
+Carried over from 0.14.0, still true:
 
 - **Spec digest.**
   - Unpunctuated keyword lines in one paragraph merge into one constraint, and a
@@ -243,55 +463,79 @@ The known limitations, in full in the CHANGELOG:
     one expected non-spec finding was missed in 4 of 4 grounded runs across
     two models and found in 3 of 4 ungrounded runs. That is two runs per model
     in each arm, and the cause is inferred, not proven.
-- **`kiro-cli`.** It always reports "cost unknown". Whether user-level Kiro
-  configuration such as `~/.kiro/steering/` reaches prxref's per-call agent has
-  not been verified. The model that actually ran is not reported, and every chat
-  is kept under `~/.kiro/sessions/cli/`.
-- **GitLab.** Files GitLab withholds as `too_large` or `collapsed` are listed
-  header-only, and an MR past 5,000 files fails. Reading an MR's threads on
-  gitlab.com needs `PRXREF_GITLAB_TOKEN` even for a public project; without one,
-  thread dedup runs against no threads.
-- **GitHub.** A pull request whose diff runs past 20,000 lines gets HTTP `406`
-  `too_large` from the diff endpoint and ends as an `Error` run. The 0.14.0
-  release PR itself, at about 32,600 changed lines, hit this in CI. The fix is
-  a fallback that rebuilds the diff from the paged `/pulls/{number}/files`
-  listing, as the GitLab adapter does, with files GitHub sends without a
-  `patch` listed header-only.
-- **Replay.** A `--diff-file` run without `--pr-url` sees only the diff.
-- **Azure DevOps.** Only anonymous reads are verified live: the forge reads, the
-  dry-run output shape, the pinned-range compare diff and a pinned-range replay.
-  Posting, pruning, PAT and `SYSTEM_ACCESSTOKEN` authentication and service hooks
-  are tested against recorded API shapes only. Azure DevOps Server is untested.
+- **`kiro-cli`.**
+  - It always reports "cost unknown".
+  - Whether user-level Kiro configuration such as `~/.kiro/steering/` reaches
+    prxref's per-call agent has not been verified.
+  - The model that actually ran is not reported.
+  - Every chat is kept under `~/.kiro/sessions/cli/`.
+- **GitLab.**
+  - Files GitLab withholds as `too_large` or `collapsed` are listed header-only.
+  - An MR past 5,000 files fails.
+  - Reading an MR's threads on gitlab.com needs `PRXREF_GITLAB_TOKEN`, even for
+    a public project. Without one, thread dedup runs against no threads.
+- **Replay from a diff file.** A `--diff-file` run without `--pr-url` has no
+  file context and no threads. The title comes from the patch mail or the file
+  name. The description comes from the mail, `--description-file` or
+  `--no-description`.
+- **Azure DevOps.**
+  - Only anonymous reads are verified live: the forge reads, the dry-run output
+    shape, the pinned-range compare diff and a pinned-range replay.
+  - Posting, pruning, PAT and `SYSTEM_ACCESSTOKEN` authentication and service
+    hooks are tested against recorded API shapes only.
+  - Azure DevOps Server is untested.
 - **Gating.** A mistyped or unrecognized `--pr-url` exits 0 even under
   `PRXREF_FAIL_ON=error` or `any`, because nothing was reviewed.
+- **One seam is tested only in halves on two paths.** The size advisory and the
+  cost label are tested together on the main summary post
+  (`tests/test_release_seams.py`). On the inline-accounting refresh post and on
+  the summary-only run, each is tested alone.
+- **Scope labelling is measured on one fixture shape.** An off-ticket change
+  inside an on-ticket file is unmeasured.
 
-Follow-ups a seat reported that did not land:
+Follow-ups a maintainer can act on:
 
-- **Eval scoring is manual.** `tests/evals/test_eval_replay.py` replays every
-  case offline, but scoring (section 7.2 of `docs/spec-grounded-review.md`)
-  is not built: judging findings against a case's `expected.json` needs a live
-  model and stays manual.
-- **One seam is tested only in halves on two paths.** The size advisory and
-  the cost label are tested together on the main summary post
-  (`tests/test_release_seams.py`), but on the inline-accounting refresh post
-  and on the summary-only run each is tested alone.
-- **Scope labelling is measured on one fixture shape.** The live check added an
-  off-ticket file in its own directory to the case-002 eval, and ran three
-  times for each example value on one model, plus once more on a second model.
-  An off-ticket change inside an on-ticket file is unmeasured.
+- **After this release, tune #10's threshold.** Run `prxref eval` on a real
+  replay set, then consider changing the default. Use replays pinned by #16:
+  earlier tuning ran on replays that leaked the PR's current description.
+- **Measure #18's default cap.** The issue's before and after numbers come from
+  a simulation over graded replays, and were not re-measured on prxref's own
+  output. `prxref eval compare` on two labelled runs measures it: `prxref eval
+  run` the same cases with the same `--rules-file` twice, once with
+  `PRXREF_MAX_FINDINGS_PER_RULE=0` and once at the default, `prxref eval score`
+  both, then compare them. Each run's `run.json` records the cap it used.
+- **Unchecked anchors.** `eval_cases.check_anchors` is public but never runs on
+  a `pr_url` case's fetched diff, so those labels are only shape-checked.
+- **Eval cases cannot pin the description.** A case file cannot carry `as_of` or
+  `description_file`, because `eval_cases._CASE_KEYS` has neither.
+- **Gaps in the judge's numbering.** The judge numbers references over the
+  whole record but is shown only the findings in labelled files. So it can see
+  A1 and A3 with no A2.
+- **`{repo_hint}` is never passed.** `orchestrate_review` never passes it, so
+  the slot reads `(unspecified)` in every review.
+- **The posted summary never counts dropped findings.**
+  `orchestrator._render_summary` does not tally drop reasons.
+  `formatter.format_summary` and its `_dropped_section` are imported by nothing
+  in `src/`. Wire them in or delete them.
+- **Duplicated code in `rules.py`.** `rules._read_scoped_file` duplicates the
+  read block of `load_review_rules`. A `_reason` helper exists in both
+  `rules.py` and `prompt_templates.py`.
+- **Missing definitions.** `chunk_context.referenced_definitions` looks only in
+  the same file, and `_language` has no Java entry, so a Java chunk gets no
+  definitions.
+- **The history read is untraced.** The replay's history read is outside the
+  trace, and only the `replay` stamp records its outcome.
+- **The sweep's example is always in force.** `orchestrator._example_titles`
+  always reads the systemic template. So the sweep's example title is in force
+  even on a run whose sweep never runs.
 
-The v0.5.0 handoff left three forge-wide items open. All three are **fixed**:
-
-- Every retry session allows only `GET`, `HEAD` and `OPTIONS`.
-- A comment listing that fails or comes back short raises `FeedReadError`
-  instead of passing for "no summary exists".
-- Every forge, Bitbucket Cloud included, finds its own summary by
-  `SUMMARY_MARKER` and updates it in place.
+The v0.14.0 handoff's GitHub 20,000-line bullet is **fixed** (#15), and so is
+its manual eval scoring (#14).
 
 | Item | Value |
 |---|---|
-| Released version | `0.14.0` (minor: new inputs, a forge and two backends; an unrecognized `PRXREF_LLM_BACKEND` now exits 2) |
-| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers` |
+| Released version | `0.15.0` (minor: new eval commands, new inputs and eight new config keys, seven off by default and the per-rule cap on by default whenever a review rules file is loaded; no existing config default changed, but a `--pr-url` replay now pins its title and description by default, a review rules file now also asks every unit for a rule and folds each rule's findings past the second, and every worker prompt hash moved) |
+| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |

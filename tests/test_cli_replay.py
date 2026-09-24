@@ -103,8 +103,11 @@ def _assert_nothing_ran(rec) -> None:
     assert rec.orchestrate == []
 
 
-def _stamp(base=None, head=None, threads="hidden", diff=None) -> dict:
-    return {"base_sha": base, "head_sha": head, "threads": threads, "diff_file": diff}
+def _stamp(base=None, head=None, threads="hidden", diff=None, description="live") -> dict:
+    return {
+        "base_sha": base, "head_sha": head, "threads": threads, "diff_file": diff,
+        "description": description, "as_of": None, "as_of_source": None,
+    }
 
 
 class TestValidation:
@@ -267,7 +270,9 @@ class TestWiring:
         ]) == 0
         call = runtime.orchestrate[0]
         assert call["replay"] == _stamp(BASE, HEAD, "hidden")
-        assert list(call["replay"]) == ["base_sha", "head_sha", "threads", "diff_file"]
+        assert list(call["replay"]) == [
+            "base_sha", "head_sha", "threads", "diff_file", "description", "as_of", "as_of_source",
+        ]
         assert isinstance(call["forge"], ReplayForge)
         assert call["ref"] == detect_forge(URL)
 
@@ -279,7 +284,7 @@ class TestWiring:
         assert isinstance(call["forge"], LocalDiffForge)
         assert call["forge"].get_diff(call["ref"]) == FILE_DIFF
         assert call["ref"] == LocalDiffForge.ref_for(diff_file)
-        assert call["replay"] == _stamp(diff=diff_file)
+        assert call["replay"] == _stamp(diff=diff_file, description="file")
         assert call["post"] is False
 
     def test_the_diff_file_is_stamped_as_typed(self, runtime, tmp_path, monkeypatch):
@@ -321,7 +326,7 @@ class TestWiring:
             assert main([
                 "review", "--pr-url", URL, "--base-sha", BASE, "--head-sha", HEAD, "--no-threads",
             ]) == 0
-        assert caplog.text == ""
+        assert [r.getMessage() for r in caplog.records if "CURRENT title and description" not in r.getMessage()] == []
 
     def test_diff_file_with_pr_url_and_no_head_sha_warns(self, runtime, caplog, diff_file):
         with caplog.at_level(logging.WARNING, logger="prxref"):
@@ -333,7 +338,7 @@ class TestWiring:
                 "review", "--pr-url", URL, "--diff-file", diff_file,
                 "--base-sha", BASE, "--head-sha", HEAD, "--no-threads",
             ]) == 0
-        assert caplog.text == ""
+        assert [r.getMessage() for r in caplog.records if "CURRENT title and description" not in r.getMessage()] == []
 
     def test_replay_composes_with_spec_rules_and_context(self, runtime, tmp_path, diff_file):
         rules = tmp_path / "rules.md"
@@ -347,7 +352,7 @@ class TestWiring:
             "--rules-file", str(rules), "--context-file", str(ticket),
         ]) == 0
         call = runtime.orchestrate[0]
-        assert call["replay"] == _stamp(diff=diff_file)
+        assert call["replay"] == _stamp(diff=diff_file, description="file")
         assert call["spec_sources"] == [str(spec)]
         assert call["rules"] is not None and call["rules"].record()["path"] == str(rules)
         assert call["ticket"] is not None and call["ticket"].record()["path"] == str(ticket)
@@ -411,7 +416,7 @@ class TestThroughTheRealOrchestrator:
     def test_json_payload_forwards_replay(self, rig, capsys, diff_file):
         assert main(["review", "--diff-file", diff_file, "--format", "json"]) == 0
         payload = self._json(capsys)
-        assert payload["replay"] == _stamp(diff=diff_file)
+        assert payload["replay"] == _stamp(diff=diff_file, description="file")
         assert payload["chunks_reviewed"] >= 1 and payload["chunks_failed"] == 0
         assert rig.inner.calls == []
 
@@ -426,7 +431,7 @@ class TestThroughTheRealOrchestrator:
     def test_text_summary_prints_replay_line(self, rig, capsys, diff_file):
         assert main(["review", "--diff-file", diff_file]) == 0
         out = capsys.readouterr().out
-        assert f"replay: base=- head=- threads=hidden diff_file={diff_file}\n" in out
+        assert f"replay: base=- head=- threads=hidden diff_file={diff_file} description=file\n" in out
         assert main(["review", "--pr-url", URL, "--no-post"]) == 0
         assert "replay:" not in capsys.readouterr().out
 
@@ -437,7 +442,7 @@ class TestThroughTheRealOrchestrator:
         assert main(["review", "--diff-file", str(blank), "--format", "json"]) == 0
         payload = self._json(capsys)
         assert payload["verdict"] == "Error"
-        assert payload["replay"] == _stamp(diff=str(blank))
+        assert payload["replay"] == _stamp(diff=str(blank), description="file")
         assert rig.llm.calls == 0
 
     def test_empty_pinned_range_is_an_error_run_exit_0_with_stamp(self, rig, capsys):

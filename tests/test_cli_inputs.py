@@ -235,7 +235,8 @@ class TestStubSurfaceRidesTheRealPipeline:
     rules and the ticket are EMPTY ones, the only state that adds nothing to
     the prompts; rules with text are proven in
     tests/test_issue_63_review_rules.py and a ticket with text in
-    tests/test_issue_64_ticket_context.py."""
+    tests/test_issue_64_ticket_context.py. The per-rule cap is set to 0 because
+    its rule request is a separate feature, proven in tests/test_orchestrator_rule_cap.py."""
 
     def test_loaded_objects_are_recorded_and_change_no_prompt(self, tmp_path):
         rules = ReviewRules(path="r.md", body=cap_text("", 100), severity_map={})
@@ -246,6 +247,7 @@ class TestStubSurfaceRidesTheRealPipeline:
         trace = tmp_path / "run.jsonl"
         _forge, with_llm, res = _real_run(
             post=False, rules=rules, ticket=ticket, trace_file=str(trace),
+            max_findings_per_rule=0,
         )
         _forge, without_llm, _res = _real_run(post=False)
         assert with_llm.prompts, "no LLM call was made, so the comparison is vacuous"

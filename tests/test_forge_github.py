@@ -516,7 +516,9 @@ def test_only_read_verbs_are_retryable():
 def test_get_file_content_returns_text_on_200():
     session = MagicMock(spec=requests.Session)
     session.get.return_value = _mock_response(
-        200, text="print('hi')\n", headers={"Content-Type": "text/plain; charset=utf-8"}
+        200,
+        text="print('hi')\n",
+        headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
     )
 
     result = ForgeImpl(session=session).get_file_content(
@@ -567,8 +569,8 @@ def test_get_file_content_returns_none_when_the_request_raises():
 
 
 def test_get_file_content_returns_none_on_a_json_body():
-    """A directory, or a file over the 1 MB raw ceiling, comes back as JSON
-    even though the raw Accept header was sent."""
+    """A JSON body is an envelope, such as a directory listing, and reads as
+    no content even though the raw Accept header was sent."""
     session = MagicMock(spec=requests.Session)
     session.get.return_value = _mock_response(
         200,
@@ -586,7 +588,9 @@ def test_get_file_content_returns_none_on_a_json_body():
 def test_get_file_content_returns_none_on_binary_content():
     session = MagicMock(spec=requests.Session)
     session.get.return_value = _mock_response(
-        200, content=b"\x89PNG\x00\x01\x02", headers={"Content-Type": "text/plain"}
+        200,
+        content=b"\x89PNG\x00\x01\x02",
+        headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
     )
 
     result = ForgeImpl(session=session).get_file_content(
@@ -601,7 +605,7 @@ def test_get_file_content_returns_none_on_oversize_body():
     session.get.return_value = _mock_response(
         200,
         content=b"a" * (github._MAX_FILE_CONTENT_BYTES + 1),
-        headers={"Content-Type": "text/plain"},
+        headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
     )
 
     result = ForgeImpl(session=session).get_file_content(
@@ -730,7 +734,10 @@ def _routed_session(summary_feed):
         if "/compare/" in url:
             return _mock_response(text=COMPARE_DIFF)
         if "/contents/" in url:
-            return _mock_response(text="x = 1\n", headers={"Content-Type": "text/plain"})
+            return _mock_response(
+                text="x = 1\n",
+                headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
+            )
         if url.endswith("/issues/42/comments"):
             return _mock_response(json_data=summary_feed)
         if url.endswith("/pulls/42/comments"):
@@ -741,15 +748,29 @@ def _routed_session(summary_feed):
             return _mock_response(json_data=pr)
         raise AssertionError(f"unrouted GET {url}")
 
+    history = {"data": {"repository": {"pullRequest": {
+        "createdAt": "2026-01-05T09:00:00Z",
+        "author": {"__typename": "User", "login": "dev"},
+        "commits": {"nodes": []},
+        **{field: {"pageInfo": {"hasNextPage": False}, "nodes": []}
+           for field in ("userContentEdits", "timelineItems", "reviews", "comments")},
+    }}}}
+
+    def post(url, **kwargs):
+        if url.endswith("/graphql"):
+            return _mock_response(json_data=history)
+        return _mock_response(201, json_data={"id": 1})
+
     session = MagicMock(spec=requests.Session)
     session.get.side_effect = get
-    session.post.return_value = _mock_response(201, json_data={"id": 1})
+    session.post.side_effect = post
     session.patch.return_value = _mock_response(200, json_data={"id": 77})
     session.delete.return_value = _mock_response(204)
     return session
 
 
-def test_every_request_the_adapter_sends_carries_the_timeout():
+def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t0ken")
     ref = _ref()
     fresh = _routed_session(summary_feed=[])
     existing = _routed_session(summary_feed=[{"id": 77, "body": f"{MARKER}\nold"}])
@@ -769,6 +790,7 @@ def test_every_request_the_adapter_sends_carries_the_timeout():
             ref, "src/app.py", sha=HEAD_SHA
         ) == "x = 1\n",
         "prune_inline_comments": lambda: forge.prune_inline_comments(ref) == 1,
+        "get_pr_history": lambda: forge.get_pr_history(ref).complete,
         # Both branches: no summary yet (POST), and one to update (PATCH).
         "post_summary": lambda: (
             forge.post_summary(ref, "first") is None

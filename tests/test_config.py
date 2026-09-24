@@ -1,5 +1,6 @@
 """Tests for prxref.config: env loading, type coercion, overrides, and forge factory."""
 import os
+import re
 
 import pytest
 import requests
@@ -11,6 +12,7 @@ from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
 from prxref.quality import DEFAULT_MAX_ERRORS
 from tests.conftest import clear_prxref_env, prxref_env_names
+from tests.test_docs_consistency import SURFACES
 
 
 def _make_ref(forge: str) -> PRRef:
@@ -1465,3 +1467,397 @@ class TestLLMBackendIsNotAChoiceKey:
     def test_a_mixed_case_backend_loads(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_BACKEND", "Claude-CLI")
         assert load_config()["llm_backend"] == "Claude-CLI"
+
+
+_KEYS_0_15 = [
+    ("dedup_similarity", "PRXREF_DEDUP_SIMILARITY"),
+    ("prompts_dir", "PRXREF_PROMPTS_DIR"),
+    ("scoped_rules", "PRXREF_SCOPED_RULES"),
+    ("scoped_rules_max_chars", "PRXREF_SCOPED_RULES_MAX_CHARS"),
+    ("group_findings", "PRXREF_GROUP_FINDINGS"),
+    ("max_warning_findings", "PRXREF_MAX_WARNING_FINDINGS"),
+    ("max_outofscope_findings", "PRXREF_MAX_OUTOFSCOPE_FINDINGS"),
+    ("max_findings_per_rule", "PRXREF_MAX_FINDINGS_PER_RULE"),
+]
+
+
+class TestDedupSimilarity:
+    """PRXREF_DEDUP_SIMILARITY (#10): a 0-1 Jaccard threshold, off when unset.
+
+    ``None`` is the declared unset, like the size thresholds, so the
+    reworded-duplicate pass runs only when an operator asks for it. The low
+    bound is open: 0 would merge every pair of findings on a line.
+    """
+
+    def test_default_is_none_meaning_off(self):
+        assert config._DEFAULTS["dedup_similarity"] is None
+        assert load_config()["dedup_similarity"] is None
+
+    def test_declared_as_a_float_key_with_an_open_low_bound(self):
+        assert "dedup_similarity" in config._FLOAT_KEYS
+        assert "dedup_similarity" not in config._INT_KEYS
+        assert config._RANGES["dedup_similarity"] == config._Range(0.0, 1.0)
+        assert config._RANGES["dedup_similarity"].low_inclusive is False
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("0.5", 0.5), ("1", 1.0), ("1.0", 1.0), (" 0.75 ", 0.75), ("0.01", 0.01),
+    ])
+    def test_env_coerces_to_a_float(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", raw)
+        value = load_config()["dedup_similarity"]
+        assert value == expected
+        assert isinstance(value, float)
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_or_whitespace_reads_as_unset(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", raw)
+        assert load_config()["dedup_similarity"] is None
+
+    @pytest.mark.parametrize("raw", ["0", "0.0", "-0.1", "1.01", "2", "nan", "inf"])
+    def test_out_of_band_value_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", raw)
+        with pytest.raises(ConfigError, match=r"^PRXREF_DEDUP_SIMILARITY: "):
+            load_config()
+
+    @pytest.mark.parametrize("raw", ["high", "50%", "0,5"])
+    def test_malformed_value_names_the_variable(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", raw)
+        with pytest.raises(ConfigError, match=r"^PRXREF_DEDUP_SIMILARITY: "):
+            load_config()
+
+    def test_message_states_the_bound_it_broke(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", "0")
+        with pytest.raises(ConfigError) as exc:
+            load_config()
+        assert "greater than 0.0" in str(exc.value)
+        assert "at most 1.0" in str(exc.value)
+
+    @pytest.mark.parametrize("value", [0, 0.0, 1.5, -1, float("nan"), True])
+    def test_an_override_cannot_smuggle_an_out_of_band_value(self, value):
+        with pytest.raises(ConfigError, match=r"^dedup_similarity: ") as exc:
+            load_config(dedup_similarity=value)
+        assert "PRXREF_DEDUP_SIMILARITY" not in str(exc.value)
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", "0.9")
+        assert load_config(dedup_similarity=0.5)["dedup_similarity"] == 0.5
+
+
+class TestPromptsDir:
+    """PRXREF_PROMPTS_DIR (#11): a path string, ``None`` when unset.
+
+    The directory is only read by the prompt-template loader, so
+    ``load_config`` stays I/O-free for it and passes the value through.
+    """
+
+    def test_default_is_none(self):
+        assert config._DEFAULTS["prompts_dir"] is None
+        assert load_config()["prompts_dir"] is None
+
+    def test_in_no_coercion_table(self):
+        assert "prompts_dir" not in (
+            config._INT_KEYS | config._FLOAT_KEYS | config._BOOL_KEYS | config._LIST_KEYS
+        )
+        assert "prompts_dir" not in config._RANGES
+        assert "prompts_dir" not in config._CHOICE_KEYS
+
+    @pytest.mark.parametrize("raw", [".prxref/prompts", "team prompts/v2", "~/prompts"])
+    def test_env_value_passes_through_verbatim(self, monkeypatch, raw):
+        """Not a list key: a path containing a space survives whole."""
+        monkeypatch.setenv("PRXREF_PROMPTS_DIR", raw)
+        assert load_config()["prompts_dir"] == raw
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_or_whitespace_reads_as_unset(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_PROMPTS_DIR", raw)
+        assert load_config()["prompts_dir"] is None
+
+    def test_a_missing_dir_is_not_read_at_load_time(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PRXREF_PROMPTS_DIR", str(tmp_path / "absent"))
+        assert load_config()["prompts_dir"].endswith("absent")
+
+    def test_an_empty_string_override_arrives_as_the_empty_string(self, monkeypatch):
+        """Only ``None`` overrides are ignored, so a ``--prompts-dir ""`` style
+        override reaches the caller as ``""``: consumers treat both ``None`` and
+        ``""`` as off."""
+        monkeypatch.setenv("PRXREF_PROMPTS_DIR", ".prxref/prompts")
+        assert load_config(prompts_dir="")["prompts_dir"] == ""
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_PROMPTS_DIR", "env-dir")
+        assert load_config(prompts_dir="flag-dir")["prompts_dir"] == "flag-dir"
+
+
+class TestScopedRules:
+    """PRXREF_SCOPED_RULES (#12): the fourth list key, empty by default."""
+
+    def test_default_is_an_empty_list(self):
+        assert config._DEFAULTS["scoped_rules"] == []
+        assert load_config()["scoped_rules"] == []
+
+    def test_declared_as_a_list_key(self):
+        assert "scoped_rules" in config._LIST_KEYS
+        assert "scoped_rules" not in config._RANGES
+        assert "scoped_rules" not in config._CHOICE_KEYS
+
+    @pytest.mark.parametrize("raw,expected", [
+        (".prxref/rules", [".prxref/rules"]),
+        ("rules/java.md,rules/helm.md", ["rules/java.md", "rules/helm.md"]),
+        ("rules/java.md rules/helm.md", ["rules/java.md", "rules/helm.md"]),
+        (" rules/java.md ,\n .prxref/scoped\t", ["rules/java.md", ".prxref/scoped"]),
+    ])
+    def test_splits_on_commas_and_whitespace(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES", raw)
+        assert load_config()["scoped_rules"] == expected
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES", "  \t ")
+        assert load_config()["scoped_rules"] == []
+
+    @pytest.mark.parametrize("value", [[""], ["team rules/java.md"]])
+    def test_an_override_list_is_taken_as_given(self, value):
+        """No split and no blank-dropping on the override path: a flag can name
+        a path with a space, and the loader drops blank entries itself."""
+        assert load_config(scoped_rules=value)["scoped_rules"] == value
+
+    def test_an_override_replaces_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES", "a.md,b.md")
+        assert load_config(scoped_rules=["c.md"])["scoped_rules"] == ["c.md"]
+
+
+class TestScopedRulesMaxChars:
+    """PRXREF_SCOPED_RULES_MAX_CHARS (#12): the per-unit total, int > 0."""
+
+    def test_default(self):
+        assert config._DEFAULTS["scoped_rules_max_chars"] == 24000
+        value = load_config()["scoped_rules_max_chars"]
+        assert value == 24000
+        assert isinstance(value, int)
+
+    def test_declared_in_the_int_and_range_tables(self):
+        assert "scoped_rules_max_chars" in config._INT_KEYS
+        assert config._RANGES["scoped_rules_max_chars"] == config._Range(0)
+
+    @pytest.mark.parametrize("raw,expected", [(" 7 ", 7), ("1", 1), ("10000000", 10_000_000)])
+    def test_env_coerces_to_an_int_with_no_invented_ceiling(
+        self, monkeypatch, raw, expected
+    ):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES_MAX_CHARS", raw)
+        value = load_config()["scoped_rules_max_chars"]
+        assert value == expected
+        assert isinstance(value, int)
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES_MAX_CHARS", "   ")
+        assert load_config()["scoped_rules_max_chars"] == 24000
+
+    @pytest.mark.parametrize("raw", ["lots", "2.5", "0", "-1"])
+    def test_malformed_or_non_positive_value_names_the_variable(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES_MAX_CHARS", raw)
+        with pytest.raises(ConfigError, match=r"^PRXREF_SCOPED_RULES_MAX_CHARS: "):
+            load_config()
+
+    def test_an_override_is_range_checked_and_named_as_itself(self):
+        with pytest.raises(ConfigError, match=r"^scoped_rules_max_chars: ") as exc:
+            load_config(scoped_rules_max_chars=0)
+        assert "PRXREF_SCOPED_RULES_MAX_CHARS" not in str(exc.value)
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_SCOPED_RULES_MAX_CHARS", "3")
+        assert load_config(scoped_rules_max_chars=5)["scoped_rules_max_chars"] == 5
+
+
+class TestGroupFindings:
+    """PRXREF_GROUP_FINDINGS (#13): explicit opt-in, parsed by ``_truthy``."""
+
+    def test_defaults_to_off(self):
+        assert config._DEFAULTS["group_findings"] is False
+        assert load_config()["group_findings"] is False
+
+    def test_literal_one_enables_it(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_GROUP_FINDINGS", "1")
+        assert load_config()["group_findings"] is True
+
+    @pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "0", "y"])
+    def test_only_the_literal_one_enables_it(self, monkeypatch, raw):
+        monkeypatch.setenv("PRXREF_GROUP_FINDINGS", raw)
+        assert load_config()["group_findings"] is False
+
+    def test_whitespace_only_reads_as_unset(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_GROUP_FINDINGS", "   ")
+        assert load_config()["group_findings"] is False
+
+    def test_it_is_a_bool_key_not_a_numeric_one(self):
+        assert "group_findings" in config._BOOL_KEYS
+        assert "group_findings" not in config._INT_KEYS | config._FLOAT_KEYS
+        assert "group_findings" not in config._RANGES
+
+    def test_an_override_wins_over_the_environment(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_GROUP_FINDINGS", "1")
+        assert load_config(group_findings=False)["group_findings"] is False
+
+
+_SEVERITY_CAPS = [
+    ("max_warning_findings", "PRXREF_MAX_WARNING_FINDINGS"),
+    ("max_outofscope_findings", "PRXREF_MAX_OUTOFSCOPE_FINDINGS"),
+]
+
+
+class TestPerSeverityCaps:
+    """PRXREF_MAX_WARNING_FINDINGS / _OUTOFSCOPE_FINDINGS (#13).
+
+    ``None`` means unlimited, in the key's own type, because 0 is a legal cap
+    that drops every finding of that severity. So the low bound is inclusive
+    and ``_check_ranges`` skips the key only while it is unset.
+    """
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    def test_default_is_none_meaning_unlimited(self, key, env):
+        assert config._DEFAULTS[key] is None
+        assert load_config()[key] is None
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    def test_declared_in_the_int_and_range_tables(self, key, env):
+        assert key in config._INT_KEYS
+        assert config._RANGES[key] == config._Range(0, low_inclusive=True)
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    @pytest.mark.parametrize(
+        "raw,expected", [("0", 0), ("3", 3), (" 12 ", 12), ("100000", 100_000)]
+    )
+    def test_env_coerces_to_an_int(self, monkeypatch, key, env, raw, expected):
+        monkeypatch.setenv(env, raw)
+        value = load_config()[key]
+        assert value == expected
+        assert isinstance(value, int)
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    def test_zero_is_distinct_from_unset(self, monkeypatch, key, env):
+        monkeypatch.setenv(env, "0")
+        assert load_config()[key] == 0
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_or_whitespace_reads_as_unset(self, monkeypatch, key, env, raw):
+        monkeypatch.setenv(env, raw)
+        assert load_config()[key] is None
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    @pytest.mark.parametrize("raw", ["-1", "-50"])
+    def test_negative_value_rejected(self, monkeypatch, key, env, raw):
+        monkeypatch.setenv(env, raw)
+        with pytest.raises(ConfigError, match=rf"^{env}: "):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    @pytest.mark.parametrize("raw", ["many", "1.5", "off"])
+    def test_malformed_value_names_the_variable(self, monkeypatch, key, env, raw):
+        monkeypatch.setenv(env, raw)
+        with pytest.raises(ConfigError, match=rf"^{env}: "):
+            load_config()
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    def test_an_override_cannot_smuggle_a_negative_cap(self, key, env):
+        with pytest.raises(ConfigError, match=rf"^{key}: ") as exc:
+            load_config(**{key: -1})
+        assert env not in str(exc.value)
+
+    @pytest.mark.parametrize("key,env", _SEVERITY_CAPS)
+    def test_an_override_wins_over_the_environment(self, monkeypatch, key, env):
+        monkeypatch.setenv(env, "10")
+        assert load_config(**{key: 0})[key] == 0
+
+    def test_the_caps_are_independent_of_each_other_and_of_the_error_cap(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("PRXREF_MAX_WARNING_FINDINGS", "2")
+        cfg = load_config()
+        assert cfg["max_warning_findings"] == 2
+        assert cfg["max_outofscope_findings"] is None
+        assert cfg["max_error_findings"] == DEFAULT_MAX_ERRORS
+
+
+class TestKeys015ReachTheEntryPoint:
+    """Observed through ``prxref review``: a bad 0.15 value is exit 2 naming
+    its variable, before the review runs; a good one gets past config."""
+
+    @pytest.mark.parametrize("env,raw", [
+        ("PRXREF_DEDUP_SIMILARITY", "0"),
+        ("PRXREF_SCOPED_RULES_MAX_CHARS", "0"),
+        ("PRXREF_MAX_WARNING_FINDINGS", "-1"),
+        ("PRXREF_MAX_OUTOFSCOPE_FINDINGS", "few"),
+        ("PRXREF_MAX_FINDINGS_PER_RULE", "-1"),
+    ])
+    def test_a_bad_value_exits_2_before_the_review_runs(
+        self, monkeypatch, capsys, env, raw
+    ):
+        calls = []
+        monkeypatch.setattr(cli, "_run_review", lambda *a, **k: calls.append(a))
+        monkeypatch.setenv(env, raw)
+
+        rc = cli.main(["review", "--pr-url", "https://github.com/org/repo/pull/7"])
+
+        assert rc == 2
+        _, err = capsys.readouterr()
+        assert f"configuration error: {env}: " in err
+        assert calls == []
+
+    def test_good_values_reach_the_review(self, monkeypatch):
+        calls = []
+
+        def _record(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("stop after config")
+
+        monkeypatch.setattr(cli, "_run_review", _record)
+        monkeypatch.setenv("PRXREF_DEDUP_SIMILARITY", "0.5")
+        monkeypatch.setenv("PRXREF_SCOPED_RULES_MAX_CHARS", "100")
+        monkeypatch.setenv("PRXREF_MAX_WARNING_FINDINGS", "0")
+        monkeypatch.setenv("PRXREF_MAX_OUTOFSCOPE_FINDINGS", "3")
+        monkeypatch.setenv("PRXREF_GROUP_FINDINGS", "1")
+        monkeypatch.setenv("PRXREF_MAX_FINDINGS_PER_RULE", "0")
+
+        cli.main(["review", "--pr-url", "https://github.com/org/repo/pull/7"])
+
+        assert len(calls) == 1
+
+
+def _doc_entry(surface: str, env: str) -> str:
+    """The one entry that documents ``env`` on ``surface``, whitespace-folded."""
+    text = SURFACES[surface]
+    if surface == "docs/env-vars.md":
+        entries = [ln for ln in text.splitlines() if ln.startswith(f"| `{env}` |")]
+    elif surface == ".env.example":
+        entries = [p for p in text.split("\n\n") if re.search(rf"^# {env}=", p, re.M)]
+    else:
+        entries = [
+            m.group(0)
+            for m in re.finditer(
+                rf"^  {env}\b.*?(?=^  PRXREF_|^\S|\n\n)", text, re.M | re.S
+            )
+        ]
+    assert len(entries) == 1, f"{surface}: expected one entry for {env}, got {len(entries)}"
+    return " ".join(entries[0].split())
+
+
+class TestKeys015AreDocumented:
+    """The four-surface rule, tightened for the 0.15 keys.
+
+    ``test_docs_consistency`` checks a SUBSTRING, so ``PRXREF_SCOPED_RULES``
+    would pass on the strength of ``PRXREF_SCOPED_RULES_MAX_CHARS`` alone.
+    """
+
+    @pytest.mark.parametrize("key,env", _KEYS_0_15)
+    def test_the_env_name_is_derived_for_the_suite_wide_clear(self, key, env):
+        assert config._ENV_PREFIX + key.upper() == env
+        assert env in prxref_env_names()
+
+    @pytest.mark.parametrize("surface", sorted(SURFACES))
+    @pytest.mark.parametrize("key,env", _KEYS_0_15)
+    def test_each_surface_has_one_entry_that_names_the_release(self, key, env, surface):
+        assert "0.15.0" in _doc_entry(surface, env)
+
+    @pytest.mark.parametrize("surface", sorted(SURFACES))
+    def test_the_outofscope_cap_says_it_is_not_ticket_scope_out(self, surface):
+        entry = _doc_entry(surface, "PRXREF_MAX_OUTOFSCOPE_FINDINGS")
+        assert re.search(r"\bnot\W+ticket scope\W+out\b", entry, re.I), entry

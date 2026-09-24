@@ -42,20 +42,29 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    failed chunk in the partial-review banner.
 6. Deterministic checks and quality passes, in exactly this order — the
    raw chunk + sweep findings have their ``scope`` held to ``unknown``
-   unless a ticket is active (``_enforce_scope``), then gain
+   unless a ticket is active (``_enforce_scope``) and their ``rule`` held
+   to ``None`` unless finding grouping or the per-rule cap is on
+   (``_enforce_rule``), then gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
    about a PR that is ≥80% release machinery yet also touches source),
    folded in BEFORE the passes so it is filtered like any other finding,
    and spliced in at the chunk/sweep boundary — before the sweep's own
    findings, never after — so it is always a CHUNK-side finding to
-   ``apply_sweep_dedup`` and can never be dropped as a duplicate of a
-   chunk worker's own restatement:
+   ``apply_sweep_dedup``, whose exact tier drops only sweep findings, and
+   being file-level (line 0) it is never compared by that pass's reworded
+   tier either. It can never be dropped as a duplicate of a chunk worker's
+   own restatement:
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
    maps to; drops nothing) → ``apply_spec_grounding`` (on an ungrounded
    run every ``spec`` finding, the sweep's included, is relabelled
    ``warning``, counted by a ``specs relabel`` trace event; drops nothing)
+   → ``apply_example_echo_check`` (the first pass that drops: a finding
+   whose normalized title equals an example finding's title in the worker
+   or sweep template the run rendered, packaged or overridden, is dropped
+   as ``echoes the prompt's example: "<title>"``, counted by a
+   ``prompts echo`` trace event)
    → ``apply_location_validation`` (a ``file``
    naming no path of the parsed diff is dropped, not rendered) →
    ``apply_manifest_claim_check`` (a
@@ -74,14 +83,36 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
-   ``apply_quality_gate(confidence_floor=, max_errors=)``, which returns
+   ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
+   in one file that break one rule, or that name no rule and share a
+   normalized title, fold into one representative that lists
+   the other lines after ``Also at:``, the rest dropped as ``grouped into
+   <file>:<line>``; sweep findings are never grouped, and running before
+   the gate is what makes every cap count groups; one INFO line and one
+   ``grouping ok`` trace event count the groups and the folded members) →
+   ``apply_rule_cap`` (only with a team rules file loaded and
+   ``max_findings_per_rule`` above 0, which also turns the rule request
+   on: at most that many chunk findings per rule, across every file, stay
+   active, a group counting once, and the rest fold onto the best one kept,
+   which lists them after ``Also at:`` and in its ``locations``, the rest
+   dropped as ``rule cap exceeded (max <n>): listed at <file>:<line>``;
+   sweep findings are never capped; one INFO line and one ``rulecap ok``
+   trace event count the folded findings and the rules over the cap) →
+   ``apply_quality_gate(confidence_floor=, max_errors=,
+   max_warning_findings=, max_outofscope_findings=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
-   re-derived here from finding identity rather than carried across the
-   gate as an index → ``apply_sweep_dedup`` (drops a sweep finding that
+   re-derived here from finding identity and the gate's stable sort
+   (``_split_at_sweep``) rather than carried across the gate as an index
+   → ``apply_sweep_dedup`` (drops a sweep finding that
    restates a chunk finding that SURVIVED the gate, on file + normalized
    title; running it after the gate is what keeps a sub-floor chunk
    finding from suppressing its higher-confidence sweep duplicate and
-   then dying at the gate itself) → ``apply_containment_note`` (a throw
+   then dying at the gate itself. With ``dedup_similarity`` set, a
+   reworded tier also compares findings in the same file on the same
+   line: a sweep copy no more severe than a chunk copy is dropped, and of
+   two copies on one side the less severe, then less confident, one is;
+   a chunk copy is never dropped for a sweep copy, and line 0 is never
+   compared) → ``apply_containment_note`` (a throw
    / panic / crash / unhandled-rejection finding that never names its
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
@@ -93,7 +124,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    temperature, seed, and model chain actually in force, and the run-record
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
-   ``spec_grounding``, ``size_advisory``; ``replay`` on replays only, and
+   ``spec_grounding``, ``size_advisory``, ``prompt_templates``,
+   ``scoped_rules``, ``rule_counts``; ``replay`` on replays only, and
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
@@ -104,7 +136,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    blockquote) — a partial review reads as a successful one, so a failure
    left only in the logs reaches nobody, and a file list left out of it
    leaves the operator guessing which files went unreviewed.
-8. Post: summary rendered from ``reviewer.load_prompt("summary")`` with
+8. Post: summary rendered from ``reviewer.load_prompt("summary")``, or from
+   the operator's ``summary.md`` override when ``prompts`` carries one, with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {spec_count} {spec_note} {ticket_note}
    {outofscope_count} {findings} {attribution}`` filled, plus
@@ -150,15 +183,21 @@ from .forges.base import (
 )
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
+from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
 from .quality import (
+    GROUPED_INTO_PREFIX,
+    RULE_CAP_PREFIX,
     active,
     apply_containment_note,
+    apply_example_echo_check,
     apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
+    apply_rule_cap,
+    apply_rule_grouping,
     apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_severity_map,
@@ -167,6 +206,8 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    prompt_example_titles,
+    rule_cap_counts,
 )
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .trace import Tracer, get_tracer
@@ -181,6 +222,7 @@ from .triage import (
     added_lines_by_file,
     build_chunks,
     count_size_relevant_changes,
+    normalize_rule,
     normalize_scope,
     parse_unified_diff,
 )
@@ -363,6 +405,7 @@ def orchestrate_review(
     max_inline_comments: int = MAX_INLINE_COMMENTS,
     confidence_floor: float | None = None,
     max_errors: int | None = None,
+    dedup_similarity: float | None = None,
     post_mode: str = "summary+inline",
     post_verdict: bool = True,
     trace_file: str | None = None,
@@ -381,15 +424,23 @@ def orchestrate_review(
     size_warn_files: int | None = None,
     size_ignore_globs: Sequence[str] = (),
     replay: Mapping[str, Any] | None = None,
+    prompts: PromptTemplates | None = None,
+    scoped_rules: Any = None,
+    scoped_rules_max_chars: int = 24000,
+    group_findings: bool = False,
+    max_warning_findings: int | None = None,
+    max_outofscope_findings: int | None = None,
+    max_findings_per_rule: int = 2,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
-    spec_grounding, size_advisory}``, plus ``replay`` on a replay run only.
+    spec_grounding, size_advisory, prompt_templates, scoped_rules,
+    rule_counts}``, plus ``replay`` on a replay run only.
     Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last six keys are always present and are
+    :func:`_run_record`, so the last nine keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
@@ -417,6 +468,11 @@ def orchestrate_review(
     batch. ``confidence_floor`` and ``max_errors`` are forwarded to
     ``apply_quality_gate``; ``None`` leaves that pass reading the environment
     itself, which is what a library caller with no config dict wants.
+    ``dedup_similarity`` is forwarded to ``apply_sweep_dedup`` as its
+    ``similarity``. ``None`` (the default) runs its exact-title tier alone
+    and reads no environment variable, so the run is byte-identical to one
+    without it; a threshold also drops a reworded restatement in the same
+    file and on the same line (:func:`quality.titles_similar`).
 
     ``post_mode`` selects what is written to the forge: ``"summary+inline"``
     (default) keeps today's behaviour — the summary first, then the inline
@@ -493,11 +549,112 @@ def orchestrate_review(
     summary. It never touches the verdict.
 
     ``replay`` is the evaluation-replay stamp built by the CLI
-    (``{base_sha, head_sha, threads, diff_file}``). When given it is copied
+    (``{base_sha, head_sha, threads, diff_file, description, as_of,
+    as_of_source}``). When given it is copied
     into the returned dict under ``replay`` and into the ``run start`` trace
     event, the one request knob that is echoed back, so a replay can never
     be read as a live review. It changes nothing about how the review runs:
     pinning and thread hiding live in the forge the caller passes.
+
+    ``prompts`` is the loaded prompt-template overrides
+    (:class:`prxref.prompt_templates.PromptTemplates`); ``None`` turns them
+    off, and an unset run's prompts, posts, record and trace are exactly a run
+    without it. Its ``record()`` fills the ``prompt_templates`` key on every
+    exit, and is the meta of one ``prompts ok`` trace event. Each template is
+    taken through :meth:`~prxref.prompt_templates.PromptTemplates.override`,
+    so one left packaged is still read by ``reviewer.load_prompt``: the
+    ``worker`` and ``systemic`` overrides reach every chunk and the sweep
+    through the one :class:`reviewer.PromptContext`, and the ``summary``
+    override is the template of every summary render, the empty-diff summary
+    and the inline-accounting re-post included, but never of the error notice.
+    The example-finding titles of the worker and sweep templates the units
+    rendered, overridden or packaged, are what
+    :func:`quality.apply_example_echo_check` drops echoes of.
+
+    ``scoped_rules`` is the loaded path-scoped review rules
+    (:class:`prxref.rules.ScopedRules`, as
+    :func:`prxref.rules.load_scoped_rules` returns them, taken duck-typed
+    like ``rules``: ``record()``, ``files``, ``unit_block()`` and
+    ``merged_severity_map()``), and
+    ``scoped_rules_max_chars`` is the per-unit cap on their text
+    (``PRXREF_SCOPED_RULES_MAX_CHARS``; the default restates
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does). ``None`` turns them
+    off, and an unset run's prompts, posts, trace and logs are exactly a run
+    without it; its record differs only by the ``scoped_rules`` key, which is
+    ``None``. When set, each chunk's paths (every file's ``path``, plus its
+    ``old_path`` on a rename) select the chunk's rules through
+    :meth:`~prxref.rules.ScopedRules.unit_block`, with ``rules`` as the
+    always-on file, and that block replaces ``rules_worker`` in the chunk's
+    own copy of the :class:`reviewer.PromptContext`, on the first attempt and
+    on the timeout retry alike. The sweep's block, selected by the union of
+    the chunks' paths, replaces ``rules_sweep``. When the cap cuts or omits a
+    file in any unit, one WARNING for the run names
+    ``PRXREF_SCOPED_RULES_MAX_CHARS`` and every such file. The
+    severity-remapping pass applies
+    :meth:`~prxref.rules.ScopedRules.merged_severity_map` in place of the
+    rules' own map, so a scoped file's map applies with no always-on file.
+    The ``scoped_rules`` key of every exit is ``record()`` plus ``max_chars``
+    (this per-unit cap; each ``files`` row keeps its own per-file
+    ``max_chars``) and ``units``, which is ``{"chunks": [[<row>, ...], ...],
+    "sweep": [<row>, ...]}`` with one list per chunk in chunk order and one
+    ``{"path": ..., "chars": ...}`` row per scoped file the unit carries, in
+    load order, ``chars`` being that file's ``chars`` in ``files``; ``units``
+    is ``None`` on an exit before the units are planned (a forge, parse or
+    chunking failure, or the empty diff). ``record()`` plus ``max_chars`` is
+    the meta of one ``scoped_rules ok`` trace event, and the ``chunk start``
+    and ``sweep start`` events carry their unit's rows as ``rules``. A cap
+    below 1 is an error run, not a ``ValueError``, as ``max_chunks=0`` is.
+
+    ``group_findings`` turns on finding grouping (``PRXREF_GROUP_FINDINGS``).
+    Every chunk and the sweep are asked for a per-finding ``rule``
+    (:data:`reviewer.RULE_REQUEST`, through the one
+    :class:`reviewer.PromptContext`), and a model-supplied ``rule`` is kept
+    only then, or while the per-rule cap below is active:
+    :func:`_enforce_rule` resets it to ``None`` otherwise. After
+    the hedge gate and before the quality gate,
+    :func:`quality.apply_rule_grouping` folds the chunk findings that break
+    one rule in one file (or, naming no rule, share a normalized title) into
+    one representative, which lists the other lines after ``Also at:`` and
+    in its ``locations``; the other members are kept, dropped as ``grouped
+    into <file>:<line>``. Because grouping runs first, every cap counts
+    groups rather than lines. Sweep findings are never grouped. One INFO line
+    and one ``grouping ok`` trace event (``groups``, ``members``) report the
+    pass on every run with it on, a run that formed no group included. A
+    ``worker`` or ``systemic`` override in ``prompts`` with no
+    ``{rule_example}`` slot after its ``## Review Context`` marker still gets
+    the request, but its example finding shows no ``"rule"`` key, so one
+    WARNING per run names those files and points at ``prxref prompts
+    export``. Off (the default), the prompts, posts, record, trace and logs
+    are exactly a run without it.
+
+    ``max_findings_per_rule`` is the per-rule cap
+    (``PRXREF_MAX_FINDINGS_PER_RULE``; the default restates
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does). It is active only
+    when it is an ``int`` above 0 (a ``bool`` is not) AND a team rules file
+    is loaded (``rules`` or ``scoped_rules`` is not ``None``); a cap with no
+    rules file does nothing. Active, it asks every unit for a ``rule`` and
+    keeps the answer exactly as ``group_findings`` does (the missing-slot
+    WARNING included), with grouping on or off, and after the grouping pass
+    and before the quality gate :func:`quality.apply_rule_cap` keeps at most
+    that many chunk findings per rule across every file, folding the rest
+    onto the best one kept (its ``locations`` and last ``Also at:``
+    paragraph list them), so every severity cap counts what it kept. Folded
+    findings are kept, dropped as ``rule cap exceeded (max <n>): listed at
+    <file>:<line>``; a #13 group counts once; sweep findings are never
+    counted or capped. The ``rule_counts`` key of every exit is
+    :func:`quality.rule_cap_counts` of the pass input when the pass ran, and
+    ``None`` otherwise (inactive, or an exit before the passes). One INFO
+    line and one ``rulecap ok`` trace event (``cap``, ``rules``,
+    ``folded``) report every pass, zeros included. Inactive, the prompts,
+    posts, trace and logs are exactly a run without it, and the record
+    differs only by ``rule_counts``, which is ``None``.
+
+    ``max_warning_findings`` and ``max_outofscope_findings`` are forwarded to
+    both ``apply_quality_gate`` calls, the summary-only exit's included, as
+    its per-severity caps of the same names. ``None`` (the default) is
+    unlimited and reads no environment variable; ``0`` drops every finding
+    of that severity. ``outofscope`` is the minor severity, not the ticket
+    scope ``out``.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -515,6 +672,9 @@ def orchestrate_review(
         "spec_grounding": None,
         "size_advisory": None,
         "replay": dict(replay) if replay is not None else None,
+        "prompt_templates": None,
+        "scoped_rules": None,
+        "rule_counts": None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -523,6 +683,13 @@ def orchestrate_review(
         run_inputs["review_rules"] = rules.record()
     if ticket is not None:
         run_inputs["ticket_context"] = ticket.record()
+    if prompts is not None:
+        run_inputs["prompt_templates"] = prompts.record()
+    scoped_meta: dict[str, Any] | None = None
+    if scoped_rules is not None:
+        scoped_meta = {**scoped_rules.record(), "max_chars": scoped_rules_max_chars}
+        run_inputs["scoped_rules"] = {**scoped_meta, "units": None}
+    summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
     ticket_note = ticket.note() if ticket is not None else ""
     if ticket_note and not ticket_note.endswith("\n"):
@@ -534,8 +701,12 @@ def orchestrate_review(
     )
     if run_inputs["review_rules"] is not None:
         tracer.event("rules", "ok", **run_inputs["review_rules"])
+    if scoped_meta is not None:
+        tracer.event("scoped_rules", "ok", **scoped_meta)
     if run_inputs["ticket_context"] is not None:
         tracer.event("ticket", "ok", **run_inputs["ticket_context"])
+    if run_inputs["prompt_templates"] is not None:
+        tracer.event("prompts", "ok", **run_inputs["prompt_templates"])
 
     try:
         with tracer.span("forge.get_pr"):
@@ -628,10 +799,39 @@ def orchestrate_review(
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             confidence_floor=confidence_floor, max_errors=max_errors,
+            max_warning_findings=max_warning_findings,
+            max_outofscope_findings=max_outofscope_findings,
             ticket_note=ticket_note,
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
         ), run_inputs)
+
+    # Planned once the chunks are final and before anything is written to the
+    # forge, so a degenerate cap is an error run that pruned nothing.
+    scoped_blocks: list[Any] | None = None
+    sweep_block: Any = None
+    if scoped_rules is not None:
+        try:
+            scoped_blocks, sweep_block = _scoped_unit_blocks(
+                scoped_rules, chunks, rules, max_chars=scoped_rules_max_chars,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("scoped rules failed: %s", e)
+            tracer.event("run", "fail", **_cost_meta(run_inputs))
+            return _run_record(_error_run(
+                forge, ref, post, 0, f"scoped rules failed: {e}", t0,
+                post_mode=post_mode, tracer=tracer, sampling=sampling,
+                cost_label=_cost_label(run_inputs, post_cost),
+            ), run_inputs)
+        run_inputs["scoped_rules"] = {
+            **run_inputs["scoped_rules"],
+            "units": {
+                "chunks": [_scoped_rows(block) for block in scoped_blocks],
+                "sweep": _scoped_rows(sweep_block),
+            },
+        }
+        _warn_scoped_cap(scoped_rules, [*scoped_blocks, sweep_block], scoped_rules_max_chars)
 
     # Pruned BEFORE the threads are listed, and both before the review units
     # run. The prune-then-list order is load-bearing: reading threads first
@@ -739,19 +939,33 @@ def orchestrate_review(
             **({} if ok else {"reasons": [f"{label}: {error}" for label, error in failed]}),
         )
 
+    rule_cap_active = (
+        isinstance(max_findings_per_rule, int)
+        and not isinstance(max_findings_per_rule, bool)
+        and max_findings_per_rule > 0
+        and (rules is not None or scoped_rules is not None)
+    )
+    rule_active = group_findings or rule_cap_active
     prompt_context = PromptContext(
         rules_worker=rules.prompt_block("worker") if rules is not None else "",
         rules_sweep=rules.prompt_block("sweep") if rules is not None else "",
         ticket_scope=ticket.scope_block() if ticket_active else "",
         ticket_context=ticket.prompt_block() if ticket_active else "",
         spec_digest=injected,
+        worker_template=prompts.override("worker") if prompts is not None else "",
+        systemic_template=prompts.override("systemic") if prompts is not None else "",
+        rule_request=reviewer.RULE_REQUEST if rule_active else "",
     )
+    if rule_active and prompts is not None:
+        _warn_missing_rule_slot(
+            prompts, feature="finding grouping" if group_findings else "the per-rule cap",
+        )
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
         reader=reader, all_files=files, trace_dir=trace_dir,
-        prompt_context=prompt_context,
+        prompt_context=prompt_context, scoped_blocks=scoped_blocks,
     )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
@@ -764,7 +978,7 @@ def orchestrate_review(
             llm, files, pr, max_tokens=max_tokens,
             token_budget=token_budget, tracer=tracer, threads=threads,
             trace_dir=trace_dir,
-            prompt_context=prompt_context,
+            prompt_context=prompt_context, scoped_block=sweep_block,
         )
     )
 
@@ -813,6 +1027,7 @@ def orchestrate_review(
     )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
     findings = _enforce_scope(findings, ticket_active)
+    findings = _enforce_rule(findings, rule_active)
 
     # Futures were submitted in chunk order, so results[i] is chunk[i]'s
     # outcome for i < len(chunks): the zip pairs each failed review with the
@@ -832,12 +1047,15 @@ def orchestrate_review(
     # #10): file-level (line=0) survives apply_line_align untouched, and
     # warning/1.0 clears apply_quality_gate trivially. Folded in AT the
     # chunk/sweep boundary — before the sweep's own findings, not after —
-    # and sweep_start moves with it: apply_sweep_dedup only ever drops a
-    # SWEEP-side finding, so appending this after the sweep's findings would
-    # put it on the sweep side of that boundary, where a chunk worker's own
-    # finding sharing its file and normalized title could drop the
-    # deterministic finding as "duplicate of chunk finding" and keep the
-    # model's restatement instead.
+    # and sweep_start moves with it: apply_sweep_dedup never drops a
+    # CHUNK-side finding for a sweep-side one (its exact tier drops only
+    # sweep findings; its reworded tier, on with dedup_similarity, can drop
+    # one chunk copy for another on the same line, but never compares line
+    # 0, which this finding always sits on). Appending this after the
+    # sweep's findings would put it on the sweep side of that boundary,
+    # where a chunk worker's own finding sharing its file and normalized
+    # title could drop the deterministic finding as "duplicate of chunk
+    # finding" and keep the model's restatement instead.
     release_shape = heuristics.release_shape_findings(files)
     findings = findings[:sweep_start] + release_shape + findings[sweep_start:]
     sweep_start += len(release_shape)
@@ -845,9 +1063,14 @@ def orchestrate_review(
     # FIRST among the passes: a team word the map knows ("blocker") would
     # otherwise die at the gate as an invalid severity, and consistency and
     # _origin_key both read the severity. 1:1 and order-preserving, so
-    # sweep_start still marks the boundary.
-    if rules is not None and rules.severity_map:
-        mapped = apply_severity_map(findings, rules.severity_map)
+    # sweep_start still marks the boundary. Scoped rules bring the run-wide
+    # merged map, which applies with or without an always-on file.
+    if scoped_rules is not None:
+        severity_map = scoped_rules.merged_severity_map(rules)
+    else:
+        severity_map = rules.severity_map if rules is not None else None
+    if severity_map:
+        mapped = apply_severity_map(findings, severity_map)
         remapped = sum(
             1
             for before, after in zip(findings, mapped, strict=True)
@@ -880,6 +1103,24 @@ def orchestrate_review(
         tracer.event("specs", "relabel", findings=relabelled)
     findings = graded
 
+    # The first pass that drops: an echo of the prompt's own example never
+    # reaches the thread, consistency or grouping comparisons, a cap, or
+    # sweep dedup, and its audit copy keeps the model's raw anchor. 1:1 and
+    # order-preserving, so sweep_start still marks the boundary.
+    checked = apply_example_echo_check(findings, _example_titles(prompt_context))
+    echoes = sum(
+        1
+        for before, after in zip(findings, checked, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    if echoes:
+        logger.info(
+            "example echo: dropped %d finding(s) titled like a prompt template's example finding",
+            echoes,
+        )
+        tracer.event("prompts", "echo", findings=echoes)
+    findings = checked
+
     findings = apply_location_validation(findings, [f.path for f in files])
     # BEFORE apply_line_align, deliberately: the manifest check compares the
     # model's raw anchor against the key and section it claims, and realignment
@@ -904,30 +1145,33 @@ def orchestrate_review(
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
     findings = apply_hedge_gate(findings, spec_digest=injected)
-    # The sweep boundary is positional, and the gate now returns its findings
-    # in content order, so the boundary is re-derived from the identity of the
-    # sweep's own findings rather than carried across the gate as an index.
-    sweep_identities = Counter(
-        _origin_key(f) for f in findings[sweep_start:]
-    )
-    findings = apply_quality_gate(
+    if group_findings:
+        findings = _group_findings(
+            findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+            tracer=tracer,
+        )
+    if rule_cap_active:
+        findings, run_inputs["rule_counts"] = _cap_rules(
+            findings, cap=max_findings_per_rule, confidence_floor=confidence_floor,
+            sweep_start=sweep_start, tracer=tracer,
+        )
+    # The sweep boundary is positional, and the gate returns its findings in
+    # content order, so _split_at_sweep re-derives the boundary from finding
+    # identity and the gate's stable sort rather than carrying it across the
+    # gate as an index.
+    gated = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
+        max_warning_findings=max_warning_findings,
+        max_outofscope_findings=max_outofscope_findings,
     )
-    chunk_part: list[Finding] = []
-    sweep_part: list[Finding] = []
-    for f in findings:
-        key = _origin_key(f)
-        if sweep_identities[key] > 0:
-            sweep_identities[key] -= 1
-            sweep_part.append(f)
-        else:
-            chunk_part.append(f)
+    chunk_part, sweep_part = _split_at_sweep(gated, findings, sweep_start)
     # AFTER the gate, deliberately: the duplicate set is built from chunk
     # findings that survived it, so a sub-floor chunk finding cannot suppress
     # its higher-confidence sweep duplicate and then die at the gate itself —
     # that would lose the recall the sweep exists to add.
     findings = apply_sweep_dedup(
-        chunk_part + sweep_part, sweep_start=len(chunk_part)
+        chunk_part + sweep_part, sweep_start=len(chunk_part),
+        similarity=dedup_similarity,
     )
     # Last, deliberately: it only decorates body text (never drop_reason or
     # severity), so it must run after every pass that keys off title/body
@@ -973,6 +1217,7 @@ def orchestrate_review(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
         )
         try:
             forge.post_summary(ref, summary)
@@ -1027,6 +1272,7 @@ def orchestrate_review(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
             inline_accounting=_inline_accounting(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
@@ -1068,23 +1314,72 @@ def orchestrate_review(
 def _origin_key(finding: Finding) -> tuple:
     """Identity used to re-derive the chunk/sweep boundary across the gate.
 
-    ``severity`` and ``confidence`` are part of the key: without them a chunk
-    finding and a sweep finding that agree on file, line, title, and body
-    collide, ``finding_sort_key`` ties them, and the Counter walk hands the
-    first survivor to the sweep side — dropping the higher-confidence chunk
-    copy as a "duplicate of chunk finding". ``scope`` is in it for the same
-    reason: with a ticket active the two copies can disagree on it, and a
-    swap would put the sweep copy's scope in the chunk copy's slot.
+    The file, line, title, body, severity, confidence, rule and scope, in
+    that order: ``rule`` sits before ``scope``, which stays the last
+    element. :func:`quality.apply_quality_gate` rewrites none of them but
+    ``severity``, which it trims and lower-cases, so the key holds the
+    severity in that form and a finding has the same key on both sides of
+    the gate, which :func:`_split_at_sweep` relies on. A key built from the
+    raw severity changed across the gate for a model that wrote
+    ``Warning``, and the sweep's copy was posted as a second comment.
+
+    ``severity`` and ``confidence`` are part of the key, so a chunk finding
+    and a sweep finding that agree on file, line, title and body but not on
+    those never share one and neither can take the other's slot, the
+    higher-confidence chunk copy included. ``scope`` is in it for the same
+    reason: with a ticket active the two copies can disagree on it. So is
+    ``rule``. ``drop_reason`` and ``locations`` are not: they are state a
+    pass sets on one copy and not the other, not identity.
     """
     return (
         finding.file,
         finding.line,
         finding.title,
         finding.body,
-        finding.severity,
+        (finding.severity or "").strip().lower(),
         finding.confidence,
+        finding.rule,
         finding.scope,
     )
+
+
+def _split_at_sweep(
+    gated: Sequence[Finding], before: Sequence[Finding], sweep_start: int
+) -> tuple[list[Finding], list[Finding]]:
+    """Split the quality gate's output back into chunk findings and sweep findings.
+
+    ``before`` is the list :func:`quality.apply_quality_gate` was given,
+    whose first ``sweep_start`` findings came from the chunk workers, and
+    ``gated`` is what it returned. Returns ``(chunk findings, sweep
+    findings)``, each in ``gated`` order.
+
+    The gate sorts by :func:`quality.finding_sort_key`, whose fields every
+    :func:`_origin_key` holds, and the sort is stable, so the findings that
+    share a key leave the gate in the order they entered it: every chunk
+    copy of a key ahead of every sweep copy. The first copies of each key,
+    as many as the chunk side had, are therefore the chunk findings, and
+    the next, as many as the sweep side had, the sweep's. That holds
+    whatever a pass set on one copy and not the other: grouping or the
+    per-rule cap dropping the chunk copy before the gate, or a severity cap
+    in the gate keeping the chunk copy and dropping the sweep copy. A
+    finding whose key neither side had is filed with the chunk findings,
+    so it is never dropped as a sweep duplicate.
+    """
+    chunk_left = Counter(_origin_key(f) for f in before[:sweep_start])
+    sweep_left = Counter(_origin_key(f) for f in before[sweep_start:])
+    chunk_part: list[Finding] = []
+    sweep_part: list[Finding] = []
+    for f in gated:
+        key = _origin_key(f)
+        if chunk_left[key] > 0:
+            chunk_left[key] -= 1
+            chunk_part.append(f)
+        elif sweep_left[key] > 0:
+            sweep_left[key] -= 1
+            sweep_part.append(f)
+        else:
+            chunk_part.append(f)
+    return chunk_part, sweep_part
 
 
 def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
@@ -1103,6 +1398,166 @@ def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
         scope = normalize_scope(f.scope) if active else SCOPE_UNKNOWN
         out.append(f if scope == f.scope else replace(f, scope=scope))
     return out
+
+
+def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
+    """Hold every finding's ``rule`` to what the run asked the model for.
+
+    The ``rule`` twin of :func:`_enforce_scope`. When the prompts never asked
+    for a rule, any value (from a test double, a library reviewer, or a
+    backend that bypasses the reviewer's own gate) is reset to ``None``. When
+    they did, the value is normalized (:func:`triage.normalize_rule`), so an
+    unusable one is ``None`` too. Returns a new list in the same order; only a
+    finding whose rule changes is replaced, with :func:`dataclasses.replace`.
+    """
+    out: list[Finding] = []
+    for f in findings:
+        rule = normalize_rule(f.rule) if active else None
+        out.append(f if rule == f.rule else replace(f, rule=rule))
+    return out
+
+
+def _example_titles(prompt_context: PromptContext) -> tuple[str, ...]:
+    """The example-finding titles of the worker and sweep templates this run rendered.
+
+    Each template is the one the review units rendered: the override text
+    ``prompt_context`` carries (``worker_template`` / ``systemic_template``),
+    else the packaged file, read through
+    :func:`prompt_templates.packaged_text` rather than
+    ``reviewer.load_prompt``, which the orchestrator asks for the summary
+    template only. The titles come from :func:`quality.prompt_example_titles`
+    and feed :func:`quality.apply_example_echo_check`. A packaged template
+    that cannot be read contributes no title and logs one WARNING, so this
+    never raises out of the review.
+    """
+    texts: list[str] = []
+    for override, name in (
+        (prompt_context.worker_template, "worker"),
+        (prompt_context.systemic_template, "systemic"),
+    ):
+        if override:
+            texts.append(override)
+            continue
+        try:
+            texts.append(packaged_text(name))
+        except (OSError, ValueError) as e:
+            logger.warning("example echo check: cannot read packaged %s.md (continuing without it): %s", name, e)
+    return prompt_example_titles(*texts)
+
+
+def _group_findings(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+    tracer: Tracer,
+) -> list[Finding]:
+    """Run :func:`quality.apply_rule_grouping` and report what it folded.
+
+    Called only with grouping on, after the hedge gate and before the quality
+    gate, while the positional ``sweep_start`` is still valid (every pass
+    before it is 1:1 and order-preserving), with the ``confidence_floor`` the
+    gate gets. ``members`` counts the findings the pass dropped as
+    ``grouped into <file>:<line>`` (:data:`quality.GROUPED_INTO_PREFIX`).
+    ``groups`` counts representatives: the pass rewrites each one and passes
+    every finding it does not fold through as the same object, so an active
+    finding that is no longer the same object is one. Counting distinct drop
+    reasons instead would merge two groups anchored on the same line. Both
+    counts reach one INFO line and one ``grouping ok`` trace event, zeros
+    included.
+    """
+    grouped = apply_rule_grouping(
+        findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    pairs = list(zip(findings, grouped, strict=True))
+    groups = sum(
+        1 for before, after in pairs
+        if after is not before and after.drop_reason is None
+    )
+    members = sum(
+        1 for before, after in pairs
+        if before.drop_reason is None
+        and isinstance(after.drop_reason, str)
+        and after.drop_reason.startswith(GROUPED_INTO_PREFIX)
+    )
+    logger.info(
+        "finding grouping: formed %d group(s), folding %d finding(s) into them",
+        groups, members,
+    )
+    tracer.event("grouping", "ok", groups=groups, members=members)
+    return grouped
+
+
+def _cap_rules(
+    findings: Sequence[Finding],
+    *,
+    cap: int,
+    confidence_floor: float | None,
+    sweep_start: int,
+    tracer: Tracer,
+) -> tuple[list[Finding], list[dict]]:
+    """Run :func:`quality.apply_rule_cap` and report what it folded.
+
+    Called only with the per-rule cap active, after the grouping pass and
+    before the quality gate, while the positional ``sweep_start`` is still
+    valid (every pass before it is 1:1 and order-preserving), with the
+    ``confidence_floor`` the gate gets. Returns the capped findings and
+    :func:`quality.rule_cap_counts` of the INPUT, the run record's
+    ``rule_counts``. ``folded`` counts the findings the pass dropped as
+    ``rule cap exceeded (max <n>): listed at <file>:<line>``
+    (:data:`quality.RULE_CAP_PREFIX`); ``rules`` counts the rows of those
+    counts whose ``total`` is over ``cap``. Both reach one INFO line and one
+    ``rulecap ok`` trace event, with ``cap``, zeros included.
+    """
+    counts = rule_cap_counts(
+        findings, cap=cap, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    capped = apply_rule_cap(
+        findings, cap=cap, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    folded = sum(
+        1 for before, after in zip(findings, capped, strict=True)
+        if before.drop_reason is None
+        and isinstance(after.drop_reason, str)
+        and after.drop_reason.startswith(RULE_CAP_PREFIX)
+    )
+    rules = sum(1 for row in counts if row["total"] > cap)
+    logger.info(
+        "rule cap: folded %d finding(s) past %d per rule, across %d rule(s)",
+        folded, cap, rules,
+    )
+    tracer.event("rulecap", "ok", cap=cap, rules=rules, folded=folded)
+    return capped, counts
+
+
+def _warn_missing_rule_slot(prompts: PromptTemplates, *, feature: str = "finding grouping") -> None:
+    """Warn once when the rule request is on and a review override has no ``{rule_example}``.
+
+    ``feature`` names what turned the request on (``finding grouping``, or
+    ``the per-rule cap`` when only the cap did) and opens the message. Such
+    an override still gets :data:`reviewer.RULE_REQUEST` and its
+    ``rule`` answers are still kept, but its ``## Output Format`` example
+    finding shows no ``"rule"`` key. Only the text after
+    :data:`prompt_templates.CONTEXT_MARKER` is filled, so a slot above the
+    marker does not count. One WARNING names every such ``worker`` or
+    ``systemic`` file and points at ``prxref prompts export``; nothing is
+    raised. :func:`prompt_templates.load_prompt_templates` stays silent about
+    the slot, because it cannot know whether the request is on.
+    """
+    missing = [
+        f.path
+        for f in getattr(prompts, "overrides", ())
+        if f.name in REVIEW_TEMPLATES
+        and "rule_example" not in placeholders(f.text.partition(CONTEXT_MARKER)[2])
+    ]
+    if missing:
+        logger.warning(
+            "%s is on, but prompt template override(s) %s have no "
+            "{rule_example} slot after %r, so their example finding shows no "
+            "\"rule\" key; re-export with `prxref prompts export DIR --force` "
+            "and re-apply your edits to pick the slot up",
+            feature, ", ".join(missing), CONTEXT_MARKER,
+        )
 
 
 def _scope_counts(findings: Sequence[Finding]) -> dict[str, int]:
@@ -1335,12 +1790,72 @@ def _context_blocks(chunk, reader, *, include_definitions: bool) -> str:
         return ""
 
 
+def _scoped_unit_blocks(
+    scoped_rules: Any, chunks, always_on, *, max_chars: int,
+) -> tuple[list[Any], Any]:
+    """Build every review unit's scoped-rules block: one per chunk, in chunk order, then the sweep's.
+
+    A chunk's paths are each file's ``path`` plus its ``old_path``, so a rules
+    file scoped to a renamed file's old location still reaches it; the sweep's
+    paths are the union of the chunks' paths, which selects the union of the
+    chunks' files. ``always_on`` is the always-on rules file, or ``None``.
+    Raises what :meth:`prxref.rules.ScopedRules.unit_block` raises (a
+    ``max_chars`` below 1).
+    """
+    chunk_paths = [[p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks]
+    blocks = [
+        scoped_rules.unit_block("worker", paths, always_on, max_chars=max_chars)
+        for paths in chunk_paths
+    ]
+    sweep = scoped_rules.unit_block(
+        "sweep", [p for paths in chunk_paths for p in paths], always_on, max_chars=max_chars,
+    )
+    return blocks, sweep
+
+
+def _scoped_rows(block: Any) -> list[dict[str, Any]]:
+    """One unit's scoped files as ``{"path", "chars"}`` rows, in load order.
+
+    ``chars`` is the file's body length after its front matter, the same
+    number as its ``chars`` in :meth:`prxref.rules.ScopedRules.record`, so a
+    row joins its ``files`` row on ``path``. Shared by the run record and the
+    ``chunk start`` / ``sweep start`` trace events.
+    """
+    return [{"path": f.path, "chars": f.body.chars} for f in block.files]
+
+
+def _warn_scoped_cap(
+    scoped_rules: Any, blocks: Sequence[Any], max_chars: int,
+) -> None:
+    """Log ONE warning for the run when the per-unit cap cut or omitted any scoped file.
+
+    Names ``PRXREF_SCOPED_RULES_MAX_CHARS``, how many units it touched, and
+    the distinct truncated and omitted paths in load order. Silent when
+    every unit's scoped text fit.
+    """
+    cut = {block.truncated for block in blocks if block.truncated}
+    left_out = {path for block in blocks for path in block.omitted}
+    if not cut and not left_out:
+        return
+    order = [f.path for f in scoped_rules.files]
+    logger.warning(
+        "scoped rules exceed PRXREF_SCOPED_RULES_MAX_CHARS (%d characters per review unit) "
+        "in %d of %d review unit(s); truncated: %s; omitted: %s",
+        max_chars,
+        sum(1 for block in blocks if block.truncated or block.omitted),
+        len(blocks),
+        ", ".join(p for p in order if p in cut) or "none",
+        ", ".join(p for p in order if p in left_out) or "none",
+    )
+
+
 def _run_workers(
     llm: LLMClient, chunks, pr: PRData, *, max_tokens: int | None = None,
     max_workers: int = MAX_WORKERS, context_lines: int | None = None,
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    scoped_blocks: Sequence[Any] | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -1377,6 +1892,7 @@ def _run_workers(
                 max_tokens, context_lines, tracer, reader, all_files,
                 trace_label=f"chunk{i}", trace_dir=trace_dir,
                 prompt_context=prompt_context,
+                scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -1443,7 +1959,8 @@ def _invoke_chunk(
     bulk context. ``prompt_context`` (rules, ticket, spec digest) is passed
     unchanged on both attempts: it is intent, not bulk context, and a
     dict-shaped finding keeps its ``scope`` only when
-    :attr:`reviewer.PromptContext.scope_active`.
+    :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
+    :attr:`reviewer.PromptContext.rule_active`.
 
     The shape carries the reviewer's reported ``cost_usd`` and
     ``cost_source`` beside the token counts; a call that raised, or a stub
@@ -1482,7 +1999,10 @@ def _invoke_chunk(
 
     findings = []
     for item in res.get("findings") or []:
-        finding = _coerce_finding(item, accept_scope=prompt_context.scope_active)
+        finding = _coerce_finding(
+            item, accept_scope=prompt_context.scope_active,
+            accept_rule=prompt_context.rule_active,
+        )
         if finding is not None:
             findings.append(finding)
 
@@ -1504,9 +2024,16 @@ def _run_worker(
     tracer: Tracer | None = None, reader=None, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
     *, prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    scoped_block: Any = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
+    # The chunk's own scoped rules replace the run-wide worker block; both
+    # attempts below take this context, so the retry keeps the chunk's rules.
+    unit_context = (
+        prompt_context if scoped_block is None
+        else replace(prompt_context, rules_worker=scoped_block.text)
+    )
     # Logged on ENTRY, not only on completion. A chunk that never finishes
     # otherwise leaves no evidence it ever started, so a hang cannot be
     # attributed to a chunk, a file, or a model.
@@ -1517,10 +2044,11 @@ def _run_worker(
     tracer.event(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
+        **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
     )
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
-        trace_label=trace_label, trace_dir=trace_dir, prompt_context=prompt_context,
+        trace_label=trace_label, trace_dir=trace_dir, prompt_context=unit_context,
     )
     if (
         res["error"]
@@ -1546,7 +2074,7 @@ def _run_worker(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,
             trace_label=trace_label, trace_dir=trace_dir,
-            prompt_context=prompt_context,
+            prompt_context=unit_context,
         )
 
     error = res["error"]
@@ -1589,6 +2117,7 @@ def _run_sweep(
     threads: Sequence[Thread] = (),
     trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    scoped_block: Any = None,
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -1597,16 +2126,22 @@ def _run_sweep(
     :func:`reviewer.review_systemic` — so ``PRXREF_LLM_MAX_TOKENS``, the
     timeout, and the model fallback chain all apply as to any chunk — and
     returns the same result shape a chunk worker does. ``prompt_context``
-    rides along into the sweep prompt (sweep rules and ticket scope in the
-    system half, ticket context and the spec digest in the user half), and a
-    dict-shaped finding keeps its ``scope`` only when
-    :attr:`reviewer.PromptContext.scope_active`. A failure is that
+    rides along into the sweep prompt (sweep rules, ticket scope and the rule
+    request in the system half, ticket context and the spec digest in the
+    user half), and a dict-shaped finding keeps its ``scope`` only when
+    :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
+    :attr:`reviewer.PromptContext.rule_active`. A failure is that
     shape with ``error`` set prefixed ``systemic sweep:``, so the
     partial-review banner names the unit that failed; it counts as one
-    failed chunk in the caller's coverage accounting.
+    failed chunk in the caller's coverage accounting. ``scoped_block``, the
+    sweep's path-scoped rules block, replaces ``rules_sweep`` in the context
+    and its files ride the ``sweep start`` event as ``rules``; ``None`` (no
+    scoped rules) leaves both exactly as they were.
     """
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
+    if scoped_block is not None:
+        prompt_context = replace(prompt_context, rules_sweep=scoped_block.text)
     digest = systemic.build_digest(files, token_budget)
     digested = {f.path for f in files}
     discussion = [t for t in threads if t.path in digested]
@@ -1617,6 +2152,7 @@ def _run_sweep(
     tracer.event(
         "sweep", "start", files=len(files), digest_chars=len(digest),
         threads=len(discussion),
+        **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
     )
     try:
         findings_raw, meta = reviewer.review_systemic(
@@ -1640,7 +2176,10 @@ def _run_sweep(
 
     findings = []
     for item in findings_raw:
-        finding = _coerce_finding(item, accept_scope=prompt_context.scope_active)
+        finding = _coerce_finding(
+            item, accept_scope=prompt_context.scope_active,
+            accept_rule=prompt_context.rule_active,
+        )
         if finding is not None:
             findings.append(finding)
 
@@ -1674,7 +2213,9 @@ def _run_sweep(
     }
 
 
-def _coerce_finding(item, *, accept_scope: bool = False) -> Finding | None:
+def _coerce_finding(
+    item, *, accept_scope: bool = False, accept_rule: bool = False,
+) -> Finding | None:
     if isinstance(item, Finding):
         return item
     if isinstance(item, dict):
@@ -1690,6 +2231,7 @@ def _coerce_finding(item, *, accept_scope: bool = False) -> Finding | None:
                     normalize_scope(item.get("scope")) if accept_scope
                     else SCOPE_UNKNOWN
                 ),
+                rule=normalize_rule(item.get("rule")) if accept_rule else None,
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)
@@ -1717,6 +2259,7 @@ def _render_summary(
     ticket_note: str = "",
     cost_label: str = "",
     size_advisory_line: str = "",
+    summary_template: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -1736,9 +2279,14 @@ def _render_summary(
     (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
     ``""``) is prepended to the finished body, after the partial-review
     banner, so it is the first thing under the forge's summary marker.
+    ``summary_template`` is an operator override of ``summary.md``
+    (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
+    the packaged template through ``reviewer.load_prompt``, and only that
+    read can fall back to the built-in template, so an override is always
+    rendered as given.
     """
     try:
-        template = reviewer.load_prompt("summary")
+        template = summary_template or reviewer.load_prompt("summary")
     except Exception as e:  # noqa: BLE001
         logger.warning("load_prompt('summary') failed, using fallback: %s", e)
         template = _FALLBACK_SUMMARY_TEMPLATE
@@ -2023,7 +2571,10 @@ def _summary_only_run(
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
+    max_warning_findings: int | None = None,
+    max_outofscope_findings: int | None = None,
     ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
+    summary_template: str = "",
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -2036,12 +2587,15 @@ def _summary_only_run(
     ``verdict`` / the summary. An empty diff still yields
     ``release_shape_findings=[]`` (fewer than 2 files can never be
     release-shaped), so this degrades to exactly the prior empty-diff
-    behaviour: ``Approved``, no findings, no banner.
+    behaviour: ``Approved``, no findings, no banner. ``confidence_floor``,
+    ``max_errors``, ``max_warning_findings`` and ``max_outofscope_findings``
+    are that gate's knobs, threaded from :func:`orchestrate_review`. No
+    grouping pass runs here: there is no chunk finding to group.
 
-    ``ticket_note``, ``cost_label`` and ``size_advisory_line`` are handed to
-    :func:`_render_summary` unchanged; all three default to ``""``, which
-    renders the summary exactly as before. The run-record keys are added by
-    the caller's :func:`_run_record`, not here.
+    ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
+    ``summary_template`` are handed to :func:`_render_summary` unchanged; all
+    four default to ``""``, which renders the summary exactly as before. The
+    run-record keys are added by the caller's :func:`_run_record`, not here.
     """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -2052,6 +2606,8 @@ def _summary_only_run(
         findings = apply_location_validation(findings, [f.path for f in files])
         findings = apply_quality_gate(
             findings, confidence_floor=confidence_floor, max_errors=max_errors,
+            max_warning_findings=max_warning_findings,
+            max_outofscope_findings=max_outofscope_findings,
         )
     findings_active = sorted(active(findings), key=finding_sort_key)
     findings_dropped = sorted(
@@ -2076,6 +2632,7 @@ def _summary_only_run(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
         )
         try:
             forge.post_summary(ref, summary)

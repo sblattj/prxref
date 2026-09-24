@@ -1,30 +1,62 @@
 """prxref command-line interface.
 
-Provides three subcommands:
+Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
+  * ``eval run|score|compare`` — replay labelled cases, score the findings
+    against the human labels, and compare two scored runs (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
+  * ``prompts export DIR [--force]`` — the packaged prompt templates, written
+    to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
 
-``review`` takes three optional inputs besides the PR itself, and they
+``review`` takes four optional inputs besides the PR itself, and they
 compose: ``--spec URL_OR_PATH`` (repeatable) grounds the review against specs
 or tickets and replaces ``PRXREF_SPEC_SOURCES``; ``--rules-file PATH`` adds a
-team review-rules file (``PRXREF_REVIEW_RULES``); ``--context-file PATH``
-names the ticket the PR implements (``PRXREF_TICKET_CONTEXT_FILE``), so each
-finding is marked in, out of, or of unknown ticket scope. Each flag wins over
-its variable, and ``--rules-file ""`` / ``--context-file ""`` turn the
-variable off for one run. Both files are read before any network call, so an
-unusable one is a configuration error. The webhook daemon reads the rules
-file from its own environment and never reads a ticket-context file.
+team review-rules file (``PRXREF_REVIEW_RULES``) that reaches every review
+unit; ``--scoped-rules PATH`` (repeatable) adds path-scoped rules files and
+directories and replaces ``PRXREF_SCOPED_RULES``, each file reaching only
+the chunks its ``applies_to:`` globs match, and the sweep their union;
+``--context-file PATH`` names the ticket the PR implements
+(``PRXREF_TICKET_CONTEXT_FILE``), so each finding is marked in, out of, or
+of unknown ticket scope. Each flag wins over its variable, and
+``--rules-file ""`` / ``--scoped-rules ""`` / ``--context-file ""`` turn the
+variable off for one run. The rules and ticket files are read before any
+network call, so an unusable one is a configuration error. The webhook
+daemon reads both kinds of rules file from its own environment, re-reading
+them on every webhook, and never reads a ticket-context file.
+
+``--prompts-dir DIR`` (``PRXREF_PROMPTS_DIR``) replaces the packaged
+``worker.md``, ``systemic.md`` and ``summary.md`` prompt templates with the
+ones in ``DIR``, the flag winning and ``--prompts-dir ""`` turning the
+variable off for one run. The directory is loaded and validated before any
+network call, so a bad one exits 2 naming its source; the webhook daemon
+reads it from its own environment on every webhook. The run record's
+``prompt_templates`` stamps each override's sha256.
 
 The replay flags review a pinned, reproducible input for evaluation:
 ``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
 repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
 optional, and no forge is contacted without it), and ``--no-threads`` hides
-the PR's existing threads. Any of them makes the run a replay: it never
+the PR's existing threads. Any replay flag makes the run a replay: it never
 posts, and its run record gains a ``replay`` stamp. They are validated
 before the URL is parsed, and a bad set exits 2 naming the flag. The webhook
 daemon never replays.
+
+A ``--pr-url`` replay also pins the PR's title and description by default
+(issue #16): it shows the ones in force at a cutoff, which is ``--as-of
+TIME`` when given, else the PR's first human review, else its head commit's
+date. Reading that history is one call to the forge's history reader, made
+before the review starts and not recorded in the run trace. A forge with no
+history reader, a read that fails, or a history that does not reach the
+cutoff keeps the current title and description and logs a WARNING, except
+that an explicit ``--as-of`` on a forge with no history reader exits 2.
+``--description-file PATH`` (that file's text) and ``--no-description`` (an
+empty description) read no history and leave the title current. At most one
+of the three flags may be given; each is CLI-only, with no environment
+variable, and each makes the run a replay. The stamp's ``description``
+(``pinned``, ``live``, ``file`` or ``none``), ``as_of`` and ``as_of_source``
+record which title and description the review saw.
 
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
@@ -59,14 +91,19 @@ location, title, and body, followed by any dropped findings and their reason.
 from __future__ import annotations
 
 import argparse
+import codecs
+import errno
+import functools
 import importlib
 import json
 import logging
 import os
 import re
+import stat
 import sys
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,9 +111,11 @@ import prxref
 from prxref.config import load_config, make_forge
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
-from prxref.forges.replay import LocalDiffForge, ReplayForge
+from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
 from prxref.llm import ConfigError
-from prxref.rules import load_review_rules
+from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
+from prxref.rules import load_review_rules, load_scoped_rules
+from prxref.text_inputs import check_readable_path, decode_text
 from prxref.ticket import load_ticket_context
 from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
 from prxref.viz import render_file
@@ -146,6 +185,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--scoped-rules",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path-scoped team review rules: a rules file, or a directory of "
+            "*.md rules files, each reaching only the chunks its applies_to: "
+            "globs match; repeatable; replaces PRXREF_SCOPED_RULES, and '' "
+            "turns it off for this run; read it from a trusted checkout, never "
+            "from the PR under review"
+        ),
+    )
+    rev.add_argument(
         "--context-file",
         default=None,
         metavar="PATH",
@@ -154,6 +206,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "implement; findings get a scope of in/out/unknown against it; "
             "overrides PRXREF_TICKET_CONTEXT_FILE, and '' turns it off for "
             "this run"
+        ),
+    )
+    rev.add_argument(
+        "--prompts-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "directory of worker.md, systemic.md and summary.md templates "
+            "that replace the packaged prompts (start from 'prxref prompts "
+            "export DIR'); overrides PRXREF_PROMPTS_DIR, and '' turns it off "
+            "for this run; read it from a trusted checkout, never from the PR "
+            "under review"
         ),
     )
     rev.add_argument(
@@ -194,6 +258,34 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--as-of",
+        default=None,
+        metavar="TIME",
+        help=(
+            "replay: show the PR's title and description as they were at TIME, "
+            "an ISO-8601 time with a UTC offset (2026-05-01T09:30:00Z); needs "
+            "--pr-url; excludes --description-file and --no-description; "
+            "implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--description-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "replay: use this UTF-8 text file as the PR description; excludes "
+            "--as-of and --no-description; implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--no-description",
+        action="store_true",
+        help=(
+            "replay: review with an empty PR description; excludes --as-of "
+            "and --description-file; implies no posting"
+        ),
+    )
+    rev.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -231,6 +323,99 @@ def _build_parser() -> argparse.ArgumentParser:
         help="bind address (default 0.0.0.0)",
     )
 
+    ev = sub.add_parser(
+        "eval", help="replay labelled cases, score them, and compare runs"
+    )
+    ev_sub = ev.add_subparsers(dest="eval_command")
+    eval_out = "./prxref-eval/"
+    ev_run = ev_sub.add_parser(
+        "run", help="replay every case and write one labelled run"
+    )
+    ev_run.add_argument(
+        "--cases",
+        required=True,
+        metavar="PATH",
+        help="the labelled cases: a cases.json file or a directory of case-*/ directories",
+    )
+    ev_run.add_argument(
+        "--label",
+        required=True,
+        metavar="NAME",
+        help=(
+            "name of this run and of its directory under --out; an existing "
+            "one is refused unless --resume is given"
+        ),
+    )
+    ev_run.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
+    )
+    ev_run.add_argument(
+        "--rules-file",
+        default=None,
+        metavar="PATH",
+        help="team review rules for every case, as review --rules-file",
+    )
+    ev_run.add_argument(
+        "--scoped-rules",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="path-scoped team review rules for every case, as review --scoped-rules; repeatable",
+    )
+    ev_run.add_argument(
+        "--prompts-dir",
+        default=None,
+        metavar="DIR",
+        help="prompt templates for every case, as review --prompts-dir",
+    )
+    ev_run.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue an existing --label run instead of refusing it",
+    )
+    ev_score = ev_sub.add_parser(
+        "score", help="grade a run against its human labels"
+    )
+    ev_score.add_argument(
+        "--label",
+        required=True,
+        metavar="NAME",
+        help="the run to score, under --out",
+    )
+    ev_score.add_argument(
+        "--judge-model",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "model that grades the labels without a must_match predicate, on "
+            "the review's own LLM backend; required when any label lacks one"
+        ),
+    )
+    ev_score.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
+    )
+    ev_cmp = ev_sub.add_parser(
+        "compare", help="compare two scored runs, label by label"
+    )
+    ev_cmp.add_argument(
+        "run_a", metavar="A", help="first run: a label under --out, or a run directory"
+    )
+    ev_cmp.add_argument(
+        "run_b", metavar="B", help="second run: a label under --out, or a run directory"
+    )
+    ev_cmp.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
+    )
+
     tr = sub.add_parser("trace", help="work with a JSONL run trace")
     tr_sub = tr.add_subparsers(dest="trace_command")
     tr_render = tr_sub.add_parser(
@@ -240,6 +425,21 @@ def _build_parser() -> argparse.ArgumentParser:
     tr_render.add_argument(
         "-o", "--out",
         help="output HTML path (default: the trace path with an .html suffix)",
+    )
+
+    pr = sub.add_parser("prompts", help="work with the overridable prompt templates")
+    pr_sub = pr.add_subparsers(dest="prompts_command")
+    pr_export = pr_sub.add_parser(
+        "export",
+        help="write the packaged worker, systemic and summary templates to DIR as an override starting point",
+    )
+    pr_export.add_argument(
+        "prompts_export_dir", metavar="DIR", help="directory to write into (created when missing)"
+    )
+    pr_export.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite templates already in DIR (without it, an existing one is refused and nothing is written)",
     )
 
     return parser
@@ -315,10 +515,17 @@ def _print_summary(
     Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
     ``size advisory:`` when the PR-size advisory fired; and ``replay:`` when
     the run was a replay, so a replay can never be read as a live review.
+    The ``replay:`` line carries the stamp as ``key=value`` pairs, ending in
+    ``description=<status>`` and, when a cutoff was chosen,
+    `` as_of=<time> (<source>)``.
     Under ``-v`` it adds the finding counts, the ``elapsed/tokens/cost`` line,
-    and one line for each configured input: ``rules:``, ``ticket:`` (with the
-    active findings' scope counts), and ``spec:``. ``result`` may be partial,
-    or not a dict at all; a missing or ``None`` record prints nothing.
+    and one line for each configured input: ``rules:``, ``scoped rules:``
+    (the number of scoped rules files, then ``<path>=<sha256 prefix>`` for
+    each in load order, then ``cap=<per-unit cap>``), ``prompts:`` (the
+    directory, then ``<name>=<sha256 prefix>`` for each overridden template
+    in name order), ``ticket:`` (with the active findings' scope counts), and
+    ``spec:``. ``result`` may be partial, or not a dict at all; a missing or
+    ``None`` record prints nothing.
     """
     target = sys.stdout if out is None else out
     record = result if isinstance(result, dict) else {}
@@ -333,9 +540,12 @@ def _print_summary(
         print(f"size advisory: {size['message']}", file=target)
     replay = record.get("replay")
     if isinstance(replay, dict):
+        as_of = replay.get("as_of")
+        cutoff = f" as_of={as_of} ({_dash(replay.get('as_of_source'))})" if as_of else ""
         print(
             f"replay: base={_dash(replay.get('base_sha'), 12)} head={_dash(replay.get('head_sha'), 12)} "
-            f"threads={_dash(replay.get('threads'))} diff_file={_dash(replay.get('diff_file'))}",
+            f"threads={_dash(replay.get('threads'))} diff_file={_dash(replay.get('diff_file'))} "
+            f"description={_dash(replay.get('description'))}{cutoff}",
             file=target,
         )
     if not verbose:
@@ -352,6 +562,21 @@ def _print_summary(
             f"chars={_dash(rules.get('chars'))}{truncated}",
             file=target,
         )
+    scoped = record.get("scoped_rules")
+    if isinstance(scoped, dict):
+        files = scoped.get("files")
+        files = [info if isinstance(info, dict) else {} for info in files] if isinstance(files, list) else []
+        stamps = "".join(f" {_dash(info.get('path'))}={_dash(info.get('sha256'), 12)}" for info in files)
+        print(f"scoped rules: {len(files)} file(s){stamps} cap={_dash(scoped.get('max_chars'))}", file=target)
+    prompts = record.get("prompt_templates")
+    if isinstance(prompts, dict):
+        templates = prompts.get("templates")
+        templates = templates if isinstance(templates, dict) else {}
+        stamps = "".join(
+            f" {name}={_dash(info.get('sha256') if isinstance(info, dict) else None, 12)}"
+            for name, info in sorted(templates.items())
+        )
+        print(f"prompts: {_dash(prompts.get('dir'))}{stamps}", file=target)
     ticket = record.get("ticket_context")
     if isinstance(ticket, dict):
         truncated = " truncated" if ticket.get("truncated") else ""
@@ -375,7 +600,11 @@ def _fmt_finding_line(f: Any) -> str:
 
     A finding the ticket judged gains `` [scope: in]`` or `` [scope: out]``
     after the frozen prefix; ``unknown`` (always the case without a ticket)
-    adds nothing.
+    adds nothing. A finding that names a rule then gains `` [rule: <rule>]``,
+    after any scope tag. Only a run with finding grouping on, or with the
+    per-rule cap active (a review rules file loaded), keeps a rule (the
+    orchestrator resets every rule to ``None`` otherwise), so with both off
+    the line is unchanged.
     """
     severity = getattr(f, "severity", None) or ""
     location = f"{getattr(f, 'file', '')}:{getattr(f, 'line', 0)}"
@@ -385,6 +614,9 @@ def _fmt_finding_line(f: Any) -> str:
     scope = getattr(f, "scope", None)
     if scope in (SCOPE_IN, SCOPE_OUT):
         line = f"{line} [scope: {scope}]"
+    rule = getattr(f, "rule", None)
+    if rule:
+        line = f"{line} [rule: {rule}]"
     return line
 
 
@@ -430,13 +662,33 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     ``scope`` is the finding's position relative to the ticket context
     (``in``, ``out`` or ``unknown``); a finding object without the attribute
     reports ``unknown``.
+
+    ``rule`` and ``locations`` follow ``scope`` and are always present. ``rule``
+    is the rule the finding names, or ``null`` (never ``""``) when it names
+    none, which is every finding of a run with finding grouping off and the
+    per-rule cap inactive.
+    ``locations`` is set only on the representative of a grouped finding, or
+    on the best finding the per-rule cap kept for a rule, whose locations can
+    span files: a list of ``{"file": ..., "line": ...}`` objects for the
+    other locations it stands for, never including the row's own ``file``
+    and ``line``. A group representative's list is its ``Also at:``
+    paragraph, in the same order; the cap's best lists its own group's
+    locations and every folded finding's, sorted by file then line, of which
+    its ``Also at:`` names the first five. It is ``null`` on every other
+    row, a member row dropped as ``grouped into <file>:<line>`` or ``rule
+    cap exceeded (max <n>): listed at <file>:<line>`` included (that row
+    still carries its own ``rule``). A finding object without either
+    attribute reports ``null`` for it.
     """
+    locations = getattr(f, "locations", None) or ()
     return {
         "file": f.file,
         "line": f.line,
         "severity": f.severity,
         "confidence": f.confidence,
         "scope": getattr(f, "scope", "unknown"),
+        "rule": getattr(f, "rule", None) or None,
+        "locations": [{"file": path, "line": line} for path, line in locations] or None,
         "title": f.title,
         "body": f.body,
         "drop_reason": drop_reason,
@@ -449,15 +701,20 @@ def _build_json_result(result: Any) -> dict:
     Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
     ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
-    ``ticket_context``, ``spec_grounding``, ``size_advisory``, then
+    ``ticket_context``, ``spec_grounding``, ``size_advisory``,
+    ``prompt_templates``, ``scoped_rules``, ``rule_counts``, then
     ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
     to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
-    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) are
-    always emitted and are ``null`` when their feature is off; ``cost_usd`` is
-    also ``null`` when no source could price the run, never ``0``.
+    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) and
+    0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts`` are
+    always emitted and are ``null`` when their feature is off
+    (``rule_counts`` whenever the per-rule cap did not run); ``cost_usd`` is
+    also ``null`` when no source could price the run, never ``0``. Every
+    ``findings`` row, active or dropped, carries 0.15's ``rule`` and
+    ``locations`` the same way (see :func:`_finding_json`).
     ``sampling`` and ``replay`` are forwarded only when the result already
     carries them. ``replay`` is on replay runs only, so a normal run's
     payload has no ``replay`` key at all.
@@ -487,6 +744,9 @@ def _build_json_result(result: Any) -> dict:
         "ticket_context": result.get("ticket_context"),
         "spec_grounding": result.get("spec_grounding"),
         "size_advisory": result.get("size_advisory"),
+        "prompt_templates": result.get("prompt_templates"),
+        "scoped_rules": result.get("scoped_rules"),
+        "rule_counts": result.get("rule_counts"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -506,6 +766,14 @@ class _ReplayRequest:
     ``None``. ``diff_file`` is the path exactly as the operator typed it, and
     ``diff_text`` is that file's text once ``_run_review`` has read it
     (``None`` until then, and without ``--diff-file``).
+
+    The description fields (issue #16) hold at most one choice, because
+    ``--as-of``, ``--description-file`` and ``--no-description`` are mutually
+    exclusive. ``as_of`` is the ``--as-of`` time as a timezone-aware UTC
+    ``datetime``. ``description_file`` is the path as typed, and
+    ``description_text`` is its decoded text once ``_run_review`` has read it
+    (``None`` until then, and without ``--description-file``).
+    ``no_description`` is ``--no-description``.
     """
 
     base_sha: str | None = None
@@ -513,20 +781,64 @@ class _ReplayRequest:
     no_threads: bool = False
     diff_file: str | None = None
     diff_text: str | None = None
+    as_of: datetime | None = None
+    description_file: str | None = None
+    description_text: str | None = None
+    no_description: bool = False
 
-    def stamp(self, *, has_forge: bool) -> dict[str, Any]:
-        """The run record's ``replay`` stamp: four keys, in a fixed order, all present.
+    def stamp(self, *, has_forge: bool, pin: Any = None) -> dict[str, Any]:
+        """The run record's ``replay`` stamp: seven keys, in a fixed order, all present.
 
         ``threads`` is ``"hidden"`` whenever the PR's threads were not
         consulted: under ``--no-threads``, or with no forge at all
         (``--diff-file`` without ``--pr-url``).
+
+        ``description``, ``as_of`` and ``as_of_source`` (issue #16) say which
+        title and description the review saw. ``pin`` is the replay forge's
+        :class:`~prxref.forges.replay.DescriptionPin`, and its status, cutoff
+        and cutoff source are copied as they are. ``as_of`` is written as a
+        UTC ISO-8601 time ending in ``Z``, with the fraction of a second only
+        when there is one, so ``--as-of`` given that value picks the same
+        cutoff. Anything else as ``pin`` (``None``, as from a
+        :class:`~prxref.forges.replay.LocalDiffForge`) is read from the
+        flags: ``"file"`` under ``--description-file``, ``"none"`` under
+        ``--no-description``, else ``"file"`` without a forge (the diff
+        file supplies the description) and ``"live"`` with one; ``as_of``
+        and ``as_of_source`` are then ``None``. There is no title key: the
+        title is pinned exactly when the description is.
         """
+        if isinstance(pin, DescriptionPin):
+            description, as_of, as_of_source = pin.status, _iso_z(pin.as_of), pin.as_of_source
+        else:
+            description, as_of, as_of_source = self._flag_description(has_forge=has_forge), None, None
         return {
             "base_sha": self.base_sha,
             "head_sha": self.head_sha,
             "threads": "hidden" if self.no_threads or not has_forge else "shown",
             "diff_file": self.diff_file,
+            "description": description,
+            "as_of": as_of,
+            "as_of_source": as_of_source,
         }
+
+    def _flag_description(self, *, has_forge: bool) -> str:
+        if self.description_file is not None:
+            return "file"
+        if self.no_description:
+            return "none"
+        return "live" if has_forge else "file"
+
+
+def _iso_z(value: datetime | None) -> str | None:
+    """``value`` (timezone-aware) as a UTC ISO-8601 string ending in ``Z``; ``None`` stays ``None``.
+
+    Whole seconds print as ``YYYY-MM-DDTHH:MM:SSZ``; a fraction of a second
+    is kept (``.ffffff``) rather than floored, so the string names the same
+    instant.
+    """
+    if value is None:
+        return None
+    return value.astimezone(UTC).replace(tzinfo=None).isoformat() + "Z"
 
 
 def _resolve_replay(
@@ -536,20 +848,28 @@ def _resolve_replay(
     head_sha: str | None = None,
     no_threads: bool = False,
     diff_file: str | None = None,
+    as_of: str | None = None,
+    description_file: str | None = None,
+    no_description: bool = False,
 ) -> _ReplayRequest | None:
     """Validate the replay flags; ``None`` means a normal, non-replay run.
 
     Pure: it reads nothing and calls nothing. ``_run_review`` calls it first,
     before ``detect_forge``, so a bad set of replay flags exits 2 even next
     to an unrecognised URL. A flag counts as given whenever it is not
-    ``None``, so an empty value is validated rather than ignored.
+    ``None`` (``--no-description`` whenever it is true), so an empty value
+    is validated rather than ignored.
 
     The checks run in this order, each a ``ConfigError`` naming its flag:
     no ``--pr-url`` and no ``--diff-file``; only one of ``--base-sha`` /
     ``--head-sha``; either one not a full 40- or 64-character hex SHA; the
-    two naming the same commit (compared lowercased); and a range without
-    ``--pr-url`` to resolve it in. Whether the forge can fetch the range is
-    only known once it exists, so ``_run_review`` checks that.
+    two naming the same commit (compared lowercased); a range without
+    ``--pr-url`` to resolve it in; two or more of ``--as-of``,
+    ``--description-file`` and ``--no-description``, naming every one
+    given; an ``--as-of`` that :func:`_parse_as_of` refuses; and an
+    ``--as-of`` without ``--pr-url``, whose history it reads. Whether the
+    forge can fetch the range is only known once it exists, so
+    ``_run_review`` checks that.
     """
     if url is None and diff_file is None:
         raise ConfigError("--pr-url: required unless --diff-file is given")
@@ -571,12 +891,68 @@ def _resolve_replay(
                 "--base-sha/--head-sha: need --pr-url (the range is resolved in "
                 "that PR's repository)"
             )
-    if head_sha is None and not no_threads and diff_file is None:
+    chosen = [
+        flag for flag, given in (
+            ("--as-of", as_of is not None),
+            ("--description-file", description_file is not None),
+            ("--no-description", bool(no_description)),
+        ) if given
+    ]
+    if len(chosen) > 1:
+        raise ConfigError(
+            f"{'/'.join(chosen)}: cannot be combined (give at most one of "
+            "--as-of, --description-file and --no-description)"
+        )
+    cutoff = _parse_as_of(as_of) if as_of is not None else None
+    if cutoff is not None and url is None:
+        raise ConfigError(
+            "--as-of: needs --pr-url (the description history is read from "
+            "that PR)"
+        )
+    if head_sha is None and not no_threads and diff_file is None and not chosen:
         return None
     return _ReplayRequest(
         base_sha=base_sha, head_sha=head_sha, no_threads=bool(no_threads),
-        diff_file=diff_file,
+        diff_file=diff_file, as_of=cutoff, description_file=description_file,
+        no_description=bool(no_description),
     )
+
+
+def _parse_as_of(value: str) -> datetime:
+    """Parse ``--as-of`` into a timezone-aware UTC ``datetime``; refusals are a ``ConfigError``.
+
+    The value is ISO-8601 as :meth:`datetime.fromisoformat` reads it, and it
+    must carry a UTC offset (``Z`` or ``+02:00``). A date alone
+    (``2026-05-01``) and a time without an offset are refused rather than
+    read in this machine's time zone or at an assumed hour, because either
+    guess would move the cutoff with the host running the replay. A time
+    whose UTC equivalent falls outside ``datetime``'s range is refused too.
+    """
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        pass
+    else:
+        raise ConfigError(
+            f"--as-of: {value!r} is a date without a time; give a time with a "
+            f"UTC offset, such as '{day.isoformat()}T00:00:00Z'"
+        )
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ConfigError(
+            "--as-of: must be an ISO-8601 time with a UTC offset, such as "
+            f"'2026-05-01T09:30:00Z', got {value!r}"
+        ) from None
+    if parsed.utcoffset() is None:
+        raise ConfigError(
+            f"--as-of: {value!r} has no UTC offset; add one, such as 'Z' for "
+            "UTC or '+02:00'"
+        )
+    try:
+        return parsed.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise ConfigError(f"--as-of: {value!r} is out of range in UTC") from None
 
 
 def _read_diff_file(path: str) -> str:
@@ -597,17 +973,75 @@ def _read_diff_file(path: str) -> str:
         ) from exc
 
 
+def _read_description_file(path: str) -> str:
+    """Read the ``--description-file`` text; every failure is a ``ConfigError`` naming the flag.
+
+    The file is configuration, not review input, so it is read as the rules
+    file is: through :func:`prxref.text_inputs.check_readable_path` (a path
+    under the working directory that symlinks out of it is refused, and so
+    is anything but a regular file), then decoded strictly by
+    :func:`prxref.text_inputs.decode_text` (a leading BOM dropped, CRLF and
+    CR folded to LF). A missing, unreadable or non-regular file, invalid
+    UTF-8 and NUL bytes each raise. A blank file is not an error: it is an
+    empty description.
+    """
+    try:
+        resolved = check_readable_path(path, confine=True)
+        with open(resolved, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise OSError(errno.EINVAL, "not a regular file", path)
+            raw = fh.read()
+    except OSError as exc:
+        raise ConfigError(
+            f"--description-file: cannot read {path!r}: {exc.strerror or exc}"
+        ) from exc
+    try:
+        text = decode_text(raw)
+    except UnicodeDecodeError as exc:
+        offset = exc.start + (len(codecs.BOM_UTF8) if raw.startswith(codecs.BOM_UTF8) else 0)
+        raise ConfigError(
+            f"--description-file: {path!r} is not UTF-8 text ({exc.reason} at byte {offset})"
+        ) from exc
+    if "\x00" in text:
+        raise ConfigError(
+            f"--description-file: {path!r} contains NUL bytes; expected Markdown or plain text"
+        )
+    return text
+
+
+_CURRENT_DESCRIPTION = "replay shows the PR's CURRENT title and description"
+
+
 def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
     """Wrap the ``--pr-url`` forge in a :class:`ReplayForge` for this replay.
 
     A pinned range that has to be fetched (no ``--diff-file``) needs the
     forge's optional ``get_compare_diff``; without it this raises the
     ``ConfigError`` naming ``--base-sha/--head-sha`` (exit 2) before any
-    network call. Two combinations are allowed but logged as a WARNING,
-    because each leaks the PR's present into a replay: pinned SHAs without
-    ``--no-threads`` still show the PR's current threads, and a
-    ``--diff-file`` without ``--head-sha`` reads file context at the PR's
-    current head.
+    network call. An explicit ``--as-of`` needs the forge's optional
+    ``get_pr_history`` the same way, and without it raises the
+    ``ConfigError`` naming ``--as-of``. Two combinations are allowed but
+    logged as a WARNING, because each leaks the PR's present into a replay:
+    pinned SHAs without ``--no-threads`` still show the PR's current
+    threads, and a ``--diff-file`` without ``--head-sha`` reads file context
+    at the PR's current head.
+
+    Then the PR's title and description are resolved (issue #16), and the
+    returned forge's ``description_pin`` records the outcome
+    (:class:`prxref.forges.replay.DescriptionPin`). ``--description-file``
+    and ``--no-description`` fix the description (``file``, ``none``) and
+    read no history. Otherwise pinning is on: this reads the forge's
+    ``get_pr_history`` once, at ``--head-sha`` when one is given, and picks
+    the cutoff: ``--as-of``, else the first human review, else the head
+    commit's date. When the history holds the description in force at the
+    cutoff, the forge shows that title and description (``pinned``), with
+    no further network call. Every other outcome shows the PR's current
+    title and description (``live``) and logs a WARNING saying why: a forge
+    with no ``get_pr_history``, a history read that raises (401/403,
+    transport), a history with no cutoff to offer, or one that does not
+    reach the cutoff (incomplete, or that version deleted). The pin carries
+    the cutoff and its source whenever one was chosen, a ``live`` one
+    included.
     """
     if (
         replay.head_sha is not None
@@ -617,6 +1051,11 @@ def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
         raise ConfigError(
             f"--base-sha/--head-sha: the {ref.forge} forge cannot fetch a "
             "pinned commit range"
+        )
+    if replay.as_of is not None and getattr(forge, "get_pr_history", None) is None:
+        raise ConfigError(
+            f"--as-of: the {ref.forge} forge cannot read a pull request's "
+            "description history"
         )
     if replay.head_sha is not None and not replay.no_threads:
         logger.warning(
@@ -628,15 +1067,72 @@ def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
             "--diff-file with --pr-url and no --head-sha: file context is read "
             "at the PR's current head, which may not match the file"
         )
+    pin_kwargs, pin = _resolve_description(forge, ref, replay)
     return ReplayForge(
         forge, base_sha=replay.base_sha, head_sha=replay.head_sha,
         hide_threads=replay.no_threads, diff_text=replay.diff_text,
+        description_pin=pin, **pin_kwargs,
     )
 
 
-def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> Any:
+def _resolve_description(
+    forge: Any, ref: Any, replay: _ReplayRequest,
+) -> tuple[dict[str, Any], DescriptionPin]:
+    """Resolve a ``--pr-url`` replay's title and description for :func:`_replay_forge`.
+
+    Returns the ``ReplayForge`` keyword arguments that apply it (a fixed
+    ``description``, or the ``history`` and ``cutoff`` to pin with, which
+    are passed only when the status is ``pinned``, so a ``live`` resolution
+    leaves ``get_pr`` untouched) and the :class:`DescriptionPin`. The
+    ``--as-of`` configuration error is raised by the caller, before its
+    warnings.
+    """
+    if replay.description_file is not None:
+        return {"description": replay.description_text}, DescriptionPin("file", None, None)
+    if replay.no_description:
+        return {"description": ""}, DescriptionPin("none", None, None)
+    getter = getattr(forge, "get_pr_history", None)
+    if getter is None:
+        logger.warning(
+            "%s: the %s forge cannot read a pull request's description history",
+            _CURRENT_DESCRIPTION, ref.forge,
+        )
+        return {}, DescriptionPin("live", None, None)
+    history = None
+    try:
+        history = getter(ref, head_sha=replay.head_sha)
+    except Exception as exc:  # noqa: BLE001 - a failed history read falls back to the live text
+        logger.warning(
+            "%s: reading its description history failed (%s: %s)",
+            _CURRENT_DESCRIPTION, type(exc).__name__, exc,
+        )
+    chosen = choose_cutoff(replay.as_of, history)
+    if chosen is None:
+        if history is not None:
+            logger.warning(
+                "%s: its history has no first human review and no head commit "
+                "date to pin them to (give --as-of to choose the time)",
+                _CURRENT_DESCRIPTION,
+            )
+        return {}, DescriptionPin("live", None, None)
+    cutoff, source = chosen
+    if history is None:
+        return {}, DescriptionPin("live", cutoff, source)
+    if pin_status(history, cutoff) == "live":
+        logger.warning(
+            "%s: its description history does not reach the %s cutoff %s "
+            "(it is incomplete, or the version then in force was deleted)",
+            _CURRENT_DESCRIPTION, source, cutoff.isoformat(),
+        )
+        return {}, DescriptionPin("live", cutoff, source)
+    return {"history": history, "cutoff": cutoff}, DescriptionPin("pinned", cutoff, source)
+
+
+def _load_text_input(loader: Any, path: str | list[str], *, max_chars: int, source: str) -> Any:
     """Run the rules or ticket-context ``loader``, fencing every failure into a ``ConfigError``.
 
+    ``path`` is handed to ``loader`` as given: one path for the rules and
+    ticket files, the configured list for the path-scoped rules.
     The loaders raise ``ConfigError`` naming ``source`` themselves; an
     ``OSError`` or ``ValueError`` that escapes one is re-raised as a
     ``ConfigError`` naming it too. So an unusable file always exits 2 before
@@ -651,6 +1147,23 @@ def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> 
         raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
 
 
+def _load_prompts_dir(path: str | None, *, source: str) -> Any:
+    """Load the prompt-template overrides in ``path``, fenced as :func:`_load_text_input` fences a file.
+
+    ``None``, ``""`` and whitespace mean "no overrides" and return ``None``,
+    so ``--prompts-dir ""`` turns ``PRXREF_PROMPTS_DIR`` off. The loader
+    raises ``ConfigError`` naming ``source`` itself; an ``OSError`` or
+    ``ValueError`` that escapes it becomes one too, so an unusable directory
+    always exits 2 before any network call.
+    """
+    try:
+        return load_prompt_templates(path, source=source)
+    except ConfigError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{source}: cannot load prompts directory {path!r}: {exc}") from exc
+
+
 def _run_review(
     url: str | None,
     *,
@@ -660,34 +1173,46 @@ def _run_review(
     trace_dir: str | None = None,
     spec_sources: list[str] | None = None,
     rules_file: str | None = None,
+    scoped_rules: list[str] | None = None,
     context_file: str | None = None,
+    prompts_dir: str | None = None,
     base_sha: str | None = None,
     head_sha: str | None = None,
     no_threads: bool = False,
     diff_file: str | None = None,
+    as_of: str | None = None,
+    description_file: str | None = None,
+    no_description: bool = False,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
-        diff_file=diff_file,
+        diff_file=diff_file, as_of=as_of, description_file=description_file,
+        no_description=no_description,
     )
     # The diff file is read with the flags, before the URL is parsed, so an
     # unreadable one exits 2 whatever the URL. Without --pr-url it is the
     # whole input: a synthetic "local" ref, and no forge is ever built.
     if replay is not None and replay.diff_file is not None:
         replay = replace(replay, diff_text=_read_diff_file(replay.diff_file))
+    if replay is not None and replay.description_file is not None:
+        replay = replace(
+            replay, description_text=_read_description_file(replay.description_file),
+        )
     if url is None:
         ref = LocalDiffForge.ref_for(replay.diff_file)
     else:
         ref = detect_forge(url)
         if ref is None:
             return None
-    # --max-chunks, --timeout, --spec, --rules-file and --context-file arrive
-    # as load_config overrides (None is ignored, "" is not), so each flag rides
-    # exactly the path its environment variable does: --max-chunks and
-    # --timeout are range-checked on the same pass as PRXREF_MAX_CHUNKS and
-    # PRXREF_LLM_TIMEOUT, --spec replaces PRXREF_SPEC_SOURCES wholesale rather
-    # than merging with it, and --rules-file "" / --context-file "" blank
-    # their variable for one run. Precedence is derived once, here. There is
+    # --max-chunks, --timeout, --spec, --rules-file, --scoped-rules,
+    # --context-file and --prompts-dir arrive as load_config overrides (None is
+    # ignored, "" is not), so each flag rides exactly the path its environment
+    # variable does: --max-chunks and --timeout are range-checked on the same
+    # pass as PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, --spec and
+    # --scoped-rules replace PRXREF_SPEC_SOURCES / PRXREF_SCOPED_RULES
+    # wholesale rather than merging with them, and --rules-file "" /
+    # --scoped-rules "" / --context-file "" / --prompts-dir "" blank their
+    # variable for one run. Precedence is derived once, here. There is
     # deliberately no way to inject a pre-built config dict: that would bypass
     # _check_ranges and make every range guarantee conditional on nobody using
     # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
@@ -698,7 +1223,9 @@ def _run_review(
         trace_dir=trace_dir,
         spec_sources=spec_sources,
         review_rules=rules_file,
+        scoped_rules=scoped_rules,
         ticket_context_file=context_file,
+        prompts_dir=prompts_dir,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -706,17 +1233,27 @@ def _run_review(
             "llm_timeout": "--timeout",
             "spec_sources": "--spec",
             "review_rules": "--rules-file",
+            "scoped_rules": "--scoped-rules",
             "ticket_context_file": "--context-file",
+            "prompts_dir": "--prompts-dir",
         },
     )
-    # Both files are read here, after config and before make_forge and the LLM
-    # client, so an unusable one exits 2 before any network I/O. load_config
-    # stays I/O-free. Each is reported under the input that supplied its
-    # path: the flag whenever it was given, else the variable.
+    # The rules files, the ticket file and the prompts directory are read
+    # here, after config and before make_forge and the LLM client, so an
+    # unusable one exits 2 before any network I/O. load_config stays I/O-free.
+    # Each is reported under the input that supplied its path: the flag
+    # whenever it was given, else the variable. The scoped rules are checked
+    # against the always-on file, so one team word mapped to two tiers across
+    # them exits 2 here rather than silently taking the scoped tier.
     rules = _load_text_input(
         load_review_rules, cfg["review_rules"],
         max_chars=cfg["review_rules_max_chars"],
         source="--rules-file" if rules_file is not None else "PRXREF_REVIEW_RULES",
+    )
+    scoped = _load_text_input(
+        functools.partial(load_scoped_rules, always_on=rules), cfg["scoped_rules"],
+        max_chars=cfg["review_rules_max_chars"],
+        source="--scoped-rules" if scoped_rules is not None else "PRXREF_SCOPED_RULES",
     )
     ticket = _load_text_input(
         load_ticket_context, cfg["ticket_context_file"],
@@ -724,6 +1261,10 @@ def _run_review(
         source=(
             "--context-file" if context_file is not None else "PRXREF_TICKET_CONTEXT_FILE"
         ),
+    )
+    prompts = _load_prompts_dir(
+        cfg["prompts_dir"],
+        source="--prompts-dir" if prompts_dir is not None else "PRXREF_PROMPTS_DIR",
     )
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -741,7 +1282,13 @@ def _run_review(
         logger.info("replay run: posting to the forge is disabled")
         post = False
     if url is None:
-        forge = LocalDiffForge(replay.diff_text, path=replay.diff_file)
+        forge = LocalDiffForge(
+            replay.diff_text, path=replay.diff_file,
+            description=(
+                replay.description_text if replay.description_file is not None
+                else "" if replay.no_description else None
+            ),
+        )
     else:
         forge = make_forge(ref)
         if replay is not None:
@@ -769,6 +1316,11 @@ def _run_review(
         # discards any value an override or a .env-driven load resolved.
         confidence_floor=cfg["confidence_floor"],
         max_errors=cfg["max_error_findings"],
+        max_warning_findings=cfg["max_warning_findings"],
+        max_outofscope_findings=cfg["max_outofscope_findings"],
+        max_findings_per_rule=cfg["max_findings_per_rule"],
+        group_findings=cfg["group_findings"],
+        dedup_similarity=cfg["dedup_similarity"],
         post_mode=cfg["post_mode"],
         post_verdict=cfg["post_verdict"],
         trace_file=cfg["trace_file"],
@@ -787,7 +1339,13 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
-        replay=replay.stamp(has_forge=url is not None) if replay is not None else None,
+        replay=(
+            replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))
+            if replay is not None else None
+        ),
+        prompts=prompts,
+        scoped_rules=scoped,
+        scoped_rules_max_chars=cfg["scoped_rules_max_chars"],
     )
 
 
@@ -800,9 +1358,10 @@ def _webhook_handler(url: str) -> None:
 
     ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
     webhook: one static ticket file cannot describe every PR the daemon sees,
-    so its findings always carry scope ``unknown``. The team rules file still
-    comes from the daemon's environment, re-read on every webhook. The daemon
-    passes no replay flag, so it never replays.
+    so its findings always carry scope ``unknown``. The team rules file, the
+    ``PRXREF_SCOPED_RULES`` files and the ``PRXREF_PROMPTS_DIR`` templates
+    still come from the daemon's environment, re-read on every webhook. The
+    daemon passes no replay flag, so it never replays.
     """
     try:
         _run_review(url, post=True, context_file="")
@@ -874,11 +1433,16 @@ def _cmd_review(args: argparse.Namespace) -> int:
             trace_dir=args.trace_dir,
             spec_sources=args.spec,
             rules_file=args.rules_file,
+            scoped_rules=args.scoped_rules,
             context_file=args.context_file,
+            prompts_dir=args.prompts_dir,
             base_sha=args.base_sha,
             head_sha=args.head_sha,
             no_threads=args.no_threads,
             diff_file=args.diff_file,
+            as_of=args.as_of,
+            description_file=args.description_file,
+            no_description=args.no_description,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
@@ -935,6 +1499,30 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_eval(args: argparse.Namespace) -> int:
+    """Route ``eval run|score|compare`` to ``prxref.evals`` and return its exit code.
+
+    ``prxref.evals`` is imported here rather than at module top, because the
+    eval modules must never import the CLI back. For the same reason ``run``
+    is handed :func:`_run_review` and :func:`_build_json_result` as keyword
+    arguments. A ``ConfigError`` from any action exits 2, printed exactly as
+    ``review`` prints one.
+    """
+    evals = importlib.import_module("prxref.evals")
+    action = {
+        "run": lambda parsed: evals.eval_run(
+            parsed, run_review=_run_review, build_record=_build_json_result,
+        ),
+        "score": evals.eval_score,
+        "compare": evals.eval_compare,
+    }[args.eval_command]
+    try:
+        return action(args)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+
+
 def _cmd_trace_render(args: argparse.Namespace) -> int:
     """Render a JSONL trace to a self-contained HTML pipeline view.
 
@@ -956,8 +1544,27 @@ def _cmd_trace_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_prompts_export(args: argparse.Namespace) -> int:
+    """Write the packaged prompt templates to ``DIR``, printing one written path per line.
+
+    Exit 2 when an existing template would be overwritten without
+    ``--force``, or when ``DIR`` cannot be created or written: both are
+    ``ConfigError``, reported as ``review`` reports one, and the refusal
+    writes nothing.
+    """
+    try:
+        written = export_prompt_templates(args.prompts_export_dir, force=args.force)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    for path in written:
+        print(path)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point dispatching ``review``, ``serve``, or ``--version``."""
+    """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare``,
+    ``trace render``, ``prompts export``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -975,9 +1582,19 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_review(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "eval":
+        if args.eval_command is not None:
+            return _cmd_eval(args)
+        parser.print_help(sys.stderr)
+        return 2
     if args.command == "trace":
         if args.trace_command == "render":
             return _cmd_trace_render(args)
+        parser.print_help(sys.stderr)
+        return 2
+    if args.command == "prompts":
+        if args.prompts_command == "export":
+            return _cmd_prompts_export(args)
         parser.print_help(sys.stderr)
         return 2
 
