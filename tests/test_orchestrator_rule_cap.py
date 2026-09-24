@@ -509,12 +509,18 @@ class TestCliWiring:
 # orchestrator had no max_findings_per_rule parameter. Record and JSON keys are
 # projected onto the key sets at that BASE, so the only difference a run at cap
 # 0 may show is the new rule_counts key, which the tests pin to null.
+# "rules_grouping" was re-derived when the chunk/sweep split after the gate
+# stopped swapping twins (0.15, seat R18-D, tests/test_sweep_boundary_drops.py):
+# the sweep's copies of the grouped members at src/app.py:9, :15 and :22 were
+# posted as second comments and now drop as "duplicate of chunk finding". Only
+# those three findings moved: the record and JSON rows, the three inline
+# comments, the summary's counts and list, and the post and run trace counts.
 # ---------------------------------------------------------------------------
 
 RULES_GOLDEN = {
     "rules": "029d065d6734661346e48bad7acd3c1b9b282350406c957cc27d434ed1324a27",
     "scoped": "65406082cb53caa153bce81ffeecd1e4437935ff12e908bc67dd17293a501c23",
-    "rules_grouping": "d6a95b03320bfa18d87a3bb639aa36c3b28e7b5f942060ffcfdd96455ead7cb9",
+    "rules_grouping": "72733b90eb69c7edc14a8a3393245f44eade9c5f392b506b286461ace6d7dd30",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 
