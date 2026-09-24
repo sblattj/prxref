@@ -57,6 +57,8 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 
 The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`, `--diff-file`, `--as-of`, `--description-file`, `--no-description`) deliberately have no environment variable: set in the environment, a replay pin would silently pin every run, the webhook daemon's included.
 
+`prxref eval` adds no environment variable either: `--cases`, `--label`, `--out`, `--rules-file`, `--resume` and `--judge-model` are command-line flags only. `prxref eval run` reviews each case with the environment's settings, as `prxref review` does, except that a case's ticket and spec come only from the case (`PRXREF_TICKET_CONTEXT_FILE` and `PRXREF_SPEC_SOURCES` never reach it) and its trace goes to the case's own `trace/` directory instead of `PRXREF_TRACE_DIR`. `PRXREF_REVIEW_RULES` applies unless `--rules-file` is given, and `PRXREF_TRACE_FILE`, when set, is shared: every case appends to the one JSONL trace. The judge of `prxref eval score` runs on the review's own LLM backend settings, with only the model replaced by `--judge-model`. See [docs/evals.md](evals.md).
+
 ### Per-Forge Authentication
 
 | Variable | Default | Purpose |

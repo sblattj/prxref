@@ -7,10 +7,34 @@ just generic bugs. Every planted spec violation is detectable ONLY by reading
 the case's `docs/` corpus; from the diff alone it looks like correct code.
 
 `test_evals.py` here is a STRUCTURAL scorer only: it proves the dataset is
-well-formed and self-consistent. It runs NO LLM. Each case also runs through
-the real pipeline with one replay-mode CLI call (see "Running a case" below);
-scoring the resulting findings against `expected.json` is still a manual,
-offline step.
+well-formed and self-consistent. It runs NO LLM. Scoring a review of the
+cases against `expected.json` is `prxref eval` (see "Scoring the cases"
+below, and [docs/evals.md](../../docs/evals.md)); one case can also run
+through the real pipeline with one replay-mode CLI call (see "Running a
+case").
+
+## Scoring the cases
+
+`prxref eval` reads this directory as it is: each `case-*/` directory is one
+case, `diff.patch` its diff, `ticket.md` its ticket context, `docs/` its spec
+source, and `expected.json` its labels (`line_hint` is the label's line and
+`source` its category). From the repository root:
+
+```bash
+uv run prxref eval run --cases tests/evals --label base
+uv run prxref eval score --label base
+```
+
+`eval run` reviews the three cases with the configured LLM
+(`PRXREF_LLM_MODELS` and the backend's credentials, see `docs/llm.md`) and
+writes the run to `./prxref-eval/base/`, which is not tracked: keep it out
+of commits. Every label here has a `must_match` predicate, so `eval score`
+grades them all deterministically and needs no `--judge-model`. It writes
+`score.json` and `score.md` into the run directory; `recall_by_category`
+reports spec recall under `spec` and the plain bugs under `generic`. Run a
+second arm under another `--label` (another model, prompt directory or
+setting), score it, and compare the two with
+`uv run prxref eval compare base <other>`.
 
 ## Running a case
 
@@ -33,19 +57,22 @@ see "Replay Mode" in the top-level README). It needs a configured LLM
 (`PRXREF_LLM_MODELS` and the backend's credentials, see `docs/llm.md`). Add
 `--trace-dir DIR` to keep every prompt and raw model answer.
 
-Nothing scores the findings automatically. Checking them against the case's
-`expected.json` (each `must_match` on a finding in `file` near `line_hint`)
-stays a manual, offline step. `test_eval_replay.py` runs that same one call
-per case offline, with a stub LLM that finds nothing, and proves only the
-wiring: exit 0, the replay stamp, every chunk and the sweep reviewed, and
-the case's ticket and one of its spec rules present in every prompt.
+A single call like this is not scored. To score its findings against the
+case's `expected.json` (each `must_match` on an active finding in `file`
+within 5 lines of `line_hint`), run the case through `prxref eval` as in
+"Scoring the cases" above, which reviews the case the same way.
+`test_eval_replay.py` runs that same one call per case offline, with a stub
+LLM that finds nothing, and proves only the wiring: exit 0, the replay
+stamp, every chunk and the sweep reviewed, and the case's ticket and one of
+its spec rules present in every prompt.
 
 **Known label question (case-002):** planted violation V2 (`S2`, the
 `VITE_SESSION_SECRET` read) keeps its `spec` severity. In the 0.14.0 live
 runs, models reviewing WITHOUT the spec corpus flagged it as `error` in 6 of
 6 runs, because a secret under a client-exposed prefix is a security hole
-without any doc. The label stays as it is by owner decision, so a scorer that
-compares severities will count those runs as a severity mismatch on `S2`.
+without any doc. The label stays as it is by owner decision, so when such a
+finding credits `S2`, the severity agreement of `prxref eval score` counts
+it as a mismatch (human `spec`, AI `error`); its recall is unaffected.
 
 ## Case layout
 

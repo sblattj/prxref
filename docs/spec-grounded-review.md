@@ -9,6 +9,10 @@
 >
 > - The dataset contract for `tests/evals/` is
 >   [tests/evals/README.md](../tests/evals/README.md), not §7.
+> - The runner and the scoring §7 designs shipped in 0.15.0 as
+>   `prxref eval run|score|compare`. Their reference is
+>   [docs/evals.md](evals.md), and **As built (0.15.0)** notes in §7 say
+>   where they differ from the design.
 > - 🟦 in this document is the pre-0.14 `outofscope` glyph. `outofscope` now
 >   renders ⬜, and 🟦 marks a finding outside the ticket's scope. The glyphs
 >   live in one table, `prxref.markers`.
@@ -716,18 +720,39 @@ was.
 > `source` keeps the meaning proposed here: `generic` marks an ordinary bug
 > the unguided reviewer should also catch, so a later scoring pass can check
 > that grounding costs no generic recall.
+>
+> **As built (0.15.0):** the runner and the scoring shipped as
+> `prxref eval run|score|compare`, a CLI rather than the pytest harness
+> designed below; [docs/evals.md](evals.md) is its reference. It reads this
+> dataset as it is (`line_hint` as a label's line, `source` as its category),
+> and it also reads a `cases.json` file of labelled pull requests. The notes
+> in §7.1 and §7.2 list where the build differs from the design.
 
-### 7.1 Runner (design not built; a replay run shipped instead)
+### 7.1 Runner (as built in 0.15.0: `prxref eval run`)
 
-> **Planned, not built.** Nothing in §7.1 or §7.2 exists in 0.14.0: there is
-> no `harness.py`, no plumbing or recorded stub-LLM mode, and no P/R/F1
-> scoring. What did ship, outside this design, is one pipeline run per case:
+> **As built (0.15.0):** the runner is
+> [`prxref eval run`](evals.md#prxref-eval-run), not
+> `tests/evals/harness.py`. It differs from the design below:
+>
+> - It is a shipped command you run by hand against the configured LLM, not
+>   a pytest test in CI. There is no plumbing mode and no recorded stub-LLM
+>   mode: every run is a live review.
+> - It does not drive the pipeline piece by piece. Each case goes through the
+>   same in-process review `prxref review` runs, as a replay that never posts
+>   and hides the PR's threads, so the whole pipeline is exercised as it
+>   ships.
+> - `ticket.md` is the case's ticket context (`--context-file`), and only
+>   `docs/` is a spec source. The design passed both as spec sources.
+> - Step 4 holds: only findings whose `drop_reason` is null are scored, after
+>   every quality pass.
+> - Added beyond the design: a `cases.json` dataset form, including pull
+>   requests pinned to a commit range; one run directory per `--label`, with
+>   each case's record and trace; per-case fencing, so one failed case never
+>   stops the run; and `--resume`.
+>
 > [`tests/evals/test_eval_replay.py`](../tests/evals/test_eval_replay.py)
-> reviews each case with one replay-mode `prxref review` call against a stub
-> LLM that finds nothing, which proves the wiring, not the review. Scoring the
-> findings against `expected.json` is still a manual, offline step
-> ([`tests/evals/README.md`](../tests/evals/README.md), "Running a case"). The
-> design below is kept for a later pass that automates that scoring.
+> (0.14.0) still reviews each case with a stub LLM that finds nothing, which
+> proves the wiring, not the review. The design below is kept as written.
 
 `tests/evals/harness.py` (data-local, not shipped) + a thin wrapper in
 `tests/evals/test_evals.py` (the file that holds today's structural scorer)
@@ -752,17 +777,49 @@ so `uv run pytest tests/evals -q` runs it in CI:
 4. Score **post-gate, post-alignment** output against `expected.json` —
    never raw model output, so the eval measures what a PR author receives.
 
-### 7.2 Scoring metric (planned, not built)
+### 7.2 Scoring metric (as built in 0.15.0: `prxref eval score`)
 
-> **Against the shipped dataset:** `expected.json` has no `line`,
-> `title_hint`, `constraint_ref` or `nonfindings`. A scorer would match on
-> `file`, on `line_hint` within the line tolerance, and on `must_match`
-> against the finding body; the specificity check has no list to read; and
-> a per-case floor would live in the scorer, since `meta.json` holds none.
-> The line self-check below did ship, tighter than designed:
-> `test_line_hints_anchor_added_lines` requires every `line_hint` to be an
-> added line of the case diff, and `test_expected_json_schema` requires it
-> to be at least 1, so there is no file-level `0`.
+> **As built (0.15.0):** the scoring is
+> [`prxref eval score`](evals.md#prxref-eval-score), and
+> [`prxref eval compare`](evals.md#prxref-eval-compare) sets two scored runs
+> side by side. It differs from the design below:
+>
+> - **Matching.** A label with a `must_match` predicate is credited by an
+>   active finding in the same `file`, within
+>   `quality.DEFAULT_LINE_TOLERANCE` (5) lines of the label's line
+>   (`line_hint` in this dataset), whose title plus body passes the
+>   predicate: a normalized substring, or a case-insensitive regular
+>   expression after `re:`. There is no token overlap with `title_hint` and
+>   `constraint_ref`, which the dataset does not have. A label without
+>   `must_match` is graded by an LLM judge as `full`, `partial` (half credit)
+>   or `none`; the design had no judge.
+> - **Recall** is micro recall over every label, also reported per severity
+>   and per category, so spec recall is the `spec` row of recall by category
+>   (the dataset's `source`).
+> - **Spec precision was not built.** The labels are a floor, not an
+>   exhaustive list, so a finding no label names is not necessarily a false
+>   positive. The score reports unmatched AI findings per PR instead.
+> - **Class-miss became severity agreement**: over the credited labels, how
+>   often the crediting finding has the label's severity, with a confusion
+>   matrix (a human `minor` compared as `warning`). A credited label counts in
+>   recall whatever its severity.
+> - **Specificity was not built**: the dataset has no `nonfindings` list.
+> - **Anchor check.** Scoring reads the review's record after every quality
+>   pass, `apply_line_align` included, so its line tolerance is the shipped
+>   one. The label self-check shipped in the case loader, tighter than
+>   designed: every label must sit on an added line of its case's diff, and a
+>   line of `0` is refused, so there is no file-level label. In this dataset
+>   `test_line_hints_anchor_added_lines` and `test_expected_json_schema`
+>   check the same.
+> - **No P/R/F1 and no floor.** `score.json` holds the micro recall and one
+>   row per case, and `eval compare` shows the change between two runs.
+>   Nothing asserts a per-case floor, and `meta.json` holds none.
+> - **Added beyond the design:** one AI finding credits at most two labels,
+>   a grouped finding per location; the review's failed chunks, time and
+>   cost per case, where an unknown cost is never summed; a judge cache; and
+>   a stamp when the judge model is one of the reviewer's models.
+>
+> The design below is kept as written.
 
 Matching rule, in order: same `file` (exact) **and**
 `|pred.line − exp.line| ≤ quality.DEFAULT_LINE_TOLERANCE` (5,
@@ -870,7 +927,8 @@ For six new keys:
 
 > **As built:** the feature shipped in **0.14.0**, not 0.12.0. The eval work
 > that shipped is the dataset plus its structural scorer (§7), not a
-> harness.
+> harness. The harness followed in 0.15.0 as `prxref eval`
+> ([docs/evals.md](evals.md)).
 
 ---
 
@@ -891,7 +949,10 @@ For six new keys:
   sweep prompt too loaded to catch spec classes, v2 adds a third single-shot
   unit (mirroring `_run_sweep`, `orchestrator.py:847-918`) — one more
   `chunk_count` unit, same failure shape. *As built (0.14.0): recorded-mode
-  evals were not built (§7.1), so this trigger cannot fire yet.*
+  evals were not built (§7.1). As built (0.15.0): they still are not, but
+  `prxref eval` measures spec recall on live runs (the `spec` row of recall
+  by category, [docs/evals.md](evals.md)), so the trigger can now be
+  checked. No such measurement is recorded here.*
 - **No MCP ticket fetch** in v1 (locked: REST basic-auth is primary; MCP noted
   as an alternative path for a future backend).
 - **No per-source timeout/Retry config knobs** in v1: module constants
@@ -932,7 +993,8 @@ For six new keys:
 - **J6 — no extra LLM call in v1**: the digest rides chunk prompts + the
   systemic sweep. Alternative: a dedicated third sweep unit for spec classes.
   *As built (0.14.0): held; the recorded-mode evals that would test it were
-  not built (§7.1, §10).*
+  not built (§7.1, §10). As built (0.15.0): still held. Recorded mode was not
+  built, but `prxref eval` can now test the call on live runs (§7.1, §10).*
 - **J7 — list coercion widened to comma-or-whitespace for ALL list keys**
   (touches `llm_models`' coercion too; behavior-identical for it). 
   Alternative: a `spec_sources`-only split rule.
