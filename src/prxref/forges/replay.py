@@ -7,8 +7,8 @@ like now, and it never writes to a forge. Two forges serve it:
   ``--pr-url``): no network, no threads, no file reads.
 - :class:`ReplayForge` wraps a real forge and pins what the orchestrator sees:
   the diff of a commit range (``base_sha``/``head_sha``, through the inner
-  forge's optional ``get_compare_diff``) or a diff text, file reads at the
-  pinned head, optionally no existing threads, and the PR's title and
+  forge's optional ``get_compare_diff``) or a diff text, file reads and path
+  listings at the pinned head, optionally no existing threads, and the PR's title and
   description as they stood at a cutoff (issue #16).
 
 Both raise on every write method, as defence in depth: the CLI already forces
@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from .base import Forge, InlineComment, PRData, PRHistory, PRRef, Thread, _require_aware
+from .base import Forge, InlineComment, PathListing, PRData, PRHistory, PRRef, Thread, _require_aware
 
 NEVER_POSTS = "replay runs never write to a forge"
 
@@ -285,6 +285,16 @@ class ReplayForge:
             return None
         try:
             return reader(ref, path, sha=sha)
+        except Exception:  # noqa: BLE001 - the Protocol says this never raises
+            return None
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """The inner forge's path listing at ``sha``; ``None`` when it has none or it raises."""
+        lister = getattr(self._inner, "list_paths", None)
+        if lister is None:
+            return None
+        try:
+            return lister(ref, sha=sha)
         except Exception:  # noqa: BLE001 - the Protocol says this never raises
             return None
 
