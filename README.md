@@ -349,11 +349,13 @@ The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook se
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
   - `--label NAME` — the run's name and its directory under `--out`. Required. An existing label exits `2` unless `--resume` is given.
   - `--out DIR` — the directory that holds the runs (default `./prxref-eval/`). `score` and `compare` take it too.
-  - `--rules-file PATH` — team review rules for every case, as for `review`.
+  - `--rules-file PATH` — team review rules for every case, as for `review`: it overrides `PRXREF_REVIEW_RULES`, and `--rules-file ""` turns it off. It is read for each case, so an unusable file fails every case rather than exiting `2`.
   - `--resume` — continue an existing `--label` run instead of refusing it.
 - `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
   - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.
-- `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed. `A` and `B` are each a label under `--out` or a run directory.
+- `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed and the cases and labels only one run has. `A` and `B` are each a label under `--out` or a run directory. It warns when the runs are not like for like.
+
+The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
 ## Replay Mode (Evaluation)
 
@@ -395,6 +397,24 @@ prxref review --diff-file tests/evals/<case>/diff.patch --context-file tests/eva
   `threads` is `"hidden"` under `--no-threads` or with no `--pr-url`, else `"shown"`; `diff_file` is the path as you typed it. `description` is `"pinned"` (the title and description in force at the cutoff), `"live"` (the current ones), `"file"` (`--description-file`, or `--diff-file` without `--pr-url`, where any description comes from the file) or `"none"` (`--no-description`). `as_of` is the cutoff as a UTC time ending in `Z`, with a fraction of a second only when the source time had one, and `as_of_source` is `"flag"`, `"first-review"` or `"head-commit"`. Both are `null` when no cutoff was chosen, and both are set on a `"live"` stamp whose history did not reach its cutoff. Given back as `--as-of`, `as_of` names the same instant. The text line then ends `description=pinned as_of=2026-05-01T09:30:00Z (first-review)`.
 - **Exit codes.** A bad set of replay flags exits `2` naming the flag, and it is checked before the PR URL is parsed. A review error inside a replay — an empty pinned range (a head already merged into the base) or a blank diff file — ends the run as an `Error` run: it exits `0` under the default `PRXREF_FAIL_ON=never`, and `1` under `error` or `any`, like any review that does not complete. See [Exit Codes](#exit-codes).
 - The replay flags have no environment variable, on purpose, and the [webhook server](#webhook-server) never replays.
+
+## Evaluating prxref
+
+`prxref eval` turns replays into numbers. Give it pull requests that human reviewers have already reviewed, each labelled with the findings they left, and it replays every case through the real pipeline, grades prxref's findings against the labels, and compares two runs, so a new model, prompt template, rules file or setting can be judged across a dataset rather than on one PR:
+
+```bash
+prxref eval run --cases tests/evals --label base
+PRXREF_LLM_MODELS=example-model-b prxref eval run --cases tests/evals --label cand
+prxref eval score --label base
+prxref eval score --label cand
+prxref eval compare base cand
+```
+
+- **Cases** come as a `cases.json` file or as a directory of `case-*/` directories, the layout of [`tests/evals/`](tests/evals/README.md). A label is graded deterministically when it carries a `must_match` predicate, and by an LLM judge on the review's own backend (`--judge-model`) when it does not.
+- **Recall** is micro recall over every label, with half credit for a `partial` judge grade, broken down by severity and by category. The score also reports unmatched AI findings per PR, severity agreement, failed chunks, time and cost, and never sums an unknown cost.
+- **Runs** go to `./prxref-eval/<label>/` by default; add `prxref-eval/` to your `.gitignore`. A run never posts, and a case that fails is recorded and scored, never fatal.
+
+The full reference is [docs/evals.md](docs/evals.md).
 
 ## Exit Codes
 
