@@ -49,7 +49,7 @@ from dataclasses import dataclass
 
 from .llm import ConfigError
 from .quality import SEVERITIES
-from .text_inputs import CappedText, cap_text, check_readable_path, decode_text
+from .text_inputs import CappedText, cap_text, check_readable_path, confine_to_cwd, decode_text
 
 logger = logging.getLogger(__name__)
 
@@ -576,3 +576,219 @@ def _split_any_dirs(pattern: str) -> list[str]:
             index += 1
     pieces.append(pattern[start:])
     return pieces
+
+
+SCOPED_RULES_MAX_FILES = 50
+
+
+@dataclass(frozen=True)
+class ScopedRules:
+    """Path-scoped team review rules, as :func:`load_scoped_rules` loads them.
+
+    ``entries`` holds the configured files and directories as given, blank
+    entries dropped. ``files`` holds one :class:`ReviewRules` per rules file
+    in load order: the configured entry order, with each directory's files in
+    its place in name order. Each file carries its ``path`` as configured (a
+    directory's file is the directory joined with the file name, never
+    resolved), its ``body`` after the front matter, capped at
+    ``PRXREF_REVIEW_RULES_MAX_CHARS`` and fingerprinted by the raw file
+    bytes, its own ``severity_map``, its unused front-matter keys in
+    ``ignored_keys`` (``applies_to`` and ``applyTo`` are used, so never
+    listed), and its ``applies_to`` globs, or ``None`` when it reaches every
+    unit. ``severity_map`` merges the files' maps, each team word at its
+    first position in load order; no two files map one word to different
+    tiers.
+    """
+
+    entries: tuple[str, ...]
+    files: tuple[ReviewRules, ...]
+    severity_map: Mapping[str, str]
+
+
+def load_scoped_rules(
+    entries: str | Sequence[str] | None,
+    *,
+    max_chars: int,
+    source: str,
+    always_on: ReviewRules | None = None,
+) -> ScopedRules | None:
+    """Load the path-scoped rules files that ``entries`` names, each capped at ``max_chars``.
+
+    ``entries`` is the ``PRXREF_SCOPED_RULES`` list, or the ``--scoped-rules``
+    flags that replace it; a bare string counts as one entry. Blank entries
+    are dropped, so ``None``, ``[]`` and ``[""]`` mean "off" and return
+    ``None``. ``max_chars`` is the per-file cap,
+    ``PRXREF_REVIEW_RULES_MAX_CHARS``. ``source`` names the input that
+    supplied the list, and every failure is a :class:`~prxref.llm.ConfigError`
+    whose message starts with it and names the path, followed by ``:<line>``
+    when the problem sits on a line of the file.
+
+    Each entry is a local file or a directory. A directory is read one level
+    deep: every name directly inside it that ends in ``.md`` (case-sensitive)
+    and does not start with ``.`` is a rules file, in code-point order of the
+    names; a subdirectory with such a name is an error, not a skip. Files are
+    loaded in entry order, a directory's files taking its place. A file
+    reached twice (listed twice, or listed beside its directory) is loaded
+    once, at its first position, and logged at INFO. More than
+    :data:`SCOPED_RULES_MAX_FILES` files in all is an error, raised before any
+    file is read. A directory with no rules file is a WARNING, so a run whose
+    entries hold no rules file at all returns a :class:`ScopedRules` with no
+    ``files``.
+
+    Every file is read as :func:`load_review_rules` reads its one file: an
+    entry that is a URL is refused; the file must be a regular file of
+    strict UTF-8 with no NUL bytes; and a path under the working directory
+    must still resolve under it once its symlinks are followed
+    (:func:`prxref.text_inputs.confine_to_cwd`). So a symlinked rules file
+    that stays inside the working directory is read, one that escapes it is
+    an error and never a silent skip, and a directory entry is confined the
+    same way. The front matter is split by :func:`split_front_matter`, and
+    ``applies_to`` (alias ``applyTo``) is parsed by :func:`parse_applies_to`,
+    so ``applies_to: []``, a glob with a leading ``/`` and a malformed
+    severity map are errors. The body is capped as the always-on body is. A
+    truncated body is logged as a WARNING naming
+    ``PRXREF_REVIEW_RULES_MAX_CHARS``, an empty body with no map as a
+    WARNING, a file with no ``applies_to`` at INFO (it reaches every unit),
+    and unused front-matter keys at INFO; each file is still loaded.
+
+    The files' severity maps merge into :attr:`ScopedRules.severity_map`, and
+    one word mapped to different tiers by two files is an error naming both,
+    each with its line. ``always_on``, the loaded ``PRXREF_REVIEW_RULES``
+    file, takes part in that check but is not merged, so
+    ``{**always_on.severity_map, **scoped.severity_map}`` is a conflict-free
+    run-wide map. A cap below 1 is an error too.
+    """
+    if isinstance(entries, str):
+        entries = [entries]
+    configured = tuple(entry for entry in entries or () if entry.strip())
+    if not configured:
+        return None
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
+        raise ConfigError(f"{source}: PRXREF_REVIEW_RULES_MAX_CHARS must be at least 1, got {max_chars!r}")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for entry in configured:
+        if _URL_RE.match(entry.strip()):
+            raise ConfigError(f"{source}: scoped rules must be local file or directory paths, not a URL: {entry!r}")
+        for path in _scoped_rules_paths(entry, source=source):
+            real = os.path.realpath(path)
+            if real in seen:
+                logger.info("%s: rules file %r is reached more than once; it is loaded once", source, path)
+                continue
+            seen.add(real)
+            paths.append(path)
+    if len(paths) > SCOPED_RULES_MAX_FILES:
+        raise ConfigError(
+            f"{source}: {len(paths)} rules files are configured, over the limit of {SCOPED_RULES_MAX_FILES}; "
+            f"the first one past it is {paths[SCOPED_RULES_MAX_FILES]!r}"
+        )
+    owners: dict[str, tuple[str, str]] = {}
+    if always_on is not None:
+        for word, tier in (always_on.severity_map or {}).items():
+            owners[word] = (tier, f"the always-on rules file {always_on.path!r}")
+    merged: dict[str, str] = {}
+    files: list[ReviewRules] = []
+    for path in paths:
+        rules, lines = _load_scoped_file(path, max_chars=max_chars, source=source)
+        for word, tier in rules.severity_map.items():
+            where = f"{path}:{lines[word]}" if word in lines else path
+            held_tier, held_where = owners.setdefault(word, (tier, where))
+            if held_tier != tier:
+                raise ConfigError(
+                    f"{source}: {where}: '{word}' is mapped to {tier} here but to {held_tier} in "
+                    f"{held_where}; map each team word to one tier across all rules files"
+                )
+            merged.setdefault(word, tier)
+        files.append(rules)
+    return ScopedRules(entries=configured, files=tuple(files), severity_map=merged)
+
+
+def _scoped_rules_paths(entry: str, *, source: str) -> list[str]:
+    """The rules-file paths ``entry`` stands for: itself, or a directory's ``*.md`` files by name."""
+    if not os.path.isdir(entry):
+        return [entry]
+    try:
+        confine_to_cwd(entry)
+        with os.scandir(entry) as listing:
+            names = sorted(e.name for e in listing if e.name.endswith(".md") and not e.name.startswith("."))
+    except OSError as exc:
+        raise ConfigError(f"{source}: cannot read rules directory {entry!r}: {_reason(exc)}") from exc
+    if not names:
+        logger.warning("%s: rules directory %r holds no *.md files; no rules loaded from it", source, entry)
+    return [os.path.join(entry, name) for name in names]
+
+
+def _load_scoped_file(path: str, *, max_chars: int, source: str) -> tuple[ReviewRules, dict[str, int]]:
+    """Load one scoped rules file; also return the line of each team word its severity map sets."""
+    text, sha256 = _read_scoped_file(path, source=source)
+    severity_map, ignored, body = split_front_matter(text, source=source, path=path)
+    applies_to = parse_applies_to(text, source=source, path=path)
+    capped = cap_text(body.strip(), max_chars, sha256=sha256)
+    unused = tuple(key for key in ignored if key.casefold() not in APPLIES_TO_KEYS)
+    if unused:
+        logger.info(
+            "%s: rules file %r: ignoring front-matter keys other than 'severity' and 'applies_to': %s",
+            source, path, ", ".join(unused),
+        )
+    if applies_to is None:
+        logger.info("%s: rules file %r has no 'applies_to' key, so it reaches every unit", source, path)
+    if capped.truncated:
+        logger.warning(
+            "%s: rules file %r has %d characters (after front matter); only the first %d "
+            "reach the prompt — raise PRXREF_REVIEW_RULES_MAX_CHARS",
+            source, path, capped.chars, max_chars,
+        )
+    if not capped.text and not severity_map:
+        logger.warning("%s: rules file %r is empty; no rules injected", source, path)
+    rules = ReviewRules(
+        path=path, body=capped, severity_map=severity_map, ignored_keys=unused, applies_to=applies_to,
+    )
+    return rules, (_severity_lines(text) if severity_map else {})
+
+
+def _read_scoped_file(path: str, *, source: str) -> tuple[str, str]:
+    """Read, hash and decode one rules file as :func:`load_review_rules` does: ``(text, sha256)``."""
+    try:
+        resolved = check_readable_path(path, confine=True)
+        with open(resolved, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise OSError(errno.EINVAL, "not a regular file", path)
+            raw = fh.read()
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{source}: cannot read rules file {path!r}: {_reason(exc)}") from exc
+    try:
+        text = decode_text(raw)
+    except UnicodeDecodeError as exc:
+        offset = exc.start + (len(codecs.BOM_UTF8) if raw.startswith(codecs.BOM_UTF8) else 0)
+        raise ConfigError(
+            f"{source}: rules file {path!r} is not UTF-8 text ({exc.reason} at byte {offset})"
+        ) from exc
+    if "\x00" in text:
+        raise ConfigError(f"{source}: rules file {path!r} contains NUL bytes; expected Markdown or plain text")
+    return text, hashlib.sha256(raw).hexdigest()
+
+
+def _severity_lines(text: str) -> dict[str, int]:
+    """Map each team word in ``text``'s ``severity:`` block to the 1-based line that first maps it."""
+    lines = text.split("\n")
+    close = 0
+    if _FENCE_RE.match(lines[0]):
+        close = next((k for k in range(1, len(lines)) if _FENCE_RE.match(lines[k])), 0)
+    found: dict[str, int] = {}
+    in_severity = False
+    for index in range(1, close):
+        line = _COMMENT_RE.sub(r"\1", lines[index])
+        if not line.strip():
+            continue
+        if line[0] not in " \t":
+            key = _KEY_RE.match(line)
+            in_severity = key is not None and key.group(1).casefold() == "severity"
+            continue
+        entry = _ENTRY_RE.match(line) if in_severity else None
+        if entry is not None:
+            found.setdefault(" ".join(entry.group(2).split()).casefold(), index + 1)
+    return found
+
+
+def _reason(exc: BaseException) -> str:
+    return getattr(exc, "strerror", None) or str(exc)
