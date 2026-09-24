@@ -43,7 +43,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 6. Deterministic checks and quality passes, in exactly this order — the
    raw chunk + sweep findings have their ``scope`` held to ``unknown``
    unless a ticket is active (``_enforce_scope``) and their ``rule`` held
-   to ``None`` unless finding grouping is on (``_enforce_rule``), then gain
+   to ``None`` unless finding grouping or the per-rule cap is on
+   (``_enforce_rule``), then gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
    about a PR that is ≥80% release machinery yet also touches source),
    folded in BEFORE the passes so it is filtered like any other finding,
@@ -89,6 +90,14 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    <file>:<line>``; sweep findings are never grouped, and running before
    the gate is what makes every cap count groups; one INFO line and one
    ``grouping ok`` trace event count the groups and the folded members) →
+   ``apply_rule_cap`` (only with a team rules file loaded and
+   ``max_findings_per_rule`` above 0, which also turns the rule request
+   on: at most that many chunk findings per rule, across every file, stay
+   active, a group counting once, and the rest fold onto the best one kept,
+   which lists them after ``Also at:`` and in its ``locations``, the rest
+   dropped as ``rule cap exceeded (max <n>): listed at <file>:<line>``;
+   sweep findings are never capped; one INFO line and one ``rulecap ok``
+   trace event count the folded findings and the rules over the cap) →
    ``apply_quality_gate(confidence_floor=, max_errors=,
    max_warning_findings=, max_outofscope_findings=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
@@ -114,9 +123,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    temperature, seed, and model chain actually in force, and the run-record
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
-   ``spec_grounding``, ``size_advisory``, ``prompt_templates``; ``replay``
-   on replays only, and ``cost_api_equivalent`` on claude-cli-priced runs
-   only).
+   ``spec_grounding``, ``size_advisory``, ``prompt_templates``,
+   ``scoped_rules``, ``rule_counts``; ``replay`` on replays only, and
+   ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;
@@ -176,6 +185,7 @@ from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, mark
 from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
 from .quality import (
     GROUPED_INTO_PREFIX,
+    RULE_CAP_PREFIX,
     active,
     apply_containment_note,
     apply_example_echo_check,
@@ -185,6 +195,7 @@ from .quality import (
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
+    apply_rule_cap,
     apply_rule_grouping,
     apply_settled_thread_suppression,
     apply_severity_consistency,
@@ -195,6 +206,7 @@ from .quality import (
     finding_rank_key,
     finding_sort_key,
     prompt_example_titles,
+    rule_cap_counts,
 )
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .trace import Tracer, get_tracer
@@ -417,16 +429,17 @@ def orchestrate_review(
     group_findings: bool = False,
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
+    max_findings_per_rule: int = 2,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
-    spec_grounding, size_advisory, prompt_templates, scoped_rules}``, plus
-    ``replay`` on a replay run only.
+    spec_grounding, size_advisory, prompt_templates, scoped_rules,
+    rule_counts}``, plus ``replay`` on a replay run only.
     Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last eight keys are always present and are
+    :func:`_run_record`, so the last nine keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
@@ -595,7 +608,8 @@ def orchestrate_review(
     Every chunk and the sweep are asked for a per-finding ``rule``
     (:data:`reviewer.RULE_REQUEST`, through the one
     :class:`reviewer.PromptContext`), and a model-supplied ``rule`` is kept
-    only then: :func:`_enforce_rule` resets it to ``None`` otherwise. After
+    only then, or while the per-rule cap below is active:
+    :func:`_enforce_rule` resets it to ``None`` otherwise. After
     the hedge gate and before the quality gate,
     :func:`quality.apply_rule_grouping` folds the chunk findings that break
     one rule in one file (or, naming no rule, share a normalized title) into
@@ -611,6 +625,28 @@ def orchestrate_review(
     WARNING per run names those files and points at ``prxref prompts
     export``. Off (the default), the prompts, posts, record, trace and logs
     are exactly a run without it.
+
+    ``max_findings_per_rule`` is the per-rule cap
+    (``PRXREF_MAX_FINDINGS_PER_RULE``; the default restates
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does). It is active only
+    when it is an ``int`` above 0 (a ``bool`` is not) AND a team rules file
+    is loaded (``rules`` or ``scoped_rules`` is not ``None``); a cap with no
+    rules file does nothing. Active, it asks every unit for a ``rule`` and
+    keeps the answer exactly as ``group_findings`` does (the missing-slot
+    WARNING included), with grouping on or off, and after the grouping pass
+    and before the quality gate :func:`quality.apply_rule_cap` keeps at most
+    that many chunk findings per rule across every file, folding the rest
+    onto the best one kept (its ``locations`` and last ``Also at:``
+    paragraph list them), so every severity cap counts what it kept. Folded
+    findings are kept, dropped as ``rule cap exceeded (max <n>): listed at
+    <file>:<line>``; a #13 group counts once; sweep findings are never
+    counted or capped. The ``rule_counts`` key of every exit is
+    :func:`quality.rule_cap_counts` of the pass input when the pass ran, and
+    ``None`` otherwise (inactive, or an exit before the passes). One INFO
+    line and one ``rulecap ok`` trace event (``cap``, ``rules``,
+    ``folded``) report every pass, zeros included. Inactive, the prompts,
+    posts, trace and logs are exactly a run without it, and the record
+    differs only by ``rule_counts``, which is ``None``.
 
     ``max_warning_findings`` and ``max_outofscope_findings`` are forwarded to
     both ``apply_quality_gate`` calls, the summary-only exit's included, as
@@ -637,6 +673,7 @@ def orchestrate_review(
         "replay": dict(replay) if replay is not None else None,
         "prompt_templates": None,
         "scoped_rules": None,
+        "rule_counts": None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -901,6 +938,13 @@ def orchestrate_review(
             **({} if ok else {"reasons": [f"{label}: {error}" for label, error in failed]}),
         )
 
+    rule_cap_active = (
+        isinstance(max_findings_per_rule, int)
+        and not isinstance(max_findings_per_rule, bool)
+        and max_findings_per_rule > 0
+        and (rules is not None or scoped_rules is not None)
+    )
+    rule_active = group_findings or rule_cap_active
     prompt_context = PromptContext(
         rules_worker=rules.prompt_block("worker") if rules is not None else "",
         rules_sweep=rules.prompt_block("sweep") if rules is not None else "",
@@ -909,10 +953,12 @@ def orchestrate_review(
         spec_digest=injected,
         worker_template=prompts.override("worker") if prompts is not None else "",
         systemic_template=prompts.override("systemic") if prompts is not None else "",
-        rule_request=reviewer.RULE_REQUEST if group_findings else "",
+        rule_request=reviewer.RULE_REQUEST if rule_active else "",
     )
-    if group_findings and prompts is not None:
-        _warn_missing_rule_slot(prompts)
+    if rule_active and prompts is not None:
+        _warn_missing_rule_slot(
+            prompts, feature="finding grouping" if group_findings else "the per-rule cap",
+        )
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
@@ -980,7 +1026,7 @@ def orchestrate_review(
     )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
     findings = _enforce_scope(findings, ticket_active)
-    findings = _enforce_rule(findings, group_findings)
+    findings = _enforce_rule(findings, rule_active)
 
     # Futures were submitted in chunk order, so results[i] is chunk[i]'s
     # outcome for i < len(chunks): the zip pairs each failed review with the
@@ -1102,6 +1148,11 @@ def orchestrate_review(
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
             tracer=tracer,
+        )
+    if rule_cap_active:
+        findings, run_inputs["rule_counts"] = _cap_rules(
+            findings, cap=max_findings_per_rule, confidence_floor=confidence_floor,
+            sweep_start=sweep_start, tracer=tracer,
         )
     # The sweep boundary is positional, and the gate now returns its findings
     # in content order, so the boundary is re-derived from the identity of the
@@ -1400,17 +1451,61 @@ def _group_findings(
     return grouped
 
 
-def _warn_missing_rule_slot(prompts: PromptTemplates) -> None:
-    """Warn once when grouping is on and a review override has no ``{rule_example}``.
+def _cap_rules(
+    findings: Sequence[Finding],
+    *,
+    cap: int,
+    confidence_floor: float | None,
+    sweep_start: int,
+    tracer: Tracer,
+) -> tuple[list[Finding], list[dict]]:
+    """Run :func:`quality.apply_rule_cap` and report what it folded.
 
-    Such an override still gets :data:`reviewer.RULE_REQUEST` and its
+    Called only with the per-rule cap active, after the grouping pass and
+    before the quality gate, while the positional ``sweep_start`` is still
+    valid (every pass before it is 1:1 and order-preserving), with the
+    ``confidence_floor`` the gate gets. Returns the capped findings and
+    :func:`quality.rule_cap_counts` of the INPUT, the run record's
+    ``rule_counts``. ``folded`` counts the findings the pass dropped as
+    ``rule cap exceeded (max <n>): listed at <file>:<line>``
+    (:data:`quality.RULE_CAP_PREFIX`); ``rules`` counts the rows of those
+    counts whose ``total`` is over ``cap``. Both reach one INFO line and one
+    ``rulecap ok`` trace event, with ``cap``, zeros included.
+    """
+    counts = rule_cap_counts(
+        findings, cap=cap, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    capped = apply_rule_cap(
+        findings, cap=cap, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    folded = sum(
+        1 for before, after in zip(findings, capped, strict=True)
+        if before.drop_reason is None
+        and isinstance(after.drop_reason, str)
+        and after.drop_reason.startswith(RULE_CAP_PREFIX)
+    )
+    rules = sum(1 for row in counts if row["total"] > cap)
+    logger.info(
+        "rule cap: folded %d finding(s) past %d per rule, across %d rule(s)",
+        folded, cap, rules,
+    )
+    tracer.event("rulecap", "ok", cap=cap, rules=rules, folded=folded)
+    return capped, counts
+
+
+def _warn_missing_rule_slot(prompts: PromptTemplates, *, feature: str = "finding grouping") -> None:
+    """Warn once when the rule request is on and a review override has no ``{rule_example}``.
+
+    ``feature`` names what turned the request on (``finding grouping``, or
+    ``the per-rule cap`` when only the cap did) and opens the message. Such
+    an override still gets :data:`reviewer.RULE_REQUEST` and its
     ``rule`` answers are still kept, but its ``## Output Format`` example
     finding shows no ``"rule"`` key. Only the text after
     :data:`prompt_templates.CONTEXT_MARKER` is filled, so a slot above the
     marker does not count. One WARNING names every such ``worker`` or
     ``systemic`` file and points at ``prxref prompts export``; nothing is
     raised. :func:`prompt_templates.load_prompt_templates` stays silent about
-    the slot, because it cannot know whether grouping is on.
+    the slot, because it cannot know whether the request is on.
     """
     missing = [
         f.path
@@ -1420,11 +1515,11 @@ def _warn_missing_rule_slot(prompts: PromptTemplates) -> None:
     ]
     if missing:
         logger.warning(
-            "finding grouping is on, but prompt template override(s) %s have no "
+            "%s is on, but prompt template override(s) %s have no "
             "{rule_example} slot after %r, so their example finding shows no "
             "\"rule\" key; re-export with `prxref prompts export DIR --force` "
             "and re-apply your edits to pick the slot up",
-            ", ".join(missing), CONTEXT_MARKER,
+            feature, ", ".join(missing), CONTEXT_MARKER,
         )
 
 

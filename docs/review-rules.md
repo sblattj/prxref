@@ -21,6 +21,13 @@ export PRXREF_REVIEW_RULES=/etc/prxref/rules.md
 - Unset (the default), nothing changes: the prompts, the trace files, the
   JSONL trace and the exit code are what they would be without the feature,
   and the run record carries `review_rules: null`.
+- A loaded rules file (this one or a
+  [path-scoped one](#path-scoped-rules)) also turns on the per-rule cap by
+  default: the model is asked to name the rule each finding applies, and at
+  most `PRXREF_MAX_FINDINGS_PER_RULE` findings per rule (default `2`) stay
+  active across the review, the rest folded into the best one; `0` turns the
+  cap off. See [docs/env-vars.md](env-vars.md) and
+  [docs/quality.md](quality.md).
 
 **Read the rules from a trusted checkout, never from the pull request under
 review.** See [CI safety](#ci-safety-read-the-rules-from-something-the-pr-cannot-change).

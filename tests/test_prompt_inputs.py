@@ -34,7 +34,7 @@ import pytest
 from prxref import orchestrator, quality
 from prxref.cli import _build_json_result
 from prxref.llm import InvokeResult
-from prxref.reviewer import _CONTEXT_MARKER, NO_PROMPT_CONTEXT, PromptContext, load_prompt
+from prxref.reviewer import _CONTEXT_MARKER, NO_PROMPT_CONTEXT, RULE_REQUEST, PromptContext, load_prompt
 from prxref.specs import SpecSource
 from prxref.triage import SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN, Finding
 from tests.test_orchestrator import (
@@ -339,6 +339,7 @@ class TestPromptContextFields:
         assert ctx == PromptContext(
             rules_worker=RULES_WORKER, rules_sweep=RULES_SWEEP,
             ticket_scope=TICKET_SCOPE, ticket_context=TICKET_BLOCK, spec_digest="",
+            rule_request=RULE_REQUEST,
         )
         assert ctx.scope_active
 
@@ -403,8 +404,8 @@ class TestRealPrompts:
         worker_head = load_prompt("worker").partition(_CONTEXT_MARKER)[0].strip()
         sweep_head = load_prompt("systemic").partition(_CONTEXT_MARKER)[0].strip()
         for call in chunks:
-            assert call["system"] == f"{worker_head}\n\n{RULES_WORKER}\n\n{TICKET_SCOPE}"
-        assert sweep["system"] == f"{sweep_head}\n\n{RULES_SWEEP}\n\n{TICKET_SCOPE}"
+            assert call["system"] == f"{worker_head}\n\n{RULES_WORKER}\n\n{TICKET_SCOPE}\n\n{RULE_REQUEST}"
+        assert sweep["system"] == f"{sweep_head}\n\n{RULES_SWEEP}\n\n{TICKET_SCOPE}\n\n{RULE_REQUEST}"
         for call in llm.calls:
             assert f"{TICKET_BLOCK}\n\n### Spec constraints" in call["user"]
             assert "Team review rules" not in call["user"]

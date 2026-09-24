@@ -165,6 +165,7 @@ class TestTheScopedSeverityMapBeforeGrouping:
     def test_without_grouping_the_remapped_pair_stays_apart(self, work):
         res = self._run(work, scoped=True, group_findings=False)
         assert sorted((f.line, f.severity, f.rule) for f in res["findings_active"]) == [
-            (3, "warning", None), (9, "error", None),
+            (3, "warning", "validate-inputs"), (9, "error", "validate-inputs"),
         ]
         assert res["findings_dropped"] == []
+        assert res["rule_counts"] == [{"rule": "validate-inputs", "kind": "rule", "total": 2, "kept": 2}]

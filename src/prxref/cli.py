@@ -601,9 +601,10 @@ def _fmt_finding_line(f: Any) -> str:
     A finding the ticket judged gains `` [scope: in]`` or `` [scope: out]``
     after the frozen prefix; ``unknown`` (always the case without a ticket)
     adds nothing. A finding that names a rule then gains `` [rule: <rule>]``,
-    after any scope tag. Only a run with finding grouping on keeps a rule
-    (the orchestrator resets every rule to ``None`` otherwise), so with
-    grouping off the line is unchanged.
+    after any scope tag. Only a run with finding grouping on, or with the
+    per-rule cap active (a review rules file loaded), keeps a rule (the
+    orchestrator resets every rule to ``None`` otherwise), so with both off
+    the line is unchanged.
     """
     severity = getattr(f, "severity", None) or ""
     location = f"{getattr(f, 'file', '')}:{getattr(f, 'line', 0)}"
@@ -664,14 +665,20 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
 
     ``rule`` and ``locations`` follow ``scope`` and are always present. ``rule``
     is the rule the finding names, or ``null`` (never ``""``) when it names
-    none, which is every finding of a run with finding grouping off.
-    ``locations`` is set only on the representative of a grouped finding: a
-    list of ``{"file": ..., "line": ...}`` objects for the other locations its
-    ``Also at:`` paragraph lists, in the same order, never including the row's
-    own ``file`` and ``line``. It is ``null`` on every other row, a member
-    row dropped as ``grouped into <file>:<line>`` included (that row still
-    carries its own ``rule``). A finding object without either attribute
-    reports ``null`` for it.
+    none, which is every finding of a run with finding grouping off and the
+    per-rule cap inactive.
+    ``locations`` is set only on the representative of a grouped finding, or
+    on the best finding the per-rule cap kept for a rule, whose locations can
+    span files: a list of ``{"file": ..., "line": ...}`` objects for the
+    other locations it stands for, never including the row's own ``file``
+    and ``line``. A group representative's list is its ``Also at:``
+    paragraph, in the same order; the cap's best lists its own group's
+    locations and every folded finding's, sorted by file then line, of which
+    its ``Also at:`` names the first five. It is ``null`` on every other
+    row, a member row dropped as ``grouped into <file>:<line>`` or ``rule
+    cap exceeded (max <n>): listed at <file>:<line>`` included (that row
+    still carries its own ``rule``). A finding object without either
+    attribute reports ``null`` for it.
     """
     locations = getattr(f, "locations", None) or ()
     return {
@@ -695,18 +702,19 @@ def _build_json_result(result: Any) -> dict:
     ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
-    ``prompt_templates``, ``scoped_rules``, then ``sampling`` and ``replay``
-    when present.
+    ``prompt_templates``, ``scoped_rules``, ``rule_counts``, then
+    ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
     to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
     run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) and
-    0.15's ``prompt_templates`` and ``scoped_rules`` are always emitted and
-    are ``null`` when their feature is off; ``cost_usd`` is also ``null``
-    when no source could price the run, never ``0``. Every ``findings`` row,
-    active or dropped, carries 0.15's ``rule`` and ``locations`` the same way
-    (see :func:`_finding_json`).
+    0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts`` are
+    always emitted and are ``null`` when their feature is off
+    (``rule_counts`` whenever the per-rule cap did not run); ``cost_usd`` is
+    also ``null`` when no source could price the run, never ``0``. Every
+    ``findings`` row, active or dropped, carries 0.15's ``rule`` and
+    ``locations`` the same way (see :func:`_finding_json`).
     ``sampling`` and ``replay`` are forwarded only when the result already
     carries them. ``replay`` is on replay runs only, so a normal run's
     payload has no ``replay`` key at all.
@@ -738,6 +746,7 @@ def _build_json_result(result: Any) -> dict:
         "size_advisory": result.get("size_advisory"),
         "prompt_templates": result.get("prompt_templates"),
         "scoped_rules": result.get("scoped_rules"),
+        "rule_counts": result.get("rule_counts"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1309,6 +1318,7 @@ def _run_review(
         max_errors=cfg["max_error_findings"],
         max_warning_findings=cfg["max_warning_findings"],
         max_outofscope_findings=cfg["max_outofscope_findings"],
+        max_findings_per_rule=cfg["max_findings_per_rule"],
         group_findings=cfg["group_findings"],
         dedup_similarity=cfg["dedup_similarity"],
         post_mode=cfg["post_mode"],
