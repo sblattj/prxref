@@ -199,14 +199,24 @@ class ForgeImpl:
         resp.raise_for_status()
         return resp.text
 
-    def _iter_comment_pages(
-        self, ref: PRRef, url: str, headers: dict[str, str]
+    def _iter_pages(
+        self,
+        ref: PRRef,
+        url: str,
+        headers: dict[str, str],
+        *,
+        what: str,
+        extra_params: dict[str, str] | None = None,
     ) -> Iterator[list[dict]]:
-        """Yield a comment listing one page at a time, oldest page first.
+        """Yield a paginated GitHub collection one page at a time, oldest page first.
+
+        Every request carries ``per_page`` and ``page``; ``extra_params`` is
+        merged over them. ``what`` names the collection in every error, so a
+        failed read says which listing it was reading.
 
         A page at a time rather than one flat list, so a caller hunting for a
-        single comment stops at the page it appears on instead of paying for
-        the whole feed. Any read that does not reach the end — transport
+        single entry stops at the page it appears on instead of paying for
+        the whole listing. Any read that does not reach the end — transport
         failure, non-OK status, unparseable body, or the page budget running
         out — raises ``FeedReadError`` instead of returning short, so no
         caller can mistake "I stopped early" for "that was all".
@@ -217,34 +227,40 @@ class ForgeImpl:
         """
         where = f"{ref.owner}/{ref.repo}#{ref.number}"
         for page_number in range(1, _MAX_PAGES + 1):
+            params: dict[str, int | str] = {
+                "per_page": _PAGE_SIZE,
+                "page": page_number,
+            }
+            if extra_params:
+                params.update(extra_params)
             try:
                 resp = self.session.get(
                     url,
                     headers=headers,
-                    params={"per_page": _PAGE_SIZE, "page": page_number},
+                    params=params,
                     timeout=_REQUEST_TIMEOUT,
                 )
             except requests.RequestException as e:
                 raise FeedReadError(
-                    f"comment feed for {where} could not be read at page "
+                    f"{what} for {where} could not be read at page "
                     f"{page_number}: {e}"
                 ) from e
             if not resp.ok:
                 raise FeedReadError(
-                    f"comment feed for {where} returned HTTP "
+                    f"{what} for {where} returned HTTP "
                     f"{resp.status_code} at page {page_number}"
                 )
             try:
                 items = resp.json()
             except ValueError as e:
                 raise FeedReadError(
-                    f"comment feed for {where} returned an unreadable body at "
+                    f"{what} for {where} returned an unreadable body at "
                     f"page {page_number}: {e}"
                 ) from e
             if not isinstance(items, list):
                 raise FeedReadError(
-                    f"comment feed for {where} returned "
-                    f"{type(items).__name__}, not a list of comments"
+                    f"{what} for {where} returned "
+                    f"{type(items).__name__}, not a list"
                 )
 
             yield [item for item in items if isinstance(item, dict)]
@@ -253,8 +269,8 @@ class ForgeImpl:
                 return
 
         raise FeedReadError(
-            f"comment feed for {where} outran the {_MAX_PAGES}-page budget "
-            f"({_MAX_PAGES * _PAGE_SIZE} comments) without reaching the end"
+            f"{what} for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_SIZE} entries) without reaching the end"
         )
 
     def post_summary(self, ref: PRRef, body: str) -> None:
@@ -270,7 +286,7 @@ class ForgeImpl:
         body = with_summary_marker(body)
 
         existing_comment_id: int | None = None
-        for comments in self._iter_comment_pages(ref, list_url, headers):
+        for comments in self._iter_pages(ref, list_url, headers, what="comment feed"):
             for c in comments:
                 if SUMMARY_MARKER in (c.get("body") or ""):
                     existing_comment_id = c.get("id")
@@ -350,7 +366,7 @@ class ForgeImpl:
 
         threads: list[Thread] = []
         try:
-            for data in self._iter_comment_pages(ref, url, headers):
+            for data in self._iter_pages(ref, url, headers, what="comment feed"):
                 for item in data:
                     path = item.get("path")
                     line = item.get("line") or item.get("original_line") or item.get("position")
@@ -439,7 +455,7 @@ class ForgeImpl:
         headers = self._headers(ref.host)
         removed = 0
         try:
-            for comments in self._iter_comment_pages(ref, list_url, headers):
+            for comments in self._iter_pages(ref, list_url, headers, what="comment feed"):
                 for comment in comments:
                     if ATTRIBUTION_MARKER not in (comment.get("body") or ""):
                         continue
