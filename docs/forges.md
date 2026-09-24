@@ -36,6 +36,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Accepted Events:** `pullrequest:created`, `pullrequest:updated`
   - **Payload:** PR URL read from `pullrequest.links.html.href`.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against `PRXREF_BITBUCKET_WEBHOOK_SECRET`.
+- **Pinned Commit Range (Replay):** `GET /2.0/repositories/{owner}/{repo}/diff/{head_sha}..{base_sha}?topic=true` with `Accept: text/plain`, returning the changes on the head side of the merge-base. Bitbucket spells a range SOURCE..DEST, the reverse of git, so the head SHA comes first; the other order names the reverse range and returns a different diff that still parses. `topic=true` is the merge-base ("three-dot") form and is sent explicitly rather than left to the default, because `topic=false` diffs the two commits directly and so also shows whatever landed on the base after the fork. The text is returned unmodified, an empty range returns empty text, and an HTTP or transport error raises.
 
 ---
 
@@ -60,6 +61,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Event Header:** `X-GitHub-Event` (must equal `pull_request`)
   - **Accepted Actions:** `opened`, `synchronize`
   - **Signature Header:** `X-Hub-Signature-256` (HMAC-SHA256) validated against `PRXREF_GITHUB_WEBHOOK_SECRET`.
+- **Pinned Commit Range (Replay):** `GET /repos/{owner}/{repo}/compare/{base_sha}...{head_sha}` on the same base URL (GHES included), with `Accept: application/vnd.github.diff`. The three dots are the merge-base form and are required, because the two-dot spelling returns 404. Without the diff media type the endpoint returns its JSON comparison object rather than a diff. The text is returned unmodified, an empty range (a head already merged into the base) returns empty text, and an HTTP or transport error raises.
 
 ---
 
@@ -83,6 +85,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Event Header:** `X-Gitlab-Event` (normalized to `MergeRequestHook`)
   - **Accepted Actions:** `open`, `update`
   - **Signature Header:** `X-Gitlab-Token` (plain secret token) validated against `PRXREF_GITLAB_WEBHOOK_SECRET`.
+- **Pinned Commit Range (Replay):** `GET /repository/compare?from={base_sha}&to={head_sha}&straight=false`. `straight=false` is the merge-base form; `straight=true` would diff the two commits directly. `unidiff` is deliberately not requested, so each entry's `diff` holds only its hunks, and the entries are rendered by the same header reconstruction as **Diffs** above. A response with `compare_timeout: true` raises rather than reviewing an incomplete file list. An entry flagged `too_large` or `collapsed` carries no inline diff: it is logged as a warning and reviewed as a header-only file. An empty range returns empty text, and an HTTP or transport error raises.
 
 ---
 
@@ -160,6 +163,20 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     capital `R`, and the list, both of which differ from Cloud.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against
     `PRXREF_BITBUCKET_WEBHOOK_SECRET`, the same secret Cloud uses.
+- **Pinned Commit Range (Replay):** two requests under
+  `{scheme}://{host}{context}/rest/api/1.0/projects/{key}/repos/{slug}`. First
+  `GET …/commits/{head_sha}/merge-base?otherCommitId={base_sha}`, whose `id` is the fork point;
+  then `GET …/diff?since={merge_base}&until={head_sha}` with `Accept: text/plain`, the raw diff,
+  returned unmodified. That raw diff runs from whatever `since` names, with no merge-base step
+  of its own, so the lookup is what makes it a three-dot diff. The spec lists the raw diff only
+  as `text/plain; qs=0.1`, so the request names that type. If the merge-base lookup fails (an
+  HTTP or transport error, or a response naming no commit), a warning is logged and the diff
+  runs from `since={base_sha}`. That is still right whenever the base SHA is already the fork
+  point, as a PR's recorded target commit usually is. An empty range returns empty text, and a
+  failed diff request raises. Both endpoints come from the Data Center 9.4 REST reference and
+  have **not been probed against a live Data Center**. No minimum version is claimed, but one
+  Atlassian knowledge-base article reports that the path-less `/diff` returns 400 on some older
+  versions.
 
 ---
 
