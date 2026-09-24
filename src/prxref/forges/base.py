@@ -1,7 +1,8 @@
-"""Forge contract: one Protocol, four implementations.
+"""Forge contract: one Protocol, five implementations.
 
 The implementations are bitbucket (Cloud), bitbucket_server (Server / Data
-Center), github (Cloud and Enterprise Server) and gitlab (SaaS and self-hosted).
+Center), github (Cloud and Enterprise Server), gitlab (SaaS and self-hosted)
+and azure_devops (Azure DevOps Services and Azure DevOps Server).
 
 Every value that flows through the pipeline is forge-agnostic past this module.
 Diff handling is deliberately unified: each forge returns ONE raw unified diff
@@ -171,10 +172,14 @@ def detect_forge(url: str) -> PRRef | None:
     any result today. It is kept deliberately anyway: whichever parser is
     narrower should be asked first, so that loosening one later degrades into a
     shadowed forge rather than a silently mis-routed one.
-    """
-    from . import bitbucket, bitbucket_server, github, gitlab
 
-    for forge in (bitbucket, bitbucket_server, github, gitlab):
+    Azure DevOps is asked last for the same defensive reason: its URLs carry
+    ``/_git/{repo}/pullrequest/{n}``, which no other pattern accepts, so it
+    cannot shadow or be shadowed by the forges ahead of it.
+    """
+    from . import azure_devops, bitbucket, bitbucket_server, github, gitlab
+
+    for forge in (bitbucket, bitbucket_server, github, gitlab, azure_devops):
         ref = forge.ForgeImpl.parse_pr_url(url)
         if ref is not None:
             return ref

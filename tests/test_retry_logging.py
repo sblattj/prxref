@@ -112,7 +112,7 @@ class TestRetriesAreVisible:
 
 
 class TestEveryForgeUsesIt:
-    """A policy wired into three adapters out of four is the worst outcome:
+    """A policy wired into all adapters but one is the worst outcome:
     the one that stayed quiet is the one you stop suspecting."""
 
     @pytest.mark.parametrize(
@@ -122,14 +122,15 @@ class TestEveryForgeUsesIt:
             "prxref.forges.gitlab",
             "prxref.forges.bitbucket",
             "prxref.forges.bitbucket_server",
+            "prxref.forges.azure_devops",
         ],
     )
     def test_the_default_session_retries_out_loud(self, module):
         """Built through the forge, not through its private session helper.
 
-        The default session is reached differently in each adapter (a
-        module-level singleton in three of them, a call in the fourth), so the
-        only check that covers all four is the object a review actually uses.
+        The default session is reached differently across adapters (a
+        module-level singleton in most of them, a call in another), so the
+        only check that covers every one is the object a review actually uses.
         """
         import importlib
 
