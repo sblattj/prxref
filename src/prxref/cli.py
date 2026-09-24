@@ -785,6 +785,7 @@ def _run_review(
         # discards any value an override or a .env-driven load resolved.
         confidence_floor=cfg["confidence_floor"],
         max_errors=cfg["max_error_findings"],
+        dedup_similarity=cfg["dedup_similarity"],
         post_mode=cfg["post_mode"],
         post_verdict=cfg["post_verdict"],
         trace_file=cfg["trace_file"],
