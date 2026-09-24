@@ -273,15 +273,30 @@ class ForgeImpl:
         )
 
     def get_diff(self, ref: PRRef) -> str:
-        """Fetch the raw unified diff of the PR (all files)."""
+        """Fetch the raw unified diff of the PR (all files).
+
+        The ``/diffs`` listing is paginated, 20 entries a page by default, so
+        a single unparameterised request reviewed the first 20 files of a
+        larger MR and silently dropped the rest. The listing is walked with
+        ``_iter_pages`` like every other GitLab collection here: a page that
+        cannot be read, or a listing that outruns the page budget, raises
+        ``FeedReadError`` rather than handing back the files that happened to
+        arrive. An entry GitLab marks ``collapsed`` or ``too_large`` carries no
+        hunks and is rendered as a header-only file. Raises ``ValueError`` for
+        an MR with no file entries at all.
+        """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
         url = f"{base}/merge_requests/{ref.number}/diffs"
-        params = {"access_raw_diffs": "true"}
 
-        resp = self._session.get(url, headers=headers, params=params, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        diffs = resp.json()
+        diffs = [
+            entry
+            for page in self._iter_pages(
+                ref, url, headers, what="MR diff list",
+                extra_params={"access_raw_diffs": "true"},
+            )
+            for entry in page
+        ]
 
         if not diffs:
             raise ValueError(
