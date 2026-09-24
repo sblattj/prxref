@@ -26,6 +26,11 @@ Fixture provenance, stated plainly:
 - The GitHub and Bitbucket Cloud responses are ``THREE_DOT`` served as text. The
   GitLab response is GitLab's documented ``diffs`` entries built from it. None of
   them is a capture.
+- The Azure DevOps response is a change list plus the ``ADO_*`` whole files,
+  whose ``git diff base...feature`` in a throwaway repository is ``THREE_DOT``
+  apart from two ``index`` lines; the entry shapes follow
+  ``tests/fixtures/azure_devops/``. It is not a capture either. The full account
+  is in the docstring of ``_serve_azure_devops``.
 
 Space-only context lines are spelled ``\\x20`` in the fixtures, so an editor or
 linter that trims trailing whitespace cannot rewrite the recorded bytes.

@@ -24,7 +24,7 @@ Four variables shape the request itself. All are optional, and a bad value exits
 
 | Variable | Default | Effect on the request |
 |---|---|---|
-| `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call. Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
+| `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call on `openai-compat` and `litellm`; the CLI backends accept it and do not apply it (see [What is not applied](#what-is-not-applied)). Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
 | `PRXREF_LLM_TIMEOUT` | `45.0` | The client's default request timeout, in seconds. Must be > 0. It is a **per-model** deadline: a model that exceeds it is abandoned and the next in the chain is tried immediately, so a chain of three can take up to three timeouts. |
 | `PRXREF_LLM_TEMPERATURE` | `0.0` (sent) | `temperature` in the payload. Must be finite and >= 0; no upper bound, since the maximum is provider-specific. Unset or empty sends the default `0.0` rather than omitting the field, so an identical diff reviews identically by default; a set value wins. `PRXREF_LLM_REASONING_EFFORT` keeps its own pass-through-unvalidated rule. |
 | `PRXREF_LLM_SEED` | *(auto-derived)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset derives one random seed per process, shared by every client the run builds, so all LLM calls in a run pin the same sampling state; the run record's `sampling.seed` reports it. |
@@ -69,7 +69,7 @@ For environments running without a centralized inference gateway, `prxref` suppo
 - **Backend Setting:** `PRXREF_LLM_BACKEND=litellm`
 - **Installation:** `pip install 'prxref[litellm]'`
 - **Endpoint URL: not used.** litellm resolves each model's own provider endpoint and reads that provider's credential (for example `OPENROUTER_API_KEY`) from its own environment, so `PRXREF_LLM_BASE_URL` is not required here and neither it nor `PRXREF_LLM_API_KEY` is ever passed to litellm. A set `PRXREF_LLM_BASE_URL` is ignored with one INFO line (`PRXREF_LLM_BASE_URL is set but not used by the litellm backend; ignoring it`), so a deployment that set a placeholder URL to get past the check older releases applied to every backend keeps working unchanged. To route through a LiteLLM **proxy**, which speaks the OpenAI API, use the `openai-compat` backend with `PRXREF_LLM_BASE_URL` pointing at the proxy.
-- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and a configured seed is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is openai-compat only.
+- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and the seed, configured or else auto-derived, is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is not applied by `litellm`: it reaches only `openai-compat` (as `reasoning_effort` in the payload) and `claude-cli` (as `--effort`), and `kiro-cli` ignores it too.
 
 ### Configuration Example
 
@@ -209,11 +209,15 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
 
 - `PRXREF_LLM_TEMPERATURE` defaults to `0.0`, and `0.0` is **sent** on the wire
   rather than omitted.
-- `PRXREF_LLM_SEED` is sent on every call, on both backends: the configured
+- `PRXREF_LLM_SEED` is sent on every call by the two API backends,
+  `openai-compat` and `litellm`: the configured
   value when set, else one random seed derived per process and shared by every
   client the run builds — temperature 0 alone cannot pin hosted inference
   (issue #56), so an unseeded run still varies call to call. The `sampling`
-  field reports which seed was in force.
+  field reports which seed was in force. The CLI backends, `claude-cli` and
+  `kiro-cli`, send no seed and no temperature: setting either logs one WARNING
+  that it is not applied, and `sampling` reports both as `null` (see
+  [What is not applied](#what-is-not-applied)).
 - **Neither makes a review bit-reproducible.** Providers vary by system
   fingerprint, load-balanced backends serve the same model from different
   hardware, MoE routing shifts with batch composition, and many gateways accept
