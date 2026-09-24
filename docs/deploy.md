@@ -189,4 +189,52 @@ Practical consequences for a pipeline:
 
 ## 7. Spec Sources in CI and on the Daemon
 
-<!-- 0.14 placeholder: W-SPECDOCS -->
+Spec grounding fetches the sources the operator names in `--spec` or `PRXREF_SPEC_SOURCES` on every review; see the README's [Review Against a Spec or Ticket](../README.md#review-against-a-spec-or-ticket). A pull request cannot add a source. The CLI reads sources only from its flags and environment, and the daemon only from its own environment, never from a webhook payload or a PR description.
+
+### Trust the path, not only the flag
+
+A local spec path inside the PR's own checkout is content the PR controls: the PR can rewrite the constraints it is reviewed against. In CI, point `--spec` at a path outside the workspace, or at a URL.
+
+A relative source is confined to the working directory. A path under the working directory that resolves outside it once its symlinks are followed fails its source (`resolves outside the working directory`), and a directory source skips every symlinked entry in it. An absolute path outside the working directory is the operator's own choice and is read as given.
+
+### On the webhook daemon
+
+- **One list grounds every repository.** `PRXREF_SPEC_SOURCES` applies to every review the daemon runs, and the prompts tell the model to quote a violated constraint verbatim. Private spec text can therefore appear in a comment on any repository the daemon serves. Give the daemon only sources that every one of those repositories may see.
+- **Run it from a directory no PR can change.** Relative sources resolve against the daemon's working directory, so never start it inside a checkout. The systemd unit above uses `WorkingDirectory=/opt/prxref`.
+- **A slow spec host delays the queue.** The daemon reviews one PR at a time, so every source's fetch time is added to every review, and to every review queued behind it. The bounds below cap that cost per source.
+
+### Fetch time bounds
+
+Two module constants in `prxref.specs` bound a fetch. They are not configuration keys, and neither depends on `--timeout` or `PRXREF_LLM_TIMEOUT`:
+
+| Constant | Value | Bounds |
+|---|---|---|
+| `SPEC_FETCH_TIMEOUT_S` | `15` | Each HTTP attempt's connect timeout and its timeout per read. |
+| `SPEC_FETCH_BUDGET_S` | `30` | One source's body, in wall-clock seconds counted from before the request. |
+
+A spec fetch is retried once, with no backoff sleep, and `Retry-After` is ignored: a host that is down or asks for time is skipped, not waited for. The body is read one socket read at a time, so a host that trickles bytes cannot outlast the budget by more than one read timeout. Worst cases per source:
+
+- A host that accepts the connection and never answers costs about 30 s: two attempts of 15 s each.
+- A host that answers and then trickles its body costs about 45 s: the 30 s budget plus one 15 s read timeout.
+
+A web page longer than its byte cap, `4 × PRXREF_SPEC_MAX_CHARS + 4`, is cut with a `[source truncated at N chars]` marker. A Jira response over that cap fails its source.
+
+### What the logs, the run record and the trace say
+
+A failed source never fails the review. The posted grounding note names a failed source only by its position and kind. The operator gets more detail:
+
+- **One WARNING per failed source:** `spec source N/T (kind, origin) failed (best-effort): reason`. `kind` is `file`, `dir`, `url` or `jira`, or `unknown` when the source failed before its kind was known. The reason is redacted the same way as in the posted note. The origin is made safe to log:
+  - a local path is logged verbatim, since it names what to fix;
+  - a URL is cut to `scheme://host[:port]/path`, with no userinfo, query, fragment or `;params`;
+  - a URL that cannot be parsed is logged as `[unparseable origin]`.
+- **One INFO line per run with spec sources:** `spec grounding: OK/T source(s) ok, N constraint(s) injected`. N is 0 when the digest held no constraint and was not injected. If the spec stage itself crashes, one ERROR line replaces it (`spec grounding failed (best-effort): …`), and the run proceeds ungrounded.
+- **The run record's `spec_grounding` key,** also printed by `--format json`: `{sources, ok, failed, constraints, digest_sha256}`.
+  - `failed` lists `source N (kind): <redacted reason>`, or `source N: …` when the kind is unknown. A crashed spec stage records `spec stage crashed: <exception class>` instead.
+  - `digest_sha256` is the SHA-256 of the injected digest, or `null` when nothing was injected.
+  - The whole key is `null` on a run without spec sources.
+  - `prxref review -v` prints it as `spec: OK/T source(s) ok, N constraint(s)`.
+- **The run trace (`PRXREF_TRACE_FILE`):**
+  - one `specs ok` event (at least one source fetched) or `specs fail` event (none did), with `sources`, `ok` and `constraints`; a `fail` event also carries the raw, unredacted `reasons`;
+  - a `specs relabel` event with `findings` when ungrounded `spec` findings were relabelled `warning` (see [docs/quality.md](quality.md#spec-grounding)).
+
+**Known limitation.** A file skipped inside a spec directory, whether a symlink or a file that cannot be read or decoded, is only logged at WARNING (`spec directory <origin>: skipped …`) while the other files are read. It does not appear in the posted note, the run record or the trace. A directory source fails, and shows up everywhere, only when none of its files could be read.
