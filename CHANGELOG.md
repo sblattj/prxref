@@ -317,6 +317,16 @@ review rules file turns on.
   is an estimate, and `PRXREF_MAX_CHUNKS` overflow can grow a chunk past it.
   The sentence now reads "The diff below is the complete chunk.", so worker
   prompt hashes change.
+- **A whole-PR sweep finding no longer repeats a folded chunk finding.** When
+  finding grouping (`PRXREF_GROUP_FINDINGS=1`) or the per-rule cap (on by
+  default with a review rules file) folded a chunk finding, a field-identical
+  sweep finding was taken for a chunk finding, escaped the sweep dedup and was
+  posted as a second comment. It is now dropped as `duplicate of chunk
+  finding`. The same fix covers two older paths that 0.14.0's code has too: a
+  severity the model wrote in another case (`Warning`) let the sweep copy
+  through, and a finding that a severity cap (`PRXREF_MAX_ERROR_FINDINGS`, and
+  now the per-severity caps) kept could be dropped as a duplicate of another
+  finding with the same title in the same file, and so was never posted.
 - **The documentation matches the 0.15.0 code.** Among the corrections: the
   run record stamps every template file in the prompts directory, edited or
   not; `PRXREF_SCOPED_RULES_MAX_CHARS` cuts the overflowing file to the room
