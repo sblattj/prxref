@@ -107,9 +107,11 @@ class Finding:
     :func:`normalize_rule`; ``None`` whenever the prompt did not ask for one
     or the answer was not usable. ``locations`` is set only on the
     representative of a group that :func:`prxref.quality.apply_rule_grouping`
-    folded: the ``(file, line)`` of every location its ``Also at:`` paragraph
-    lists, in the same order, and ``()`` on every other finding. It is not
-    part of any identity or dedup key. The new fields trail the old ones, so
+    folded (the ``(file, line)`` of every location its ``Also at:`` paragraph
+    lists, in the same order) or on the best finding
+    :func:`prxref.quality.apply_rule_cap` kept for a rule (every location it
+    folded in, across files, sorted), and is ``()`` on every other finding.
+    It is not part of any identity or dedup key. The new fields trail the old ones, so
     every positional construction keeps working.
     """
 
