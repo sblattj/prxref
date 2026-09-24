@@ -110,7 +110,12 @@ def _case_url(name: str) -> str:
 
 
 class TestPinnedReplayOverEveryBuiltinForge:
-    """#65 x #62: no real adapter hits the pinned-range configuration error."""
+    """#65 x #62: no real adapter hits the pinned-range configuration error.
+
+    ``--no-description`` keeps these runs off the network: since #16 a
+    ``--pr-url`` replay reads the description history by default, which is
+    a deliberate request covered in ``tests/test_replay_pinning.py``.
+    """
 
     def test_the_forge_set_is_discovered_and_includes_azure_devops(self):
         assert "azure_devops" in BUILTIN_FORGES
@@ -122,7 +127,7 @@ class TestPinnedReplayOverEveryBuiltinForge:
         session = _NoNetworkSession()
         forge = _forge_impl(name)(session=session)
         ref = PRRef(forge=name, host="", owner="acme", repo="api", number=1, url="")
-        replay = cli._ReplayRequest(base_sha=BASE, head_sha=HEAD, no_threads=no_threads)
+        replay = cli._ReplayRequest(base_sha=BASE, head_sha=HEAD, no_threads=no_threads, no_description=True)
         assert isinstance(cli._replay_forge(forge, ref, replay), ReplayForge)
         assert session.sent == []
 
@@ -155,7 +160,7 @@ class TestPinnedReplayOverEveryBuiltinForge:
         monkeypatch.setattr(orchestrator, "orchestrate_review", fake_orchestrate_review)
         assert main([
             "review", "--pr-url", url, "--base-sha", BASE, "--head-sha", HEAD,
-            "--no-threads", "--format", "json",
+            "--no-threads", "--no-description", "--format", "json",
         ]) == 0
         assert "configuration error" not in capsys.readouterr().err
         [adapter] = built
