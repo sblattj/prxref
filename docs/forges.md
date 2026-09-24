@@ -77,7 +77,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
 - **API Endpoints & Behavior:**
   - **Base URL:** `https://{host}/api/v4/projects/{url_encoded_project_path}`
   - **Metadata:** `GET /merge_requests/{number}`. Target SHA is resolved from `diff_refs.base_sha` or fallback branch lookup.
-  - **Diffs:** `GET /merge_requests/{number}/diffs?access_raw_diffs=true`. Reconstructs a full unified multi-file diff string from GitLab's structured diff items (including new, deleted, renamed, and modified file headers).
+  - **Diffs:** `GET /merge_requests/{number}/diffs?access_raw_diffs=true`, paged with `per_page=100` and read to the last page. Reconstructs a full unified multi-file diff string from GitLab's structured diff items (including new, deleted, renamed, and modified file headers). A page that cannot be read (a transport error, a non-OK status, or a body that is not a JSON list), or a listing longer than 50 pages (5,000 files), fails the review with `FeedReadError` rather than reviewing part of the MR. An MR with no file entries at all is an error too. An entry flagged `too_large` or `collapsed` carries no inline diff: it is logged as a warning and reviewed as a header-only file.
   - **Summary Comments:** Managed via `GET/POST/PUT /merge_requests/{number}/notes`. Searches for `<!-- prxref-summary -->` and updates existing note via `PUT` if found.
   - **Inline Comments:** Posted as discussions via `POST /merge_requests/{number}/discussions` with text position references (`base_sha`, `start_sha`, `head_sha`, `new_path`, `new_line`). If position anchoring fails with HTTP 400 (e.g. line outside diff or obsolete context), it automatically falls back to posting a plain note via `POST /merge_requests/{number}/notes` formatted with `file: {path}\n\n{body}`.
   - **Thread List:** `GET /merge_requests/{number}/discussions`.
@@ -254,7 +254,7 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
     fetches nothing. A binary file (by extension, or a NUL byte in its first 8000
     bytes) renders as `Binary files … differ`. Content is capped at 512 KiB per blob,
     300 files and 16 MiB per diff; a file past a cap is listed without hunks, with a
-    warning. A blob that returns `404` is listed without hunks too, but any other
+    warning. A blob that returns `404` or `410` is listed without hunks too, but any other
     failed blob fetch fails the review rather than silently emptying a file. The
     change list comes from the Diffs API rather than the PR's iterations because the
     iterations list is not readable anonymously, even on a public project.

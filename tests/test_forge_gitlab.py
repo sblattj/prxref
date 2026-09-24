@@ -1096,3 +1096,32 @@ def test_get_diff_keeps_an_excluded_file_as_header_only(flag):
 
     assert [f.path for f in files] == ["src/a.py", "data/big.csv"]
     assert files[1].hunks == []
+
+
+@pytest.mark.parametrize("flag", ["too_large", "collapsed"])
+def test_get_diff_warns_once_for_each_excluded_file(flag, caplog):
+    # Same WARNING get_compare_diff gives, so a header-only file in a live MR
+    # review is visible in the log rather than silently hunkless.
+    big = {"old_path": "data/big.csv", "new_path": "data/big.csv", "diff": "", flag: True}
+    huge = {"old_path": "assets/huge.bin", "new_path": "assets/huge.bin", "diff": "", flag: True}
+    entries = [RENDER_ENTRIES[0], big, huge]
+    session = _paging_diff_server(entries)
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        diff = ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert diff == gitlab._render_diff_entries(entries)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "data/big.csv" in warnings[0]
+    assert "assets/huge.bin" in warnings[1]
+    assert not any("src/a.py" in message for message in warnings)
+
+
+def test_get_diff_does_not_warn_on_an_ordinary_entry(caplog):
+    session = _paging_diff_server(RENDER_ENTRIES)
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.gitlab"):
+        ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
