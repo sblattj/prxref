@@ -13,7 +13,7 @@ Verify every claim against the diff itself. Every finding must cite a file and l
 
 ## Spec-grounded rules
 
-Emit `spec` only for a conflict between the diff and a constraint quoted in the Spec constraints block — never for a generic best practice not present in the block. When the block reads `(no specs provided for this review)`, `spec` is not a legal severity. Cite the diff line that violates it — the same `file`/`line` contract as every finding — and quote the violated constraint verbatim in the body, prefixed `Spec: "`.
+Emit `spec` only for a conflict between the diff and a constraint quoted in the Spec constraints block — never for a generic best practice not present in the block. When the only basis for a finding is a constraint quoted in the Spec constraints block, its severity is `spec`. When the block reads `(no specs provided for this review)`, `spec` is not a legal severity. Cite the diff line that violates it — the same `file`/`line` contract as every finding — and quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 
 ## Confidence
 
