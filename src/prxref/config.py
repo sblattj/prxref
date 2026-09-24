@@ -49,6 +49,34 @@ LLM / pipeline:
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
                                 review; >= 0, where 0 caps every error
                                 (legacy alias: PRXREF_MAX_ERRORS)
+  PRXREF_MAX_WARNING_FINDINGS   Per-severity caps (0.15.0): max
+                                warning-severity findings reported per
+                                review, the excess dropped
+                                lowest-confidence-first; >= 0, where 0 caps
+                                every warning. Unset (default) = unlimited
+  PRXREF_MAX_OUTOFSCOPE_FINDINGS
+                                Per-severity caps (0.15.0): the same cap for
+                                the minor tier, ``outofscope``-severity
+                                findings. ``outofscope`` is a severity, not
+                                ticket scope ``out`` (see
+                                PRXREF_TICKET_CONTEXT_FILE); ``spec`` is
+                                never capped. >= 0; unset (default) =
+                                unlimited
+  PRXREF_GROUP_FINDINGS         Finding grouping (0.15.0): literal "1" folds
+                                chunk findings that break the same rule in
+                                the same file (by normalized title when the
+                                model names no rule) into one comment that
+                                lists the other locations; runs before the
+                                caps, so they count groups. Default off:
+                                prompts and output unchanged
+  PRXREF_DEDUP_SIMILARITY       Reworded-duplicate dedup (0.15.0): title
+                                similarity (Jaccard over title tokens, at
+                                least 3 shared) at or above which two
+                                findings on the same file and line are one;
+                                a chunk copy beats a sweep copy of equal or
+                                lower severity. Greater than 0 and at most
+                                1.0; unset (default) = off, only the
+                                exact-title dedup runs
   PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR; positive int
                                 (default 8)
   PRXREF_CHUNK_TOKEN_BUDGET     Approximate token budget per diff chunk;
@@ -171,6 +199,31 @@ LLM / pipeline:
                                 front matter) kept in the prompt; longer is
                                 truncated with a warning; positive int
                                 (default 12000)
+  PRXREF_SCOPED_RULES           Path-scoped review rules (0.15.0): rules
+                                files and directories (``*.md`` one level
+                                deep) whose ``applies_to:`` front-matter
+                                globs pick the chunks each file reaches; the
+                                sweep gets the union. Added to
+                                PRXREF_REVIEW_RULES, never replacing it. A
+                                file without ``applies_to`` reaches every
+                                unit; a URL, ``applies_to: []`` or a
+                                malformed file is a configuration error.
+                                The repeatable ``--scoped-rules PATH`` flag
+                                replaces the list. Empty (the default) = off
+  PRXREF_SCOPED_RULES_MAX_CHARS Path-scoped review rules (0.15.0):
+                                characters of scoped-rules text one review
+                                unit receives; the file that overflows is
+                                truncated with a warning; positive int
+                                (default 24000)
+  PRXREF_PROMPTS_DIR            Prompt template overrides (0.15.0):
+                                directory of replacement ``worker.md``,
+                                ``systemic.md`` and ``summary.md``; an
+                                absent file keeps the packaged one. Each
+                                template is validated before any network
+                                call (marker, placeholders, 256 KiB), and a
+                                failure is a configuration error.
+                                ``--prompts-dir DIR`` wins. Unset (the
+                                default) = the packaged templates
   PRXREF_TICKET_CONTEXT_FILE    Path to a text file holding the ticket this
                                 PR implements; each finding is then marked
                                 in, out of, or of unknown ticket scope. An
@@ -234,10 +287,10 @@ Webhooks:
   PRXREF_ALLOW_UNSIGNED           literal "1" accepts unsigned
                                   webhooks (default off; insecure)
 
-List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES and
-PRXREF_SIZE_IGNORE_GLOBS) split on any run of commas and/or whitespace, so no
-item can contain either; a glob that must match a literal space writes it as
-``?``.
+List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
+PRXREF_SIZE_IGNORE_GLOBS and PRXREF_SCOPED_RULES) split on any run of commas
+and/or whitespace, so no item can contain either; a glob that must match a
+literal space writes it as ``?``.
 
 Precedence: built-in defaults < environment < ``overrides`` kwargs.
 An error names the source that actually supplied the offending value — the
@@ -292,6 +345,10 @@ _DEFAULTS: dict[str, object] = {
     "llm_cli_concurrency": 2,
     "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
+    "max_warning_findings": None,
+    "max_outofscope_findings": None,
+    "group_findings": False,
+    "dedup_similarity": None,
     "max_chunks": 8,
     "chunk_token_budget": DEFAULT_TOKEN_BUDGET,
     "chunk_max_files": DEFAULT_MAX_FILES_PER_CHUNK,
@@ -323,6 +380,9 @@ _DEFAULTS: dict[str, object] = {
     "spec_digest_tokens": 3000,
     "review_rules": "",
     "review_rules_max_chars": 12000,
+    "scoped_rules": [],
+    "scoped_rules_max_chars": 24000,
+    "prompts_dir": None,
     "ticket_context_file": "",
     "ticket_context_max_chars": 6000,
     "jira_base_url": "",
@@ -352,10 +412,15 @@ _INT_KEYS = frozenset({
     "spec_max_chars", "spec_digest_tokens",
     "llm_cli_concurrency", "review_rules_max_chars",
     "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
+    "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
 })
-_FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout"})
-_BOOL_KEYS = frozenset({"allow_unsigned", "dry_run", "post_verdict", "post_cost"})
-_LIST_KEYS = frozenset({"llm_models", "spec_sources", "size_ignore_globs"})
+_FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
+_BOOL_KEYS = frozenset({
+    "allow_unsigned", "dry_run", "post_verdict", "post_cost", "group_findings",
+})
+_LIST_KEYS = frozenset({
+    "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
+})
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
 # is declared here instead and enforced on the same pass as the ranges. A
@@ -380,15 +445,18 @@ class _Range(NamedTuple):
     machine-specific, and an invented limit would be worse than none. Only a
     semantically bounded quantity gets a real ``high``: today that is the
     confidence floor, which is a 0-1 probability everywhere in
-    ``triage.Finding`` and in the prompts.
+    ``triage.Finding`` and in the prompts, and the dedup similarity, a 0-1
+    Jaccard score whose low end is open because 0 would merge every pair of
+    findings on a line.
 
     ``low_inclusive`` distinguishes "must be positive" from "must not be
     negative". Zero is meaningless for a token budget (it asks the model for an
     empty completion), for a timeout (every request fails instantly), for a
     worker count (``ThreadPoolExecutor`` rejects it) and for a chunk count
     (``build_chunks`` raises on the overflow branch). Zero IS meaningful for the
-    error cap, where it means "report no errors", for the context-line count,
-    where it means "emit the changed lines only", for the sampling seed,
+    error, warning and outofscope caps, where it means "report none of that
+    severity", for the context-line count, where it means "emit the changed
+    lines only", for the sampling seed,
     where 0 is a perfectly valid seed, and for the PR-size thresholds, where
     0 flags any change at all.
     """
@@ -437,7 +505,11 @@ _RANGES: dict[str, _Range] = {
     "ticket_context_max_chars": _Range(0),
     "size_warn_lines": _Range(0, low_inclusive=True),
     "size_warn_files": _Range(0, low_inclusive=True),
+    "max_warning_findings": _Range(0, low_inclusive=True),
+    "max_outofscope_findings": _Range(0, low_inclusive=True),
+    "scoped_rules_max_chars": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
+    "dedup_similarity": _Range(0.0, 1.0),
 }
 
 _LEGACY_ENV_ALIASES: dict[str, str] = {
@@ -498,7 +570,11 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
     "not configured" is not a violation. The PR-size thresholds
     (``size_warn_lines``, ``size_warn_files``) are the second such class:
     ``None`` means the advisory is off, because 0 is a legal threshold and
-    cannot double as "unset". Every value that is not ``None`` —
+    cannot double as "unset". The 0.15.0 keys add two more: the warning and
+    outofscope caps (``max_warning_findings``, ``max_outofscope_findings``),
+    where ``None`` means unlimited because 0 caps every finding of that
+    severity, and ``dedup_similarity``, where ``None`` means the
+    reworded-duplicate pass is off. Every value that is not ``None`` —
     including one smuggled in through an override — is still checked.
     """
     for key, rng in sorted(_RANGES.items()):
