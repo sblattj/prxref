@@ -629,3 +629,73 @@ def test_get_file_content_never_logs_above_debug(caplog):
 
     assert result is None
     assert all(record.levelno <= logging.DEBUG for record in caplog.records)
+
+
+# --- get_compare_diff (replay) ------------------------------------------------
+
+
+BASE_SHA = "a" * 40
+HEAD_SHA = "b" * 40
+COMPARE_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n"
+    "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x\n+y\n"
+)
+
+
+def test_get_compare_diff_requests_three_dot_compare_with_diff_media_type(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t0ken")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(text=COMPARE_DIFF)
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == COMPARE_DIFF
+    session.get.assert_called_once()
+    assert session.get.call_args[0][0] == (
+        f"https://api.github.com/repos/acme/api/compare/{BASE_SHA}...{HEAD_SHA}"
+    )
+    headers = session.get.call_args[1]["headers"]
+    assert headers["Accept"] == "application/vnd.github.diff"
+    assert headers["Authorization"] == "Bearer t0ken"
+
+
+def test_get_compare_diff_uses_enterprise_api_base(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_ENTERPRISE_TOKEN", "ghes-t0ken")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(text=COMPARE_DIFF)
+
+    ForgeImpl(session=session).get_compare_diff(
+        _ref("https://git.corp.example/acme/api/pull/7"),
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+    )
+
+    assert session.get.call_args[0][0] == (
+        f"https://git.corp.example/api/v3/repos/acme/api/compare/{BASE_SHA}...{HEAD_SHA}"
+    )
+    assert session.get.call_args[1]["headers"]["Authorization"] == "Bearer ghes-t0ken"
+
+
+def test_get_compare_diff_returns_an_empty_range_as_empty_text():
+    # A head already merged into the base compares empty; judging that is the
+    # caller's job, so it comes back as text, not as an error.
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(text="")
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == ""
+
+
+def test_get_compare_diff_raises_on_http_error():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(404, json_data={"message": "Not Found"})
+
+    with pytest.raises(requests.HTTPError):
+        ForgeImpl(session=session).get_compare_diff(
+            _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )

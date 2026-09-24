@@ -172,6 +172,25 @@ class ForgeImpl:
         resp.raise_for_status()
         return resp.text
 
+    def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
+        """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
+
+        Uses the compare endpoint with three dots, ``{base}...{head}``, which
+        diffs from the merge-base exactly as the PR's own diff does; GitHub
+        answers the two-dot spelling with a 404. The diff media type makes the
+        body the raw diff text rather than the JSON comparison. An empty range
+        (``head_sha`` already merged into ``base_sha``) comes back as ``""``,
+        returned unmodified. Raises on an HTTP or transport failure.
+        """
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+            f"/compare/{base_sha}...{head_sha}"
+        )
+        headers = self._headers(ref.host, {"Accept": "application/vnd.github.diff"})
+        resp = self.session.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.text
+
     def _iter_comment_pages(
         self, ref: PRRef, url: str, headers: dict[str, str]
     ) -> Iterator[list[dict]]:
