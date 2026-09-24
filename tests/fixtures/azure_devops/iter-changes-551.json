@@ -1,0 +1,73 @@
+{
+  "changeEntries": [
+    {
+      "changeTrackingId": 1,
+      "changeId": 1,
+      "changeType": "delete",
+      "originalPath": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell/KeyVault - Copy.ps1",
+      "item": {
+        "originalObjectId": "87D2FBFD3750367237157FD7D031B3390823E18B",
+        "path": null
+      }
+    },
+    {
+      "changeTrackingId": 2,
+      "changeId": 2,
+      "changeType": "add",
+      "item": {
+        "objectId": "B66D7F74F0ECADB879E06BCD8820D46CEA3B9432",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell/KeyVaultCleanup.ps1"
+      }
+    },
+    {
+      "changeTrackingId": 5,
+      "changeId": 5,
+      "changeType": "edit",
+      "item": {
+        "objectId": "AEDA269DA90452B18D97B7D627B8E1A60865B2ED",
+        "originalObjectId": "8E0E451AF030956A450401AC0DE200634DAC3A61",
+        "path": "/azure-pipelines-build-template.yml"
+      }
+    },
+    {
+      "changeTrackingId": 3,
+      "changeId": 3,
+      "changeType": "edit",
+      "item": {
+        "objectId": "D840A3ED95397C469773564F31F609948FCD5320",
+        "originalObjectId": "AD7512D769AF208278B9ABE7825341EEDC8C8A83",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/AcmeWeb.Environment.ARMTemplate.deployproj"
+      }
+    },
+    {
+      "changeTrackingId": 4,
+      "changeId": 4,
+      "changeType": "edit",
+      "item": {
+        "objectId": "898C90B50BE7DD5C7D810E41E241826FD9B2AD33",
+        "originalObjectId": "3B0126BB2B1A7D93CAA670B697C73901CBE47DD8",
+        "path": "/AcmeWeb/AcmeWeb.FunctionalTests/test.runsettings"
+      }
+    },
+    {
+      "changeTrackingId": 6,
+      "changeId": 6,
+      "changeType": "edit",
+      "item": {
+        "objectId": "A6CB7AAF5D490FDA1C1D169A8F681885BC4D14C1",
+        "originalObjectId": "87D2FBFD3750367237157FD7D031B3390823E18B",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell/KeyVault.ps1"
+      }
+    },
+    {
+      "changeTrackingId": 7,
+      "changeId": 7,
+      "changeType": "edit",
+      "item": {
+        "objectId": "B21E69B9340D9472C16BE2AC10F0CDE0F48579AB",
+        "originalObjectId": "5B88DE2B26220C902512CB56B36BE818FCB6CD88",
+        "path": "/azure-pipelines.yml"
+      }
+    }
+  ]
+}
