@@ -103,9 +103,16 @@ prxref review --pr-url https://github.com/owner/repository/pull/108
 
 # GitLab & Self-Hosted GitLab (including nested subgroups)
 prxref review --pr-url https://gitlab.com/group/subgroup/project/-/merge_requests/15
+
+# Azure DevOps Services (dev.azure.com or the legacy *.visualstudio.com host)
+prxref review --pr-url https://dev.azure.com/organization/project/_git/repository/pullrequest/42
+prxref review --pr-url https://organization.visualstudio.com/project/_git/repository/pullrequest/42
+
+# Azure DevOps Server (on-prem; the URL names the collection and the project)
+prxref review --pr-url https://ado.corp.example/tfs/DefaultCollection/project/_git/repository/pullrequest/42
 ```
 
-**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. See [docs/forges.md](docs/forges.md).
+**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. Azure DevOps Services and Server share one adapter. It has no diff endpoint to call, so it rebuilds the PR's diff from the changed files; a public project can be reviewed with no token at all. Posting to Azure DevOps is not yet verified against a live server, and Azure DevOps Server is untested. See [docs/forges.md](docs/forges.md).
 
 ## LLM Configuration
 
@@ -145,19 +152,21 @@ Configure the authentication token matching your forge:
 | **GitHub** | `PRXREF_GITHUB_TOKEN` | Personal Access Token (PAT) or GitHub App token |
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
+| **Azure DevOps** | `PRXREF_AZURE_DEVOPS_TOKEN` | Personal access token: Code (Read) to review, Code (Read & write) to post |
+| **Azure DevOps (Pipelines)** | `SYSTEM_ACCESSTOKEN` | The job token, used when no PAT is set; map it into the step with `env: SYSTEM_ACCESSTOKEN: $(System.AccessToken)`. With neither set, public projects are read anonymously |
 
 See [docs/env-vars.md](docs/env-vars.md) for the full configuration reference, [docs/forges.md](docs/forges.md) for forge specifics, [docs/quality.md](docs/quality.md) for the deterministic checks and every drop reason, and [docs/systemic-sweep.md](docs/systemic-sweep.md) for the whole-PR sweep's digest classes.
 
 ## Webhook Server
 
-Run prxref as a persistent daemon to handle webhook events from GitHub, Bitbucket, and GitLab:
+Run prxref as a persistent daemon to handle webhook events from GitHub, Bitbucket, GitLab, and Azure DevOps:
 
 ```bash
 prxref serve --port 8080 --host 0.0.0.0
 ```
 
 The service exposes:
-- `POST /webhook` — verifies HMAC or token signatures per forge, enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially.
+- `POST /webhook` — verifies HMAC or token signatures per forge (for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
 ## Review Against a Spec or Ticket
