@@ -5,12 +5,13 @@ v0.14.0 handoff.
 
 0.15.0 gives a team the knobs to tune a review, and a harness to measure what
 the tuning did. The knobs are prompt template overrides, path-scoped review
-rules, finding grouping with per-severity caps, and an opt-in tier for reworded
-duplicates. The harness is `prxref eval run|score|compare`. GitHub pull requests
-past the diff endpoint's size limit are now reviewed, and a replay pins the PR's
-title and description to the time it replays. The user-facing account is the
-`[0.15.0]` section of `CHANGELOG.md`. This file is for whoever cuts the next
-release. The v0.14.0 handoff is in git history.
+rules, finding grouping with per-severity caps, a per-rule cap that a review
+rules file turns on, and an opt-in tier for reworded duplicates. The harness is
+`prxref eval run|score|compare`. GitHub pull requests past the diff endpoint's
+size limit are now reviewed, and a replay pins the PR's title and description to
+the time it replays. The user-facing account is the `[0.15.0]` section of
+`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.14.0
+handoff is in git history.
 
 ## What landed
 
@@ -40,9 +41,10 @@ release. The v0.14.0 handoff is in git history.
   worker prompt asks each finding for a `rule` (`triage.normalize_rule`,
   `orchestrator._enforce_rule`). `quality.apply_rule_grouping` then folds the
   chunk findings that break one rule in one file into one representative. Its
-  body ends `Also at:` and its `locations` lists the other lines. `--json` emits
-  `rule` and `locations` (`cli._finding_json`), with `locations` null on an
-  ungrouped finding. `PRXREF_MAX_WARNING_FINDINGS` and
+  body ends `Also at:` and its `locations` lists the other lines.
+  `--format json` emits `rule` and `locations` (`cli._finding_json`), with
+  `locations` null on an ungrouped finding unless the per-rule cap (#18)
+  folded others into it. `PRXREF_MAX_WARNING_FINDINGS` and
   `PRXREF_MAX_OUTOFSCOPE_FINDINGS` cap those two severities in
   `quality.apply_quality_gate`, ranked by `quality.finding_rank_key`, and every
   cap counts groups.
@@ -85,6 +87,17 @@ release. The v0.14.0 handoff is in git history.
   replays the live text and logs a WARNING that says why. The run's `replay`
   stamp records `description` (`pinned`, `live`, `file` or `none`) with the
   cutoff and its source.
+- **#18 Per-rule cap.** Start at `quality.apply_rule_cap`. `orchestrate_review`
+  calls it through `_cap_rules`, after the grouping pass and before
+  `apply_quality_gate`, only when `rule_cap_active` holds:
+  `max_findings_per_rule` (`PRXREF_MAX_FINDINGS_PER_RULE`, default 2) is above 0
+  and `rules` or `scoped_rules` is not `None`. The same flag turns on #13's rule
+  request through `rule_active`, so a rules-file run asks every unit for a
+  `rule` with grouping off. The pass keys on the rule, or the normalized title,
+  across files, keeps the first `cap` ranked by severity and then
+  `finding_rank_key`, and folds the rest onto the first one's `locations` and
+  `Also at:` paragraph. `quality.rule_cap_counts` builds the run record's
+  `rule_counts`.
 - **Fixes found on the way.**
   - `quality.apply_example_echo_check` drops a finding whose title echoes a
     prompt template's example finding. It is the first pass that drops
@@ -95,15 +108,19 @@ release. The v0.14.0 handoff is in git history.
     `application/vnd.github.raw+json`, for a JSON envelope and dropped every
     file it read, so GitHub reviews got no full-file context. Earlier releases
     are affected too. `_is_json_envelope` now decides by the media type.
-- **Config went from 55 to 62 keys.** The seven new keys are:
+- **Config went from 55 to 63 keys.** The eight new keys are:
   - `PRXREF_DEDUP_SIMILARITY` (#10)
   - `PRXREF_PROMPTS_DIR` (#11)
   - `PRXREF_SCOPED_RULES` and `PRXREF_SCOPED_RULES_MAX_CHARS` (#12; the second
     defaults to 24,000)
   - `PRXREF_GROUP_FINDINGS`, `PRXREF_MAX_WARNING_FINDINGS` and
     `PRXREF_MAX_OUTOFSCOPE_FINDINGS` (#13)
+  - `PRXREF_MAX_FINDINGS_PER_RULE` (#18; defaults to 2, and applies only while
+    a review rules file is loaded)
 
-  Each is off or unset by default. No existing config default changed.
+  The first seven are off or unset by default. The per-rule cap is on by
+  default whenever a review rules file is loaded. No existing config default
+  changed.
 
 ## What this release taught
 
@@ -126,8 +143,8 @@ Written down because each one cost real time.
    that lacks it stops loading. A new slot also needs its `replace` line in
    `tests/test_prompt_context.py`'s `_old_user`.
 4. **The hub files take every issue's kwargs, so merge them one at a time.**
-   `orchestrator.py` was touched by five issues and `cli.py` by six. Merging one
-   branch at a time kept them green. Each merge got a full gate, and each
+   `orchestrator.py` was touched by six issues and `cli.py` by seven. Merging
+   one branch at a time kept them green. Each merge got a full gate, and each
    kwarg-order conflict was resolved as the union of both sides. The order is
    pinned by tests such as
    `test_both_kwargs_are_keyword_only_and_follow_prompts` and the record-key
@@ -140,8 +157,11 @@ Written down because each one cost real time.
    user-prompt hash, including on runs with every feature off. It shows in the
    trace, in `--trace-dir`, and in the golden tests of
    `tests/test_rule_prompt_slot.py` and `tests/test_orchestrator_grouping.py`.
-   The system, sweep and summary-only hashes did not move. Keep this in mind
-   when comparing hashes across 0.14 and 0.15 runs.
+   The system, sweep and summary-only hashes did not move. A run with a review
+   rules file moved further: the per-rule cap (#18) is on there by default, and
+   its rule request changes both prompt halves of every chunk and of the sweep,
+   which `PRXREF_MAX_FINDINGS_PER_RULE=0` undoes. Keep this in mind when
+   comparing hashes across 0.14 and 0.15 runs.
 6. **Read a packaged template through `prompt_templates.packaged_text`.** The
    stub `_contract_load_prompt` in `tests/test_orchestrator.py` asserts that the
    orchestrator asks `reviewer.load_prompt` for the summary template only.
@@ -181,8 +201,9 @@ together:
 A key that feeds `orchestrate_review` needs one more step. `tests/test_cli.py`
 (`test_run_review_passes_every_configured_orchestrate_kwarg`) requires
 `cli._run_review` to pass every orchestrator kwarg whose name equals a config
-key. 0.15.0 added 7 keys this way. Current values: **62** keys, **1** legacy
-alias, **63** accepted names.
+key. Of the 8 keys 0.15.0 added, 7 feed it this way; `prompts_dir` does not,
+since `orchestrate_review` takes the loaded templates as `prompts`. Current
+values: **63** keys, **1** legacy alias, **64** accepted names.
 
 ## Release shape (follow this next time)
 
@@ -193,16 +214,18 @@ How 0.15.0 was built:
    questions before any code was written, including the rule that a new key is
    null when its feature is off.
 2. **Foundation.** One task landed every new config key, off by default, before
-   any feature work started.
+   any feature work started. #18, which joined later, brought its own key.
 3. **Lanes in waves.** Work was split into lanes by subsystem: quality (#10,
-   #13), prompts (#11, #12), eval (#14), forge (#15) and replay (#16).
+   #13, #18), prompts (#11, #12), eval (#14), forge (#15) and replay (#16).
    - Tasks ran in waves of parallel agents, each agent in its own worktree
      against a pinned base commit.
    - Each task was rated at most 5 of 10 for complexity and brought its own new
      test file.
-   - 45 tasks merged in eight waves before release: the foundation, 5 forge,
-     9 quality, 11 prompts, 12 eval and 6 replay tasks, and the example-echo
-     fix.
+   - 45 tasks merged in eight waves before the release documents were written:
+     the foundation, 5 forge, 9 quality, 11 prompts, 12 eval and 6 replay
+     tasks, and the example-echo fix. #18 joined the release after that, as 3
+     more tasks in two waves: the pass and its config surfaces in parallel,
+     then the wiring.
 4. **One integration gate per merge.** Each branch merged into `release/X.Y.Z`
    on its own. A merge stayed only if the full `uv run pytest` and
    `uv run ruff check src tests` passed on the merged tree.
@@ -238,7 +261,7 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-6609 passed                                   uv run pytest -q
+6776 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.15.0                                        uv run prxref --version
 ```
@@ -318,7 +341,8 @@ The known limitations, in full in the CHANGELOG:
     location.
   - The caps rank by `finding_rank_key` (confidence, then file path), not by
     group size. So capping a representative drops all its folded locations from
-    the output.
+    the output. The same goes for the finding the per-rule cap (#18) folded a
+    rule's other findings into.
 - **Findings on files outside the chunk.** A worker can report on a file it saw
   only in the bounded `### Other files changed in this PR` excerpt
   (`chunk_context.sibling_summary_block`). Location validation and line
@@ -454,6 +478,12 @@ Follow-ups a maintainer can act on:
 - **After this release, tune #10's threshold.** Run `prxref eval` on a real
   replay set, then consider changing the default. Use replays pinned by #16:
   earlier tuning ran on replays that leaked the PR's current description.
+- **Measure #18's default cap.** The issue's before and after numbers come from
+  a simulation over graded replays, and were not re-measured on prxref's own
+  output. `prxref eval compare` on two labelled runs measures it: `prxref eval
+  run` the same cases with the same `--rules-file` twice, once with
+  `PRXREF_MAX_FINDINGS_PER_RULE=0` and once at the default, `prxref eval score`
+  both, then compare them. Each run's `run.json` records the cap it used.
 - **Unchecked anchors.** `eval_cases.check_anchors` is public but never runs on
   a `pr_url` case's fetched diff, so those labels are only shape-checked.
 - **Eval cases cannot pin the description.** A case file cannot carry `as_of` or
@@ -484,7 +514,7 @@ its manual eval scoring (#14).
 
 | Item | Value |
 |---|---|
-| Released version | `0.15.0` (minor: new eval commands, new inputs and seven new config keys, each off by default; no existing config default changed, but a `--pr-url` replay now pins its title and description by default, and every worker prompt hash moved) |
+| Released version | `0.15.0` (minor: new eval commands, new inputs and eight new config keys, seven off by default and the per-rule cap on by default whenever a review rules file is loaded; no existing config default changed, but a `--pr-url` replay now pins its title and description by default, a review rules file now also asks every unit for a rule and folds each rule's findings past the second, and every worker prompt hash moved) |
 | Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
