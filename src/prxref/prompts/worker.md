@@ -46,7 +46,7 @@ Repo: {repo_hint}
 
 {spec_digest}
 
-The input stays under roughly 30k tokens; the diff below is the complete chunk.
+The diff below is the complete chunk.
 
 ### Diff
 

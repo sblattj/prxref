@@ -1,8 +1,9 @@
 # Deterministic Checks, Quality Passes, and Drop Reasons
 
 Most findings come from the LLM fallback chain. Everything on this page is
-computed from the parsed diff and the PR's own discussion — no model call, no
-non-determinism, no knob unless one is named below.
+computed from the parsed diff, the PR's own discussion and the prompt
+templates the run used — no model call, no non-determinism, no knob unless
+one is named below.
 
 A finding that fails a pass is **never deleted silently**. It keeps its
 identity and gains a `drop_reason`, so a run store, a `--no-post` dry run, or
@@ -39,18 +40,19 @@ it (noted in the table).
 
 | # | Pass | What it does |
 |---|---|---|
-| 1 | `apply_location_validation` | Drops a finding whose `file` names no path of the parsed diff. |
-| 2 | `apply_manifest_claim_check` | Manifests and npm-family lockfiles (`package.json`, `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`). When the anchor's hunk holds no section header, the served full-file lines decide the enclosing section. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
-| 3 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
-| 4 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
-| 5 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
-| 6 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
-| 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
-| 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
-| 9 | `apply_rule_grouping` | Opt-in: runs only with `PRXREF_GROUP_FINDINGS` set to `1`. Folds chunk findings in one file that name the same rule (compared case-insensitively), or that name no rule and share a normalized title, into one finding. The finding with the smallest positive line anchors the group; a file-level (line 0) finding anchors only when no member has a line. The anchor takes the group's highest severity and highest confidence, and its body gains `Also at:` followed by each other line of the group as a backticked `<file>:<line>`. Every other member is dropped as `grouped into <file>:<line>`. Only active findings at or above the confidence floor are grouped, and whole-PR sweep findings are never grouped. The same rule in two files makes two groups. Runs **after** the thread, removal and hedge passes, so a dropped finding is never listed as a location, and **before** the gate, so the error cap counts groups, not lines. |
-| 10 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap, and the optional per-review warning and outofscope caps (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`; unset caps nothing, and `spec` is never capped). Returns its findings in content order. |
-| 11 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. A chunk finding that grouping folded away (`grouped into <file>:<line>`) still counts here, because its group's anchor lists its location. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line (never line 0) whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. |
-| 12 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
+| 1 | `apply_example_echo_check` | Drops a finding whose title, normalized, equals the title of the example finding in the worker or sweep prompt template the run used. See [Example echoes](#example-echoes). The first pass that drops, deliberately, so an echo never reaches the thread, consistency or grouping comparisons, a cap, or sweep dedup, and its audit copy keeps the model's own anchor. |
+| 2 | `apply_location_validation` | Drops a finding whose `file` names no path of the parsed diff. |
+| 3 | `apply_manifest_claim_check` | Manifests and npm-family lockfiles (`package.json`, `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`). When the anchor's hunk holds no section header, the served full-file lines decide the enclosing section. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
+| 4 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
+| 5 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
+| 6 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
+| 7 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
+| 8 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
+| 9 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
+| 10 | `apply_rule_grouping` | Opt-in: runs only with `PRXREF_GROUP_FINDINGS` set to `1`. Folds chunk findings in one file that name the same rule (compared case-insensitively), or that name no rule and share a normalized title, into one finding. The finding with the smallest positive line anchors the group; a file-level (line 0) finding anchors only when no member has a line. The anchor takes the group's highest severity and highest confidence, and its body gains `Also at:` followed by each other line of the group as a backticked `<file>:<line>`. Every other member is dropped as `grouped into <file>:<line>`. Only active findings at or above the confidence floor are grouped, and whole-PR sweep findings are never grouped. The same rule in two files makes two groups. Runs **after** the thread, removal and hedge passes, so a dropped finding is never listed as a location, and **before** the gate, so the error cap counts groups, not lines. |
+| 11 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap, and the optional per-review warning and outofscope caps (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`; unset caps nothing, and `spec` is never capped). Returns its findings in content order. |
+| 12 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. A chunk finding that grouping folded away (`grouped into <file>:<line>`) still counts here, because its group's anchor lists its location. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line (never line 0) whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. |
+| 13 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
 
 Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
@@ -91,7 +93,7 @@ then sees the no-specs text `(no specs provided for this review)`, under which
 the prompts make `spec` an illegal severity.
 
 `apply_spec_grounding` runs right after the severity map and before
-`apply_location_validation` (pass 1 above), over chunk and sweep findings
+`apply_example_echo_check` (pass 1 above), over chunk and sweep findings
 alike:
 
 - On an ungrounded run it relabels every `spec` finding as `warning`. The
@@ -111,13 +113,51 @@ finding is filtered like any other. `apply_severity_consistency` ranks
 `error` > `warning` > `spec` > `outofscope`, so a same-title `warning` or
 `error` raises it. The confidence floor applies to it. It never counts toward
 `PRXREF_MAX_ERROR_FINDINGS` and never moves the verdict. The hedge gate's
-`Spec: "…"` exemption (pass 8) reads the injected digest only, so an
+`Spec: "…"` exemption (pass 9) reads the injected digest only, so an
 ungrounded run exempts nothing.
 
 Since 0.14.0 the worker and sweep prompts carry spec text on every run, with
 spec sources or without. Their system half carries the `spec` severity and the
 spec-grounded rules. Their user half carries a `### Spec constraints` block
 that reads `(no specs provided for this review)` when nothing is injected.
+
+## Example echoes
+
+The worker and sweep prompts each show the model one example finding in their
+`## Output Format` section. A model that copies that example into its answer
+reports a defect nobody found. `apply_example_echo_check` (pass 1) drops it.
+
+- **The titles come from the templates the run used.** Each run reads the
+  example titles out of the worker and sweep templates its review units were
+  shown: the packaged `worker.md` and `systemic.md`, or the override a
+  `--prompts-dir` supplied (see [docs/prompt-templates.md](prompt-templates.md)).
+  An overridden template's example title replaces the packaged one, so the
+  packaged title stops dropping anything once its template is overridden.
+- **Only fenced JSON blocks are read.** A fenced block tagged `json` (in any
+  case) or untagged counts, and so does every `"title": "<text>"` pair in it.
+  A block in any other language, such as the worker's `diff` block, is never
+  read. prxref scans those blocks rather than parsing them, because a packaged
+  example is not valid JSON before it is rendered: the `{scope_example}` and
+  `{rule_example}` slots follow its last value.
+- **The match is exact after normalization.** A finding's title is compared
+  with every harvested title after `normalize_title`: lower-cased, backticks,
+  quotes and emphasis marks removed, edge punctuation trimmed, whitespace runs
+  collapsed. A title that only resembles an example stays. Chunk and sweep
+  findings are checked alike, each against the titles of both templates.
+- **Every echo is visible.** A dropped echo gains `drop_reason`
+  `echoes the prompt's example: "<title>"`, quoting the example as its
+  template writes it. When the pass drops anything, prxref logs `example echo:
+  dropped N finding(s) titled like a prompt template's example finding` at INFO
+  and the JSONL trace gets one `prompts echo` event with `findings: N`. A run
+  with no echo logs and traces nothing extra.
+- **It runs first among the passes that drop.** It reads only the title, so
+  it needs no aligned anchor, and it keeps the list's length and order, so the
+  chunk/sweep boundary holds. Running first keeps an echo out of the thread,
+  consistency and grouping comparisons, the caps and sweep dedup. An echo never
+  anchors a group, never raises a same-title sibling's severity, and never
+  takes an error-cap slot, and its audit copy keeps the model's own anchor.
+- If the packaged `systemic.md` cannot be read, the run logs a WARNING and
+  checks against the worker's example alone.
 
 ## Ticket scope
 
@@ -163,7 +203,7 @@ gains a `drop_reason` for its scope.
 
 ## Grouped findings in the output
 
-With `PRXREF_GROUP_FINDINGS` set to `1`, a group (pass 9) reaches the output
+With `PRXREF_GROUP_FINDINGS` set to `1`, a group (pass 10) reaches the output
 as one active finding, its representative, plus a dropped audit copy of every
 other member.
 
@@ -189,7 +229,7 @@ other member.
 
 ## Replay runs and the thread passes
 
-A `--no-threads` replay gives passes 4 and 5 (`apply_thread_dedup` and
+A `--no-threads` replay gives passes 5 and 6 (`apply_thread_dedup` and
 `apply_settled_thread_suppression`) an empty thread list, so they drop nothing,
 and a `--diff-file` replay with no `--pr-url` has no threads to start with. A
 replay at pinned SHAs WITHOUT `--no-threads` still dedups against the PR's
@@ -201,6 +241,7 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 
 | `drop_reason` | Pass | Meaning |
 | --- | --- | --- |
+| `echoes the prompt's example: "<title>"` | `apply_example_echo_check` | The finding's title, normalized, is the title of the example finding in the worker or sweep template the run used. `<title>` is the example's title as the template writes it. |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
 | `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |
 | `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A manifest/lockfile finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |
@@ -239,7 +280,9 @@ text.
   [Tuning for Your Team](env-vars.md#tuning-for-your-team).
 - The hedge gate, the manifest checks, and the removal-claim check have **no
   knob**. They are correctness checks against the diff itself, not noise
-  levers. A hedged finding is unverified by its own admission; the escape hatch
+  levers. The example-echo check has none either: a finding that repeats the
+  prompt's own example was never found in the diff. To change what it drops,
+  change the example in an overridden template. A hedged finding is unverified by its own admission; the escape hatch
   is at the prompt level, where the worker is told to file such a thing as a
   question at confidence ≤ 0.5 and let the floor handle it.
 - A hedged finding never consumes an error-cap slot ahead of a proven one.

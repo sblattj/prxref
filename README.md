@@ -58,7 +58,7 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through twelve more deterministic passes: location validation, `package.json` claim
+through thirteen more deterministic passes: the example-echo check, location validation, `package.json` claim
 checks, line alignment, thread dedup, settled-thread suppression, severity
 consistency, the removal-claim check, the hedge gate, finding grouping (opt-in
 with `PRXREF_GROUP_FINDINGS`), the quality gate, sweep dedup, and the
