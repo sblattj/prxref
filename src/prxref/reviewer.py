@@ -64,7 +64,16 @@ from .costs import valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
-from .triage import SCOPE_IN, SCOPE_UNKNOWN, FileDiff, Finding, normalize_rule, normalize_scope, trim_hunk_context
+from .triage import (
+    RULE_MAX_CHARS,
+    SCOPE_IN,
+    SCOPE_UNKNOWN,
+    FileDiff,
+    Finding,
+    normalize_rule,
+    normalize_scope,
+    trim_hunk_context,
+)
 
 logger = logging.getLogger("prxref")
 
@@ -79,6 +88,23 @@ _NO_SPECS_TEXT = "(no specs provided for this review)"
 # in both templates' ``## Output Format``: the comma travels with the key, so
 # the empty value a no-ticket run gets leaves the example valid and unchanged.
 _SCOPE_EXAMPLE = f',\n      "scope": "{SCOPE_IN}"'
+
+# The SYSTEM-prompt block that asks for a per-finding ``rule``, passed as
+# ``PromptContext.rule_request`` when ``PRXREF_GROUP_FINDINGS`` is on. The
+# label it asks for is what :func:`prxref.triage.normalize_rule` keeps.
+RULE_REQUEST = "\n\n".join((
+    "## Rule names",
+    "When a finding applies a named rule or standard from the team review rules, add a "
+    "\"rule\" key to it: that rule's short name, written as the rules write it, on one "
+    f"line of at most {RULE_MAX_CHARS} characters. Otherwise leave \"rule\" out, and never "
+    "make a name up.",
+    '"rule" never changes "severity" or "confidence".',
+))
+
+# Fills the ``{rule_example}`` slot that follows ``{scope_example}``, the same
+# way: the comma travels with the key, so a run that does not ask for a rule
+# renders the example unchanged.
+_RULE_EXAMPLE = ',\n      "rule": "no-bare-except"'
 
 _MAX_TOKENS_ENV = "PRXREF_LLM_MAX_TOKENS"
 
@@ -158,7 +184,9 @@ class PromptContext:
     SYSTEM half, appended to the template head in this order:
     ``rules_worker`` for chunk units or ``rules_sweep`` for the sweep (the
     team review rules), then ``ticket_scope`` (the instructions that ask the
-    model for a per-finding ``scope``). USER half, after the Review Context
+    model for a per-finding ``scope``), then ``rule_request`` (the
+    instructions that ask for a per-finding ``rule``, :data:`RULE_REQUEST`
+    when finding grouping is on). USER half, after the Review Context
     lines: ``ticket_context`` (the fenced ticket text), then ``spec_digest``
     (the Spec constraints block), then the diff or digest.
 
@@ -167,8 +195,9 @@ class PromptContext:
     sweep, each holding an operator override's text as
     :meth:`prxref.prompt_templates.PromptTemplates.override` returns it. An
     override is split at the ``## Review Context`` marker exactly as the
-    packaged template is: its head becomes the SYSTEM half, with the rules and
-    ``ticket_scope`` blocks appended in the order above and nothing filled in,
+    packaged template is: its head becomes the SYSTEM half, with the rules,
+    ``ticket_scope`` and ``rule_request`` blocks appended in the order above
+    and nothing filled in,
     and its tail is the USER half, filled in one :func:`fill_template` pass
     and never through :meth:`str.format`, so stray or foreign braces in the
     override render literally.
@@ -180,7 +209,10 @@ class PromptContext:
     :attr:`scope_active` is true only when the scope instructions are in the
     prompt, and it alone decides whether a model-supplied ``scope`` is read
     and whether the ``## Output Format`` example finding shows a ``"scope"``
-    key.
+    key. :attr:`rule_active` does the same for ``rule_request``, a
+    model-supplied ``rule`` and a ``"rule"`` key in the example; an override
+    template without the optional ``{rule_example}`` slot still gets the
+    request, only not the example key.
     """
 
     rules_worker: str = ""
@@ -190,11 +222,17 @@ class PromptContext:
     spec_digest: str = ""
     worker_template: str = ""
     systemic_template: str = ""
+    rule_request: str = ""
 
     @property
     def scope_active(self) -> bool:
         """True when the prompt asks for ``scope``, so the answer may be kept."""
         return bool(self.ticket_scope)
+
+    @property
+    def rule_active(self) -> bool:
+        """True when the prompt asks for ``rule``, so the answer may be kept."""
+        return bool(self.rule_request)
 
 
 NO_PROMPT_CONTEXT = PromptContext()
@@ -212,6 +250,10 @@ def _ticket_context_value(prompt_context: PromptContext) -> str:
 
 def _scope_example_value(prompt_context: PromptContext) -> str:
     return _SCOPE_EXAMPLE if prompt_context.scope_active else ""
+
+
+def _rule_example_value(prompt_context: PromptContext) -> str:
+    return _RULE_EXAMPLE if prompt_context.rule_active else ""
 
 
 def _render_file(f: FileDiff, context_lines: int | None = None) -> str:
@@ -277,9 +319,11 @@ def _render_prompt(
         "context_blocks": blocks,
         "diff": render_chunk(chunk, context_lines) or "(empty chunk)",
         "scope_example": _scope_example_value(prompt_context),
+        "rule_example": _rule_example_value(prompt_context),
     })
     system = _append_block(head.strip(), prompt_context.rules_worker)
     system = _append_block(system, prompt_context.ticket_scope)
+    system = _append_block(system, prompt_context.rule_request)
     return system, user.strip()
 
 
@@ -337,6 +381,7 @@ def _render_systemic_prompt(
         "spec_digest": prompt_context.spec_digest.strip() or _NO_SPECS_TEXT,
         "digest": digest.strip() or "(empty digest)",
         "scope_example": _scope_example_value(prompt_context),
+        "rule_example": _rule_example_value(prompt_context),
     })
     discussion = _render_discussion_block(threads)
     user = user.strip()
@@ -344,6 +389,7 @@ def _render_systemic_prompt(
         user = f"{user}\n\n{discussion}"
     system = _append_block(head.strip(), prompt_context.rules_sweep)
     system = _append_block(system, prompt_context.ticket_scope)
+    system = _append_block(system, prompt_context.rule_request)
     return system, user
 
 
@@ -625,15 +671,15 @@ def review_chunk(
     every chunk without any per-caller wiring.
 
     ``prompt_context`` carries the run-wide injected inputs
-    (:class:`PromptContext`): ``rules_worker`` and ``ticket_scope`` are
-    appended to the system prompt, ``ticket_context`` and ``spec_digest`` are
-    filled into the user prompt before the diff. An empty ``spec_digest``
-    renders the literal ``(no specs provided for this review)``, and the
-    prompt tells the model ``spec`` is then not a legal severity. A finding's
-    ``scope`` is read from the response only when
+    (:class:`PromptContext`): ``rules_worker``, ``ticket_scope`` and
+    ``rule_request`` are appended to the system prompt, ``ticket_context``
+    and ``spec_digest`` are filled into the user prompt before the diff. An
+    empty ``spec_digest`` renders the literal ``(no specs provided for this
+    review)``, and the prompt tells the model ``spec`` is then not a legal
+    severity. A finding's ``scope`` is read from the response only when
     :attr:`PromptContext.scope_active`; otherwise it is ``unknown``. Its
-    ``rule`` is read only when the context's ``rule_active`` is true;
-    otherwise it is ``None``. The
+    ``rule`` is read only when :attr:`PromptContext.rule_active`; otherwise
+    it is ``None``. The
     default :data:`NO_PROMPT_CONTEXT` injects nothing. The orchestrator
     always passes this keyword too, so any test double must accept it.
     """
@@ -652,7 +698,7 @@ def review_chunk(
         llm, system, user, budget=budget, label=f"chunk of {len(chunk)} files",
         trace_dir=trace_dir, trace_label=trace_label,
         accept_scope=prompt_context.scope_active,
-        accept_rule=getattr(prompt_context, "rule_active", False),
+        accept_rule=prompt_context.rule_active,
     )
 
 
@@ -708,5 +754,5 @@ def review_systemic(
         llm, system, user, budget=budget, label="systemic sweep",
         trace_dir=trace_dir, trace_label=trace_label,
         accept_scope=prompt_context.scope_active,
-        accept_rule=getattr(prompt_context, "rule_active", False),
+        accept_rule=prompt_context.rule_active,
     )

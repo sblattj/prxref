@@ -1509,7 +1509,7 @@ def _invoke_chunk(
     unchanged on both attempts: it is intent, not bulk context, and a
     dict-shaped finding keeps its ``scope`` only when
     :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
-    the context's ``rule_active`` is true.
+    :attr:`reviewer.PromptContext.rule_active`.
 
     The shape carries the reviewer's reported ``cost_usd`` and
     ``cost_source`` beside the token counts; a call that raised, or a stub
@@ -1550,7 +1550,7 @@ def _invoke_chunk(
     for item in res.get("findings") or []:
         finding = _coerce_finding(
             item, accept_scope=prompt_context.scope_active,
-            accept_rule=getattr(prompt_context, "rule_active", False),
+            accept_rule=prompt_context.rule_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -1666,11 +1666,11 @@ def _run_sweep(
     :func:`reviewer.review_systemic` — so ``PRXREF_LLM_MAX_TOKENS``, the
     timeout, and the model fallback chain all apply as to any chunk — and
     returns the same result shape a chunk worker does. ``prompt_context``
-    rides along into the sweep prompt (sweep rules and ticket scope in the
-    system half, ticket context and the spec digest in the user half), and a
-    dict-shaped finding keeps its ``scope`` only when
+    rides along into the sweep prompt (sweep rules, ticket scope and the rule
+    request in the system half, ticket context and the spec digest in the
+    user half), and a dict-shaped finding keeps its ``scope`` only when
     :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
-    the context's ``rule_active`` is true. A failure is that
+    :attr:`reviewer.PromptContext.rule_active`. A failure is that
     shape with ``error`` set prefixed ``systemic sweep:``, so the
     partial-review banner names the unit that failed; it counts as one
     failed chunk in the caller's coverage accounting.
@@ -1712,7 +1712,7 @@ def _run_sweep(
     for item in findings_raw:
         finding = _coerce_finding(
             item, accept_scope=prompt_context.scope_active,
-            accept_rule=getattr(prompt_context, "rule_active", False),
+            accept_rule=prompt_context.rule_active,
         )
         if finding is not None:
             findings.append(finding)
