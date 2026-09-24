@@ -34,12 +34,14 @@ from __future__ import annotations
 
 import codecs
 import errno
+import fnmatch
 import hashlib
+import itertools
 import logging
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .llm import ConfigError
@@ -302,3 +304,70 @@ def load_review_rules(path: str | None, *, max_chars: int, source: str) -> Revie
     if not capped.text and not severity_map:
         logger.warning("%s: rules file %r is empty; no rules injected", source, path)
     return ReviewRules(path=path, body=capped, severity_map=severity_map, ignored_keys=ignored)
+
+
+_ANY_DIRS = "**/"
+
+
+def match_globs(path: str, patterns: Sequence[str]) -> bool:
+    """True when ``patterns``, a scoped rules file's ``applies_to`` list, selects ``path``.
+
+    ``path`` is a diff path: POSIX, relative to the repository root. Each
+    pattern is matched against the whole path with
+    :func:`fnmatch.fnmatchcase`, as ``PRXREF_SIZE_IGNORE_GLOBS`` is, so the
+    match is case-sensitive on every host and ``*`` crosses ``/``. A pattern
+    that starts with ``!`` negates the glob after it.
+
+    The path is selected when at least one positive pattern matches it and no
+    negation does. Order does not matter: a negation vetoes the path wherever
+    it sits in the list, and a positive pattern after it cannot bring the path
+    back, unlike the last-match-wins rule of ``.gitignore``. An empty list, or
+    a list of negations only, selects nothing. A leading ``!`` always
+    negates, so a pattern for a path that itself starts with ``!`` starts
+    with ``?`` instead.
+
+    One addition to plain ``fnmatch``: a ``**/`` that starts the pattern or
+    follows a ``/`` also matches zero directories, so ``**/*.java`` selects a
+    root-level ``Foo.java``, ``!**/src/test/**`` vetoes ``src/test/A.java``,
+    and ``src/**/*.java`` selects ``src/Foo.java``. Stdlib ``fnmatch`` needs a
+    ``/`` there, and ``PRXREF_SIZE_IGNORE_GLOBS`` keeps that stricter match.
+    A pattern matches when it, or any copy of it with some of those ``**/``
+    removed, matches under ``fnmatchcase``; a run such as ``**/**/`` counts as
+    one. Each of ``k`` such ``**/`` doubles the copies tried, so the cost is
+    ``2**k`` ``fnmatchcase`` calls at worst.
+    """
+    selected = False
+    for pattern in patterns:
+        if pattern.startswith("!"):
+            if _glob_matches(path, pattern[1:]):
+                return False
+        elif not selected:
+            selected = _glob_matches(path, pattern)
+    return selected
+
+
+def _glob_matches(path: str, pattern: str) -> bool:
+    """True when ``path`` matches ``pattern`` or a copy of it with some ``**/`` removed."""
+    head, *tail = _split_any_dirs(pattern)
+    for kept in itertools.product((_ANY_DIRS, ""), repeat=len(tail)):
+        variant = head + "".join(sep + piece for sep, piece in zip(kept, tail, strict=True))
+        if fnmatch.fnmatchcase(path, variant):
+            return True
+    return False
+
+
+def _split_any_dirs(pattern: str) -> list[str]:
+    """Split ``pattern`` at each ``**/`` that starts it or follows a ``/``, a run counting as one."""
+    pieces: list[str] = []
+    start = index = 0
+    while index < len(pattern):
+        if pattern.startswith(_ANY_DIRS, index) and (index == 0 or pattern[index - 1] == "/"):
+            pieces.append(pattern[start:index])
+            index += len(_ANY_DIRS)
+            while pattern.startswith(_ANY_DIRS, index):
+                index += len(_ANY_DIRS)
+            start = index
+        else:
+            index += 1
+    pieces.append(pattern[start:])
+    return pieces
