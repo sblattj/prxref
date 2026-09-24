@@ -1001,3 +1001,98 @@ def test_get_compare_diff_raises_on_http_error():
         ForgeImpl(session=session).get_compare_diff(
             _gl_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
         )
+
+
+# --- get_diff pagination ------------------------------------------------------
+
+# GitLab's documented default for the MR diffs listing when no per_page is sent.
+GITLAB_DEFAULT_PER_PAGE = 20
+
+
+def _diff_entry(i):
+    path = f"src/mod_{i:03d}.py"
+    return {"old_path": path, "new_path": path, "diff": f"@@ -1 +1 @@\n-a{i}\n+b{i}\n"}
+
+
+def _paging_diff_server(entries, fail_page=None, failure=None):
+    """Serve ``entries`` the way GitLab pages them: sliced by the request's own
+    ``page`` and ``per_page``, never by call order. ``fail_page`` answers that
+    page with ``failure`` (a response, or an exception to raise) instead.
+    """
+    def get(url, headers=None, params=None, timeout=None):
+        params = params or {}
+        page = int(params.get("page", 1))
+        per_page = int(params.get("per_page", GITLAB_DEFAULT_PER_PAGE))
+        if page == fail_page:
+            if isinstance(failure, BaseException):
+                raise failure
+            return failure
+        start = (page - 1) * per_page
+        return _mock_response(200, json_data=entries[start:start + per_page])
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def test_get_diff_reads_every_page_of_a_large_mr():
+    # More files than one page of the adapter's page size, so the walk has to
+    # cross two page boundaries; a single request of GitLab's default size
+    # would have seen the first 20 of them.
+    entries = [_diff_entry(i) for i in range(2 * gitlab._PAGE_SIZE + 45)]
+    session = _paging_diff_server(entries)
+
+    diff = ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert [f.path for f in parse_unified_diff(diff)] == [e["new_path"] for e in entries]
+    assert diff == gitlab._render_diff_entries(entries)
+    sent = [c[1]["params"] for c in session.get.call_args_list]
+    assert [p["page"] for p in sent] == [1, 2, 3]
+    assert {p["per_page"] for p in sent} == {gitlab._PAGE_SIZE}
+    assert all(p["access_raw_diffs"] == "true" for p in sent)
+    assert all(
+        c[0][0] == "https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/7/diffs"
+        for c in session.get.call_args_list
+    )
+
+
+def test_get_diff_stops_after_a_single_short_page():
+    entries = [_diff_entry(i) for i in range(3)]
+    session = _paging_diff_server(entries)
+
+    diff = ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert session.get.call_count == 1
+    assert session.get.call_args[1]["params"]["page"] == 1
+    assert diff == gitlab._render_diff_entries(entries)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _mock_response(500, json_data={"message": "boom"}),
+        requests.ConnectionError("down"),
+    ],
+    ids=["http-500", "transport"],
+)
+def test_get_diff_fails_rather_than_returning_the_first_page_alone(failure):
+    entries = [_diff_entry(i) for i in range(gitlab._PAGE_SIZE + 5)]
+    session = _paging_diff_server(entries, fail_page=2, failure=failure)
+
+    with pytest.raises(FeedReadError, match="MR diff list .* page 2"):
+        ForgeImpl(session=session).get_diff(_gl_ref())
+
+    assert [c[1]["params"]["page"] for c in session.get.call_args_list] == [1, 2]
+
+
+@pytest.mark.parametrize("flag", ["too_large", "collapsed"])
+def test_get_diff_keeps_an_excluded_file_as_header_only(flag):
+    # GitLab 18.4+ marks a file whose hunks it will not serve; the MR is still
+    # reviewed, with that file present and hunkless rather than dropped.
+    big = {"old_path": "data/big.csv", "new_path": "data/big.csv", "diff": "", flag: True}
+    session = _paging_diff_server([RENDER_ENTRIES[0], big])
+
+    files = parse_unified_diff(ForgeImpl(session=session).get_diff(_gl_ref()))
+
+    assert [f.path for f in files] == ["src/a.py", "data/big.csv"]
+    assert files[1].hunks == []
