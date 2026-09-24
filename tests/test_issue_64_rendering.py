@@ -14,11 +14,18 @@ Scope ``in`` and ``unknown`` render byte-identically to a run without a
 ticket, which is the feature-off guarantee. The ticket object is faked with
 the duck-typed surface the orchestrator reads (``active``, ``record()``,
 ``note()``, ``scope_block()``, ``prompt_block()``); the real loader is W64A's.
+
+The prompt side of the same field is pinned here too: the ``## Output Format``
+JSON example that ends every worker and sweep USER prompt shows
+``"scope": "in"`` on its finding only while a ticket is active, and with no
+ticket both prompts are byte-identical to the pre-ticket ones.
 """
 from __future__ import annotations
 
 import io
+import json
 import re
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +33,7 @@ import pytest
 from prxref import orchestrator
 from prxref.cli import _fmt_finding_line, _print_findings
 from prxref.formatter import format_inline_comment
+from prxref.llm import InvokeResult
 from prxref.markers import (
     OUT_OF_TICKET_MARKER,
     SCOPE_LABELS,
@@ -34,7 +42,20 @@ from prxref.markers import (
     marker_for,
 )
 from prxref.orchestrator import _format_finding, _render_summary
-from prxref.triage import SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN, SCOPES, Finding
+from prxref.reviewer import (
+    NO_PROMPT_CONTEXT,
+    PromptContext,
+    _render_prompt,
+    _render_systemic_prompt,
+)
+from prxref.triage import (
+    SCOPE_IN,
+    SCOPE_OUT,
+    SCOPE_UNKNOWN,
+    SCOPES,
+    Finding,
+    parse_unified_diff,
+)
 from tests.test_orchestrator import REF, FakeForge, FakeLLM, _added_file_diff, make_pr
 
 BLUE = "🟦"
@@ -458,3 +479,136 @@ class TestSummaryOnlyAndErrorRuns:
         (notice,) = forge.summaries
         assert notice.startswith("🤖 **prxref review — Error**")
         assert "ℹ️" not in notice and BLUE not in notice
+
+
+PROMPT_DIFF = """\
+diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,3 @@
+ import os
++import sys
+ print(os.name)
+"""
+PROMPT_DIGEST = "## src/app.py\n@@ -1,2 +1,3 @@\n+import sys"
+EXAMPLE_KEYS = ["file", "line", "severity", "confidence", "title", "body"]
+SCOPE_LINE = ',\n      "scope": "in"'
+_PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
+
+
+def _worker_prompt(ctx: PromptContext = NO_PROMPT_CONTEXT) -> tuple[str, str]:
+    return _render_prompt(parse_unified_diff(PROMPT_DIFF), "t", "d", "r", prompt_context=ctx)
+
+
+def _sweep_prompt(ctx: PromptContext = NO_PROMPT_CONTEXT) -> tuple[str, str]:
+    return _render_systemic_prompt(PROMPT_DIGEST, "t", "d", "r", prompt_context=ctx)
+
+
+RENDERERS = [pytest.param(_worker_prompt, id="worker"), pytest.param(_sweep_prompt, id="sweep")]
+
+
+def _active(ticket_context: str | None = None) -> PromptContext:
+    """The prompt context the orchestrator builds for an active ticket."""
+    ticket = FakeTicket("AC")
+    return PromptContext(
+        ticket_scope=ticket.scope_block(),
+        ticket_context=ticket.prompt_block() if ticket_context is None else ticket_context,
+    )
+
+
+def _example(user: str) -> dict:
+    """The ``## Output Format`` JSON example of a rendered user prompt, parsed."""
+    section = user.rsplit("## Output Format", 1)[1]
+    return json.loads(section.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
+class TestOutputFormatExampleScope:
+    """The example ends the USER prompt and a model copies the example it read
+    last, so the ``scope`` ask in the SYSTEM prompt alone went unanswered by
+    gpt-4.1-mini. The example finding carries ``"scope": "in"`` exactly while
+    the system prompt asks for scope, and nothing else in either prompt moves."""
+
+    @pytest.mark.parametrize("render", RENDERERS)
+    def test_no_ticket_user_prompt_never_mentions_scope(self, render):
+        _system, user = render()
+        assert '"scope"' not in user
+        assert _PLACEHOLDER.findall(user) == []
+        (finding,) = _example(user)["findings"]
+        assert list(finding) == EXAMPLE_KEYS
+
+    @pytest.mark.parametrize("render", RENDERERS)
+    def test_active_ticket_example_finding_ends_in_scope_in(self, render):
+        _system, user = render(_active())
+        (finding,) = _example(user)["findings"]
+        assert list(finding) == [*EXAMPLE_KEYS, "scope"]
+        assert finding["scope"] == SCOPE_IN
+        assert _PLACEHOLDER.findall(user) == []
+
+    @pytest.mark.parametrize("render", RENDERERS)
+    def test_the_scope_key_is_the_only_change_to_the_user_prompt(self, render):
+        _system, user_on = render(PromptContext(ticket_scope=FakeTicket("AC").scope_block()))
+        _system, user_off = render()
+        assert user_on.count(SCOPE_LINE) == 1
+        assert user_on.replace(SCOPE_LINE, "", 1) == user_off
+
+    @pytest.mark.parametrize("render", RENDERERS)
+    def test_the_system_prompt_keeps_exactly_one_ticket_scope_block(self, render):
+        system_on, _user = render(_active())
+        system_off, _user = render()
+        assert system_on == f"{system_off}\n\n{FakeTicket('AC').scope_block()}"
+        assert system_on.count("## Ticket scope") == 1
+        assert SCOPE_LINE not in system_on
+
+    @pytest.mark.parametrize("render", RENDERERS)
+    def test_ticket_text_without_the_scope_ask_adds_no_scope_key(self, render):
+        _system, user = render(PromptContext(ticket_context=FakeTicket("AC").prompt_block()))
+        assert '"scope"' not in user
+        (finding,) = _example(user)["findings"]
+        assert list(finding) == EXAMPLE_KEYS
+
+    def test_a_ticket_quoting_the_slot_renders_it_literally(self):
+        _system, user = _worker_prompt(_active("### Ticket context\n\nquote {scope_example} here"))
+        assert "quote {scope_example} here" in user
+        assert user.count(SCOPE_LINE) == 1
+
+
+class _PromptRecorder:
+    """Records every (system, user) prompt and answers with no findings."""
+
+    def __init__(self):
+        self.prompts: list[tuple[str, str]] = []
+        self._lock = threading.Lock()
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        with self._lock:
+            self.prompts.append((system, user))
+        return InvokeResult(
+            text='{"findings": [], "escalations": []}', input_tokens=10, output_tokens=5,
+            model="rec-model-1", backend="fake", elapsed_ms=1,
+        )
+
+
+def _live_prompts(state: str) -> list[tuple[str, str]]:
+    """Every prompt a real orchestrator run sends, for one ticket state."""
+    llm = _PromptRecorder()
+    ticket = None if state == "NONE" else FakeTicket(state)
+    forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+    orchestrator.orchestrate_review(forge, REF, llm, post=False, ticket=ticket)
+    return sorted(llm.prompts)
+
+
+class TestOutputFormatExampleThroughTheOrchestrator:
+    """The real orchestrator and reviewer with the packaged templates."""
+
+    @pytest.mark.parametrize("state", STATES)
+    def test_every_prompt_shows_scope_only_while_the_ticket_is_active(self, state):
+        prompts = _live_prompts(state)
+        assert len(prompts) == 2, "one chunk unit and one sweep"
+        active = state in ("NO_AC", "AC")
+        for _system, user in prompts:
+            assert user.count(SCOPE_LINE) == (1 if active else 0)
+            assert ('"scope"' in user) is active
+            assert _PLACEHOLDER.findall(user) == []
+
+    def test_an_empty_ticket_sends_the_no_ticket_prompts(self):
+        assert _live_prompts("EMPTY") == _live_prompts("NONE")
