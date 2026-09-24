@@ -74,7 +74,7 @@ Return exactly one JSON object, no prose, no fences:
       "severity": "error",
       "confidence": 0.9,
       "title": "Paid API handler has no auth check",
-      "body": "The digest shows the handler on line 42 reaching the billing API; no nonce or auth line for it appears anywhere in the digest."
+      "body": "The digest shows the handler on line 42 reaching the billing API; no nonce or auth line for it appears anywhere in the digest."{scope_example}
     }
   ],
   "escalations": []
