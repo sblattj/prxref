@@ -705,11 +705,15 @@ class TestCliWiring:
 # sha256 of its output at BASE cdb3e9e, before any #13 T6 edit. Record and JSON
 # keys are projected onto the BASE key sets, so a key another 0.15 feature adds
 # (always present, null when off) does not read as an off-path change here.
+# "main" and "override" were re-derived when worker.md dropped its "roughly
+# 30k tokens" promise (0.15, seat Q-ECHO): the only fields that moved are the
+# worker prompt and unit-file hashes and, for "override", the override
+# worker.md's sha256 and chars (42 fewer); "summary_only" renders no prompt.
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {
-    "main": "157b58c765faec04c40c5959acbb2cf64a3f65610279979edb55dd45f70ac53b",
-    "override": "64ce8289a50334bcfbd39013978b058f2bdc340d0eb3f3d6ce4f11c08ab19dd9",
+    "main": "bcb8afd09b5e1915537205225d1d8fa7a5f030c454b94861fc4861ed998200ad",
+    "override": "01ae1cc9153c3976c8c64e243d908e64605020ea3370e60ad98b16041ddf6ee9",
     "summary_only": "1539f1e036492cf3437e08b9263413c6cf9f1cb4f5378753dcc602fff62715a5",
 }
 
