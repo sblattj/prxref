@@ -1,10 +1,10 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, and GitHub — Cloud and self-hosted.
+Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps — Cloud and self-hosted.
 
 ## What This Is
 
-A Python CLI + webhook service that reviews PRs/MRs on any of the three major
+A Python CLI + webhook service that reviews PRs/MRs on any of the four major
 forges by: parsing one unified diff, chunking it, running parallel single-shot
 LLM worker reviews with a fallback model chain, gating findings through
 deterministic quality passes, and posting inline comments + a summary.
@@ -15,7 +15,7 @@ auto-detects the forge.
 ## Tech
 
 - Python 3.12+, `uv` for env/lock, hatchling packaging
-- One `Forge` Protocol (src/prxref/forges/base.py), four adapters
+- One `Forge` Protocol (src/prxref/forges/base.py), five adapters
 - Bitbucket needs two of them: Cloud speaks `/2.0` on `bitbucket.org` only,
   Server / Data Center speaks `/rest/api/1.0` on any host, so the adapter is
   picked from the URL. `detect_forge` asks Cloud first, but that order is
@@ -26,6 +26,9 @@ auto-detects the forge.
   first means a later loosening degrades into a shadowed forge rather than a
   silently mis-routed one. GitHub and GitLab stay one adapter each, because
   their self-hosted products differ only in base URL.
+- Azure DevOps is one adapter for Services and Server, asked last by
+  `detect_forge`; it has no unified-diff endpoint, so it rebuilds the diff
+  locally from the Diffs API change list plus blob contents.
 - LLM access via a fallback chain (llm-ferry preferred, litellm optional,
   plain-HTTP client as zero-dependency default) — provider-agnostic, no
   Anthropic key by design
