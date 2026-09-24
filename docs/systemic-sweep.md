@@ -48,7 +48,10 @@ raises it anyway.
 The fetch is best-effort: a forge that cannot list threads still gets a full
 review, with an empty discussion block. It is deliberately ordered AFTER the
 stale-inline-comment prune, or the run would suppress its own findings against
-comments it is about to delete.
+comments it is about to delete. A `--no-threads` replay (and a `--diff-file`
+replay with no `--pr-url`) lists no threads, so no `### Existing discussion`
+block is printed and the two thread gates, `apply_thread_dedup` and
+`apply_settled_thread_suppression`, see no threads either.
 
 ## Drop reasons
 

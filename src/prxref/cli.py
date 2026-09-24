@@ -15,11 +15,16 @@ finding is marked in, out of, or of unknown ticket scope. Each flag wins over
 its variable, and ``--rules-file ""`` / ``--context-file ""`` turn the
 variable off for one run. Both files are read before any network call, so an
 unusable one is a configuration error. The webhook daemon reads the rules
-file from its own environment and never reads a ticket-context file. The
-replay flags (``--base-sha`` / ``--head-sha``, ``--no-threads``,
-``--diff-file``) review a pinned, reproducible input for evaluation, and a
-replay never posts. In this build the rules and ticket-context loaders and
-replay mode fail closed: a non-empty path or any replay flag exits 2.
+file from its own environment and never reads a ticket-context file.
+
+The replay flags review a pinned, reproducible input for evaluation:
+``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
+repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
+optional, and no forge is contacted without it), and ``--no-threads`` hides
+the PR's existing threads. Any of them makes the run a replay: it never
+posts, and its run record gains a ``replay`` stamp. They are validated
+before the URL is parsed, and a bad set exits 2 naming the flag. The webhook
+daemon never replays.
 
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
@@ -55,8 +60,10 @@ import importlib
 import json
 import logging
 import os
+import re
 import sys
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +71,7 @@ import prxref
 from prxref.config import load_config, make_forge
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
+from prxref.forges.replay import LocalDiffForge, ReplayForge
 from prxref.llm import ConfigError
 from prxref.rules import load_review_rules
 from prxref.ticket import load_ticket_context
@@ -88,7 +96,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rev = sub.add_parser("review", help="review one PR/MR from its web URL")
     rev.add_argument(
         "--pr-url",
-        required=True,
+        default=None,
         help=(
             "full URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure "
             "DevOps (required unless --diff-file is given)"
@@ -480,6 +488,40 @@ def _build_json_result(result: Any) -> dict:
     return payload
 
 
+_FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+
+
+@dataclass(frozen=True)
+class _ReplayRequest:
+    """The validated replay flags of one ``review`` run (issue #65).
+
+    ``base_sha`` / ``head_sha`` are both full, lowercased SHAs or both
+    ``None``. ``diff_file`` is the path exactly as the operator typed it, and
+    ``diff_text`` is that file's text once ``_run_review`` has read it
+    (``None`` until then, and without ``--diff-file``).
+    """
+
+    base_sha: str | None = None
+    head_sha: str | None = None
+    no_threads: bool = False
+    diff_file: str | None = None
+    diff_text: str | None = None
+
+    def stamp(self, *, has_forge: bool) -> dict[str, Any]:
+        """The run record's ``replay`` stamp: four keys, in a fixed order, all present.
+
+        ``threads`` is ``"hidden"`` whenever the PR's threads were not
+        consulted: under ``--no-threads``, or with no forge at all
+        (``--diff-file`` without ``--pr-url``).
+        """
+        return {
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "threads": "hidden" if self.no_threads or not has_forge else "shown",
+            "diff_file": self.diff_file,
+        }
+
+
 def _resolve_replay(
     url: str | None,
     *,
@@ -487,30 +529,101 @@ def _resolve_replay(
     head_sha: str | None = None,
     no_threads: bool = False,
     diff_file: str | None = None,
-) -> None:
+) -> _ReplayRequest | None:
     """Validate the replay flags; ``None`` means a normal, non-replay run.
 
     Pure: it reads nothing and calls nothing. ``_run_review`` calls it first,
     before ``detect_forge``, so a bad set of replay flags exits 2 even next
-    to an unrecognised URL.
+    to an unrecognised URL. A flag counts as given whenever it is not
+    ``None``, so an empty value is validated rather than ignored.
 
-    Replay mode is not wired in this build, so any replay flag, even with an
-    empty value, raises a ``ConfigError`` naming the flags given (exit 2)
-    rather than silently reviewing, and posting to, the live PR.
+    The checks run in this order, each a ``ConfigError`` naming its flag:
+    no ``--pr-url`` and no ``--diff-file``; only one of ``--base-sha`` /
+    ``--head-sha``; either one not a full 40- or 64-character hex SHA; the
+    two naming the same commit (compared lowercased); and a range without
+    ``--pr-url`` to resolve it in. Whether the forge can fetch the range is
+    only known once it exists, so ``_run_review`` checks that.
     """
-    given = [
-        flag
-        for flag, value in (
-            ("--base-sha", base_sha),
-            ("--head-sha", head_sha),
-            ("--no-threads", no_threads),
-            ("--diff-file", diff_file),
+    if url is None and diff_file is None:
+        raise ConfigError("--pr-url: required unless --diff-file is given")
+    if (base_sha is None) != (head_sha is None):
+        only = "--base-sha" if head_sha is None else "--head-sha"
+        raise ConfigError(f"--base-sha/--head-sha: must be given together (got only {only})")
+    if base_sha is not None and head_sha is not None:
+        for flag, value in (("--base-sha", base_sha), ("--head-sha", head_sha)):
+            if not _FULL_SHA_RE.fullmatch(value):
+                raise ConfigError(
+                    f"{flag}: must be a full 40- or 64-character hex commit SHA, "
+                    f"got {value!r} (resolve it with git rev-parse)"
+                )
+        base_sha, head_sha = base_sha.lower(), head_sha.lower()
+        if base_sha == head_sha:
+            raise ConfigError("--base-sha/--head-sha: must name two different commits")
+        if url is None:
+            raise ConfigError(
+                "--base-sha/--head-sha: need --pr-url (the range is resolved in "
+                "that PR's repository)"
+            )
+    if head_sha is None and not no_threads and diff_file is None:
+        return None
+    return _ReplayRequest(
+        base_sha=base_sha, head_sha=head_sha, no_threads=bool(no_threads),
+        diff_file=diff_file,
+    )
+
+
+def _read_diff_file(path: str) -> str:
+    """Read the ``--diff-file`` text; a file that cannot be read is a ``ConfigError``.
+
+    The message is ``--diff-file: cannot read '<path>': <strerror>``, which
+    covers a missing file and a directory alike. Undecodable bytes are
+    replaced, not refused, because the diff is review input rather than
+    configuration. A blank file is not a configuration error either: the
+    replay forge raises on it, and the run ends as an ``Error`` run (exit 0).
+    """
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(
+            f"--diff-file: cannot read {path!r}: {exc.strerror or exc}"
+        ) from exc
+
+
+def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
+    """Wrap the ``--pr-url`` forge in a :class:`ReplayForge` for this replay.
+
+    A pinned range that has to be fetched (no ``--diff-file``) needs the
+    forge's optional ``get_compare_diff``; without it this raises the
+    ``ConfigError`` naming ``--base-sha/--head-sha`` (exit 2) before any
+    network call. Two combinations are allowed but logged as a WARNING,
+    because each leaks the PR's present into a replay: pinned SHAs without
+    ``--no-threads`` still show the PR's current threads, and a
+    ``--diff-file`` without ``--head-sha`` reads file context at the PR's
+    current head.
+    """
+    if (
+        replay.head_sha is not None
+        and replay.diff_text is None
+        and getattr(forge, "get_compare_diff", None) is None
+    ):
+        raise ConfigError(
+            f"--base-sha/--head-sha: the {ref.forge} forge cannot fetch a "
+            "pinned commit range"
         )
-        if value is not None and value is not False
-    ]
-    if given:
-        raise ConfigError(f"{'/'.join(given)}: replay mode is not wired in this build")
-    return None
+    if replay.head_sha is not None and not replay.no_threads:
+        logger.warning(
+            "replay at pinned SHAs still shows the PR's CURRENT threads to the "
+            "prompt and the dedup passes; add --no-threads for a blind replay"
+        )
+    if replay.diff_file is not None and replay.head_sha is None:
+        logger.warning(
+            "--diff-file with --pr-url and no --head-sha: file context is read "
+            "at the PR's current head, which may not match the file"
+        )
+    return ReplayForge(
+        forge, base_sha=replay.base_sha, head_sha=replay.head_sha,
+        hide_threads=replay.no_threads, diff_text=replay.diff_text,
+    )
 
 
 def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> Any:
@@ -531,7 +644,7 @@ def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> 
 
 
 def _run_review(
-    url: str,
+    url: str | None,
     *,
     post: bool = True,
     max_chunks: int | None = None,
@@ -549,9 +662,17 @@ def _run_review(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
         diff_file=diff_file,
     )
-    ref = detect_forge(url)
-    if ref is None:
-        return None
+    # The diff file is read with the flags, before the URL is parsed, so an
+    # unreadable one exits 2 whatever the URL. Without --pr-url it is the
+    # whole input: a synthetic "local" ref, and no forge is ever built.
+    if replay is not None and replay.diff_file is not None:
+        replay = replace(replay, diff_text=_read_diff_file(replay.diff_file))
+    if url is None:
+        ref = LocalDiffForge.ref_for(replay.diff_file)
+    else:
+        ref = detect_forge(url)
+        if ref is None:
+            return None
     # --max-chunks, --timeout, --spec, --rules-file and --context-file arrive
     # as load_config overrides (None is ignored, "" is not), so each flag rides
     # exactly the path its environment variable does: --max-chunks and
@@ -605,7 +726,18 @@ def _run_review(
     if post and cfg["dry_run"]:
         logger.info("PRXREF_DRY_RUN=1: reviewing %s without posting to the forge", ref.url)
         post = False
-    forge = make_forge(ref)
+    # A replay reviews a pinned input for evaluation, never the live PR as it
+    # stands, so it must never write: any replay flag turns posting off, with
+    # or without --no-post. The replay forges also refuse every write.
+    if replay is not None and post:
+        logger.info("replay run: posting to the forge is disabled")
+        post = False
+    if url is None:
+        forge = LocalDiffForge(replay.diff_text, path=replay.diff_file)
+    else:
+        forge = make_forge(ref)
+        if replay is not None:
+            forge = _replay_forge(forge, ref, replay)
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
     return orchestrate(
@@ -647,7 +779,7 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
-        replay=replay,
+        replay=replay.stamp(has_forge=url is not None) if replay is not None else None,
     )
 
 
