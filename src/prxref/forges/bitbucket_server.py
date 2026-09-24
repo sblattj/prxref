@@ -246,14 +246,24 @@ class ForgeImpl:
             return match.group("scheme").lower()
         return "https"
 
-    def _pr_url(self, ref: PRRef, suffix: str = "") -> str:
-        """Construct the Data Center API endpoint URL for a given PR."""
+    def _repo_url(self, ref: PRRef, suffix: str = "") -> str:
+        """Construct a Data Center API endpoint URL under the PR's repository.
+
+        The scheme and the deployment context path are the ones recovered from
+        ``ref.url``, and ``ref.owner`` is already the API project key (the
+        ``~slug`` form for a personal repository), so every repository-level
+        and PR-level request is built on this one prefix.
+        """
         context = self._context_path(ref)
         base = (
             f"{self._scheme(ref)}://{ref.host}{context}/rest/api/1.0"
-            f"/projects/{ref.owner}/repos/{ref.repo}/pull-requests/{ref.number}"
+            f"/projects/{ref.owner}/repos/{ref.repo}"
         )
         return f"{base}{suffix}"
+
+    def _pr_url(self, ref: PRRef, suffix: str = "") -> str:
+        """Construct the Data Center API endpoint URL for a given PR."""
+        return self._repo_url(ref, f"/pull-requests/{ref.number}{suffix}")
 
     def get_pr(self, ref: PRRef) -> PRData:
         """Fetch normalized PR metadata."""
@@ -306,6 +316,58 @@ class ForgeImpl:
             )
 
         return diff_text
+
+    def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
+        """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
+
+        The raw diff endpoint (``/diff?since=&until=``) diffs from whatever
+        ``since`` names, with no merge-base step of its own, so passing the base
+        commit straight through would also show everything that landed on the
+        base after the fork. The merge-base is therefore resolved first
+        (``/commits/{head}/merge-base?otherCommitId={base}``) and used as
+        ``since``. When that lookup fails or names no commit, a WARNING is
+        logged and ``base_sha`` itself is used, which is still right whenever
+        it already is the fork point, as a PR's recorded target commit usually
+        is.
+
+        The raw diff is served only as ``text/plain``, at a low quality factor,
+        so the Accept header is explicit. An empty range comes back as ``""``.
+        Raises on an HTTP or transport failure of the diff request.
+        """
+        headers, auth = self._get_auth()
+        since = base_sha
+        try:
+            mb = self._session.get(
+                self._repo_url(ref, f"/commits/{head_sha}/merge-base"),
+                headers=headers,
+                auth=auth,
+                params={"otherCommitId": base_sha},
+                timeout=_REQUEST_TIMEOUT,
+            )
+            mb.raise_for_status()
+            commit = mb.json()
+            merge_base = commit.get("id") if isinstance(commit, dict) else None
+            if merge_base:
+                since = merge_base
+            else:
+                logger.warning(
+                    "merge-base(%s, %s) named no commit; diffing from base_sha directly",
+                    head_sha, base_sha,
+                )
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                "merge-base(%s, %s) failed (%s); diffing from base_sha directly",
+                head_sha, base_sha, e,
+            )
+        resp = self._session.get(
+            self._repo_url(ref, "/diff"),
+            headers={**headers, "Accept": "text/plain"},
+            auth=auth,
+            params={"since": since, "until": head_sha},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.text
 
     def _iter_activity_pages(self, ref: PRRef) -> Iterator[list[dict]]:
         """Yield the COMMENTED activity entries one page at a time.
@@ -512,17 +574,13 @@ class ForgeImpl:
         Hits the repository-level ``/raw`` endpoint directly rather than a
         pull-request-scoped one — this is a commit-addressed file read, not a
         PR resource. ``ref.owner`` already carries the ``~slug`` form for a
-        personal repository, so this builds the same project path
+        personal repository, so this builds on the same ``_repo_url`` prefix
         ``_pr_url`` does. Never raises.
         """
         if not sha:
             return None
         headers, auth = self._get_auth()
-        context = self._context_path(ref)
-        url = (
-            f"{self._scheme(ref)}://{ref.host}{context}/rest/api/1.0"
-            f"/projects/{ref.owner}/repos/{ref.repo}/raw/{quote(path, safe='/')}"
-        )
+        url = self._repo_url(ref, f"/raw/{quote(path, safe='/')}")
         try:
             resp = self._session.get(
                 url, headers=headers, auth=auth, params={"at": sha},

@@ -1,6 +1,6 @@
 # Forge Integrations & Webhooks
 
-`prxref` provides unified pull/merge request reviews across Bitbucket (Cloud and Server / Data Center), GitHub (Cloud and Enterprise Server), and GitLab (SaaS and self-hosted).
+`prxref` provides unified pull/merge request reviews across Bitbucket (Cloud and Server / Data Center), GitHub (Cloud and Enterprise Server), GitLab (SaaS and self-hosted), and Azure DevOps (Services and Server).
 
 ## Supported Hosts
 
@@ -9,8 +9,9 @@
 | **Bitbucket** | `bitbucket.org` | Supported — Bitbucket Server / Data Center, any host, including a deployment context path |
 | **GitHub** | `github.com` | Supported — GitHub Enterprise Server, any host |
 | **GitLab** | `gitlab.com` | Supported — any host, including nested subgroups |
+| **Azure DevOps** | `dev.azure.com`, `*.visualstudio.com` | Supported, untested live — Azure DevOps Server, any host; the URL must include the collection and the project |
 
-Every host is covered, but not by the same means. GitHub and GitLab are host-agnostic within one adapter each, because their self-hosted products speak the same REST API as their SaaS ones, differing only in base URL (`/api/v3` for GHES, `/api/v4` for every GitLab). Bitbucket is not: Server / Data Center exposes a different API surface (`/rest/api/1.0`) with different resource shapes, so it is a fourth adapter rather than a base-URL setting, selected automatically from the URL. See [Bitbucket Server / Data Center](#4-bitbucket-server--data-center).
+Every host is covered, but not by the same means. GitHub and GitLab are host-agnostic within one adapter each, because their self-hosted products speak the same REST API as their SaaS ones, differing only in base URL (`/api/v3` for GHES, `/api/v4` for every GitLab). Bitbucket is not: Server / Data Center exposes a different API surface (`/rest/api/1.0`) with different resource shapes, so it is a fourth adapter rather than a base-URL setting, selected automatically from the URL. See [Bitbucket Server / Data Center](#4-bitbucket-server--data-center). Azure DevOps is the fifth adapter, and like GitHub and GitLab it serves both products: Services and Server speak the same REST API and differ only in where the collection sits in the URL. See [Azure DevOps Services & Server](#5-azure-devops-services--server).
 
 ---
 
@@ -36,6 +37,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Accepted Events:** `pullrequest:created`, `pullrequest:updated`
   - **Payload:** PR URL read from `pullrequest.links.html.href`.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against `PRXREF_BITBUCKET_WEBHOOK_SECRET`.
+- **Pinned Commit Range (Replay):** `GET /2.0/repositories/{owner}/{repo}/diff/{head_sha}..{base_sha}?topic=true` with `Accept: text/plain`, returning the changes on the head side of the merge-base. Bitbucket spells a range SOURCE..DEST, the reverse of git, so the head SHA comes first; the other order names the reverse range and returns a different diff that still parses. `topic=true` is the merge-base ("three-dot") form and is sent explicitly rather than left to the default, because `topic=false` diffs the two commits directly and so also shows whatever landed on the base after the fork. The text is returned unmodified, an empty range returns empty text, and an HTTP or transport error raises.
 
 ---
 
@@ -51,7 +53,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
 - **API Endpoints & Behavior:**
   - **Base URL:** `https://api.github.com` for `github.com`, or `https://{host}/api/v3` for GHES.
   - **Metadata:** `GET /repos/{owner}/{repo}/pulls/{number}`
-  - **Diffs:** `GET /repos/{owner}/{repo}/pulls/{number}` with `Accept: application/vnd.github.v3.diff, application/vnd.diff`.
+  - **Diffs:** `GET /repos/{owner}/{repo}/pulls/{number}` with `Accept: application/vnd.github.v3.diff, application/vnd.diff`. GitHub refuses this diff for a pull request whose diff runs past 20,000 lines (HTTP `406`, error code `too_large`), so such a PR ends as an `Error` run and gets the error notice. There is no fallback to the paged `/pulls/{number}/files` listing yet.
   - **Summary Comments:** Managed on the issue comments endpoint (`/repos/{owner}/{repo}/issues/{number}/comments`). Summary deduplication is handled via the embedded hidden HTML marker `<!-- prxref-summary -->`. If an existing review comment contains this marker, it is updated via `PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}` instead of creating a duplicate comment.
   - **Inline Comments:** `POST /repos/{owner}/{repo}/pulls/{number}/comments` with `body`, `path`, `line`, and `side` (`RIGHT`). HTTP 422 errors (e.g. comment line not part of diff hunk) are gracefully skipped.
   - **Thread List:** `GET /repos/{owner}/{repo}/pulls/{number}/comments`.
@@ -60,6 +62,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Event Header:** `X-GitHub-Event` (must equal `pull_request`)
   - **Accepted Actions:** `opened`, `synchronize`
   - **Signature Header:** `X-Hub-Signature-256` (HMAC-SHA256) validated against `PRXREF_GITHUB_WEBHOOK_SECRET`.
+- **Pinned Commit Range (Replay):** `GET /repos/{owner}/{repo}/compare/{base_sha}...{head_sha}` on the same base URL (GHES included), with `Accept: application/vnd.github.diff`. The three dots are the merge-base form and are required, because the two-dot spelling returns 404. Without the diff media type the endpoint returns its JSON comparison object rather than a diff. The text is returned unmodified, an empty range (a head already merged into the base) returns empty text, and an HTTP or transport error raises.
 
 ---
 
@@ -74,15 +77,16 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
 - **API Endpoints & Behavior:**
   - **Base URL:** `https://{host}/api/v4/projects/{url_encoded_project_path}`
   - **Metadata:** `GET /merge_requests/{number}`. Target SHA is resolved from `diff_refs.base_sha` or fallback branch lookup.
-  - **Diffs:** `GET /merge_requests/{number}/diffs?access_raw_diffs=true`. Reconstructs a full unified multi-file diff string from GitLab's structured diff items (including new, deleted, renamed, and modified file headers).
+  - **Diffs:** `GET /merge_requests/{number}/diffs`, paged with `per_page=100` and read to the last page. Reconstructs a full unified multi-file diff string from GitLab's structured diff items (including new, deleted, renamed, and modified file headers). A page that cannot be read (a transport error, a non-OK status, or a body that is not a JSON list), or a listing longer than 50 pages (5,000 files), fails the review with `FeedReadError` rather than reviewing part of the MR. An MR with no file entries at all is an error too. An entry flagged `too_large` or `collapsed` carries no inline diff: it is logged as a warning and reviewed as a header-only file.
   - **Summary Comments:** Managed via `GET/POST/PUT /merge_requests/{number}/notes`. Searches for `<!-- prxref-summary -->` and updates existing note via `PUT` if found.
   - **Inline Comments:** Posted as discussions via `POST /merge_requests/{number}/discussions` with text position references (`base_sha`, `start_sha`, `head_sha`, `new_path`, `new_line`). If position anchoring fails with HTTP 400 (e.g. line outside diff or obsolete context), it automatically falls back to posting a plain note via `POST /merge_requests/{number}/notes` formatted with `file: {path}\n\n{body}`.
-  - **Thread List:** `GET /merge_requests/{number}/discussions`.
+  - **Thread List:** `GET /merge_requests/{number}/discussions`. Thread dedup needs `PRXREF_GITLAB_TOKEN` even on a public gitlab.com project: gitlab.com serves the MR and its diffs anonymously but answers anonymous `/notes` and `/discussions` requests with HTTP 401, so a tokenless review logs `discussion feed read was incomplete` and dedups against no threads.
   - **File Content:** `GET /repository/files/{url_encoded_path}/raw?ref={sha}` (path percent-encoded including slashes), best-effort, read with the same `PRIVATE-TOKEN` as everything else above (no extra scope). A non-2xx, oversize, or binary body returns `None` and is logged at debug, never a hard error.
 - **Webhook Integration:**
   - **Event Header:** `X-Gitlab-Event` (normalized to `MergeRequestHook`)
   - **Accepted Actions:** `open`, `update`
   - **Signature Header:** `X-Gitlab-Token` (plain secret token) validated against `PRXREF_GITLAB_WEBHOOK_SECRET`.
+- **Pinned Commit Range (Replay):** `GET /repository/compare?from={base_sha}&to={head_sha}&straight=false`. `straight=false` is the merge-base form; `straight=true` would diff the two commits directly. `unidiff` is deliberately not requested, so each entry's `diff` holds only its hunks, and the entries are rendered by the same header reconstruction as **Diffs** above. A response with `compare_timeout: true` raises rather than reviewing an incomplete file list. An entry flagged `too_large` or `collapsed` carries no inline diff: it is logged as a warning and reviewed as a header-only file. An empty range returns empty text, and an HTTP or transport error raises.
 
 ---
 
@@ -160,3 +164,180 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
     capital `R`, and the list, both of which differ from Cloud.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against
     `PRXREF_BITBUCKET_WEBHOOK_SECRET`, the same secret Cloud uses.
+- **Pinned Commit Range (Replay):** two requests under
+  `{scheme}://{host}{context}/rest/api/1.0/projects/{key}/repos/{slug}`. First
+  `GET …/commits/{head_sha}/merge-base?otherCommitId={base_sha}`, whose `id` is the fork point;
+  then `GET …/diff?since={merge_base}&until={head_sha}` with `Accept: text/plain`, the raw diff,
+  returned unmodified. That raw diff runs from whatever `since` names, with no merge-base step
+  of its own, so the lookup is what makes it a three-dot diff. The spec lists the raw diff only
+  as `text/plain; qs=0.1`, so the request names that type. If the merge-base lookup fails (an
+  HTTP or transport error, or a response naming no commit), a warning is logged and the diff
+  runs from `since={base_sha}`. That is still right whenever the base SHA is already the fork
+  point, as a PR's recorded target commit usually is. An empty range returns empty text, and a
+  failed diff request raises. Both endpoints come from the Data Center 9.4 REST reference and
+  have **not been probed against a live Data Center**. No minimum version is claimed, but one
+  Atlassian knowledge-base article reports that the path-less `/diff` returns 400 on some older
+  versions.
+
+---
+
+## 5. Azure DevOps Services & Server
+
+Azure DevOps has no endpoint that returns a unified diff, so this is the one
+adapter that builds its diff instead of downloading it. One adapter covers
+Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
+`api-version=7.1`, and they differ only in where the collection sits in the URL.
+
+- **Forge Identifier:** `azure-devops`
+- **Supported URL Shapes:**
+  - `https://dev.azure.com/{organization}/{project}/_git/{repo}/pullrequest/{number}`
+  - `https://dev.azure.com/{organization}/_git/{repo}/pullrequest/{number}` (short form,
+    for a project named like its repository)
+  - `https://{organization}.visualstudio.com/{project}/_git/{repo}/pullrequest/{number}`,
+    with or without a `DefaultCollection` segment after the host, plus the same short form
+  - `http(s)://{host}/{collection path}/{project}/_git/{repo}/pullrequest/{number}` for
+    Azure DevOps Server, e.g. `https://{host}/tfs/DefaultCollection/{project}/_git/...`.
+    A Server URL must name both the collection and the project. With a single segment
+    before `_git` there is no telling which one it is, so the URL is rejected.
+  - Percent-encoded names (`Web%20Platform`) are decoded. A query string or fragment
+    (`?_a=files`) and a trailing route are ignored. The URL is normalized to the
+    explicit-project form.
+- **Scheme Note:** as on Bitbucket Server, the scheme of the URL you pass is kept, so
+  an on-prem server on plain HTTP works.
+- **Detection Order:** `detect_forge` asks this parser last. No other forge's pattern
+  accepts the `/_git/{repo}/pullrequest/{number}` shape, so the position is defensive.
+- **Authentication:** the first of these that is set wins.
+  1. `PRXREF_AZURE_DEVOPS_TOKEN`: a personal access token, sent as Basic `:PAT` (empty
+     user name). **Code (Read)** to review; **Code (Read & write)** to post.
+  2. `SYSTEM_ACCESSTOKEN`: the Azure Pipelines job token, sent as `Bearer`. Pipelines
+     does not hand it to scripts unless the step maps it (below).
+  3. Neither: anonymous. A public project can be reviewed with no token at all.
+     Posting always needs one.
+
+  Every request sends `X-TFS-FedAuthRedirect: Suppress`, so an unauthenticated
+  request gets a plain `401` rather than a sign-in page. A `203` or a non-JSON body is
+  refused with an error that names `PRXREF_AZURE_DEVOPS_TOKEN`.
+- **Azure Pipelines:** map the job token into the step, and grant the project's
+  **Build Service** identity **Contribute to pull requests** on the repository so it
+  can post. `System.CollectionUri` ends with a `/` and covers both Services and Server:
+
+  ```yaml
+  steps:
+    - script: >-
+        uvx prxref review --pr-url
+        "$(System.CollectionUri)$(System.TeamProject)/_git/$(Build.Repository.Name)/pullrequest/$(System.PullRequest.PullRequestId)"
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+        PRXREF_LLM_BASE_URL: $(PRXREF_LLM_BASE_URL)
+        PRXREF_LLM_MODELS: $(PRXREF_LLM_MODELS)
+        PRXREF_LLM_API_KEY: $(PRXREF_LLM_API_KEY)
+  ```
+
+  Run it as a build-validation pipeline (a branch policy), which is what sets the
+  `System.PullRequest.*` variables.
+- **API Endpoints & Behavior:**
+  - **Base URL:** `{scheme}://{host}{collection}/{project}/_apis/git/repositories/{repo}`,
+    always project-scoped (the organization-level routes refuse anonymous reads), with
+    `api-version=7.1` on every request.
+  - **Metadata:** `GET {base}/pullrequests/{number}`. Branches come from
+    `sourceRefName`/`targetRefName` without `refs/heads/`, and SHAs from
+    `lastMergeSourceCommit`/`lastMergeTargetCommit`. The author is
+    `createdBy.displayName`, because the unique name is null on anonymous reads.
+  - **Diffs:** rebuilt locally.
+    `GET {base}/diffs/commits?baseVersion={target sha}&targetVersion={source sha}&diffCommonCommit=true`
+    lists the changed files against the merge base, which is the PR's own view (three
+    dots). It is paged 1000 entries at a time until `allChangesIncluded`, and more
+    than 50 pages is an error, not a partial review. Contents come from
+    `GET {base}/blobs/{objectId}?$format=octetstream`, eight at a time, and `difflib`
+    renders a git-style unified diff, including `\ No newline at end of file`, that
+    `git apply` accepts. Azure DevOps detects renames itself, and a pure rename
+    fetches nothing. A binary file (by extension, or a NUL byte in its first 8000
+    bytes) renders as `Binary files … differ`. Content is capped at 512 KiB per blob,
+    300 files and 16 MiB per diff; a file past a cap is listed without hunks, with a
+    warning. A blob that returns `404` or `410` is listed without hunks too, but any other
+    failed blob fetch fails the review rather than silently emptying a file. The
+    change list comes from the Diffs API rather than the PR's iterations because the
+    iterations list is not readable anonymously, even on a public project.
+  - **Summary Comments:** a PR-level thread with status `closed`, created with
+    `POST {base}/pullrequests/{number}/threads`. A re-review finds its earlier summary
+    by the `<!-- prxref-summary -->` marker and edits it with
+    `PATCH {base}/pullrequests/{number}/threads/{thread}/comments/{comment}`. When the
+    thread list cannot be read, nothing is posted, so a failed lookup never produces
+    a second summary.
+  - **Inline Comments:** one thread per finding, with status `active` and a
+    `threadContext` carrying the `/`-prefixed `filePath` and the line in
+    `rightFileStart`/`rightFileEnd`. When the PR's iterations are readable,
+    `pullRequestThreadContext` pins the thread to the latest iteration's
+    `changeTrackingId` for that file; otherwise it is left out. A 4xx on one comment
+    is skipped with a warning.
+  - **Thread List:** `GET {base}/pullrequests/{number}/threads` returns every thread in
+    one response. System threads (votes, pushes, status changes) and deleted threads
+    are skipped. A thread counts as resolved when its status is `fixed`, `wontFix`,
+    `closed` or `byDesign`.
+  - **Prune:** a stale prxref inline thread is removed by deleting its root comment,
+    `DELETE {base}/pullrequests/{number}/threads/{thread}/comments/{comment}`, matched
+    by the attribution marker. The summary thread and human replies are never touched.
+  - **File Content:** `GET {base}/items?path=/{path}&versionDescriptor.version={sha}&versionDescriptor.versionType=commit&download=true`,
+    best-effort, read with the same token as everything else above. A `404`, an
+    oversize (512 KiB) body, or a binary body returns `None` and is never a hard error.
+- **Thread statuses and "Check for comment resolution":** inline threads are posted
+  `active`, like an unresolved inline comment on every other forge. So a branch policy
+  that requires comment resolution holds the PR until someone resolves prxref's
+  threads, which is what GitHub's "require conversation resolution" rule already does.
+  The summary is posted `closed`, so it never blocks a merge.
+- **Webhook Integration:** Azure DevOps service hooks.
+  - **Detection:** there is no event header. The request is recognized by its JSON
+    body (`publisherId` is `tfs`), and only when none of the other forges' event
+    headers is present.
+  - **Accepted Events:** `git.pullrequest.created` and `git.pullrequest.updated`, and
+    only while `resource.status` is `active`. A completed or abandoned PR, like any
+    other event, is acknowledged with `202` and not reviewed.
+  - **Payload:** the PR URL is `resource.repository.webUrl` (else `remoteUrl` without
+    its `user@` prefix) plus `/pullrequest/{resource.pullRequestId}`.
+  - **Authentication:** HTTP Basic. The password is compared in constant time with
+    `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`, and the user name is ignored. An unset secret
+    rejects every Azure DevOps webhook with `401` unless `PRXREF_ALLOW_UNSIGNED=1`.
+    Setup: [Azure DevOps service hooks](deploy.md#azure-devops-service-hooks).
+- **Known Limitations:**
+  - CRLF files lose their `\r` in the rendered diff. The diff parser reads lines
+    without their terminators on every forge.
+  - A path containing a tab or a newline cannot be written in a unified diff, so such
+    a file is skipped with a warning.
+  - Inline-comment line numbers can drift in a file that uses a form feed or a Unicode
+    line or paragraph separator inside a line.
+  - `difflib` does not promise a minimal diff on pathological files. Its output is
+    still self-consistent, and `git apply` accepts it.
+  - Azure DevOps exposes no file modes here, so every file is mode `100644`.
+- **What is tested live:** reviewing a public Azure DevOps Services project with no
+  token. The write paths (summary, inline threads, prune), PAT and `SYSTEM_ACCESSTOKEN`
+  authentication, and the service-hook payload are covered by unit tests against
+  recorded API shapes, but **have not been exercised against a live server**. Azure
+  DevOps Server is parsed and authenticated the same way but is **untested**. It needs
+  a release that accepts REST `api-version=7.1` (2022.1 or later, going by Microsoft's
+  API version table).
+- **Pinned Commit Range (Replay):** the **Diffs** path above with both ends pinned as
+  commits:
+  `GET {base}/diffs/commits?baseVersion={base_sha}&baseVersionType=commit&targetVersion={head_sha}&targetVersionType=commit&diffCommonCommit=true`,
+  paged with `$top=1000`/`$skip`, then `GET {base}/blobs/{objectId}?$format=octetstream`
+  for the file contents. `diffCommonCommit=true` is the merge-base ("three-dot")
+  form: the list runs from the merge base of the two commits to `head_sha`, and each
+  file's old side is its blob at that merge base. `false` would diff the two commits
+  directly and so also list whatever changed on the base after the fork. Given a PR's
+  own target and source commits, the result is the PR's diff. There is no raw text to
+  return unmodified: the diff is rebuilt as for **Diffs**, so it has no `index` lines or
+  function names after `@@`, every mode is `100644`, and a `similarity index` line
+  appears only for a pure rename. The same budgets apply: 512 KiB per blob, 300 files
+  and 16 MiB per diff, and a file past a cap, or whose blob is gone (`404` or `410`), is
+  listed without hunks, with a warning. An empty range returns empty text, which replay
+  reports as an error run. An HTTP or transport error raises, and so do a non-JSON
+  listing, any other failed blob fetch, and a listing longer than 50 pages. While the
+  adapter was designed, a prototype of this method returned a PR's own diff from a
+  public Azure DevOps Services project, and a probe there saw `true` leave out files
+  that `false` listed. On 2026-09-23 the shipped method was run live, read-only and with
+  no token, against a public Azure DevOps Services project. Given a PR's own target and
+  source commits, it returned the adapter's diff of that PR byte for byte, also for two
+  PRs whose target had gained a commit since they forked: for those, its file list
+  matched git's three-dot `target...source` diff, and the `false` listing named extra
+  files that it left out. A range whose two ends are the same commit returned empty
+  text. Beyond that run, its tests use recorded response shapes. Azure DevOps Server is
+  untested, as above.

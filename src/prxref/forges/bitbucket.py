@@ -216,6 +216,30 @@ class ForgeImpl:
 
         return diff_text
 
+    def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
+        """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
+
+        Bitbucket's diff spec is SOURCE..DEST, the reverse of git's order, so
+        the range is spelled ``{head}..{base}``; swapping the two yields a
+        different diff that still looks valid. ``topic=true`` selects the
+        merge-base (three-dot) diff the PR itself shows. It is the default
+        today, and it is sent explicitly because the result depends on it.
+        An empty range comes back as ``""``. Raises on an HTTP or transport
+        failure.
+        """
+        headers, auth = self._get_auth()
+        headers["Accept"] = "text/plain"
+        url = f"{_API_BASE}/repositories/{ref.owner}/{ref.repo}/diff/{head_sha}..{base_sha}"
+        resp = self._session.get(
+            url,
+            headers=headers,
+            auth=auth,
+            params={"topic": "true"},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.text
+
     def _iter_comment_pages(self, ref: PRRef) -> Iterator[list[dict]]:
         """Yield the PR's comments one page at a time, following ``next``.
 

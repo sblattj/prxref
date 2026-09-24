@@ -1,9 +1,16 @@
-"""LLM backends: an OpenAI-compatible plain-HTTP client and an optional litellm wrapper.
+"""LLM backends: OpenAI-compatible HTTP, optional litellm, and subscription CLIs (``llm_cli_backends``).
 
 The primary backend speaks plain HTTP to any OpenAI-compatible
-``/chat/completions`` endpoint. There is no default endpoint and no default
-model chain: ``PRXREF_LLM_BASE_URL`` and ``PRXREF_LLM_MODELS`` are required,
-and an unset one raises ``ConfigError`` rather than guessing a host.
+``/chat/completions`` endpoint. There is no default model chain on any
+backend: ``PRXREF_LLM_MODELS`` is required, and an unset one raises
+``ConfigError``. There is no default endpoint either:
+``PRXREF_LLM_BASE_URL`` is required by the openai-compat backend (and its
+``ferry``/``http`` aliases) and raises ``ConfigError`` when unset rather than
+guessing a host. The other backends do not use it: litellm resolves each
+model's own provider endpoint, and the CLI backends talk to their CLI. A set
+value is ignored there with one INFO line, never forwarded, so a deployment
+that set a placeholder URL to get past the old unconditional check keeps its
+routing on upgrade.
 
 Fallback is a caller-side loop over the model chain: a model that answers
 with HTTP >= 500, HTTP 429, a connection error, a timeout, a malformed
@@ -17,9 +24,28 @@ in-process SDK and delegates the chain to its native ``fallbacks=``
 mechanism (which advances on errors only — a truncated litellm answer
 still returns as success).
 
-Tenet: no provider credential is ever read and no env name is
-provider-specific — provider keys live behind the configured endpoint,
-never here.
+The ``claude-cli`` and ``kiro-cli`` backends (``llm_cli_backends``) run the
+user's own installed, logged-in CLI as a subprocess, one process per call,
+with the same caller-side model chain. They take the model chain, the
+timeout, a process-count cap (``PRXREF_LLM_CLI_CONCURRENCY``) and an
+optional binary path (``PRXREF_LLM_CLI_PATH``); the base URL, the API key,
+``max_tokens``, temperature and seed are not applied. The factory imports
+that module lazily, so the HTTP backends never load it.
+
+Cost: a backend reports the dollar figure its provider returned and never
+estimates one. The openai-compat client reads the body's ``usage.cost``
+first, then a LiteLLM-based gateway's ``x-litellm-response-cost`` response
+header; the litellm client reads ``_hidden_params["response_cost"]``. No
+figure leaves ``InvokeResult.cost_usd`` as ``None``, never ``0.0``. The
+price-table estimate is made once per run, in :mod:`prxref.costs`.
+
+Tenet: prxref never reads, stores, or forwards a provider credential, and
+its own settings are provider-neutral ``PRXREF_*`` names. A provider key
+lives behind the configured endpoint (openai-compat), in the provider SDK's
+own environment (litellm), or inside the user's own logged-in CLI
+(claude-cli, kiro-cli). The CLI backends remove a fixed list of
+credential-routing variable NAMES from the child process environment so the
+CLI falls back to its subscription login; the values are never read.
 """
 from __future__ import annotations
 
@@ -32,6 +58,7 @@ import time
 
 import requests
 
+from . import costs
 from .llm import ConfigError, InvokeResult, LLMClient
 
 DEFAULT_BASE_URL = ""
@@ -43,6 +70,10 @@ DEFAULT_TIMEOUT = 45.0
 # actually reaches the wire. Resolved by create_llm_client when the operator
 # left PRXREF_LLM_TEMPERATURE unset or empty.
 DEFAULT_TEMPERATURE = 0.0
+DEFAULT_CLI_CONCURRENCY = 2
+OPENAI_COMPAT_BACKENDS = ("openai-compat", "ferry", "http")
+CLI_BACKENDS = ("claude-cli", "kiro-cli")
+BACKENDS = (*OPENAI_COMPAT_BACKENDS, "litellm", *CLI_BACKENDS)
 logger = logging.getLogger(__name__)
 # Connecting is not generating: a reachable endpoint answers the TCP/TLS
 # handshake in well under this, so a separate, much smaller connect budget
@@ -102,6 +133,54 @@ def _openai_error_message(resp: requests.Response) -> str:
     return getattr(resp, "text", "") or ""
 
 
+def _header(headers: object, name: str) -> object:
+    """Case-insensitive lookup of one response header; ``None`` when absent.
+
+    A real response carries a ``requests.structures.CaseInsensitiveDict``,
+    whose ``get`` already ignores case. A plain mapping (a test double, or
+    anything else a session hands back) gets an exact ``get`` first and then
+    a casefolded scan of its items, so ``X-LiteLLM-Response-Cost`` and
+    ``x-litellm-response-cost`` read the same everywhere.
+    """
+    if not headers:
+        return None
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        if value is not None:
+            return value
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return None
+    wanted = name.casefold()
+    for key, value in items():
+        if isinstance(key, str) and key.casefold() == wanted:
+            return value
+    return None
+
+
+def _reported_cost(usage: object, resp: object) -> tuple[float | None, str]:
+    """The dollar figure the provider reported for one completion, and its source.
+
+    The body's ``usage.cost`` (OpenRouter sends it unasked) wins; it must be
+    a JSON number, so a string there is no figure. Otherwise the
+    ``x-litellm-response-cost`` header that a LiteLLM-based gateway sets, a
+    string by nature. Anything :func:`prxref.costs.valid_usd` rejects
+    (negative, ``NaN``, ``""``, ``"None"``) is no figure, and no figure is
+    ``(None, "")``: never ``0.0``.
+    """
+    if isinstance(usage, dict):
+        body_cost = usage.get("cost")
+        if not isinstance(body_cost, str):
+            cost = costs.valid_usd(body_cost)
+            if cost is not None:
+                return cost, "usage.cost"
+    cost = costs.valid_usd(_header(getattr(resp, "headers", None), "x-litellm-response-cost"))
+    if cost is not None:
+        return cost, "x-litellm-response-cost"
+    return None, ""
+
+
 def _mark_unavailable(model: str, unavailable: set[str], lock: threading.Lock) -> bool:
     """Add ``model`` to ``unavailable`` under ``lock``; ``True`` only for the adding thread.
 
@@ -120,8 +199,6 @@ def _mark_unavailable(model: str, unavailable: set[str], lock: threading.Lock) -
 class OpenAICompatClient(LLMClient):
     """Plain-HTTP client for an OpenAI-compatible endpoint.
 
-    Tries each model in ``models`` order (cheap first for speed). A model
-    fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
     Tries each model in ``models`` order (cheap first for speed). A model
     fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
     error, a timeout, a malformed body, or a truncated completion
@@ -251,6 +328,7 @@ class OpenAICompatClient(LLMClient):
 
         failures: list[str] = []
         last_truncated: InvokeResult | None = None
+        received: list[tuple[float | None, str]] = []
         for attempt, model in enumerate(self.models, start=1):
             if model in self._unavailable:
                 failures.append(f"{model}: skipped (unavailable)")
@@ -326,6 +404,11 @@ class OpenAICompatClient(LLMClient):
                 )
                 failures.append(f"{model}: malformed response ({exc.__class__.__name__})")
                 continue
+            # Every completion that came back was billed, a truncated one the
+            # chain moves past included, so the call's figure sums them all.
+            attempt_cost, attempt_source = _reported_cost(usage, resp)
+            received.append((attempt_cost, attempt_source))
+            cost_usd, cost_source = costs.combine_reported(received)
             if finish_reason.strip().lower() in _TRUNCATION_FINISH_REASONS:
                 # A truncated completion is HTTP 200, so without this branch
                 # it returned as success and PRXREF_LLM_MODELS never advanced.
@@ -343,13 +426,15 @@ class OpenAICompatClient(LLMClient):
                     backend="openai-compat",
                     elapsed_ms=elapsed_ms,
                     finish_reason=finish_reason,
+                    cost_usd=cost_usd,
+                    cost_source=cost_source,
                 )
                 continue
             logger.info(
-                "llm attempt %d/%d ok: model=%s %dms in=%s out=%s finish=%s",
+                "llm attempt %d/%d ok: model=%s %dms in=%s out=%s finish=%s cost=%s",
                 attempt, len(self.models), resp_model, elapsed_ms,
                 usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0,
-                finish_reason or "-",
+                finish_reason or "-", "-" if attempt_cost is None else attempt_cost,
             )
             return InvokeResult(
                 text=text,
@@ -359,6 +444,8 @@ class OpenAICompatClient(LLMClient):
                 backend="openai-compat",
                 elapsed_ms=elapsed_ms,
                 finish_reason=finish_reason,
+                cost_usd=cost_usd,
+                cost_source=cost_source,
             )
         # Exhausting the chain on truncation alone is a last resort, not a
         # failure: the best answer anyone managed is still handed back, with
@@ -462,6 +549,12 @@ class LiteLLMClient(LLMClient):
         choice = response.choices[0]
         text = choice.message.content or ""
         usage = getattr(response, "usage", None)
+        # litellm prices the call from its own bundled map and leaves the
+        # figure here; completion_cost() is never called, because it raises on
+        # a model the map does not know. A string is not a figure.
+        hidden = getattr(response, "_hidden_params", None)
+        raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else getattr(hidden, "response_cost", None)
+        cost_usd = None if isinstance(raw_cost, str) else costs.valid_usd(raw_cost)
         return InvokeResult(
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -471,6 +564,8 @@ class LiteLLMClient(LLMClient):
             elapsed_ms=elapsed_ms,
             # Absent on a provider that does not report one; never guessed.
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
+            cost_usd=cost_usd,
+            cost_source="litellm" if cost_usd is not None else "",
         )
 
     def _maybe_mark_unavailable(
@@ -592,16 +687,28 @@ def create_llm_client(
     """Build the configured client from ``cfg`` overrides then PRXREF_LLM_* env.
 
     ``cfg`` keys (LLM_BACKEND, LLM_BASE_URL, LLM_API_KEY, LLM_MODELS,
-    LLM_REASONING_EFFORT) win over env; env never includes provider
-    credentials. PRXREF_LLM_BACKEND selects ``openai-compat`` (default)
-    with ``ferry`` as an alias, or ``litellm``. PRXREF_LLM_BASE_URL and
-    PRXREF_LLM_MODELS are required and have no defaults — an unset one
-    raises :class:`~prxref.llm.ConfigError`. PRXREF_LLM_API_KEY is
-    optional and may be empty for a local no-auth server.
-    PRXREF_LLM_MODELS (comma list, cheap first) feeds litellm too.
+    LLM_REASONING_EFFORT, LLM_TIMEOUT, LLM_TEMPERATURE, LLM_SEED,
+    LLM_CLI_PATH, LLM_CLI_CONCURRENCY, in either case) win over env; env
+    never includes provider credentials. PRXREF_LLM_BACKEND is read
+    case-insensitively and selects ``openai-compat`` (the default, with
+    ``ferry`` and ``http`` as aliases), ``litellm``, ``claude-cli`` or
+    ``kiro-cli``. Any other value raises :class:`~prxref.llm.ConfigError`
+    naming PRXREF_LLM_BACKEND, before any other setting is looked at, so a
+    typo is reported as itself (exit 2) rather than as a missing endpoint or
+    a failed review.
+    PRXREF_LLM_MODELS (comma list, cheap first) is required by every
+    backend and has no default. PRXREF_LLM_BASE_URL has no default and is
+    required by the openai-compat family only; it is checked before the
+    models, so a run with both unset still names the endpoint first. The
+    other backends do not use it: when it is set anyway it is ignored with
+    one INFO line and never forwarded (litellm resolves each model's own
+    provider endpoint; a LiteLLM proxy is OpenAI-compatible and belongs on
+    ``openai-compat``). PRXREF_LLM_API_KEY is openai-compat only, optional,
+    and may be empty for a local no-auth server.
     PRXREF_LLM_REASONING_EFFORT is passed through unvalidated to the
     openai-compat client for models that cannot disable reasoning
-    (e.g. GLM-5.3-Flash's ``low``/``high``/``max``); empty omits it.
+    (e.g. GLM-5.3-Flash's ``low``/``high``/``max``) and to claude-cli as its
+    effort setting; empty omits it, and litellm and kiro-cli ignore it.
     PRXREF_LLM_TIMEOUT (seconds, default 45.0, must be > 0) becomes the
     client's ``default_timeout``. PRXREF_LLM_TEMPERATURE is parsed to a
     float (finite, >= 0 — no upper bound, since the maximum is
@@ -609,7 +716,8 @@ def create_llm_client(
     ``DEFAULT_TEMPERATURE`` (0.0), which IS sent — temperature 0 keeps
     reviews reproducible by default, and an operator-set value wins.
     PRXREF_LLM_SEED (integer >= 0, where 0 is a valid seed) is passed to
-    both backends as a top-level ``seed`` and always wins when set. Unset
+    the openai-compat and litellm backends as a top-level ``seed`` and
+    always wins when set. Unset
     or empty does NOT omit the field: temperature 0 alone cannot pin hosted
     inference, so the factory derives ONE random seed per process
     (:func:`_auto_run_seed`) and stamps it on every client it builds —
@@ -621,6 +729,19 @@ def create_llm_client(
     ``PRXREF_LLM_MAX_TOKENS`` is deliberately NOT read here: it is a
     per-call budget threaded cfg -> orchestrator -> reviewer -> ``invoke``,
     so a client-level copy could never win and would be dead config.
+
+    The CLI backends (``claude-cli``, ``kiro-cli``) are built by
+    :func:`prxref.llm_cli_backends.build_cli_client`, imported lazily.
+    PRXREF_LLM_CLI_PATH overrides the binary (empty = ``claude`` or
+    ``kiro-cli`` on ``PATH``; one that cannot be found is a ConfigError
+    naming it). PRXREF_LLM_CLI_CONCURRENCY caps the CLI processes one client
+    runs at once (integer >= 1, default ``DEFAULT_CLI_CONCURRENCY``), and is
+    re-checked here for callers that bypass ``config.load_config``. Neither
+    CLI has a temperature or seed option, so both are still parsed (a
+    malformed value still exits 2) but are not applied, and an explicitly
+    set one logs one WARNING saying so; the client's ``temperature`` and
+    ``seed`` attributes are ``None``, which the run record's ``sampling``
+    reports truthfully.
     """
     cfg = cfg or {}
 
@@ -634,10 +755,15 @@ def create_llm_client(
         return os.environ.get(env, default)
 
     backend = (_get("LLM_BACKEND", "PRXREF_LLM_BACKEND", "openai-compat") or "").strip().lower() or "openai-compat"
+    if backend not in BACKENDS:
+        raise ConfigError(
+            f"PRXREF_LLM_BACKEND: must be one of {', '.join(BACKENDS)} "
+            f"(case-insensitive), got {backend!r}"
+        )
     raw_models = _get("LLM_MODELS", "PRXREF_LLM_MODELS", DEFAULT_MODELS) or ""
     models = [m.strip() for m in raw_models.split(",") if m.strip()]
     base_url = _get("LLM_BASE_URL", "PRXREF_LLM_BASE_URL", DEFAULT_BASE_URL) or ""
-    if not base_url.strip():
+    if backend in OPENAI_COMPAT_BACKENDS and not base_url.strip():
         raise ConfigError(
             "no LLM endpoint configured. Set PRXREF_LLM_BASE_URL to an "
             "OpenAI-compatible /chat/completions endpoint "
@@ -669,7 +795,7 @@ def create_llm_client(
     )
     if seed is None:
         seed = _auto_run_seed()
-    if backend in ("openai-compat", "ferry", "http"):
+    if backend in OPENAI_COMPAT_BACKENDS:
         return OpenAICompatClient(
             base_url=base_url,
             api_key=_get("LLM_API_KEY", "PRXREF_LLM_API_KEY", DEFAULT_API_KEY) or DEFAULT_API_KEY,
@@ -680,8 +806,42 @@ def create_llm_client(
             temperature=temperature,
             seed=seed,
         )
+    if base_url.strip():
+        logger.info(
+            "PRXREF_LLM_BASE_URL is set but not used by the %s backend; ignoring it",
+            backend,
+        )
     if backend == "litellm":
         return LiteLLMClient(
             models=models, default_timeout=timeout, temperature=temperature, seed=seed
         )
-    raise LLMError(f"unknown PRXREF_LLM_BACKEND {backend!r}; expected openai-compat|ferry|http|litellm")
+    unapplied = [
+        env
+        for key, env in (
+            ("LLM_TEMPERATURE", "PRXREF_LLM_TEMPERATURE"),
+            ("LLM_SEED", "PRXREF_LLM_SEED"),
+        )
+        if (_get(key, env) or "").strip()
+    ]
+    if unapplied:
+        logger.warning(
+            "%s %s not applied by %s (the CLI has no such option)",
+            " / ".join(unapplied),
+            "is" if len(unapplied) == 1 else "are",
+            backend,
+        )
+    concurrency = _int_setting(
+        _get("LLM_CLI_CONCURRENCY", "PRXREF_LLM_CLI_CONCURRENCY"),
+        "PRXREF_LLM_CLI_CONCURRENCY",
+        minimum=1,
+    )
+    from .llm_cli_backends import build_cli_client
+
+    return build_cli_client(
+        backend,
+        models=models,
+        default_timeout=timeout,
+        reasoning_effort=_get("LLM_REASONING_EFFORT", "PRXREF_LLM_REASONING_EFFORT") or None,
+        cli_path=_get("LLM_CLI_PATH", "PRXREF_LLM_CLI_PATH") or "",
+        concurrency=DEFAULT_CLI_CONCURRENCY if concurrency is None else concurrency,
+    )

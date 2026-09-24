@@ -1,13 +1,15 @@
 """Tests for prxref.formatter: inline comments, summary, attribution."""
 from __future__ import annotations
 
+import pytest
+
 from prxref.formatter import (
     _DEFAULT_SUMMARY_TEMPLATE,
     build_attribution,
     format_inline_comment,
     format_summary,
 )
-from prxref.triage import Finding
+from prxref.triage import SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN, Finding
 
 
 def _f(**kwargs) -> Finding:
@@ -68,10 +70,11 @@ class TestFormatInlineComment:
 
     def test_warning_and_note_markers(self):
         assert format_inline_comment(_f(severity="warning"), "a").startswith("🟧 **")
-        assert format_inline_comment(_f(severity="outofscope"), "a").startswith("🟦 **")
+        assert format_inline_comment(_f(severity="spec"), "a").startswith("🔍 **")
+        assert format_inline_comment(_f(severity="outofscope"), "a").startswith("⬜ **")
 
     def test_unknown_severity_defaults_to_note(self):
-        assert format_inline_comment(_f(severity=""), "a").startswith("🟦 **")
+        assert format_inline_comment(_f(severity=""), "a").startswith("⬜ **")
 
     def test_pipe_in_title_is_not_part_of_inline_output_structure(self):
         text = format_inline_comment(_f(title="a|b", body="x|y"), "a")
@@ -100,7 +103,7 @@ class TestFormatSummaryCounts:
         )
         assert "🟥 2 error" in text
         assert "🟧 0 warning" in text
-        assert "🟦 1 outofscope" in text
+        assert "⬜ 1 outofscope" in text
 
     def test_active_of_total_counts(self):
         assert "1 active of 2 raw" in _summary()
@@ -112,9 +115,18 @@ class TestFormatSummaryCounts:
             findings_dropped=[],
         )
         assert "✅ Approved" in text
-        assert "🟥 0 error · 🟧 0 warning · 🟦 0 outofscope" in text
+        assert "🟥 0 error · 🟧 0 warning · 🔍 0 spec · ⬜ 0 outofscope" in text
         assert "0 active of 0 raw" in text
         assert "No findings survived the quality passes." in text
+
+    def test_spec_count_present(self):
+        text = _summary(findings_active=[_f(severity="spec", title="Spec breach")])
+        assert "🔍 1 spec" in text
+
+    def test_no_specs_requested_leaves_no_grounding_note(self):
+        """The renderer owns the grounding note; the forge-neutral formatter
+        always renders it empty, so its output matches an ungrounded run."""
+        assert "Spec-grounded" not in _summary()
 
 
 class TestFormatSummaryTables:
@@ -129,6 +141,17 @@ class TestFormatSummaryTables:
         assert header in text
         assert text.index("z.py:2") < text.index("z.py:1")
         assert "| 🟥 | z.py:2 | Boom |" in text
+
+    def test_spec_rows_order_between_warning_and_outofscope(self):
+        text = _summary(
+            findings_active=[
+                _f(severity="outofscope", file="z.py", line=1),
+                _f(severity="spec", file="z.py", line=2, title="Spec breach"),
+                _f(severity="warning", file="z.py", line=3),
+            ]
+        )
+        assert text.index("z.py:3") < text.index("z.py:2") < text.index("z.py:1")
+        assert "| 🔍 | z.py:2 | Spec breach |" in text
 
     def test_file_level_finding_omits_line_zero(self):
         text = _summary(findings_active=[_f(line=0)])
@@ -202,3 +225,64 @@ class TestTemplateFallback:
         ):
             assert "{" + key + "}" not in text
         assert _DEFAULT_SUMMARY_TEMPLATE  # inline fallback stays non-empty
+
+
+class TestScopeMarkers:
+    """Issue #64: scope ``out`` prefixes the severity glyph with 🟦; ``in``
+    and ``unknown`` render byte-identically to a finding without a ticket."""
+
+    @pytest.mark.parametrize("scope", [SCOPE_IN, SCOPE_UNKNOWN])
+    def test_inline_comment_in_and_unknown_are_unchanged(self, scope):
+        text = format_inline_comment(
+            _f(severity="error", title="T", body="B", scope=scope), "attr-here"
+        )
+        assert text == "🟥 **T**\n\nB\n\n*attr-here*"
+
+    def test_inline_comment_out_of_ticket_is_prefixed_and_labelled(self):
+        text = format_inline_comment(
+            _f(severity="error", title="T", body="B", scope=SCOPE_OUT), "attr-here"
+        )
+        assert text == "🟦 🟥 **[OUTSIDE TICKET] T**\n\nB\n\n*attr-here*"
+
+    def test_inline_comment_out_keeps_the_severity_normalization(self):
+        assert format_inline_comment(
+            _f(severity=" ERROR ", scope=SCOPE_OUT), "a"
+        ).startswith("🟦 🟥 **[OUTSIDE TICKET] ")
+        assert format_inline_comment(
+            _f(severity="bogus", scope=SCOPE_OUT), "a"
+        ).startswith("🟦 ⬜ **[OUTSIDE TICKET] ")
+
+    def test_table_row_out_of_ticket_is_prefixed(self):
+        text = _summary(
+            findings_active=[
+                _f(severity="error", file="z.py", line=2, title="Boom", scope=SCOPE_OUT),
+                _f(severity="spec", file="z.py", line=3, title="Breach", scope=SCOPE_IN),
+                _f(severity="outofscope", file="z.py", line=4, title="Nit"),
+            ]
+        )
+        assert "| 🟦 🟥 | z.py:2 | Boom |" in text
+        assert "| 🔍 | z.py:3 | Breach |" in text
+        assert "| ⬜ | z.py:4 | Nit |" in text
+
+    def test_scope_does_not_reorder_the_table_or_change_the_counts(self):
+        text = _summary(
+            findings_active=[
+                _f(severity="warning", file="z.py", line=1, scope=SCOPE_IN),
+                _f(severity="error", file="z.py", line=2, scope=SCOPE_OUT),
+            ]
+        )
+        assert text.index("z.py:2") < text.index("z.py:1")
+        assert "🟥 1 error · 🟧 1 warning" in text
+
+    @pytest.mark.parametrize("scope", [SCOPE_IN, SCOPE_UNKNOWN])
+    def test_summary_in_and_unknown_are_byte_identical_to_the_default(self, scope):
+        def scoped(s):
+            return [
+                _f(severity=sev, line=n, scope=s)
+                for n, sev in enumerate(["error", "warning", "spec", "outofscope", "x"], 1)
+            ]
+
+        assert _summary(findings_active=scoped(scope)) == _summary(
+            findings_active=scoped(SCOPE_UNKNOWN)
+        )
+        assert "🟦" not in _summary(findings_active=scoped(scope))

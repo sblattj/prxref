@@ -21,13 +21,16 @@ import pytest
 import prxref
 from prxref.forges.base import InlineComment, PRData, PRRef, Thread
 from prxref.llm import InvokeResult
+from prxref.specs import SpecSource
 from prxref.triage import DEFAULT_TOKEN_BUDGET, Finding, build_chunks, parse_unified_diff
 
 SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
     "Files reviewed: {file_count} · 🟥 {error_count} error · "
-    "🟧 {warning_count} warning · 🟦 {outofscope_count} outofscope\n\n"
+    "🟧 {warning_count} warning · 🔍 {spec_count} spec · "
+    "⬜ {outofscope_count} outofscope\n"
+    "{spec_note}{ticket_note}\n\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -35,7 +38,7 @@ SUMMARY_TEMPLATE = (
 def _contract_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
     max_tokens=None, context_lines=None, context_blocks="", sibling_files=(),
-    trace_label="", trace_dir="",
+    trace_label="", trace_dir="", prompt_context=None,
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -67,7 +70,7 @@ def _contract_review_chunk(
 
 def _contract_review_systemic(
     llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
-    threads=(), trace_label="", trace_dir="",
+    threads=(), trace_label="", trace_dir="", prompt_context=None,
 ):
     return [], {
         "escalations": [], "input_tokens": 0, "output_tokens": 0,
@@ -240,18 +243,15 @@ class FakeForge:
 
 
 @pytest.fixture(autouse=True)
-def _contract_stubs(monkeypatch):
-    """Pin the reviewer contract. Env clearing lives in tests/conftest.py.
+def _contract_stubs(contract_stubs):
+    """Pin the reviewer contract for every test in this module.
 
-    The systemic sweep is stubbed to a clean no-findings success so the
-    sweep-specific classes below can monkeypatch their own doubles; the
-    chunk-count assertions in the older classes include the sweep unit.
+    The stubs are installed by the opt-in ``contract_stubs`` fixture in
+    tests/conftest.py, which also holds env clearing. The systemic sweep is
+    stubbed to a clean no-findings success so the sweep-specific classes below
+    can monkeypatch their own doubles; the chunk-count assertions in the older
+    classes include the sweep unit.
     """
-    monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _contract_review_chunk)
-    monkeypatch.setattr(
-        orchestrator.reviewer, "review_systemic", _contract_review_systemic,
-    )
-    monkeypatch.setattr(orchestrator.reviewer, "load_prompt", _contract_load_prompt)
 
 
 HAPPY_FINDINGS = {
@@ -276,6 +276,8 @@ class TestHappyPath:
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
+            "cost_usd", "cost_estimated", "review_rules", "ticket_context",
+            "spec_grounding", "size_advisory",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -306,7 +308,7 @@ class TestHappyPath:
         assert "[ERROR] Null deref" in by_line[3].body
         assert "x may be None" in by_line[3].body
         assert "Reviewed by prxref · model=test-model-1" in by_line[3].body
-        assert "🟦" in by_line[7].body
+        assert "⬜" in by_line[7].body
 
     def test_inline_comments_capped_at_fifteen(self):
         findings = {
@@ -411,7 +413,7 @@ class TestParallelFanOut:
         def barrier_review_chunk(
             llm, files, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, context_lines=None, context_blocks="",
-            sibling_files=(), trace_label="", trace_dir="",
+            sibling_files=(), trace_label="", trace_dir="", prompt_context=None,
         ):
             barrier.wait()
             return [Finding(
@@ -646,7 +648,9 @@ class TestCoverageAwareVerdict:
         forge = FakeForge(diff=TWO_FILE_DIFF)
         result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False)
         assert result["verdict"] == "Error"
-        assert result["chunks_reviewed"] == 0
+        # Every chunk failed; only the stubbed sweep counts as reviewed.
+        assert result["chunks_reviewed"] == 1
+        assert result["chunks_failed"] == result["chunk_count"] - 1
 
     def test_partial_failure_keeps_verdict_and_reports_coverage(self, monkeypatch):
         counter = itertools.count(1)
@@ -740,6 +744,8 @@ class TestMaxTokensThreading:
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
+            "cost_usd", "cost_estimated", "review_rules", "ticket_context",
+            "spec_grounding", "size_advisory",
         }
 
 
@@ -1052,6 +1058,8 @@ class TestQualityGateKnobsAreThreaded:
             "chunks_reviewed", "chunks_failed",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
+            "cost_usd", "cost_estimated", "review_rules", "ticket_context",
+            "spec_grounding", "size_advisory",
         }
 
 
@@ -1059,6 +1067,8 @@ RESULT_KEYS = {
     "verdict", "findings_active", "findings_dropped", "chunk_count",
     "chunks_reviewed", "chunks_failed",
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
+    "cost_usd", "cost_estimated", "review_rules", "ticket_context",
+    "spec_grounding", "size_advisory",
 }
 
 
@@ -2067,6 +2077,225 @@ class TestPostVerdictKnobs:
         assert out == "## prxref automated review\n"
 
 
+class TestSpecGrounding:
+    """``spec_sources`` grounds the run without adding a review unit.
+
+    The fetch + digest ride the never-raise fence; the digest threads into
+    every chunk prompt and the sweep prompt; the summary gains the grounding
+    note (failure reasons redacted) and the ``spec`` severity renders 🔍
+    without ever moving the verdict.
+    """
+
+    SPEC_TEXT = "## Rules\n\nTools MUST be named with an mcp prefix.\n"
+
+    SPEC_FINDINGS = {
+        "src/app.py": [
+            {"file": "src/app.py", "line": 3, "severity": "spec",
+             "confidence": 0.9, "title": "Forbidden header sent",
+             "body": "Spec: \"tools MUST be named with an mcp prefix\"; "
+                     "the diff adds it to the data path."},
+        ],
+    }
+
+    def _fetched(self, *, failed: bool = False, origin: str = "docs/spec.md"):
+        if failed:
+            return [SpecSource(
+                origin=origin, kind="url", text="",
+                error="HTTP 404 fetching https://secret.example.invalid/spec.md",
+            )]
+        return [SpecSource(
+            origin=origin, kind="file", text=self.SPEC_TEXT, error="",
+        )]
+
+    def _run(
+        self, monkeypatch, *, fetched=None, llm=None, post=True, **kw,
+    ):
+        sources = fetched if fetched is not None else self._fetched()
+        monkeypatch.setattr(
+            orchestrator.specs, "fetch_specs", lambda *a, **k: sources,
+        )
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, llm or FakeLLM(self.SPEC_FINDINGS), post=post,
+            spec_sources=["docs/spec.md"], **kw,
+        )
+        return forge, res
+
+    def test_the_counts_line_and_note_reach_the_summary(self, monkeypatch):
+        forge, _res = self._run(monkeypatch)
+        summary = forge.summaries[0]
+        assert "🔍 1 spec" in summary
+        assert (
+            "> 🔍 Spec-grounded: 1 source(s) · 1 constraint(s) injected"
+            in summary
+        )
+
+    def test_no_specs_keeps_the_note_empty_and_the_placeholder_filled(
+        self, monkeypatch,
+    ):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(forge, REF, FakeLLM(self.SPEC_FINDINGS))
+        summary = forge.summaries[0]
+        assert "🔍 0 spec" in summary
+        assert "🟧 1 warning" in summary
+        assert "Spec-grounded" not in summary
+        assert "{spec_note}" not in summary
+        assert "{spec_count}" not in summary
+
+    def test_the_marker_reaches_bullets_and_inline_cards(self, monkeypatch):
+        forge, _res = self._run(monkeypatch)
+        assert "- 🔍 `src/app.py:3` — Forbidden header sent" in forge.summaries[0]
+        body = forge.inline_batches[0][0].body
+        assert body.startswith("🤖 🔍 **[SPEC] Forbidden header sent**")
+
+    def test_a_spec_only_review_does_not_move_the_verdict(self, monkeypatch):
+        forge, res = self._run(monkeypatch)
+        assert len(res["findings_active"]) == 1
+        assert res["findings_active"][0].severity == "spec"
+        assert res["verdict"] == "Approved"
+
+    def test_all_sources_failing_completes_with_only_the_failure_note(
+        self, monkeypatch,
+    ):
+        forge, res = self._run(
+            monkeypatch, fetched=self._fetched(failed=True),
+            llm=FakeLLM("{}"),
+        )
+        assert res["verdict"] == "Approved"
+        summary = forge.summaries[0]
+        assert "> ⚠️ Spec fetch failed for 1 source(s)" in summary
+        assert "Spec-grounded:" not in summary
+
+    def test_a_partial_failure_shows_the_note_and_the_failures(
+        self, monkeypatch,
+    ):
+        fetched = self._fetched() + self._fetched(failed=True, origin="x/other.md")
+        forge, _res = self._run(monkeypatch, fetched=fetched)
+        summary = forge.summaries[0]
+        assert "> 🔍 Spec-grounded: 2 source(s) · 1 constraint(s) injected" in summary
+        assert "> ⚠️ Spec fetch failed for 1 source(s)" in summary
+
+    def test_an_unposted_run_still_logs_each_failed_source(
+        self, monkeypatch, caplog,
+    ):
+        """The grounding note only reaches a POSTED summary; --no-post and
+        dry-run operators learn about a dead source from the log alone."""
+        caplog.set_level(logging.INFO, logger="prxref")
+        fetched = self._fetched() + self._fetched(failed=True, origin="x/other.md")
+        forge, _res = self._run(monkeypatch, fetched=fetched, post=False)
+        assert forge.summaries == []
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and r.getMessage().startswith("spec source ")
+        ]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("spec source 2/2 (url, x/other.md) failed (best-effort): ")
+        assert "HTTP 404" in warnings[0]
+        assert "secret.example.invalid" not in warnings[0]
+        assert any(
+            "spec grounding: 1/2 source(s) ok, 1 constraint(s) injected"
+            in r.getMessage() for r in caplog.records
+        )
+
+    def test_fetch_failure_reasons_are_redacted(self, monkeypatch):
+        leaked = SpecSource(
+            origin="https://secret.example.invalid/browse/PROJ-9",
+            kind="jira", text="",
+            error=(
+                "Jira returned 401 for PROJ-9 contacting "
+                "https://secret.example.invalid/browse/PROJ-9 with "
+                "opaquetoken0123456789abcdef012345"
+            ),
+        )
+        forge, _res = self._run(
+            monkeypatch, fetched=[leaked], llm=FakeLLM("{}"),
+        )
+        body = forge.summaries[0]
+        assert "> ⚠️ Spec fetch failed for 1 source(s)" in body
+        assert "secret.example.invalid" not in body
+        assert "opaquetoken0123456789abcdef012345" not in body
+        assert "PROJ-9" in body
+
+    def test_the_digest_reaches_the_worker_prompt(self, monkeypatch):
+        prompts: list[str] = []
+
+        class RecordingLLM:
+            def invoke(self, system, user, *, max_tokens=4096, json_mode=False,
+                       timeout_s=60.0):
+                prompts.append(user)
+                return InvokeResult(
+                    text="{}", input_tokens=1, output_tokens=1,
+                    model="m", backend="b", elapsed_ms=1,
+                )
+
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk", REAL_REVIEW_CHUNK,
+        )
+        monkeypatch.setattr(
+            orchestrator.reviewer, "load_prompt", REAL_LOAD_PROMPT,
+        )
+        self._run(monkeypatch, llm=RecordingLLM(), post=False)
+        assert len(prompts) == 1
+        assert "### Spec constraints" in prompts[0]
+        assert "(MUST) Tools MUST be named with an mcp prefix" in prompts[0]
+        assert "(no specs provided for this review)" not in prompts[0]
+
+    def test_the_digest_reaches_the_sweep(self, monkeypatch):
+        double, calls = _sweep_double([("findings", [])])
+        monkeypatch.setattr(orchestrator.reviewer, "review_systemic", double)
+        self._run(monkeypatch, llm=FakeLLM("{}"), post=False)
+        assert len(calls) == 1
+        assert "Tools MUST be named with an mcp prefix" in calls[0]["spec_digest"]
+
+    def test_the_specs_trace_event_records_source_counts(self, monkeypatch, tmp_path):
+        target = tmp_path / "run.jsonl"
+        self._run(monkeypatch, llm=FakeLLM("{}"), post=False, trace_file=str(target))
+        events = [json.loads(x) for x in target.read_text().splitlines() if x.strip()]
+        specs_events = [e for e in events if e["node"] == "specs"]
+        assert len(specs_events) == 1
+        assert specs_events[0]["phase"] == "ok"
+        assert specs_events[0]["meta"] == {"sources": 1, "ok": 1, "constraints": 1}
+
+    def test_a_specs_crash_never_fails_the_run(self, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("boom specs")
+
+        monkeypatch.setattr(orchestrator.specs, "fetch_specs", boom)
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrate_review(
+            forge, REF, FakeLLM(self.SPEC_FINDINGS), post=True,
+            spec_sources=["docs/spec.md"],
+        )
+        assert res["verdict"] == "Approved"
+        assert [f.severity for f in res["findings_active"]] == ["warning"]
+        summary = forge.summaries[0]
+        assert "Spec-grounded" not in summary
+        assert "Spec fetch failed" not in summary
+        assert "Forbidden header sent" in summary
+        assert "🔍 0 spec" in summary
+
+    def test_no_specs_asked_runs_no_spec_stage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            orchestrator.specs, "fetch_specs",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("called")),
+        )
+        target = tmp_path / "run.jsonl"
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        orchestrate_review(
+            forge, REF, FakeLLM(self.SPEC_FINDINGS), post=False,
+            trace_file=str(target),
+        )
+        events = [json.loads(x) for x in target.read_text().splitlines() if x.strip()]
+        assert [
+            e for e in events
+            if e["node"] == "specs" and e["phase"] in ("ok", "fail")
+        ] == []
+        relabels = [e for e in events if e["node"] == "specs"]
+        assert [(e["phase"], e["meta"]) for e in relabels] == [
+            ("relabel", {"findings": 1}),
+        ]
+
+
 class TestRunTrace:
     """Every exit closes the ``run`` node, and says which kind of exit it was.
 
@@ -2307,8 +2536,13 @@ def _sweep_double(results: list, **meta_overrides):
     def _review_systemic(
         llm, digest, *, pr_title="", pr_description="", repo_hint="",
         max_tokens=None, threads=(), trace_label="", trace_dir="",
+        prompt_context=None,
     ):
-        calls.append({"digest": digest, "max_tokens": max_tokens, "threads": list(threads)})
+        calls.append({
+            "digest": digest, "max_tokens": max_tokens,
+            "threads": list(threads),
+            "spec_digest": getattr(prompt_context, "spec_digest", ""),
+        })
         kind, payload = results.pop(0)
         meta = {
             "escalations": [], "input_tokens": 7, "output_tokens": 3,
@@ -2485,7 +2719,9 @@ class TestSystemicSweep:
         forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
         res = orchestrate_review(forge, REF, FakeLLM("{}"), post=True)
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        # The sweep that answered is counted as reviewed; the verdict holds.
+        assert res["chunks_failed"] == 1
+        assert res["chunks_reviewed"] == 1
         assert "Partial review" not in forge.summaries[0]
 
     def test_an_empty_diff_runs_no_sweep(self, monkeypatch):
@@ -2566,7 +2802,7 @@ class TestReleaseShapeFoldIn:
         def _review_chunk(llm, files, *, pr_title="", pr_description="",
                            repo_hint="", max_tokens=None, context_lines=None,
                            context_blocks="", sibling_files=(),
-                           trace_label="", trace_dir=""):
+                           trace_label="", trace_dir="", prompt_context=None):
             return [self._matching_finding("chunk worker restatement")], {
                 "input_tokens": 10, "output_tokens": 5, "model": "m",
                 "elapsed_ms": 1, "error": "",
@@ -2574,7 +2810,7 @@ class TestReleaseShapeFoldIn:
 
         def _review_systemic(llm, digest, *, pr_title="", pr_description="",
                               repo_hint="", max_tokens=None, threads=(),
-                              trace_label="", trace_dir=""):
+                              trace_label="", trace_dir="", prompt_context=None):
             return [self._matching_finding("sweep restatement")], {
                 "input_tokens": 7, "output_tokens": 3, "model": "sweep-model",
                 "elapsed_ms": 1, "error": "",
@@ -2707,7 +2943,8 @@ class TestChunkTimeoutRetry:
 
         def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
                 max_tokens=None, context_lines=None, context_blocks="",
-                sibling_files=(), trace_label="", trace_dir=""):
+                sibling_files=(), trace_label="", trace_dir="",
+                prompt_context=None):
             calls.append({
                 "context_lines": context_lines,
                 "context_blocks": context_blocks,
@@ -2749,10 +2986,11 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 2
         # The only chunk failed, so this is the total-failure notice path
-        # (both units counted failed), and the notice names the timeout.
+        # (the chunk counted failed, the stubbed sweep reviewed), and the
+        # notice names the timeout.
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
-        assert res["chunks_reviewed"] == 0
+        assert res["chunks_failed"] == 1
+        assert res["chunks_reviewed"] == 1
         assert "timeout" in forge.summaries[0]
 
     def test_a_non_timeout_error_is_not_retried(self, monkeypatch):
@@ -2766,7 +3004,7 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 1
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        assert res["chunks_failed"] == 1
 
     def test_a_timeout_at_zero_context_is_not_retried(self, monkeypatch):
         """context_lines=0 is already the smallest rendering; an identical
@@ -2781,7 +3019,7 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 1
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        assert res["chunks_failed"] == 1
 
     def test_truncation_is_never_retried(self, monkeypatch):
         """finish_reason=length is the RESPONSE-side budget, not the deadline;
@@ -2796,7 +3034,7 @@ class TestChunkTimeoutRetry:
         )
         assert len(calls) == 1
         assert res["verdict"] == "Error"
-        assert res["chunks_failed"] == 2
+        assert res["chunks_failed"] == 1
 
     def test_the_retry_predicate_is_the_backend_timeout_vocabulary(self):
         assert orchestrator._is_timeout_error(

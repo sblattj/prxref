@@ -5,6 +5,373 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Issue numbers in entries before 0.14.0 refer to the project's previous issue
+tracker.
+
+## [0.14.0] — 2026-09-24
+
+The inputs release. A review can now be grounded in the spec a PR implements,
+follow a team's own review rules, and judge each finding against the ticket the
+PR is for. A replay mode reviews pinned commits for evaluation, Azure DevOps
+becomes the fifth forge, two backends run a review on your own Claude Code or
+Kiro CLI login, and every run records its dollar cost and can flag an oversized
+PR. Each new input is off until you configure it.
+
+### Added
+
+- **Spec-grounded review (`--spec`, `PRXREF_SPEC_SOURCES`).** Name web pages,
+  local spec files or directories, and Jira ticket URLs with a repeatable
+  `--spec URL_OR_PATH` or the list-valued `PRXREF_SPEC_SOURCES`. prxref fetches
+  them, prunes them to a digest of the constraints relevant to this diff
+  (`PRXREF_SPEC_MAX_CHARS` caps each fetched text, `PRXREF_SPEC_DIGEST_TOKENS`
+  the digest), and puts the digest into every chunk worker's and the whole-PR
+  sweep's prompt. A diff that breaks a quoted constraint draws a finding of the
+  new 🔍 `spec` severity, ranked below `warning`. Spec findings are advisory:
+  they never change the verdict or count toward the error cap, and
+  `PRXREF_FAIL_ON=any` is the opt-in gate. A source that fails never blocks the
+  review; the summary's grounding note lists it as `source N (kind): reason`.
+  The digest keeps hard-wrapped statements whole, splits a long or multi-rule
+  block into one MUST/SHOULD/MAY unit per sentence, files each constraint under
+  its own section heading (Markdown, setext or HTML `<h1>`–`<h6>`), turns a
+  version pin on a line of its own into a MUST, and ranks constraints by the
+  diff's content words while ignoring normative ones such as `must` or
+  `required`. Each URL or Jira source gets a 15 s socket timeout, a 30 s
+  wall-clock budget and one retry with no backoff (`Retry-After` is ignored),
+  and a page served without a charset is decoded by its `<meta>` tag, then as
+  UTF-8, then as cp1252. See the README's "Review Against a Spec or Ticket",
+  `docs/quality.md` "Spec grounding" and `docs/deploy.md` "Spec Sources in CI
+  and on the Daemon".
+- **A `spec` finding has to be earned.** A run counts as spec-grounded only when
+  at least one constraint reached the prompts. When every source failed or none
+  held a constraint, nothing is injected, the prompts say that no specs were
+  provided, and a `spec` finding the model returns anyway is posted as a
+  `warning` (logged at INFO and counted by a `specs relabel` trace event). On a
+  grounded run the hedge gate skips the text that a finding's `Spec: "…"` quote
+  copies verbatim from the digest, compared case-insensitively and in a finding
+  of any severity, so a condition that belongs to the spec ("If a session
+  already exists, the server MUST …") does not drop the finding as hedged. A
+  quote the digest does not hold exempts nothing.
+- **Jira tickets as spec sources.** A Jira issue URL (`/browse/KEY-1` or a REST
+  issue URL, either one under a context path of up to two segments, a Cloud
+  team-managed issue view, or a board URL carrying `selectedIssue`) is read from
+  Jira REST, and the ticket's summary, type, labels and description lines rank
+  ahead of every other constraint. `PRXREF_JIRA_BASE_URL`, `PRXREF_JIRA_EMAIL`
+  and `PRXREF_JIRA_API_TOKEN` configure access (see Security for where the
+  credentials go). A 401, a 403 or an anonymous 404 comes with a credentials
+  hint, and a 200 that is not a JSON issue, such as an SSO login page, fails
+  that source with a clean message.
+- **Spec grounding in the log, the run record and the trace.** Each failed
+  source logs one WARNING, `spec source N/T (kind, origin) failed
+  (best-effort): reason`, in every run mode, with a URL origin cut to
+  `scheme://host[:port]/path`. Every run with spec sources logs one INFO line,
+  `spec grounding: ok/T source(s) ok, N constraint(s) injected`. The run record
+  and `--format json` carry `spec_grounding` (`sources`, `ok`, `failed`,
+  `constraints`, `digest_sha256`), and the trace's `specs` event is `ok`, or
+  `fail` with the `reasons` when no source was fetched or the stage crashed.
+- **Azure DevOps Repos forge (#2).** `prxref review` and `prxref serve` handle
+  Azure DevOps Services (`dev.azure.com`, `*.visualstudio.com`) and Azure DevOps
+  Server (any host, with the collection in the URL). Inline findings post as
+  active threads, the summary is one closed PR-level thread that later runs
+  update in place, and stale inline comments of prxref's own are pruned. Azure
+  DevOps has no unified-diff endpoint, so the diff is rebuilt from the Diffs API
+  (merge-base semantics) plus blob contents: pure renames and known-binary files
+  are never downloaded, and a file past the per-blob, file-count or byte budget
+  keeps its header without hunks. Authentication is `PRXREF_AZURE_DEVOPS_TOKEN`
+  (a PAT), else `SYSTEM_ACCESSTOKEN` inside Azure Pipelines, else anonymous
+  reads of a public project. The webhook server accepts the
+  `git.pullrequest.created` and `git.pullrequest.updated` service hooks for an
+  active PR, checking the HTTP Basic password against
+  `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` in constant time (unset, it answers 401
+  unless `PRXREF_ALLOW_UNSIGNED=1`). The CLI help, the unrecognized-URL hint and
+  the package description name Azure DevOps; setup is in `docs/forges.md`
+  section 5 and `docs/deploy.md`.
+- **Team review rules (#3).** `--rules-file PATH` or `PRXREF_REVIEW_RULES` names
+  a Markdown or plain-text checklist. Its body goes into the system prompt of
+  every chunk worker and the sweep, under a `## Team review rules` heading and
+  inside `<team_rules>` tags, and `PRXREF_REVIEW_RULES_MAX_CHARS` (default
+  12000) caps it, with a truncation line and one WARNING. An optional `severity:`
+  front-matter block maps team words onto `error`, `warning` or `outofscope`
+  (`blocker: error`), and a mapped word the model writes is rewritten before
+  every quality pass instead of being dropped as an invalid severity; `spec` is
+  not a target, and prxref's own severities cannot be remapped. Other
+  front-matter keys are ignored, so a skill file works unmodified. The run
+  record's `review_rules` holds the path, the raw file's SHA-256, the lengths,
+  the truncation flag and the severity map, never the text; `-v` prints a
+  `rules:` line, and the trace gains `rules ok` and `rules remap` events.
+  `--rules-file ""` turns an environment-configured file off for one run, an
+  unusable file exits 2 before any network call, and the webhook server
+  re-reads the file for every review. See `docs/review-rules.md`.
+- **Ticket context and a per-finding scope (#4).** `--context-file PATH` or
+  `PRXREF_TICKET_CONTEXT_FILE` names the ticket a PR implements, and every
+  finding is judged `in`, `out` or `unknown` against it. The ticket is quoted to
+  the model as fenced, untrusted data, capped by `PRXREF_TICKET_CONTEXT_MAX_CHARS`
+  (default 6000). An out-of-ticket finding is marked 🟦 in front of its severity
+  glyph, listed last in the summary under **🟦 Outside the ticket (N)**,
+  labelled `OUTSIDE TICKET` in its inline comment, yields inline slots to
+  in-ticket findings of the same severity, and ends in `[scope: out]` in CLI
+  text. Scope never feeds dedup, the error cap, the verdict or `PRXREF_FAIL_ON`.
+  An empty file means "this PR has no ticket" and the summary says so, and a
+  ticket without acceptance criteria (an `Acceptance criteria` or `Definition of
+  done` heading or label, a task-list item, or a Gherkin `Given` … `Then`) gets
+  a note that scope was judged from its description alone. Every finding in
+  `--format json` carries `scope`, which stays `unknown` without a ticket; the
+  record's `ticket_context` holds metadata only. The webhook server never reads
+  a ticket file, and warns once at startup if the variable is set.
+- **Replay mode for evaluation (#5).** `--base-sha` and `--head-sha` review a
+  pinned commit range (the merge-base diff, with file context read at the
+  pinned head), `--no-threads` hides the PR's existing discussion, and
+  `--diff-file` reviews a diff file, with `--pr-url` or with no forge at all
+  (a `git format-patch` mail's subject, body and author become the PR's title,
+  description and author). A replay never posts, even for a library caller that
+  passes `post=True`; a blank replay diff is an `Error` run rather than an
+  `Approved` one; and the run record gains a `replay` stamp. Every built-in
+  forge implements the new optional `Forge.get_compare_diff(ref, *, base_sha,
+  head_sha)`, and `docs/forges.md` documents each forge's endpoint and caveats.
+- **Subscription CLI backends: `claude-cli` and `kiro-cli` (#6).**
+  `PRXREF_LLM_BACKEND=claude-cli` or `kiro-cli` reviews with your own installed,
+  logged-in Claude Code or Kiro CLI instead of an HTTP endpoint: one process per
+  model attempt, started from a fresh temporary directory, with the diff on
+  stdin. `claude-cli` runs `claude -p` with no built-in tools, settings files,
+  MCP servers or saved session; it removes eight credential-routing variables
+  (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` and the
+  like) from the child's environment so the call stays on your subscription
+  login, maps `PRXREF_LLM_REASONING_EFFORT` to `--effort`, and warns if the CLI
+  reports an API-key source, loads tools anyway, or reports a rate-limit status
+  other than `allowed`. `kiro-cli` runs `kiro-cli chat --no-interactive` on the
+  v2 agent engine, with a per-call agent file that carries the system prompt and
+  the model and allows no tools, MCP servers or resources. `PRXREF_LLM_MODELS`
+  is walked as a fallback chain, `PRXREF_LLM_CLI_PATH` overrides the binary,
+  `PRXREF_LLM_CLI_CONCURRENCY` (default 2) caps the processes running at once, a
+  deadline miss kills the whole process group, and a missing CLI exits 2 before
+  any forge or model call. See the "Subscription CLI backends" section of
+  `docs/llm.md`.
+- **Dollar cost in the run record (#7).** `cost_usd` is the total of the
+  review's calls, the chunk workers plus the sweep, including truncated or
+  unparseable responses that were billed, and `0.0` when no model call went
+  out. A figure the backend reported always wins: the response body's
+  `usage.cost` (OpenRouter), the `x-litellm-response-cost` header (a LiteLLM
+  gateway or llm-ferry), litellm's `response_cost`, or the Claude Code CLI's
+  `total_cost_usd`, an API-equivalent at list price rather than what a
+  subscription is billed. Otherwise the cost is estimated from
+  `PRXREF_PRICE_TABLE` (inline JSON or a JSON file path, USD per million tokens,
+  keyed by exact model name, validated at load so a malformed table exits 2),
+  and `cost_estimated` is set. Otherwise it is `null`, never `0` and never a
+  partial sum, and one INFO line names the unpriced models. `PRXREF_POST_COST=1`
+  appends the cost to the posted attribution line, `-v` prints it (`$…`,
+  `$… (API-equivalent)`, `~$… (est.)` or `cost unknown`), and the `chunk ok`,
+  `sweep ok` and `run ok` trace events, each unit's `<unit>.meta.json`
+  (`cost_usd`, `cost_source`) and the openai-compat attempt log line (`cost=`)
+  carry it. A run whose every reported figure came from the Claude Code CLI
+  shows its cost as `$0.0202 (API-equivalent)` on the `-v` line and on the
+  posted attribution, because `total_cost_usd` is the API list price, not a
+  subscription bill; an estimated run keeps `~$… (est.)`. The run record marks
+  such a run with `cost_api_equivalent: true`, a key no other run carries, and
+  `--format json` gains no key, because each unit's `cost_source` already says
+  `claude-cli`. prxref never asks a provider to add usage to a response. See
+  `docs/llm.md` "Cost accounting".
+- **PR size advisory (#8).** Set `PRXREF_SIZE_WARN_LINES` (lines added plus
+  removed) and/or `PRXREF_SIZE_WARN_FILES` (files changed), and a PR strictly
+  above either one gets a line at the top of its summary: "This PR changes N
+  lines in M files, above the team guideline of … Consider splitting it." Both
+  are off by default, and `0` is a real threshold. The counts come from the
+  parsed diff and skip lockfiles from the common ecosystems, generated files
+  (`*.snap`, `__snapshots__/`, `*.min.js`, `*.map`, `*.generated.*`,
+  `*.auto.*`) and any path matching `PRXREF_SIZE_IGNORE_GLOBS`. The advisory
+  never changes the verdict or the exit code; it is also reported as
+  `size_advisory` in the run record and `--format json`, and as a
+  `size advisory:` line in the CLI output.
+- **New run-record and `--format json` keys.** `cost_usd`, `cost_estimated`,
+  `review_rules`, `ticket_context`, `spec_grounding` and `size_advisory` are
+  present on every exit, error and empty-diff exits included, and `null` when
+  their feature is off. In `--format json` they follow the existing keys in a
+  fixed, documented order, and a replay run adds `replay`. The CLI text output
+  gains a `replay:` line on a replay, and `-v` adds `rules:`, `ticket:` (with the
+  in/out/unknown counts) and `spec:` lines. The README's "CLI Flags" section now
+  documents every `review` flag and lists the JSON keys in payload order.
+
+### Changed
+
+- **Minor findings render ⬜, and 🟦 now means "outside the ticket".**
+  `outofscope` findings and unrecognised severities show a grey square in the
+  summary counts, the findings list, inline comment headers and the library
+  formatter, where 0.13.0 showed 🟦; the JSON value and the `OUTOFSCOPE` label
+  are unchanged. The summary counts line also gains a `🔍 N spec` count on
+  every run. Every glyph now comes from one table, `prxref.markers`.
+- **The review prompts changed for every run.** The worker and sweep prompts
+  define the `spec` severity and its rules, and carry a `### Spec constraints`
+  block that reads `(no specs provided for this review)` when none are
+  configured, so a review of the same diff can differ from 0.13.0's even with
+  none of the new inputs set.
+- **An unrecognized `PRXREF_LLM_BACKEND` is a configuration error (exit 2)**
+  that names the variable and lists the six accepted values, checked before any
+  other LLM setting. In 0.13.0 it was a failed review that exited 0.
+- **`PRXREF_LLM_MODELS` splits on whitespace as well as commas**, like the new
+  list-valued `PRXREF_SPEC_SOURCES` and `PRXREF_SIZE_IGNORE_GLOBS`. 0.13.0 split
+  it on commas only.
+- **GitLab MR diffs are requested without `access_raw_diffs`.** Every earlier
+  release sent it to `/merge_requests/:iid/diffs`, which ignores it: gitlab.com
+  returned byte-identical diffs with and without it, and only the deprecated
+  `/changes` endpoint reads it. The reviewed diff is unchanged.
+
+### Fixed
+
+- **The `litellm` backend no longer requires `PRXREF_LLM_BASE_URL` (#1).** Only
+  `openai-compat`, `ferry` and `http` need it. Set on any other backend, it is
+  ignored with one INFO line and never forwarded, so a deployment that set a
+  placeholder URL to get past the old check keeps working unchanged. To use a
+  LiteLLM proxy, choose `openai-compat`.
+- **GitLab merge requests with more than 20 files are reviewed in full.** The
+  adapter read only the first page of GitLab's MR diff list, 20 files by
+  default, and dropped every file after that without saying so. It now reads
+  every page, and a page that cannot be read fails the review with an error
+  naming it instead of reviewing part of the MR. A warning names each file
+  GitLab sends without hunks (`too_large` or `collapsed`).
+- **GitHub and GitHub Enterprise API calls time out**: 10 s to connect and 30 s
+  per read, the same as the other forges. A stalled GitHub connection could
+  hang the review, and the webhook worker running it, forever. A write that
+  times out is not retried, so it cannot post a duplicate comment.
+- **A `{placeholder}` in PR text is shown literally.** A PR title or
+  description containing `{diff}` had the diff pasted into the prompt at that
+  spot, and a PR or finding title containing `{findings}` or `{attribution}` did
+  the same to the posted summary. Prompts and the summary are now filled in a
+  single pass.
+- **`load_config` no longer shares list defaults between calls.** Appending to
+  one loaded config's `llm_models` changed the default that every later load
+  started from.
+- **Under `PRXREF_FAIL_ON=error` or `any`, a review that ends with verdict
+  `Error` exits 1**, as documented since 0.4.0. Before, only a crash did: a
+  forge that could not be read, a diff that could not be parsed or chunked, and
+  a review in which every chunk failed all return an `Error` result rather than
+  raising, so a gating lane read those broken runs as green. The default
+  `never` is unchanged.
+- **A total LLM failure no longer counts a successful sweep as failed.** When
+  every chunk worker failed but the whole-PR sweep answered, the run correctly
+  ended with verdict `Error` but reported `chunks_reviewed` 0 and every review
+  unit failed. It now counts the sweep as reviewed: `chunks_reviewed` is 1,
+  `chunks_failed` is the number of chunks, and the two still add up to
+  `chunk_count`. The text output therefore reads `coverage: 1/2 chunks
+  reviewed` on a one-chunk PR. The verdict, the posted error notice and the
+  `PRXREF_FAIL_ON` exit code are unchanged.
+- **The `forge.get_diff` trace span counts bytes.** Its `bytes` field counted
+  characters, so a diff with non-ASCII text or a byte-order mark read short
+  (15,647 against 15,651 on one live Azure DevOps pull request).
+- **Documentation corrections.** `docs/deploy.md` no longer says there is no
+  `PRXREF_FAIL_ON` (there is: `never`, `error` or `any`, default `never`), its
+  exit-code table gains the `1` row, and its webhook table lists the Bitbucket
+  Cloud events prxref accepts (`pullrequest:created`, `pullrequest:updated`) and
+  gains Bitbucket Server / Data Center and Azure DevOps rows. `.env.example` and
+  `docs/env-vars.md` no longer say that an unset `PRXREF_LLM_SEED` leaves the
+  seed out of the request: prxref sends one random seed per process and reports
+  it as `sampling.seed`. `docs/llm.md` names the backends that apply the seed,
+  the reasoning effort and the max-tokens settings. `docs/forges.md` documents
+  GitLab's paged diff listing, and that reading a merge request's threads on
+  gitlab.com needs `PRXREF_GITLAB_TOKEN` even for a public project: gitlab.com
+  answers anonymous `/notes` and `/discussions` requests with HTTP 401, so a
+  tokenless review logs `discussion feed read was incomplete` and dedups against
+  no threads.
+
+### Security
+
+- **Earlier releases were withdrawn and the history rewritten.** The published
+  sdists of 0.10.1 through 0.13.0 and the wheels of 0.12.0 through 0.13.0 were
+  removed from PyPI, so 0.12.0 through 0.13.0 can no longer be installed from
+  it. The git history before 0.14.0 was rewritten to drop internal planning
+  notes: every tag and nearly every commit before 0.14.0 has a new SHA, so
+  re-clone an existing clone rather than pulling into it.
+- **Files named by path stay inside the working directory.** A rules file, a
+  ticket-context file or a local spec source that sits under the working
+  directory, such as a file committed in a PR checkout, must still resolve
+  under it once its symlinks are followed. So a committed
+  `docs/SPEC.md -> ~/.ssh/id_rsa` is refused without revealing the link target,
+  and every symlinked entry inside a spec directory is skipped. An absolute path
+  outside the working directory is the operator's own choice and is read as
+  given. These files are read as strict UTF-8 in bounded memory, and the rules
+  and ticket loaders refuse URLs.
+- **Credentials and paths stay out of what prxref sends.** Jira credentials go
+  only to `PRXREF_JIRA_BASE_URL`: set without it, ticket fetches are anonymous
+  and a WARNING names the variable, and a plain-`http` base URL is used with a
+  WARNING. The digest names a spec source to the model only by its last path
+  segment or bare host, with no query, userinfo, port or full local path (a
+  credential that is itself the last path segment still gets through), and the
+  spec failure reasons the summary posts carry no local path. The run record
+  and the trace hold a rules or ticket file's metadata, never its text.
+
+### Known limitations
+
+- **Unpunctuated spec lines merge.** Consecutive keyword lines in one paragraph
+  that end without punctuation (a list with no bullets or full stops) become a
+  single constraint labelled with the strongest keyword among them, and a run
+  of them longer than 400 characters is cut at 400, losing the rest. End each
+  rule with a full stop, or make it a list item.
+- **A `Spec: "…"` quote that never closes is barely exempt.** The hedge gate
+  exempts a quote only up to a closing quote mark. A quote with no closing
+  quote, or one that departs from the digest's wording before it closes, is
+  exempt only up to its last inner quote mark, and not at all without one, so a
+  condition inside it can still drop the finding as hedged.
+- **A spec directory is read shallowly.** A directory source reads at most the
+  first 20 `.md`, `.markdown`, `.txt` or `.adoc` files directly inside it, by
+  name, and says nothing about the rest. Files it skips as unreadable or
+  symlinked are named in a WARNING log line only, not in the posted note, the
+  run record or the trace.
+- **A spec directory's constraints are not tagged per file.** They carry the
+  directory's name and a line number counted through its files joined together,
+  each file under a `## <file name>` heading, rather than the file's own name
+  and line.
+- **A Jira ticket can crowd out the spec.** Ticket lines rank ahead of every
+  other constraint and may fill up to 6,000 characters of the digest, a fixed
+  share (half the default `PRXREF_SPEC_DIGEST_TOKENS` budget) that does not
+  shrink with `PRXREF_SPEC_MAX_CHARS`. With a smaller digest budget, a long
+  ticket can leave no room for anything else.
+- **A `spec` finding's quote is not checked against the digest.** On a
+  grounded run, a `spec` finding keeps its severity even when the constraint it
+  quotes is not in the digest; only the hedge-gate exemption requires a match.
+- **A Jira ticket passed with `--spec` is not ticket context.** It grounds
+  `spec` findings but sets no finding's scope; to judge scope, pass the
+  ticket's text with `--context-file`.
+- **Spec grounding can crowd out a generic finding.** In the bundled eval,
+  case-002's one expected non-spec finding was missed in all 4 grounded runs,
+  across two models, and found in 3 of the 4 runs without the spec. That is two
+  runs per model in each arm, and the cause, grounding displacing generic
+  review, is inferred, not proven.
+- **`kiro-cli` runs always read "cost unknown".** Kiro meters credits, not
+  dollars, and reports no token counts, so a price table cannot estimate it
+  either; each call's INFO line carries the credits instead.
+- **`kiro-cli` isolation and reporting are partial.** Whether Kiro adds
+  user-level configuration, such as `~/.kiro/steering/`, to prxref's per-call
+  agent has not been verified, and the agent file cannot turn it off. Kiro does
+  not report which model ran, so the attribution names the model you
+  configured, and it keeps every chat, the diff included, under
+  `~/.kiro/sessions/cli/` (`docs/llm.md` shows how to delete them).
+- **GitLab files without hunks are not reviewed.** A file whose diff GitLab
+  withholds as `too_large` or `collapsed` arrives without hunks, so it is listed
+  header-only and not reviewed; a warning names each such file.
+- **GitLab merge requests past 5,000 files fail.** An MR whose diff listing runs
+  past 50 pages of 100 files fails the review rather than reviewing part of it.
+- **GitHub pull requests past 20,000 diff lines are not reviewed.** GitHub
+  refuses the unified diff of such a pull request with HTTP `406`
+  (`too_large`), so the review ends with verdict `Error` and posts the error
+  notice. There is no fallback to the paged file listing yet. This limit
+  applies to every earlier release too.
+- **A forge-less replay sees only the diff.** A `--diff-file` run without
+  `--pr-url` gives the workers no library versions and no out-of-hunk
+  definitions, gives the manifest claim check no full-file lines, and has no
+  existing discussion; its title and description come from a `git format-patch`
+  header when there is one, else the file name. With `--pr-url`, a replay keeps
+  the PR's current title and description, pinned SHAs without `--no-threads`
+  still show the current threads, and a `--diff-file` without `--head-sha` reads
+  file context at the PR's current head; the last two each log a warning.
+- **Azure DevOps is verified live for anonymous reads only.** On a public Azure
+  DevOps Services project, the forge reads, the dry-run output shape, the
+  pinned-range compare diff (including a PR whose target branch had moved on)
+  and a pinned-range replay were checked live. Posting the summary and inline
+  threads, pruning, PAT and `SYSTEM_ACCESSTOKEN` authentication and the
+  service-hook payload are tested against recorded API shapes only, and Azure
+  DevOps Server (a release that accepts REST `api-version=7.1`) is untested.
+- **A mistyped or unrecognized `--pr-url` exits 0 even under
+  `PRXREF_FAIL_ON=error` or `any`.** prxref prints the unrecognized-URL hint to
+  stderr and exits 0, because nothing was reviewed and there is no outcome to
+  gate on, so a gating lane with a malformed URL stays green.
+
 ## [0.13.0] — 2026-09-17
 
 ### Added
@@ -820,7 +1187,10 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/sblattj/prxref/releases/tag/v0.14.0
+[0.13.0]: https://github.com/sblattj/prxref/releases/tag/v0.13.0
+[0.12.2]: https://github.com/sblattj/prxref/releases/tag/v0.12.2
 [0.12.1]: https://github.com/sblattj/prxref/releases/tag/v0.12.1
 [0.12.0]: https://github.com/sblattj/prxref/releases/tag/v0.12.0
 [0.11.1]: https://github.com/sblattj/prxref/releases/tag/v0.11.1

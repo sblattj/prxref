@@ -1,17 +1,33 @@
 """Deterministic quality passes over worker findings.
 
-Eleven passes run before posting, in the order ``orchestrate_review``
-applies them. A twelfth deterministic check, the release-shaped-PR
+Thirteen passes run before posting, in the order ``orchestrate_review``
+applies them; pass 1 runs only when the team review rules declare a
+severity map. A fourteenth deterministic check, the release-shaped-PR
 heuristic, is not a pass at all: ``heuristics.release_shape_findings``
 ADDS a finding before pass 1 and it then flows through every pass below
 exactly like a model finding. Every ``drop_reason`` prefix these passes
 emit is tabulated for operators in ``docs/quality.md``.
 
-1. ``apply_location_validation``: drop findings whose ``file`` names no
+1. ``apply_severity_map``: when the team review rules declare a severity
+   map, rewrite a team severity word (``blocker``) to the prxref tier the
+   map gives it (``error``), compared after whitespace collapsing and
+   ``casefold()``. It runs first because every later pass reads the
+   severity. A dropped finding, an unmapped word and one of prxref's own
+   severities pass through unchanged; it drops nothing, and without a map
+   it is not called.
+2. ``apply_spec_grounding``: on a run that injected no spec constraint
+   (``specs.constraint_count`` of the digest is 0 — no sources, every
+   source failed, or nothing kept), relabel every ``spec`` finding as
+   ``warning``: the prompts showed the no-specs text, so the label has
+   nothing to be grounded in. It runs right after the team severity
+   map, so ``apply_severity_consistency`` never raises a same-title
+   sibling to ``spec`` on the strength of an ungrounded label. It drops
+   nothing.
+3. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-2. ``apply_manifest_claim_check``: for findings on a manifest or
+4. ``apply_manifest_claim_check``: for findings on a manifest or
    npm-family lockfile (``package.json``, ``bun.lock``, ...), drop a
    claim whose named dependency is not the key on the anchored line
    (``anchor mismatch:``) or sits under a different dependency section
@@ -19,7 +35,7 @@ emit is tabulated for operators in ``docs/quality.md``.
    own hunk holds no section header, the served full-file lines decide
    the enclosing section. It runs BEFORE ``apply_line_align`` so it
    reads the model's raw anchor.
-3. ``apply_line_align``: a line explicitly cited in the finding's own
+5. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
    line lands on an added line — or a context line within tolerance of
@@ -35,43 +51,45 @@ emit is tabulated for operators in ``docs/quality.md``.
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-4. ``apply_thread_dedup``: drop findings that duplicate an already-open
+6. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``.
-5. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+7. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing thread already argued out — same path plus shared
    distinctive tokens, with NO line test, because line alignment has already
    demoted a file-level finding to line 0 by this point
    (``settled in thread: <author>``).
-6. ``apply_severity_consistency``: findings sharing one normalized title —
+8. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-7. ``apply_removal_claim_check``: drop findings whose removal verb governs
+9. ``apply_removal_claim_check``: drop findings whose removal verb governs
    a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
    path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
    header produces when a worker reads a copy as a move (issue #03).
    Only a claim that NAMES a diff path is judged, so a finding about a
    removed guard or constant is untouched.
-8. ``apply_hedge_gate``: drop findings whose title or body conditions the
-   defect on a precondition the worker never established from the diff
-   ("If X still leases a client", "unless the backfill already ran"),
-   with ``drop_reason`` ``hedged: "<matched span>"``.
-9. ``apply_quality_gate``: drop findings below the confidence floor
-   (``confidence 0.40 below floor 0.60``), cap errors per review
-   (``error cap exceeded (max N)``), and enforce the
-   {error, warning, outofscope} severity vocabulary
-   (``invalid severity: '<value>'``). It RETURNS its findings sorted by
-   ``finding_sort_key``, so the caller re-derives the chunk/sweep
-   boundary from finding identity rather than carrying an index across it.
-10. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+10. ``apply_hedge_gate``: drop findings whose title or body conditions the
+    defect on a precondition the worker never established from the diff
+    ("If X still leases a client", "unless the backfill already ran"),
+    with ``drop_reason`` ``hedged: "<matched span>"``. A body's
+    ``Spec: "..."`` quote is not read for the text it copies verbatim from
+    the spec digest the workers were shown.
+11. ``apply_quality_gate``: drop findings below the confidence floor
+    (``confidence 0.40 below floor 0.60``), cap errors per review
+    (``error cap exceeded (max N)``), and enforce the
+    {error, warning, spec, outofscope} severity vocabulary
+    (``invalid severity: '<value>'``). It RETURNS its findings sorted by
+    ``finding_sort_key``, so the caller re-derives the chunk/sweep
+    boundary from finding identity rather than carrying an index across it.
+12. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
     duplicate and then die at the gate itself.
-11. ``apply_containment_note``: a finding that asserts a throw, panic,
+13. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -88,14 +106,14 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
 
-SEVERITIES: frozenset[str] = frozenset({"error", "warning", "outofscope"})
+SEVERITIES: frozenset[str] = frozenset({"error", "warning", "spec", "outofscope"})
 
 DEFAULT_CONFIDENCE_FLOOR: float = 0.6
 DEFAULT_MAX_ERRORS: int = 10
@@ -169,6 +187,13 @@ HEDGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _HEDGE_SPAN_MAX: int = 80
+
+# Where a finding quotes its constraint (``Spec: "..."``). Normative text is
+# conditional by nature ("If a session already exists, the server MUST reuse
+# it"), so the quoted text the digest really holds is the spec's precondition,
+# not the model's hedge, and is removed before the hedge rules read the body.
+_SPEC_QUOTE_OPEN_RE = re.compile(r"Spec:\s*[\"“‘']?")
+_SPEC_QUOTE_CLOSERS: frozenset[str] = frozenset("\"”’'")
 
 
 def active(findings: Sequence[Finding]) -> list[Finding]:
@@ -967,7 +992,9 @@ def apply_settled_thread_suppression(
     return result
 
 
-_SEVERITY_RANK: dict[str, int] = {"error": 0, "warning": 1, "outofscope": 2}
+_SEVERITY_RANK: dict[str, int] = {
+    "error": 0, "warning": 1, "spec": 2, "outofscope": 3,
+}
 
 _TITLE_PUNCT_RE = re.compile(r"[`*\"'\u2018\u2019\u201c\u201d]")
 
@@ -1225,8 +1252,8 @@ def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
        describing different problems stay apart.
 
     Components bind transitively (A shares a token with B, B with C, so
-    all three group). Each component is rewritten to its highest
-    severity (error > warning > outofscope). A rewritten finding keeps
+    all three group). Each component is rewritten to its highest severity
+    (error > warning > spec > outofscope). A rewritten finding keeps
     its own file, line, body, and confidence; only severity changes.
     Findings carrying a ``drop_reason`` or a severity outside the
     vocabulary pass through untouched. One summary line is logged when
@@ -1527,7 +1554,40 @@ def _hedge_span(text: str) -> str | None:
     return None
 
 
-def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
+def _spec_quote_len(rest: str, digest_lower: str) -> int:
+    lo, hi = 0, min(len(rest), len(digest_lower))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if rest[:mid].lower() in digest_lower:
+            lo = mid
+        else:
+            hi = mid - 1
+    for k in range(min(lo, len(rest) - 1), 0, -1):
+        if rest[k] in _SPEC_QUOTE_CLOSERS:
+            return k
+    return 0
+
+
+def _blank_spec_quotes(body: str, spec_digest: str) -> str:
+    if not spec_digest:
+        return body
+    digest_lower = spec_digest.lower()
+    parts: list[str] = []
+    pos = 0
+    for m in _SPEC_QUOTE_OPEN_RE.finditer(body):
+        if m.start() < pos:
+            continue
+        k = _spec_quote_len(body[m.end():], digest_lower)
+        if k:
+            parts.append(body[pos:m.end()])
+            pos = m.end() + k
+    parts.append(body[pos:])
+    return "".join(parts)
+
+
+def apply_hedge_gate(
+    findings: Sequence[Finding], *, spec_digest: str = ""
+) -> list[Finding]:
     """Drop findings whose own text conditions the defect on an unverified fact.
 
     A hedged finding ("If toolProxy.prepare still leases a client", "If they
@@ -1539,13 +1599,26 @@ def apply_hedge_gate(findings: Sequence[Finding]) -> list[Finding]:
     Pure and order-preserving: already-dropped findings pass through
     untouched, and a match sets ``drop_reason`` to ``hedged: "<span>"``
     naming the matched text so the drop is auditable in the run record.
+
+    ``spec_digest`` is the spec constraints block the workers were shown.
+    After each ``Spec:`` marker in the body (with or without an opening
+    quote), the longest following text that appears verbatim in the digest,
+    compared case-insensitively, is cut back to end just before a closing
+    quote and removed before the rules read the body; when no closing quote
+    follows any part of it, nothing is removed. A condition inside a real
+    constraint belongs to the spec, not to the model's reasoning, and this
+    holds for every severity. Text the digest does not hold, and every quote
+    when the digest is empty, is read like the rest of the body, so a model
+    cannot hide its own hedge inside a fabricated ``Spec: "..."``. The title
+    is always read as written.
     """
     out: list[Finding] = []
     for f in findings:
         if f.drop_reason is not None:
             out.append(f)
             continue
-        span = _hedge_span(f.title or "") or _hedge_span(f.body or "")
+        body = _blank_spec_quotes(f.body or "", spec_digest)
+        span = _hedge_span(f.title or "") or _hedge_span(body)
         if span is None:
             out.append(f)
             continue
@@ -1562,12 +1635,15 @@ def apply_quality_gate(
     """Filter findings through vocabulary, confidence, and per-review error caps.
 
     Order:
-    1. Severity vocabulary: non-empty lowercase must be in {error, warning, note};
-       case-mismatches are normalized; invalid severities are dropped.
+    1. Severity vocabulary: non-empty lowercase must be in
+       {error, warning, spec, outofscope}; case-mismatches are normalized;
+       invalid severities are dropped.
     2. Confidence floor: drop findings below the threshold (default 0.6).
     3. Error cap: among surviving errors, keep the top N ranked by
        :func:`finding_rank_key` and drop the rest, so ties are broken by
-       content rather than by arrival order.
+       content rather than by arrival order. ``spec`` findings never count
+       toward the cap: a spec-heavy review is neither crowded out by it nor
+       crowding it out.
 
     The returned list is sorted by :func:`finding_sort_key`.
     """
@@ -1618,3 +1694,72 @@ def apply_quality_gate(
             )
 
     return sorted(staged, key=finding_sort_key)
+
+
+def apply_severity_map(
+    findings: Sequence[Finding], severity_map: Mapping[str, str],
+) -> list[Finding]:
+    """Rewrite a team severity word to the prxref severity it maps to.
+
+    ``severity_map`` is the review rules' front-matter map, team word to
+    prxref tier (``{"blocker": "error"}``). ``orchestrate_review`` runs this
+    before every other pass, so a mapped word reaches the gate as its tier
+    and an unmapped one still dies there as ``invalid severity``. Returns a
+    new list of the same length and order, rewritten findings being
+    :func:`dataclasses.replace` copies (every other field, ``scope``
+    included, is kept); it drops nothing.
+
+    A finding's severity matches a map word after ``strip()``, whitespace
+    collapsing and ``casefold()`` on both sides, so ``" Must  FIX "`` meets
+    ``must fix``. A finding that already carries a ``drop_reason``, one whose
+    word is not in the map, and one that already names one of prxref's own
+    :data:`SEVERITIES` pass through as the same object: the map translates
+    team words only.
+    """
+    if not severity_map:
+        return list(findings)
+    table = {_severity_word(word): tier for word, tier in severity_map.items()}
+    out: list[Finding] = []
+    for f in findings:
+        word = _severity_word(f.severity)
+        tier = table.get(word)
+        if f.drop_reason is not None or tier is None or word in SEVERITIES:
+            out.append(f)
+        else:
+            out.append(replace(f, severity=tier))
+    return out
+
+
+def _severity_word(severity: object) -> str:
+    return " ".join(severity.split()).casefold() if isinstance(severity, str) else ""
+
+
+def apply_spec_grounding(
+    findings: Sequence[Finding], *, grounded: bool,
+) -> list[Finding]:
+    """Relabel ``spec`` findings as ``warning`` on a run with no spec grounding.
+
+    ``grounded`` says whether the run injected at least one spec constraint
+    into the prompts (:func:`prxref.specs.constraint_count` of the digest is
+    above 0). A run that injected none showed every review unit the no-specs
+    text, so a ``spec`` finding there has no quoted constraint behind it: it
+    is kept as a ``warning`` rather than posted under a label it has not
+    earned or dropped along with whatever it found. The severity is compared
+    after ``.strip().lower()``, so ``"SPEC"`` is relabelled too; every other
+    severity is left exactly as written, so this pass never raises a finding
+    to ``spec``. ``orchestrate_review`` runs it right after
+    :func:`apply_severity_map` and before every other pass.
+
+    Pure and order-preserving: returns a new list of the same length,
+    rewritten findings being :func:`dataclasses.replace` copies, and
+    already-dropped findings pass through untouched. Identity when
+    ``grounded`` is true.
+    """
+    if grounded:
+        return list(findings)
+    return [
+        replace(f, severity="warning")
+        if f.drop_reason is None and (f.severity or "").strip().lower() == "spec"
+        else f
+        for f in findings
+    ]

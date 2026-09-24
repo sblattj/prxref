@@ -1,7 +1,8 @@
-"""Forge contract: one Protocol, four implementations.
+"""Forge contract: one Protocol, five implementations.
 
 The implementations are bitbucket (Cloud), bitbucket_server (Server / Data
-Center), github (Cloud and Enterprise Server) and gitlab (SaaS and self-hosted).
+Center), github (Cloud and Enterprise Server), gitlab (SaaS and self-hosted)
+and azure_devops (Azure DevOps Services and Azure DevOps Server).
 
 Every value that flows through the pipeline is forge-agnostic past this module.
 Diff handling is deliberately unified: each forge returns ONE raw unified diff
@@ -19,7 +20,7 @@ from typing import Protocol
 class PRRef:
     """A pull/merge request identity, normalized across forges."""
 
-    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab"
+    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab" | "azure-devops" | "local"
     host: str  # e.g. "bitbucket.org", "github.com", "gitlab.com", or self-hosted host
     owner: str  # workspace / org / group
     repo: str
@@ -89,6 +90,10 @@ class FeedReadError(RuntimeError):
     empty list for any exception, so returning the pages that WERE read beats
     throwing them away. It logs a warning instead, so the under-read is
     visible rather than silent.
+
+    It is not only about comments: GitLab's ``get_diff`` raises it when the
+    paged MR diff listing cannot be read to the end, because the files that
+    did arrive would otherwise be reviewed as if they were the whole MR.
     """
 
 
@@ -147,6 +152,18 @@ class Forge(Protocol):
         """
         ...
 
+    def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
+        """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
+
+        Optional: callers resolve it with ``getattr(forge, "get_compare_diff", None)``,
+        so a Forge without it is still valid (replay then refuses pinned SHAs with a
+        configuration error). Three-dot semantics — exactly what the PR's own diff
+        shows when ``base_sha``/``head_sha`` are the PR's target/source commits.
+        Raises on transport or HTTP failure like ``get_diff``; returns ``""`` for an
+        empty range and leaves the judgement to the caller.
+        """
+        ...
+
 
 def detect_forge(url: str) -> PRRef | None:
     """Try each registered forge's URL parser in order.
@@ -159,10 +176,14 @@ def detect_forge(url: str) -> PRRef | None:
     any result today. It is kept deliberately anyway: whichever parser is
     narrower should be asked first, so that loosening one later degrades into a
     shadowed forge rather than a silently mis-routed one.
-    """
-    from . import bitbucket, bitbucket_server, github, gitlab
 
-    for forge in (bitbucket, bitbucket_server, github, gitlab):
+    Azure DevOps is asked last for the same defensive reason: its URLs carry
+    ``/_git/{repo}/pullrequest/{n}``, which no other pattern accepts, so it
+    cannot shadow or be shadowed by the forges ahead of it.
+    """
+    from . import azure_devops, bitbucket, bitbucket_server, github, gitlab
+
+    for forge in (bitbucket, bitbucket_server, github, gitlab, azure_devops):
         ref = forge.ForgeImpl.parse_pr_url(url)
         if ref is not None:
             return ref

@@ -8,7 +8,12 @@ Verify every claim against the diff itself. Every finding must cite a file and l
 
 - `error` — the change will break at runtime or is a real bug: crash, wrong result, data loss, security hole, broken contract.
 - `warning` — risk or smell the diff introduces or worsens: race-prone pattern, resource leak, missing error handling, load-bearing duplication.
+- `spec` — the diff violates a constraint quoted in the Spec constraints block below: a MUST/SHALL/required behaviour not implemented, a forbidden behaviour implemented, a version pin or naming rule broken. Only when specs were provided. Quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 - `outofscope` — minor: misleading naming, a TODO without context, dead code the diff adds.
+
+## Spec-grounded rules
+
+Emit `spec` only for a conflict between the diff and a constraint quoted in the Spec constraints block — never for a generic best practice not present in the block. When the only basis for a finding is a constraint quoted in the Spec constraints block, its severity is `spec`. When the block reads `(no specs provided for this review)`, `spec` is not a legal severity. Cite the diff line that violates it — the same `file`/`line` contract as every finding — and quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 
 ## Confidence
 
@@ -37,6 +42,10 @@ PR description:
 
 Repo: {repo_hint}
 
+{ticket_context}### Spec constraints
+
+{spec_digest}
+
 The input stays under roughly 30k tokens; the diff below is the complete chunk.
 
 ### Diff
@@ -60,7 +69,7 @@ Return exactly one JSON object, no prose, no fences:
       "severity": "error",
       "confidence": 0.9,
       "title": "Divide by zero when size is unset",
-      "body": "size defaults to None and is used as a divisor on line 42; the diff adds no guard."
+      "body": "size defaults to None and is used as a divisor on line 42; the diff adds no guard."{scope_example}
     }
   ],
   "escalations": []

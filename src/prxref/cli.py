@@ -1,9 +1,30 @@
 """prxref command-line interface.
 
 Provides three subcommands:
-  * ``review --pr-url URL`` — one-shot PR/MR review from a forge URL.
+  * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
+    GitLab, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
+
+``review`` takes three optional inputs besides the PR itself, and they
+compose: ``--spec URL_OR_PATH`` (repeatable) grounds the review against specs
+or tickets and replaces ``PRXREF_SPEC_SOURCES``; ``--rules-file PATH`` adds a
+team review-rules file (``PRXREF_REVIEW_RULES``); ``--context-file PATH``
+names the ticket the PR implements (``PRXREF_TICKET_CONTEXT_FILE``), so each
+finding is marked in, out of, or of unknown ticket scope. Each flag wins over
+its variable, and ``--rules-file ""`` / ``--context-file ""`` turn the
+variable off for one run. Both files are read before any network call, so an
+unusable one is a configuration error. The webhook daemon reads the rules
+file from its own environment and never reads a ticket-context file.
+
+The replay flags review a pinned, reproducible input for evaluation:
+``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
+repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
+optional, and no forge is contacted without it), and ``--no-threads`` hides
+the PR's existing threads. Any of them makes the run a replay: it never
+posts, and its run record gains a ``replay`` stamp. They are validated
+before the URL is parsed, and a bad set exits 2 naming the flag. The webhook
+daemon never replays.
 
 Non-blocking doctrine: ``review`` exits 0 on all review errors (empty diffs,
 network failures, LLM timeouts, bad credentials), printing diagnostic notes to
@@ -17,11 +38,14 @@ usage error rather than a review outcome and exits 2. Both kinds raise
 ``PRXREF_FAIL_ON`` is the one opt-out of that doctrine. The default ``never``
 is the doctrine itself: findings never move the exit code. ``error`` exits 1
 when the completed review carries an active error-severity finding; ``any``
-exits 1 on any active finding; and under either value a review that fails to
-complete also exits 1, because a gate that silently passes on a broken run is
-worse than none. An unrecognized PR URL still exits 0 under every value —
-nothing was reviewed, so there is no outcome to gate on. The webhook daemon
-has no exit code and is unaffected by the knob.
+exits 1 on any active finding; and under either value a review that does not
+complete also exits 1 — it crashes, or it ends with verdict ``Error`` (the
+forge could not be read, the diff could not be parsed or chunked, or every
+chunk review failed) — because a gate that silently passes on a broken run is
+worse than none. An empty PR diff is not a failure: it is reviewed as
+``Approved`` and exits 0. An unrecognized PR URL still exits 0 under every
+value — nothing was reviewed, so there is no outcome to gate on. The webhook
+daemon has no exit code and is unaffected by the knob.
 
 ``PRXREF_DRY_RUN=1`` suppresses every write to the forge on both paths — the
 one-shot review and the webhook daemon — and ``--no-post`` does the same for a
@@ -38,15 +62,23 @@ import argparse
 import importlib
 import json
 import logging
+import os
+import re
 import sys
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import prxref
 from prxref.config import load_config, make_forge
+from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
+from prxref.forges.replay import LocalDiffForge, ReplayForge
 from prxref.llm import ConfigError
+from prxref.rules import load_review_rules
+from prxref.ticket import load_ticket_context
+from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
 from prxref.viz import render_file
 
 logger = logging.getLogger("prxref")
@@ -55,7 +87,7 @@ logger = logging.getLogger("prxref")
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prxref",
-        description="Fast automated AI code review for Bitbucket, GitLab, and GitHub.",
+        description="Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps.",
     )
     parser.add_argument(
         "--version",
@@ -67,8 +99,11 @@ def _build_parser() -> argparse.ArgumentParser:
     rev = sub.add_parser("review", help="review one PR/MR from its web URL")
     rev.add_argument(
         "--pr-url",
-        required=True,
-        help="full URL of the PR or MR on Bitbucket, GitHub, or GitLab",
+        default=None,
+        help=(
+            "full URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure "
+            "DevOps (required unless --diff-file is given)"
+        ),
     )
     rev.add_argument(
         "--no-post",
@@ -89,6 +124,74 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="override the per-model request deadline in seconds",
+    )
+    rev.add_argument(
+        "--spec",
+        action="append",
+        default=None,
+        metavar="URL_OR_PATH",
+        help=(
+            "spec/ticket source to review against; repeatable "
+            "(PRXREF_SPEC_SOURCES otherwise)"
+        ),
+    )
+    rev.add_argument(
+        "--rules-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "team review rules (Markdown/text) added to every review prompt; "
+            "overrides PRXREF_REVIEW_RULES, and '' turns it off for this run; "
+            "read it from a trusted checkout, never from the PR under review"
+        ),
+    )
+    rev.add_argument(
+        "--context-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "ticket context (plain text/Markdown) the PR is meant to "
+            "implement; findings get a scope of in/out/unknown against it; "
+            "overrides PRXREF_TICKET_CONTEXT_FILE, and '' turns it off for "
+            "this run"
+        ),
+    )
+    rev.add_argument(
+        "--base-sha",
+        default=None,
+        metavar="SHA",
+        help=(
+            "replay: review the range BASE...HEAD (merge-base diff, like the "
+            "PR's own) in the --pr-url repository; needs --head-sha; implies "
+            "no posting"
+        ),
+    )
+    rev.add_argument(
+        "--head-sha",
+        default=None,
+        metavar="SHA",
+        help=(
+            "replay: head commit of the pinned range; file context is read at "
+            "this commit; needs --base-sha"
+        ),
+    )
+    rev.add_argument(
+        "--no-threads",
+        action="store_true",
+        help=(
+            "replay: hide the PR's existing threads from the prompt and the "
+            "thread-dedup passes; implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--diff-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "replay: review this unified diff (git diff or git format-patch "
+            "output) instead of fetching one; --pr-url becomes optional; "
+            "implies no posting"
+        ),
     )
     rev.add_argument(
         "-v",
@@ -166,6 +269,40 @@ def _fmt_tokens(result: Any) -> str:
     return f"{inp}+{out}"
 
 
+def _fmt_cost(result: Any) -> str:
+    """Render the run's cost for the ``-v`` line.
+
+    ``costs.cost_label`` of the record's ``cost_usd``, ``cost_estimated`` and
+    ``cost_api_equivalent`` (``$0.0007``, ``$0.0007 (API-equivalent)`` for a
+    claude-cli-priced run, ``~$0.0007 (est.)``, or ``cost unknown`` for
+    ``None``), and ``-`` when the result carries no ``cost_usd`` key at all.
+    An absent key means nothing measured the cost; ``None`` means it was
+    measured and no source could price it. The two are different claims, so
+    they print differently.
+    """
+    if not isinstance(result, dict) or "cost_usd" not in result:
+        return "-"
+    return cost_label(
+        result.get("cost_usd"), result.get("cost_estimated") is True,
+        api_equivalent=result.get("cost_api_equivalent") is True,
+    )
+
+
+def _dash(value: Any, width: int | None = None) -> str:
+    if value is None or value == "":
+        return "-"
+    text = str(value)
+    return text[:width] if width else text
+
+
+def _scope_counts(result: dict) -> tuple[int, int, int]:
+    active = result.get("findings_active")
+    scopes = [normalize_scope(getattr(f, "scope", None)) for f in active] if isinstance(active, list) else []
+    n_in = scopes.count(SCOPE_IN)
+    n_out = scopes.count(SCOPE_OUT)
+    return n_in, n_out, len(scopes) - n_in - n_out
+
+
 def _print_summary(
     result: Any,
     elapsed_s: float,
@@ -173,28 +310,82 @@ def _print_summary(
     verbose: bool,
     out=None,
 ) -> None:
+    """Print the text-mode summary of one review.
+
+    Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
+    ``size advisory:`` when the PR-size advisory fired; and ``replay:`` when
+    the run was a replay, so a replay can never be read as a live review.
+    Under ``-v`` it adds the finding counts, the ``elapsed/tokens/cost`` line,
+    and one line for each configured input: ``rules:``, ``ticket:`` (with the
+    active findings' scope counts), and ``spec:``. ``result`` may be partial,
+    or not a dict at all; a missing or ``None`` record prints nothing.
+    """
     target = sys.stdout if out is None else out
+    record = result if isinstance(result, dict) else {}
     verdict = result.get("verdict") if isinstance(result, dict) else result
     print(f"verdict: {verdict if verdict is not None else 'done'}", file=target)
-    failed = result.get("chunks_failed", 0) if isinstance(result, dict) else 0
+    failed = record.get("chunks_failed", 0)
     if failed:
-        reviewed = result.get("chunks_reviewed", 0)
+        reviewed = record.get("chunks_reviewed", 0)
         print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
+    size = record.get("size_advisory")
+    if isinstance(size, dict) and size.get("message"):
+        print(f"size advisory: {size['message']}", file=target)
+    replay = record.get("replay")
+    if isinstance(replay, dict):
+        print(
+            f"replay: base={_dash(replay.get('base_sha'), 12)} head={_dash(replay.get('head_sha'), 12)} "
+            f"threads={_dash(replay.get('threads'))} diff_file={_dash(replay.get('diff_file'))}",
+            file=target,
+        )
     if not verbose:
         return
-    dropped = result.get("findings_dropped", []) if isinstance(result, dict) else []
+    dropped = record.get("findings_dropped", [])
     dropped = len(dropped) if isinstance(dropped, list) else 0
     print(f"counts: {_fmt_counts(result)} (dropped: {dropped})", file=target)
-    print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)}", file=target)
+    print(f"elapsed: {elapsed_s:.1f}s tokens: {_fmt_tokens(result)} cost: {_fmt_cost(result)}", file=target)
+    rules = record.get("review_rules")
+    if isinstance(rules, dict):
+        truncated = f" (truncated at {_dash(rules.get('max_chars'))})" if rules.get("truncated") else ""
+        print(
+            f"rules: {_dash(rules.get('path'))} sha256={_dash(rules.get('sha256'), 12)} "
+            f"chars={_dash(rules.get('chars'))}{truncated}",
+            file=target,
+        )
+    ticket = record.get("ticket_context")
+    if isinstance(ticket, dict):
+        truncated = " truncated" if ticket.get("truncated") else ""
+        n_in, n_out, n_unknown = _scope_counts(record)
+        print(
+            f"ticket: {_dash(ticket.get('path'))} sha256={_dash(ticket.get('sha256'), 12)} "
+            f"chars={_dash(ticket.get('chars'))}{truncated} in={n_in} out={n_out} unknown={n_unknown}",
+            file=target,
+        )
+    spec = record.get("spec_grounding")
+    if isinstance(spec, dict):
+        print(
+            f"spec: {_dash(spec.get('ok'))}/{_dash(spec.get('sources'))} source(s) ok, "
+            f"{_dash(spec.get('constraints'))} constraint(s)",
+            file=target,
+        )
 
 
 def _fmt_finding_line(f: Any) -> str:
-    """Render one active finding as ``<severity> <file>:<line> <title> (confidence 0.NN)``."""
+    """Render one active finding as ``<severity> <file>:<line> <title> (confidence 0.NN)``.
+
+    A finding the ticket judged gains `` [scope: in]`` or `` [scope: out]``
+    after the frozen prefix; ``unknown`` (always the case without a ticket)
+    adds nothing.
+    """
     severity = getattr(f, "severity", None) or ""
     location = f"{getattr(f, 'file', '')}:{getattr(f, 'line', 0)}"
     title = getattr(f, "title", None) or ""
     confidence = getattr(f, "confidence", None) or 0.0
-    return f"{severity} {location} {title} (confidence {confidence:.2f})"
+    line = f"{severity} {location} {title} (confidence {confidence:.2f})"
+    scope = getattr(f, "scope", None)
+    if scope in (SCOPE_IN, SCOPE_OUT):
+        line = f"{line} [scope: {scope}]"
+    return line
 
 
 def _fmt_indented_body(body: str) -> str:
@@ -234,12 +425,18 @@ def _print_findings(result: Any, *, out=None) -> None:
 
 def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     """Build one JSON finding row explicitly (``Finding`` is a dataclass, not
-    JSON-serializable by default)."""
+    JSON-serializable by default).
+
+    ``scope`` is the finding's position relative to the ticket context
+    (``in``, ``out`` or ``unknown``); a finding object without the attribute
+    reports ``unknown``.
+    """
     return {
         "file": f.file,
         "line": f.line,
         "severity": f.severity,
         "confidence": f.confidence,
+        "scope": getattr(f, "scope", "unknown"),
         "title": f.title,
         "body": f.body,
         "drop_reason": drop_reason,
@@ -249,11 +446,21 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
 def _build_json_result(result: Any) -> dict:
     """Build the single JSON payload for ``--format json``.
 
+    Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
+    ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
+    ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
+    ``ticket_context``, ``spec_grounding``, ``size_advisory``, then
+    ``sampling`` and ``replay`` when present.
+
     Tolerates an error-shaped or partial result (a dict missing keys, as an
-    incomplete or failed run may return): every key defaults to ``None`` and
-    ``findings`` defaults to ``[]`` rather than raising. ``sampling`` is
-    forwarded only when the result already carries it — a sibling feature's
-    key, not one this CLI invents.
+    incomplete or failed run may return): every always-present key defaults
+    to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
+    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) are
+    always emitted and are ``null`` when their feature is off; ``cost_usd`` is
+    also ``null`` when no source could price the run, never ``0``.
+    ``sampling`` and ``replay`` are forwarded only when the result already
+    carries them. ``replay`` is on replay runs only, so a normal run's
+    payload has no ``replay`` key at all.
     """
     if not isinstance(result, dict):
         result = {}
@@ -273,37 +480,250 @@ def _build_json_result(result: Any) -> dict:
         "elapsed_ms": result.get("elapsed_ms"),
         "input_tokens": result.get("input_tokens"),
         "output_tokens": result.get("output_tokens"),
+        "cost_usd": result.get("cost_usd"),
+        "cost_estimated": result.get("cost_estimated"),
         "posted": result.get("posted"),
+        "review_rules": result.get("review_rules"),
+        "ticket_context": result.get("ticket_context"),
+        "spec_grounding": result.get("spec_grounding"),
+        "size_advisory": result.get("size_advisory"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
+    if "replay" in result:
+        payload["replay"] = result["replay"]
     return payload
 
 
+_FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+
+
+@dataclass(frozen=True)
+class _ReplayRequest:
+    """The validated replay flags of one ``review`` run (issue #65).
+
+    ``base_sha`` / ``head_sha`` are both full, lowercased SHAs or both
+    ``None``. ``diff_file`` is the path exactly as the operator typed it, and
+    ``diff_text`` is that file's text once ``_run_review`` has read it
+    (``None`` until then, and without ``--diff-file``).
+    """
+
+    base_sha: str | None = None
+    head_sha: str | None = None
+    no_threads: bool = False
+    diff_file: str | None = None
+    diff_text: str | None = None
+
+    def stamp(self, *, has_forge: bool) -> dict[str, Any]:
+        """The run record's ``replay`` stamp: four keys, in a fixed order, all present.
+
+        ``threads`` is ``"hidden"`` whenever the PR's threads were not
+        consulted: under ``--no-threads``, or with no forge at all
+        (``--diff-file`` without ``--pr-url``).
+        """
+        return {
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "threads": "hidden" if self.no_threads or not has_forge else "shown",
+            "diff_file": self.diff_file,
+        }
+
+
+def _resolve_replay(
+    url: str | None,
+    *,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+    no_threads: bool = False,
+    diff_file: str | None = None,
+) -> _ReplayRequest | None:
+    """Validate the replay flags; ``None`` means a normal, non-replay run.
+
+    Pure: it reads nothing and calls nothing. ``_run_review`` calls it first,
+    before ``detect_forge``, so a bad set of replay flags exits 2 even next
+    to an unrecognised URL. A flag counts as given whenever it is not
+    ``None``, so an empty value is validated rather than ignored.
+
+    The checks run in this order, each a ``ConfigError`` naming its flag:
+    no ``--pr-url`` and no ``--diff-file``; only one of ``--base-sha`` /
+    ``--head-sha``; either one not a full 40- or 64-character hex SHA; the
+    two naming the same commit (compared lowercased); and a range without
+    ``--pr-url`` to resolve it in. Whether the forge can fetch the range is
+    only known once it exists, so ``_run_review`` checks that.
+    """
+    if url is None and diff_file is None:
+        raise ConfigError("--pr-url: required unless --diff-file is given")
+    if (base_sha is None) != (head_sha is None):
+        only = "--base-sha" if head_sha is None else "--head-sha"
+        raise ConfigError(f"--base-sha/--head-sha: must be given together (got only {only})")
+    if base_sha is not None and head_sha is not None:
+        for flag, value in (("--base-sha", base_sha), ("--head-sha", head_sha)):
+            if not _FULL_SHA_RE.fullmatch(value):
+                raise ConfigError(
+                    f"{flag}: must be a full 40- or 64-character hex commit SHA, "
+                    f"got {value!r} (resolve it with git rev-parse)"
+                )
+        base_sha, head_sha = base_sha.lower(), head_sha.lower()
+        if base_sha == head_sha:
+            raise ConfigError("--base-sha/--head-sha: must name two different commits")
+        if url is None:
+            raise ConfigError(
+                "--base-sha/--head-sha: need --pr-url (the range is resolved in "
+                "that PR's repository)"
+            )
+    if head_sha is None and not no_threads and diff_file is None:
+        return None
+    return _ReplayRequest(
+        base_sha=base_sha, head_sha=head_sha, no_threads=bool(no_threads),
+        diff_file=diff_file,
+    )
+
+
+def _read_diff_file(path: str) -> str:
+    """Read the ``--diff-file`` text; a file that cannot be read is a ``ConfigError``.
+
+    The message is ``--diff-file: cannot read '<path>': <strerror>``, which
+    covers a missing file and a directory alike. Undecodable bytes are
+    replaced, not refused, because the diff is review input rather than
+    configuration. A blank file is not a configuration error either: the
+    replay forge raises on it, and the run ends as an ``Error`` run (exit 0,
+    or 1 under ``PRXREF_FAIL_ON=error`` or ``any``).
+    """
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(
+            f"--diff-file: cannot read {path!r}: {exc.strerror or exc}"
+        ) from exc
+
+
+def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
+    """Wrap the ``--pr-url`` forge in a :class:`ReplayForge` for this replay.
+
+    A pinned range that has to be fetched (no ``--diff-file``) needs the
+    forge's optional ``get_compare_diff``; without it this raises the
+    ``ConfigError`` naming ``--base-sha/--head-sha`` (exit 2) before any
+    network call. Two combinations are allowed but logged as a WARNING,
+    because each leaks the PR's present into a replay: pinned SHAs without
+    ``--no-threads`` still show the PR's current threads, and a
+    ``--diff-file`` without ``--head-sha`` reads file context at the PR's
+    current head.
+    """
+    if (
+        replay.head_sha is not None
+        and replay.diff_text is None
+        and getattr(forge, "get_compare_diff", None) is None
+    ):
+        raise ConfigError(
+            f"--base-sha/--head-sha: the {ref.forge} forge cannot fetch a "
+            "pinned commit range"
+        )
+    if replay.head_sha is not None and not replay.no_threads:
+        logger.warning(
+            "replay at pinned SHAs still shows the PR's CURRENT threads to the "
+            "prompt and the dedup passes; add --no-threads for a blind replay"
+        )
+    if replay.diff_file is not None and replay.head_sha is None:
+        logger.warning(
+            "--diff-file with --pr-url and no --head-sha: file context is read "
+            "at the PR's current head, which may not match the file"
+        )
+    return ReplayForge(
+        forge, base_sha=replay.base_sha, head_sha=replay.head_sha,
+        hide_threads=replay.no_threads, diff_text=replay.diff_text,
+    )
+
+
+def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> Any:
+    """Run the rules or ticket-context ``loader``, fencing every failure into a ``ConfigError``.
+
+    The loaders raise ``ConfigError`` naming ``source`` themselves; an
+    ``OSError`` or ``ValueError`` that escapes one is re-raised as a
+    ``ConfigError`` naming it too. So an unusable file always exits 2 before
+    any network call, and nothing a loader raises can reach the orchestrator,
+    which reads the loaded object unfenced.
+    """
+    try:
+        return loader(path, max_chars=max_chars, source=source)
+    except ConfigError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
+
+
 def _run_review(
-    url: str,
+    url: str | None,
     *,
     post: bool = True,
     max_chunks: int | None = None,
     timeout: float | None = None,
     trace_dir: str | None = None,
+    spec_sources: list[str] | None = None,
+    rules_file: str | None = None,
+    context_file: str | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+    no_threads: bool = False,
+    diff_file: str | None = None,
 ) -> Any:
-    ref = detect_forge(url)
-    if ref is None:
-        return None
-    # --max-chunks and --timeout arrive as load_config overrides (None is
-    # ignored), so each flag is range-checked on exactly the same path as its
-    # environment variable and its precedence is derived once, here. There is
+    replay = _resolve_replay(
+        url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
+        diff_file=diff_file,
+    )
+    # The diff file is read with the flags, before the URL is parsed, so an
+    # unreadable one exits 2 whatever the URL. Without --pr-url it is the
+    # whole input: a synthetic "local" ref, and no forge is ever built.
+    if replay is not None and replay.diff_file is not None:
+        replay = replace(replay, diff_text=_read_diff_file(replay.diff_file))
+    if url is None:
+        ref = LocalDiffForge.ref_for(replay.diff_file)
+    else:
+        ref = detect_forge(url)
+        if ref is None:
+            return None
+    # --max-chunks, --timeout, --spec, --rules-file and --context-file arrive
+    # as load_config overrides (None is ignored, "" is not), so each flag rides
+    # exactly the path its environment variable does: --max-chunks and
+    # --timeout are range-checked on the same pass as PRXREF_MAX_CHUNKS and
+    # PRXREF_LLM_TIMEOUT, --spec replaces PRXREF_SPEC_SOURCES wholesale rather
+    # than merging with it, and --rules-file "" / --context-file "" blank
+    # their variable for one run. Precedence is derived once, here. There is
     # deliberately no way to inject a pre-built config dict: that would bypass
     # _check_ranges and make every range guarantee conditional on nobody using
-    # the bypass.
+    # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
+    # orchestrate_review has no timeout parameter.
     cfg = load_config(
         max_chunks=max_chunks,
         llm_timeout=timeout,
         trace_dir=trace_dir,
+        spec_sources=spec_sources,
+        review_rules=rules_file,
+        ticket_context_file=context_file,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
-        source_labels={"max_chunks": "--max-chunks", "llm_timeout": "--timeout"},
+        source_labels={
+            "max_chunks": "--max-chunks",
+            "llm_timeout": "--timeout",
+            "spec_sources": "--spec",
+            "review_rules": "--rules-file",
+            "ticket_context_file": "--context-file",
+        },
+    )
+    # Both files are read here, after config and before make_forge and the LLM
+    # client, so an unusable one exits 2 before any network I/O. load_config
+    # stays I/O-free. Each is reported under the input that supplied its
+    # path: the flag whenever it was given, else the variable.
+    rules = _load_text_input(
+        load_review_rules, cfg["review_rules"],
+        max_chars=cfg["review_rules_max_chars"],
+        source="--rules-file" if rules_file is not None else "PRXREF_REVIEW_RULES",
+    )
+    ticket = _load_text_input(
+        load_ticket_context, cfg["ticket_context_file"],
+        max_chars=cfg["ticket_context_max_chars"],
+        source=(
+            "--context-file" if context_file is not None else "PRXREF_TICKET_CONTEXT_FILE"
+        ),
     )
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -314,7 +734,18 @@ def _run_review(
     if post and cfg["dry_run"]:
         logger.info("PRXREF_DRY_RUN=1: reviewing %s without posting to the forge", ref.url)
         post = False
-    forge = make_forge(ref)
+    # A replay reviews a pinned input for evaluation, never the live PR as it
+    # stands, so it must never write: any replay flag turns posting off, with
+    # or without --no-post. The replay forges also refuse every write.
+    if replay is not None and post:
+        logger.info("replay run: posting to the forge is disabled")
+        post = False
+    if url is None:
+        forge = LocalDiffForge(replay.diff_text, path=replay.diff_file)
+    else:
+        forge = make_forge(ref)
+        if replay is not None:
+            forge = _replay_forge(forge, ref, replay)
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
     return orchestrate(
@@ -342,6 +773,21 @@ def _run_review(
         post_verdict=cfg["post_verdict"],
         trace_file=cfg["trace_file"],
         trace_dir=cfg["trace_dir"],
+        spec_sources=cfg["spec_sources"],
+        spec_max_chars=cfg["spec_max_chars"],
+        spec_digest_tokens=cfg["spec_digest_tokens"],
+        jira_base_url=cfg["jira_base_url"],
+        jira_email=cfg["jira_email"],
+        jira_api_token=cfg["jira_api_token"],
+        rules=rules,
+        ticket=ticket,
+        # Already parsed by load_config into {model: costs.ModelPrice}.
+        price_table=cfg["price_table"],
+        post_cost=cfg["post_cost"],
+        size_warn_lines=cfg["size_warn_lines"],
+        size_warn_files=cfg["size_warn_files"],
+        size_ignore_globs=cfg["size_ignore_globs"],
+        replay=replay.stamp(has_forge=url is not None) if replay is not None else None,
     )
 
 
@@ -351,27 +797,45 @@ def _webhook_handler(url: str) -> None:
     ``post=True`` is the daemon's intent, not its last word: ``_run_review``
     downgrades it when the configured dry run says so, which is the only way to
     observe the daemon against a real repo without writing to it.
+
+    ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
+    webhook: one static ticket file cannot describe every PR the daemon sees,
+    so its findings always carry scope ``unknown``. The team rules file still
+    comes from the daemon's environment, re-read on every webhook. The daemon
+    passes no replay flag, so it never replays.
     """
     try:
-        _run_review(url, post=True)
+        _run_review(url, post=True, context_file="")
     except Exception:
         logger.exception("webhook review failed for %s", url)
 
 
 def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
-    """The exit code a completed review earns under the ``fail_on`` policy.
+    """The exit code a returned review result earns under the ``fail_on`` policy.
 
-    Severity is compared exactly as the verdict is built in the orchestrator
-    (``Request-Changes`` iff an active finding has severity ``error``), so the
-    gate and the posted verdict can never disagree about what counts. A result
-    without parseable findings is tolerated the way ``_fmt_counts`` tolerates
-    one: nothing countable means nothing to gate on.
+    ``never`` is always 0. Under ``error`` and ``any``, a result with verdict
+    ``Error`` exits 1 whatever its findings: the orchestrator returns one
+    instead of raising when the forge could not be read, the diff could not be
+    parsed or chunked, or every chunk review failed, so it is a review that did
+    not complete — the same outcome as the crash ``_cmd_review`` gates, and one
+    a gating lane must not read as green.
+
+    Otherwise severity is compared exactly as the verdict is built in the
+    orchestrator (``Request-Changes`` iff an active finding has severity
+    ``error``), so the gate and the posted verdict can never disagree about
+    what counts. A result without parseable findings is tolerated the way
+    ``_fmt_counts`` tolerates one: nothing countable means nothing to gate on.
 
     Returns the exit code and, when the gate fires, the stderr line that says
     why — silence would read as a crash rather than a decision.
     """
     if fail_on == "never":
         return 0, None
+    if isinstance(result, dict) and result.get("verdict") == "Error":
+        return 1, (
+            f"PRXREF_FAIL_ON={fail_on}: review did not complete "
+            "(verdict Error); exiting 1"
+        )
     findings = result.get("findings_active") if isinstance(result, dict) else None
     if not isinstance(findings, list):
         return 0, None
@@ -408,6 +872,13 @@ def _cmd_review(args: argparse.Namespace) -> int:
             max_chunks=args.max_chunks,
             timeout=args.timeout,
             trace_dir=args.trace_dir,
+            spec_sources=args.spec,
+            rules_file=args.rules_file,
+            context_file=args.context_file,
+            base_sha=args.base_sha,
+            head_sha=args.head_sha,
+            no_threads=args.no_threads,
+            diff_file=args.diff_file,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
@@ -430,7 +901,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
             "pull-requests, GitHub pull, or GitLab merge_requests link "
             "(bitbucket.org, github.com, gitlab.com, or a self-hosted "
             "Bitbucket Data Center, GitHub Enterprise Server, or GitLab "
-            "host); the URL must keep the forge's own path shape.",
+            "host), or an Azure DevOps pullrequest link (dev.azure.com, "
+            "*.visualstudio.com, or an Azure DevOps Server host); the URL "
+            "must keep the forge's own path shape.",
             file=sys.stderr,
         )
         return 0
@@ -449,6 +922,14 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
+    # Said once at startup rather than per webhook: _webhook_handler blanks
+    # the variable on every review, and an operator who set it should learn
+    # that before the first PR arrives, not infer it from unscoped findings.
+    if os.environ.get("PRXREF_TICKET_CONTEXT_FILE", "").strip():
+        logger.warning(
+            "PRXREF_TICKET_CONTEXT_FILE is ignored by prxref serve: one file "
+            "cannot describe every PR"
+        )
     serve_fn = importlib.import_module("prxref.webhooks").serve
     serve_fn(port=args.port, host=args.host, handler=_webhook_handler)
     return 0

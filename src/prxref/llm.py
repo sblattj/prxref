@@ -1,10 +1,12 @@
 """LLM contract: protocol + fallback-chain factory.
 
-Backends live in llm_backends.py (ferry / litellm / http). This module freezes
-the interface the pipeline codes against. NO provider-specific keys are read
-here; backend selection is PRXREF_LLM_BACKEND=ferry|litellm|http and the model
-fallback chain is PRXREF_LLM_MODELS="model1,model2,..." (first that answers
-within timeout wins; failures fail over fast).
+Backends live in llm_backends.py (openai-compat with its ferry / http aliases,
+and litellm) and llm_cli_backends.py (claude-cli, kiro-cli). This module
+freezes the interface the pipeline codes against. NO provider-specific keys
+are read here; backend selection is
+PRXREF_LLM_BACKEND=openai-compat|ferry|http|litellm|claude-cli|kiro-cli and
+the model fallback chain is PRXREF_LLM_MODELS="model1,model2,..." (first that
+answers within timeout wins; failures fail over fast).
 """
 from __future__ import annotations
 
@@ -33,6 +35,16 @@ class InvokeResult:
     reviewer can tell an operator to raise ``PRXREF_LLM_MAX_TOKENS`` instead of
     handing them a bare ``JSONDecodeError``. A backend that does not report one
     leaves it ``""`` — absent, never guessed.
+
+    ``cost_usd`` is the dollar amount the backend REPORTED for this call. When
+    the backend's fallback chain moved past truncated completions, those were
+    billed too and are included. ``None`` means no figure was reported: it
+    never means free, and no backend may default it to ``0.0``. ``cost_source``
+    names where the figure came from (``"usage.cost"``,
+    ``"x-litellm-response-cost"``, ``"litellm"`` or ``"claude-cli"``), and is
+    ``""`` whenever ``cost_usd`` is ``None``. A price-table estimate never
+    appears here: backends only report, and :mod:`prxref.costs` estimates
+    once, over the whole run.
     """
 
     text: str
@@ -42,6 +54,8 @@ class InvokeResult:
     backend: str = ""
     elapsed_ms: int = 0
     finish_reason: str = ""
+    cost_usd: float | None = None
+    cost_source: str = ""
 
 
 class LLMClient(Protocol):

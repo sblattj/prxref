@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+from .markers import SCOPE_LABELS, marker_for
+from .markers import SEVERITY_MARKERS as _SEVERITY_MARKERS
 from .triage import Finding
 
 try:
@@ -17,28 +19,23 @@ except ImportError:  # reviewer seat not landed yet; inline default applies
     _reviewer_load_prompt = None
 
 
-_SEVERITY_MARKERS: dict[str, str] = {
-    "error": "🟥",
-    "warning": "🟧",
-    "outofscope": "🟦",
+_SEVERITY_ORDER: dict[str, int] = {
+    "error": 0, "warning": 1, "spec": 2, "outofscope": 3,
 }
-_SEVERITY_ORDER: dict[str, int] = {"error": 0, "warning": 1, "outofscope": 2}
 
-_DEFAULT_SUMMARY_TEMPLATE = """\
-## {verdict_banner}
-
-**Findings:** 🟥 {error_count} error · 🟧 {warning_count} warning · 🟦 {outofscope_count} outofscope
-
-{active_count} active of {total_count} raw
-
-{findings_table}
-{dropped_section}
----
-
-*chunks {chunk_count} · {input_tokens} in / {output_tokens} out tokens · {elapsed_s}s · model {model}*
-
-*{attribution}*
-"""
+_DEFAULT_SUMMARY_TEMPLATE = (
+    "## {verdict_banner}\n\n"
+    "**Findings:** 🟥 {error_count} error · 🟧 {warning_count} warning · "
+    "🔍 {spec_count} spec · ⬜ {outofscope_count} outofscope\n"
+    "{spec_note}\n"
+    "{active_count} active of {total_count} raw\n\n"
+    "{findings_table}\n"
+    "{dropped_section}\n"
+    "---\n\n"
+    "*chunks {chunk_count} · {input_tokens} in / {output_tokens} out tokens"
+    " · {elapsed_s}s · model {model}*\n\n"
+    "*{attribution}*\n"
+)
 
 
 def _norm_severity(severity: str) -> str:
@@ -66,7 +63,11 @@ def _escape_cell(text: str) -> str:
 
 
 def _findings_table(findings: list[Finding]) -> str:
-    """Render the ``| severity | file:line | title |`` table, error-first."""
+    """Render the ``| severity | file:line | title |`` table, error-first.
+
+    The severity cell is :func:`markers.marker_for`, so a finding outside the
+    ticket shows the out-of-ticket marker in front of its severity glyph.
+    """
     if not findings:
         return "No findings survived the quality passes."
     ordered = sorted(
@@ -84,7 +85,7 @@ def _findings_table(findings: list[Finding]) -> str:
         "| --- | --- | --- |",
     ]
     rows.extend(
-        f"| {_SEVERITY_MARKERS[_norm_severity(f.severity)]} "
+        f"| {marker_for(_norm_severity(f.severity), f.scope)} "
         f"| {_escape_cell(_fmt_location(f))} "
         f"| {_escape_cell(f.title)} |"
         for f in ordered
@@ -123,10 +124,11 @@ def _load_summary_template() -> str:
     """Load ``prompts/summary.md`` via the shared loader, else inline default.
 
     Placeholder contract for the template owner: ``verdict_banner``,
-    ``error_count``, ``warning_count``, ``outofscope_count``, ``active_count``,
-    ``total_count``, ``findings_table``, ``dropped_section``,
-    ``chunk_count``, ``input_tokens``, ``output_tokens``, ``elapsed_s``,
-    ``model``, ``attribution``.
+    ``error_count``, ``warning_count``, ``spec_count``, ``spec_note``,
+    ``outofscope_count``, ``active_count``, ``total_count``,
+    ``findings_table``, ``dropped_section``, ``chunk_count``,
+    ``input_tokens``, ``output_tokens``, ``elapsed_s``, ``model``,
+    ``attribution``.
     """
     if _reviewer_load_prompt is not None:
         try:
@@ -148,9 +150,17 @@ def build_attribution(model: str, elapsed_ms: int, tokens: int) -> str:
 
 
 def format_inline_comment(f: Finding, attribution: str) -> str:
-    """Render one finding as a forge-neutral inline-comment body."""
-    marker = _SEVERITY_MARKERS[_norm_severity(f.severity)]
-    return f"{marker} **{f.title}**\n\n{f.body}\n\n*{attribution}*"
+    """Render one finding as a forge-neutral inline-comment body.
+
+    A finding outside the ticket (scope ``"out"``) gets the
+    :func:`markers.marker_for` prefix and its :data:`markers.SCOPE_LABELS`
+    entry, as ``<prefix> <glyph> **[OUTSIDE TICKET] <title>**``; scope
+    ``"in"`` and ``"unknown"`` render exactly the severity-only body.
+    """
+    marker = marker_for(_norm_severity(f.severity), f.scope)
+    scope_label = SCOPE_LABELS.get(f.scope)
+    title = f"[{scope_label}] {f.title}" if scope_label else f.title
+    return f"{marker} **{title}**\n\n{f.body}\n\n*{attribution}*"
 
 
 def format_summary(
@@ -177,9 +187,13 @@ def format_summary(
         "warning_count": sum(
             1 for f in findings_active if _norm_severity(f.severity) == "warning"
         ),
+        "spec_count": sum(
+            1 for f in findings_active if _norm_severity(f.severity) == "spec"
+        ),
         "outofscope_count": sum(
             1 for f in findings_active if _norm_severity(f.severity) == "outofscope"
         ),
+        "spec_note": "",
         "active_count": len(findings_active),
         "total_count": len(findings_active) + len(findings_dropped),
         "findings_table": _findings_table(findings_active),

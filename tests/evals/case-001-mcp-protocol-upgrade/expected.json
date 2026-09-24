@@ -1,0 +1,18 @@
+[
+  {
+    "id": "S1",
+    "file": "src/mcp_client/session.py",
+    "line_hint": 17,
+    "severity": "spec",
+    "must_match": "clientInfo",
+    "source": "spec"
+  },
+  {
+    "id": "G1",
+    "file": "src/mcp_client/session.py",
+    "line_hint": 28,
+    "severity": "error",
+    "must_match": "re:KeyError|\\.get\\(|headers\\.get|missing header",
+    "source": "generic"
+  }
+]
