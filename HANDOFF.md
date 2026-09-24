@@ -60,7 +60,10 @@ tracker.
   fails on a short read instead of stopping at 20 files. GitHub calls time out.
   Prompts and the summary fill in a single pass, so a `{diff}` in PR text stays
   literal. `load_config` no longer shares list defaults between calls. An
-  unrecognized `PRXREF_LLM_BACKEND` exits 2.
+  unrecognized `PRXREF_LLM_BACKEND` exits 2. Under `PRXREF_FAIL_ON=error` or
+  `any`, a review that ends with verdict `Error` exits 1. A total LLM failure
+  counts the sweep that answered, and the `forge.get_diff` trace span counts
+  bytes, not characters.
 - **Config went from 36 to 55 keys.** The 19 new keys are the CLI path and
   concurrency, cost, size, spec, rules and ticket keys, the Jira credentials, and
   the Azure DevOps token and webhook secret.
@@ -130,7 +133,7 @@ How 0.14.0 was built:
    `uv run pytest` and `uv run ruff check src tests` pass on the merged tree.
 5. **REL.** Parallel seats sweep stale docs, add cross-seat seam tests, and
    write the version bump, the CHANGELOG and this file. Read-only live checks
-   follow against public PRs and real CLIs, all run with `--no-post`.
+   follow against public PRs and real CLIs (see "Live checks" below).
 
 Cutting the release:
 
@@ -158,15 +161,68 @@ publisher still names owner `sblattj`, repository `prxref`, workflow
 ## Verified at release
 
 ```
-4109 passed                                   uv run pytest -q
+4219 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.14.0                                        uv run prxref --version
 ```
 
-These counts come from the version-bump commit. It branched before the
-release's own test seats merged, so the merged tip runs more tests.
+These counts come from the release tip, after every feature, fix and test
+branch had merged.
 
-<!-- 0.14 verified: orchestrator -->
+### Live checks
+
+All ran on 2026-09-23 and were read-only: reviews ran with `--no-post` or with
+the forge's write methods captured, and a guard blocked forge writes. The
+targets were psf/requests#6963 on GitHub, a PR in a public Azure DevOps
+Services project (read anonymously), merge requests in the gitlab-org group on
+gitlab.com, and the bundled eval cases.
+
+- **#1 litellm without `PRXREF_LLM_BASE_URL`.** It answered with a cost and no
+  configuration error. With a URL set, it logged the "set but not used" INFO
+  line.
+- **#2 Azure DevOps.** The forge-level check passed 43 of 43. The dry-run JSON
+  key set equalled the GitHub control's in 3 of 3 runs. The first two lost
+  chunks to LLM timeouts and a malformed model reply, and the third reviewed
+  every chunk. The compare range matched `get_diff` byte for byte, including
+  two PRs one commit behind their target. A pinned-range replay passed 25 of
+  25.
+- **#3 Team review rules.** 19 of 19 checks passed: the prompts, the run
+  record's hash and severity map, truncation, and exit 2 on a bad path.
+- **#4 Ticket context and scope.** Passed after the scope fix, which shows a
+  `"scope"` key in the prompt's JSON example while a ticket is active. On the
+  case-002 eval, gpt-4.1-mini went from 0 of 10 findings labelled to 12 of 12,
+  and prompts without a ticket stayed byte-identical. With an off-ticket file
+  added, 5 of 5 off-ticket findings came back `out`. The example's value does
+  not anchor the answer: with the example set to `out`, 12 of 12 on-ticket
+  findings still came back `in`.
+- **#5 Replay.** The mechanics passed: the stamp, the pinned diff, the hidden
+  threads, a forge-less `--diff-file` run with no token, and exit 2 on 6 of 6
+  bad flag sets. A replay pinned to a different PR's range is model-fragile:
+  the PR's current title and description are kept, as documented, and the
+  model returned non-JSON in 3 of 3 tries, while the matching control was
+  approved in 2 of 2.
+- **#6 Subscription CLI backends.** `claude-cli` ran on the subscription login,
+  with no `ANTHROPIC_API_KEY` in the child's environment and `--effort low`
+  passed through. `kiro-cli` read "cost unknown", logged its credits, and
+  honoured the model in its agent file. The `(API-equivalent)` cost label
+  landed after this check. It is covered by `tests/test_issue_67_cost.py` and
+  was not re-run live.
+- **#7 Dollar cost.** A reported cost matched the sum of its units, a
+  cost-stripping relay gave `null`, a price table's estimate matched the
+  formula, and a malformed table exited 2. The `-v` line showed `$…`,
+  `~$… (est.)` and `cost unknown`.
+- **#8 Size advisory.** 4 of 4 checks passed, and the parsed diff's counts
+  equalled the GitHub API's.
+- **Spec grounding.** On the bundled eval, grounded against ungrounded runs
+  surfaced 8 of 10 against 3 of 10 planted spec violations on gpt-4.1-mini,
+  and 10 of 10 against 4 of 10 on claude-haiku-4.5.
+- **GitLab paging.** A 130-file MR was read across 2 pages, and `too_large`
+  files were listed header-only with a warning.
+- **Spend.** About $0.31 of LLM calls in total. That is an upper bound,
+  because it counts calls that timed out before reporting a cost at their
+  largest possible cost. The `claude-cli` runs
+  (about $0.09 API-equivalent) and the `kiro-cli` runs (about 0.09 credits)
+  used subscriptions and are not included.
 
 ## Still open — not part of this release
 
@@ -183,19 +239,25 @@ The known limitations, in full in the CHANGELOG:
   - A `spec` finding's quote is not checked against the digest.
   - A `Spec: "…"` quote that never closes is barely exempt from the hedge gate.
   - A Jira ticket passed with `--spec` sets no finding's scope.
+  - Grounding can crowd out a generic finding. In the bundled eval, case-002's
+    one expected non-spec finding was missed in 4 of 4 grounded runs across
+    two models and found in 3 of 4 ungrounded runs. That is two runs per model
+    in each arm, and the cause is inferred, not proven.
 - **`kiro-cli`.** It always reports "cost unknown". Whether user-level Kiro
   configuration such as `~/.kiro/steering/` reaches prxref's per-call agent has
   not been verified. The model that actually ran is not reported, and every chat
   is kept under `~/.kiro/sessions/cli/`.
 - **GitLab.** Files GitLab withholds as `too_large` or `collapsed` are listed
-  header-only, and an MR past 5,000 files fails. Nobody has checked live whether
-  `access_raw_diffs` changes what `/diffs` returns. If it changes nothing, drop
-  the parameter from `gitlab.get_diff` and `docs/forges.md`.
+  header-only, and an MR past 5,000 files fails. Reading an MR's threads on
+  gitlab.com needs `PRXREF_GITLAB_TOKEN` even for a public project; without one,
+  thread dedup runs against no threads.
 - **Replay.** A `--diff-file` run without `--pr-url` sees only the diff.
-- **Azure DevOps.** Only anonymous reads are verified live. Posting, pruning,
-  PAT and `SYSTEM_ACCESSTOKEN` authentication, service hooks and the pinned-range
-  replay are tested against recorded API shapes only. Azure DevOps Server is
-  untested.
+- **Azure DevOps.** Only anonymous reads are verified live: the forge reads, the
+  dry-run output shape, the pinned-range compare diff and a pinned-range replay.
+  Posting, pruning, PAT and `SYSTEM_ACCESSTOKEN` authentication and service hooks
+  are tested against recorded API shapes only. Azure DevOps Server is untested.
+- **Gating.** A mistyped or unrecognized `--pr-url` exits 0 even under
+  `PRXREF_FAIL_ON=error` or `any`, because nothing was reviewed.
 
 Follow-ups a seat reported that did not land:
 
@@ -207,8 +269,10 @@ Follow-ups a seat reported that did not land:
   the cost label are tested together on the main summary post
   (`tests/test_release_seams.py`), but on the inline-accounting refresh post
   and on the summary-only run each is tested alone.
-- **`CONTRIBUTING.md` still has no inbound link.** This is carried over from
-  0.5.0.
+- **Scope labelling is measured on one fixture shape.** The live check added an
+  off-ticket file in its own directory to the case-002 eval, and ran three
+  times for each example value on one model, plus once more on a second model.
+  An off-ticket change inside an on-ticket file is unmeasured.
 
 The v0.5.0 handoff left three forge-wide items open. All three are **fixed**:
 
