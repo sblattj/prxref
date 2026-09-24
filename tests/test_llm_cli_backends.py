@@ -1,4 +1,4 @@
-"""Tests for prxref.llm_cli_backends: the shared CLI chain and the claude-cli client (#66).
+"""Tests for prxref.llm_cli_backends: the shared CLI chain and the claude-cli and kiro-cli clients (#66).
 
 Every process here is a scripted fake handed to the client as ``runner``;
 nothing spawns a real CLI. ``os.killpg`` is replaced for the whole module, so
@@ -8,6 +8,13 @@ The claude stream fixtures are built by hand from the fields the client
 reads, with the values OBSERVED in the design probes (``clean``,
 ``noskills``, ``trunc`` and ``badmodel``) and a zeroed session id. Nothing
 else from the probe streams is copied.
+
+The kiro stream fixtures are the recorded stdout of the design probes
+``cfgmodel`` (a clean answer) and ``badmodel`` (an unknown model in the agent
+file), line for line, with the session id zeroed. ``KIRO_CFGMODEL_STDERR`` is
+that probe's stderr: its run also passed ``--model``, which the v2 engine
+refuses with that warning, so it stands for harmless stderr on a good exit.
+Every other kiro stream here is one of those two with named fields changed.
 """
 from __future__ import annotations
 
@@ -36,7 +43,9 @@ from prxref.llm_cli_backends import (
     CLAUDE_ENV_DENYLIST,
     DEFAULT_BINARIES,
     JSON_ONLY_INSTRUCTION,
+    KIRO_AGENT_NAME,
     ClaudeCLIClient,
+    KiroCLIClient,
     build_cli_client,
     resolve_cli_binary,
 )
@@ -174,6 +183,58 @@ BADMODEL_STREAM = _stream(
 )
 BADMODEL_STDERR = '[claude-code:unrecognized_model] {"model":"claude-nonexistent-9","query_source":"sdk"}\n'
 
+KIRO_CFGMODEL_LINES = (
+    r'{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}',
+    r'{"type":"metadata","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"contextUsagePercentage":2.4214999675750732}}',
+    r'{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\""}}}}',
+    r'{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok\": true, \"n\": "}}}}',
+    r'{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"3}"}}}}',
+    r'{"type":"metadata","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"contextUsagePercentage":2.1424999237060547}}',
+    r'{"type":"metadata","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"contextUsagePercentage":2.1424999237060547,'
+    r'"meteringUsage":[{"value":0.006001708656716418,"unit":"credit","unitPlural":"credits"}],"turnDurationMs":1512}}',
+    r'{"type":"runFinished","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    r'"status":"success","stopReason":"end_turn","finalText":"{\"ok\": true, \"n\": 3}","finalTextTruncated":false}}',
+)
+KIRO_CFGMODEL_STREAM = "".join(line + "\n" for line in KIRO_CFGMODEL_LINES)
+KIRO_CFGMODEL_STDERR = "[warn] failed to set model 'claude-haiku-4.5': Method not found\n"
+KIRO_BADMODEL_STREAM = (
+    '{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}\n'
+    '{"type":"metadata","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    '"contextUsagePercentage":2.4214999675750732}}\n'
+    '{"type":"runError","data":{"sessionId":"00000000-0000-0000-0000-000000000000",'
+    '"stage":"prompt","message":"Internal error"}}\n'
+)
+KIRO_ANSWER = '{"ok": true, "n": 3}'
+KIRO_LIST_MODELS_REASON = (
+    "prompt error: Internal error (possibly an unknown model; check kiro-cli chat --list-models)"
+)
+
+
+def _kiro_stream(*, drop: tuple[str, ...] = (), **finished) -> str:
+    """The ``cfgmodel`` stream without the ``drop`` event types, its ``runFinished`` data updated by ``finished``."""
+    lines = []
+    for line in KIRO_CFGMODEL_LINES:
+        event = json.loads(line)
+        if event["type"] in drop:
+            continue
+        if event["type"] == "runFinished" and finished:
+            event["data"].update(finished)
+            line = json.dumps(event)
+        lines.append(line + "\n")
+    return "".join(lines)
+
+
+def _kiro_run_error(**data) -> str:
+    """The ``badmodel`` stream with its ``runError`` data replaced by ``data``."""
+    head, _, _ = KIRO_BADMODEL_STREAM.rstrip("\n").rpartition("\n")
+    return head + "\n" + json.dumps({"type": "runError", "data": data}) + "\n"
+
 
 @dataclasses.dataclass
 class Script:
@@ -191,6 +252,8 @@ class Script:
 CLEAN = Script(stdout=CLEAN_STREAM)
 TRUNC = Script(stdout=TRUNC_STREAM, rc=1)
 BADMODEL = Script(stdout=BADMODEL_STREAM, stderr=BADMODEL_STDERR, rc=1)
+KIRO_CFGMODEL = Script(stdout=KIRO_CFGMODEL_STREAM, stderr=KIRO_CFGMODEL_STDERR)
+KIRO_BADMODEL = Script(stdout=KIRO_BADMODEL_STREAM, rc=1)
 
 
 @dataclasses.dataclass
@@ -203,6 +266,7 @@ class Launch:
     stdin: str | None = None
     timeouts: list = dataclasses.field(default_factory=list)
     killed: bool = False
+    agent: dict | None = None
 
 
 def _prompt_path(argv: list[str]) -> str | None:
@@ -246,8 +310,9 @@ class FakeRunner:
     """A ``subprocess.Popen`` stand-in: records every launch and plays scripts in order.
 
     The last script repeats once the others are used up. The working
-    directory's listing and the system prompt file are read at launch time,
-    because the client deletes its temporary root as soon as the call returns.
+    directory's listing, the system prompt file and the kiro agent file are
+    read at launch time, because the client deletes its temporary root as
+    soon as the call returns.
     """
 
     def __init__(self, *scripts: Script):
@@ -266,12 +331,18 @@ class FakeRunner:
             if path is not None and os.path.exists(path):
                 with open(path, encoding="utf-8") as fh:
                     prompt = fh.read()
+            agent_path = os.path.join(kwargs["cwd"], ".kiro", "agents", f"{KIRO_AGENT_NAME}.json")
+            agent = None
+            if os.path.exists(agent_path):
+                with open(agent_path, encoding="utf-8") as fh:
+                    agent = json.load(fh)
             launch = Launch(
                 argv=list(argv),
                 kwargs=kwargs,
                 cwd_listing=sorted(os.listdir(kwargs["cwd"])),
                 prompt_path=path,
                 prompt=prompt,
+                agent=agent,
             )
             self.launches.append(launch)
         if script.launch_error is not None:
@@ -291,6 +362,9 @@ class FakeRunner:
 
     def models(self) -> list[str]:
         return [launch.argv[launch.argv.index("--model") + 1] for launch in self.launches]
+
+    def agent_models(self) -> list[str]:
+        return [launch.agent["model"] for launch in self.launches]
 
 
 @pytest.fixture(autouse=True)
@@ -966,26 +1040,6 @@ class TestBuildCliClient:
             self._build(backend="openai-compat")
 
 
-class TestKiroSeam:
-    """Until W66B lands ``KiroCLIClient``, kiro-cli fails closed. W66B replaces this class."""
-
-    def test_kiro_cli_is_not_wired_and_never_launches(self):
-        runner = FakeRunner()
-        with pytest.raises(ConfigError) as exc:
-            build_cli_client(
-                "kiro-cli",
-                models=["claude-haiku-4.5"],
-                default_timeout=120.0,
-                reasoning_effort=None,
-                cli_path="",
-                concurrency=2,
-                which=lambda name: f"/opt/example/{name}",
-                runner=runner,
-            )
-        assert str(exc.value) == "PRXREF_LLM_BACKEND: kiro-cli is not wired in this build"
-        assert runner.launches == []
-
-
 class TestThroughTheFactoryAndCli:
     """The real ``create_llm_client`` and ``prxref review`` entry points, with no process started."""
 
@@ -1039,3 +1093,379 @@ class TestThroughTheFactoryAndCli:
         [call] = runtime
         assert isinstance(call["llm"], ClaudeCLIClient)
         assert "configuration error" not in capsys.readouterr().err
+
+    def test_the_factory_builds_a_kiro_client_without_a_base_url(self, monkeypatch, tmp_path):
+        path = _executable(tmp_path, "kiro-cli")
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "kiro-cli")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "claude-haiku-4.5,claude-sonnet-4.5")
+        monkeypatch.setenv("PRXREF_LLM_CLI_PATH", path)
+        monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "180")
+        client = create_llm_client()
+        assert isinstance(client, KiroCLIClient)
+        assert client.binary == path
+        assert client.models == ["claude-haiku-4.5", "claude-sonnet-4.5"]
+        assert client.default_timeout == 180.0
+        assert real_orchestrator._sampling(client)["temperature"] is None
+
+    @pytest.mark.parametrize(("backend", "binary"), [("claude-cli", "claude"), ("kiro-cli", "kiro-cli")])
+    def test_review_exits_2_when_the_cli_is_not_on_path(self, monkeypatch, capsys, tmp_path, runtime, backend, binary):
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", backend)
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "sonnet")
+        assert self._review() == 2
+        err = capsys.readouterr().err
+        assert (
+            f"configuration error: PRXREF_LLM_BACKEND: {backend} needs the '{binary}' CLI, which was not found "
+            "on PATH; install it and log in, or set PRXREF_LLM_CLI_PATH to its absolute path\n"
+        ) in err
+        assert runtime == []
+
+    def test_review_with_a_kiro_cli_on_path_reaches_the_orchestrator(self, monkeypatch, capsys, tmp_path, runtime):
+        path = _executable(tmp_path, "kiro-cli")
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "kiro-cli")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", "claude-haiku-4.5")
+        assert self._review() == 0
+        [call] = runtime
+        assert isinstance(call["llm"], KiroCLIClient)
+        assert call["llm"].binary == path
+        assert "configuration error" not in capsys.readouterr().err
+
+
+KIRO_BINARY = "/opt/example/bin/kiro-cli"
+KIRO_MODEL = "claude-haiku-4.5"
+
+
+def _kiro(runner: FakeRunner, *, models=(KIRO_MODEL,), **kwargs) -> KiroCLIClient:
+    kwargs.setdefault("default_timeout", 30.0)
+    return KiroCLIClient(binary=KIRO_BINARY, models=list(models), runner=runner, **kwargs)
+
+
+def _kiro_failure(script: Script, model: str = KIRO_MODEL) -> str:
+    """The reason the chain gives when ``model``'s one kiro attempt plays ``script``."""
+    with pytest.raises(LLMError) as exc:
+        _kiro(FakeRunner(script), models=(model,)).invoke("sys", "usr")
+    message = str(exc.value)
+    prefix = f"all models failed: {model}: "
+    assert message.startswith(prefix)
+    return message[len(prefix):]
+
+
+def _ok_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == LOGGER and " ok: " in r.getMessage()]
+
+
+class TestKiroProcess:
+    """How one kiro-cli process is launched: argv, agent file, stdin, cwd, environment."""
+
+    def test_kiro_argv_has_engine_v2_and_no_model_flag(self):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        _kiro(runner).invoke("sys", "usr")
+        [launch] = runner.launches
+        assert launch.argv == [
+            KIRO_BINARY, "chat", "--no-interactive",
+            "--agent", "prxref-review",
+            "--output-format", "stream-json",
+            "--trust-tools=",
+            "--agent-engine", "v2",
+        ]
+        assert not any(arg.startswith("--model") for arg in launch.argv)
+        assert KIRO_MODEL not in launch.argv
+        assert not launch.kwargs.get("shell")
+        assert launch.kwargs["start_new_session"] is (os.name == "posix")
+        for stream in ("stdin", "stdout", "stderr"):
+            assert launch.kwargs[stream] is subprocess.PIPE
+        assert launch.kwargs["text"] is True
+        assert launch.kwargs["encoding"] == "utf-8"
+
+    def test_kiro_agent_config_carries_prompt_model_and_no_tools(self):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        _kiro(runner).invoke("You review diffs.", "usr")
+        [launch] = runner.launches
+        assert KIRO_AGENT_NAME == "prxref-review"
+        assert launch.agent == {
+            "name": "prxref-review",
+            "description": "prxref single-shot reviewer: no tools, no MCP, no resources",
+            "prompt": "You review diffs.",
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+            "includeMcpJson": False,
+            "resources": [],
+            "model": KIRO_MODEL,
+        }
+        assert "You review diffs." not in " ".join(launch.argv)
+
+    def test_kiro_each_chain_model_gets_its_own_agent_model(self):
+        runner = FakeRunner(KIRO_BADMODEL, KIRO_CFGMODEL)
+        result = _kiro(runner, models=("no-such-model-x", KIRO_MODEL)).invoke("sys", "usr")
+        assert runner.agent_models() == ["no-such-model-x", KIRO_MODEL]
+        first, second = runner.launches
+        assert first.kwargs["cwd"] != second.kwargs["cwd"]
+        assert first.argv == second.argv
+        assert result.model == KIRO_MODEL
+
+    @pytest.mark.parametrize("json_mode", [True, False])
+    def test_kiro_agent_prompt_carries_json_only_suffix_in_json_mode(self, json_mode):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        _kiro(runner).invoke("You review diffs.", "usr", json_mode=json_mode)
+        expected = "You review diffs." + (JSON_ONLY_INSTRUCTION if json_mode else "")
+        assert runner.launches[0].agent["prompt"] == expected
+
+    def test_kiro_user_message_goes_to_stdin_not_argv_or_agent_file(self):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        user = "Review this diff: +secret_sauce = 1"
+        _kiro(runner).invoke("sys", user)
+        [launch] = runner.launches
+        assert launch.stdin == user
+        assert not any("secret_sauce" in arg for arg in launch.argv)
+        assert "secret_sauce" not in json.dumps(launch.agent)
+
+    def test_kiro_cwd_holds_only_the_agent_file_and_is_removed(self):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        client = _kiro(runner)
+        client.invoke("sys", "usr")
+        client.invoke("sys", "usr")
+        first, second = runner.launches
+        assert first.cwd_listing == [".kiro"] and second.cwd_listing == [".kiro"]
+        assert first.kwargs["cwd"] != second.kwargs["cwd"]
+        for launch in runner.launches:
+            cwd = launch.kwargs["cwd"]
+            assert os.path.isabs(cwd)
+            assert launch.prompt_path is None
+            assert not os.path.exists(cwd)
+
+    def test_kiro_env_is_passed_through_unchanged(self, monkeypatch):
+        monkeypatch.setenv("KIRO_API_KEY", "set-by-test")
+        for name in CLAUDE_ENV_DENYLIST:
+            monkeypatch.setenv(name, "set-by-test")
+        before = dict(os.environ)
+        runner = FakeRunner(KIRO_CFGMODEL)
+        _kiro(runner).invoke("sys", "usr")
+        env = runner.launches[0].kwargs["env"]
+        assert env == before
+        assert env["KIRO_API_KEY"] == "set-by-test"
+        assert dict(os.environ) == before
+
+    def test_kiro_max_tokens_is_not_forwarded(self):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        _kiro(runner).invoke("sys", "usr", max_tokens=12345)
+        [launch] = runner.launches
+        assert "12345" not in " ".join(launch.argv) + json.dumps(launch.agent)
+
+    def test_kiro_sampling_attributes_are_none(self):
+        client = _kiro(FakeRunner(), models=(KIRO_MODEL, "claude-sonnet-4.5"))
+        assert client.reasoning_effort is None
+        assert real_orchestrator._sampling(client) == {
+            "temperature": None, "seed": None, "models": [KIRO_MODEL, "claude-sonnet-4.5"],
+        }
+
+
+class TestKiroParse:
+    """How one finished kiro-cli process becomes an answer or a failure."""
+
+    def test_kiro_success_prefers_final_text(self):
+        result = _kiro(FakeRunner(KIRO_CFGMODEL)).invoke("sys", "usr")
+        assert result.text == KIRO_ANSWER
+        assert result.model == KIRO_MODEL
+        assert result.backend == "kiro-cli"
+        assert result.finish_reason == "end_turn"
+        assert isinstance(result.elapsed_ms, int) and result.elapsed_ms >= 0
+        differs = _kiro_stream(finalText='{"ok": true, "n": 4}')
+        assert _kiro(FakeRunner(Script(stdout=differs))).invoke("sys", "usr").text == '{"ok": true, "n": 4}'
+
+    def test_kiro_truncated_final_text_falls_back_to_chunks(self):
+        truncated = _kiro_stream(finalText='{"ok": tr', finalTextTruncated=True)
+        assert _kiro(FakeRunner(Script(stdout=truncated))).invoke("sys", "usr").text == KIRO_ANSWER
+
+    @pytest.mark.parametrize("final", ["", "   ", None, 7])
+    def test_a_blank_or_missing_final_text_falls_back_to_chunks(self, final):
+        stream = _kiro_stream(finalText=final)
+        assert _kiro(FakeRunner(Script(stdout=stream))).invoke("sys", "usr").text == KIRO_ANSWER
+
+    def test_kiro_reports_zero_tokens_no_cost_and_logs_credits(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        result = _kiro(FakeRunner(KIRO_CFGMODEL)).invoke("sys", "usr")
+        assert (result.input_tokens, result.output_tokens) == (0, 0)
+        assert (result.cost_usd, result.cost_source) == (None, "")
+        [ok] = _ok_lines(caplog)
+        assert ok.startswith(f"llm attempt 1/1 ok: backend=kiro-cli model={KIRO_MODEL} ")
+        assert ok.endswith(f" in=0 out=0 finish=end_turn credits=0.0060 session={ZERO_ID}")
+
+    def test_a_run_without_metering_logs_no_credits(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        stream = "".join(line + "\n" for line in KIRO_CFGMODEL_LINES if "meteringUsage" not in line)
+        _kiro(FakeRunner(Script(stdout=stream))).invoke("sys", "usr")
+        [ok] = _ok_lines(caplog)
+        assert ok.endswith(f" credits=- session={ZERO_ID}")
+
+    @pytest.mark.parametrize(
+        ("metering", "expected"),
+        [
+            ([{"value": 0.25, "unit": "credit"}, {"value": 2, "unit": "credit"}], 2.25),
+            ([{"value": 9, "unit": "token"}, {"value": 0.5, "unit": "credit"}], 0.5),
+            ([{"value": True, "unit": "credit"}, {"value": "1", "unit": "credit"}], None),
+            ([{"value": math.nan, "unit": "credit"}, {"value": math.inf, "unit": "credit"}, "junk"], None),
+            ([], None),
+            (None, None),
+            ({"value": 1, "unit": "credit"}, None),
+        ],
+    )
+    def test_kiro_credits_sum_only_finite_credit_values(self, metering, expected):
+        assert clib._kiro_credits(metering) == expected
+
+    def test_credits_from_every_metadata_event_are_summed(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        metered = next(line for line in KIRO_CFGMODEL_LINES if "meteringUsage" in line)
+        lines = list(KIRO_CFGMODEL_LINES)
+        lines.insert(lines.index(metered), metered)
+        _kiro(FakeRunner(Script(stdout="".join(line + "\n" for line in lines)))).invoke("sys", "usr")
+        [ok] = _ok_lines(caplog)
+        assert " credits=0.0120 " in ok
+
+    def test_kiro_run_error_fails_model_with_list_models_hint(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        runner = FakeRunner(KIRO_BADMODEL)
+        client = _kiro(runner, models=("no-such-model-x",))
+        for _ in range(2):
+            with pytest.raises(LLMError) as exc:
+                client.invoke("sys", "usr")
+            assert str(exc.value) == f"all models failed: no-such-model-x: {KIRO_LIST_MODELS_REASON}"
+        assert runner.agent_models() == ["no-such-model-x", "no-such-model-x"]
+        assert not any("marked unavailable" in m for m in _warnings(caplog))
+
+    @pytest.mark.parametrize(
+        ("data", "reason"),
+        [
+            ({"stage": "engine", "message": "Internal error"}, "engine error: Internal error"),
+            ({"message": "Internal   error\nretry"}, "run error: Internal error retry"),
+            ({"stage": "prompt"}, "prompt error: (no message)" + clib._KIRO_LIST_MODELS_HINT),
+            ({"stage": 3, "message": 4}, "run error: (no message)"),
+        ],
+    )
+    def test_a_run_error_names_its_stage_and_only_the_prompt_stage_gets_the_hint(self, data, reason):
+        assert _kiro_failure(Script(stdout=_kiro_run_error(**data), rc=1)) == reason
+
+    def test_a_run_error_wins_over_a_success_event_and_exit_zero(self):
+        stream = _kiro_stream() + json.dumps({"type": "runError", "data": {"stage": "engine", "message": "x"}}) + "\n"
+        assert _kiro_failure(Script(stdout=stream)) == "engine error: x"
+
+    @pytest.mark.parametrize(
+        ("script", "reason"),
+        [
+            (Script(stdout=KIRO_CFGMODEL_STREAM, stderr="killed\n", rc=3), "exit 3: killed"),
+            (Script(stderr="Error: not logged in\n  run kiro-cli login\n", rc=1),
+             "exit 1: Error: not logged in run kiro-cli login"),
+            (Script(stdout=_kiro_stream(drop=("runFinished",))), "no runFinished event: (no output)"),
+            (Script(stdout=_kiro_stream(status="cancelled")), "run status 'cancelled': (no output)"),
+            (Script(stdout=_kiro_stream(status=None)), "run status None: (no output)"),
+            (Script(stdout=_kiro_stream(drop=("sessionUpdate",), finalText="")), "empty answer: (no output)"),
+            (Script(stdout="this is not json\n{broken\n[1, 2]\n", stderr="panic\n"), "unparseable output: panic"),
+            (Script(), "no runFinished event: (no output)"),
+        ],
+    )
+    def test_kiro_failures_name_their_kind_and_the_stderr_tail(self, script, reason):
+        assert _kiro_failure(script) == reason
+
+    def test_a_long_kiro_stderr_is_cut_to_its_tail(self):
+        detail = _kiro_failure(Script(stderr="x" * 500 + " the real cause", rc=1)).removeprefix("exit 1: ")
+        assert len(detail) == 200
+        assert detail.endswith("the real cause")
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            KIRO_BADMODEL,
+            Script(stderr="boom", rc=1),
+            Script(stdout=_kiro_stream(status="cancelled")),
+            Script(stdout="not json\n"),
+        ],
+    )
+    def test_no_kiro_failure_marks_the_model_unavailable(self, script):
+        runner = FakeRunner(script, KIRO_CFGMODEL)
+        client = _kiro(runner, models=("a", "b"))
+        client.invoke("sys", "usr")
+        client.invoke("sys", "usr")
+        assert runner.agent_models() == ["a", "b", "a"]
+
+    def test_a_max_tokens_stop_advances_the_chain(self):
+        truncated = _kiro_stream(stopReason="max_tokens", finalText='{"find')
+        runner = FakeRunner(Script(stdout=truncated), KIRO_CFGMODEL)
+        result = _kiro(runner, models=("a", "b")).invoke("sys", "usr")
+        assert runner.agent_models() == ["a", "b"]
+        assert (result.text, result.finish_reason) == (KIRO_ANSWER, "end_turn")
+
+    def test_noise_lines_around_the_events_are_skipped(self):
+        stream = "warming up\n" + KIRO_CFGMODEL_STREAM + "\n\n"
+        assert _kiro(FakeRunner(Script(stdout=stream))).invoke("sys", "usr").text == KIRO_ANSWER
+
+    def test_a_clean_kiro_call_logs_no_warning(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        _kiro(FakeRunner(KIRO_CFGMODEL)).invoke("sys", "usr")
+        assert _warnings(caplog) == []
+
+
+class TestKiroBuild:
+    def _build(self, **overrides):
+        kwargs = {
+            "models": [KIRO_MODEL],
+            "default_timeout": 120.0,
+            "reasoning_effort": None,
+            "cli_path": "",
+            "concurrency": 2,
+            "which": lambda name: f"/opt/example/{name}",
+            "runner": FakeRunner(KIRO_CFGMODEL),
+        }
+        kwargs.update(overrides)
+        return build_cli_client("kiro-cli", **kwargs)
+
+    def test_kiro_builds_a_kiro_client_without_starting_a_process(self):
+        runner = FakeRunner(KIRO_CFGMODEL)
+        client = self._build(runner=runner)
+        assert isinstance(client, KiroCLIClient)
+        assert client.binary == "/opt/example/kiro-cli"
+        assert client.models == [KIRO_MODEL]
+        assert client.default_timeout == 120.0
+        assert (client.temperature, client.seed, client.reasoning_effort) == (None, None, None)
+        assert runner.launches == []
+        client.invoke("sys", "usr")
+        assert runner.launches[0].argv[0] == "/opt/example/kiro-cli"
+
+    @pytest.mark.parametrize(("effort", "logged"), [("high", True), (None, False), ("", False)])
+    def test_a_reasoning_effort_is_dropped_with_one_info_line(self, caplog, effort, logged):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        runner = FakeRunner(KIRO_CFGMODEL)
+        client = self._build(reasoning_effort=effort, runner=runner)
+        client.invoke("sys", "usr")
+        assert client.reasoning_effort is None
+        assert "high" not in " ".join(runner.launches[0].argv) + json.dumps(runner.launches[0].agent)
+        infos = [r.getMessage() for r in caplog.records if r.name == LOGGER and "REASONING_EFFORT" in r.getMessage()]
+        assert infos == (["PRXREF_LLM_REASONING_EFFORT is not applied by kiro-cli"] if logged else [])
+
+    def test_a_missing_kiro_binary_fails_before_any_client_exists(self):
+        with pytest.raises(ConfigError, match=r"^PRXREF_LLM_BACKEND: kiro-cli needs the 'kiro-cli' CLI"):
+            self._build(which=lambda name: None)
+
+
+class TestProcessFailureLabel:
+    """An ``OSError`` after launch is a process failure; only a failed launch reads as one."""
+
+    @pytest.mark.parametrize(
+        ("build", "ok"),
+        [(lambda runner: _client(runner, models=("a", "b")), CLEAN),
+         (lambda runner: _kiro(runner, models=("a", "b")), KIRO_CFGMODEL)],
+        ids=["claude-cli", "kiro-cli"],
+    )
+    def test_an_error_while_the_process_runs_is_not_reported_as_a_launch_failure(self, caplog, build, ok):
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        runner = FakeRunner(Script(communicate_error=BrokenPipeError(32, "Broken pipe")), ok)
+        build(runner).invoke("sys", "usr")
+        [failed] = [m for m in _warnings(caplog) if "failed" in m]
+        assert "a: process failed (BrokenPipeError: [Errno 32] Broken pipe)" in failed
+        assert "launch failed" not in failed
+
+    def test_a_process_failure_that_ends_the_chain_names_it(self):
+        runner = FakeRunner(Script(communicate_error=BrokenPipeError(32, "Broken pipe")))
+        with pytest.raises(LLMError) as exc:
+            _kiro(runner, models=("a",)).invoke("sys", "usr")
+        assert str(exc.value) == "all models failed: a: process failed (BrokenPipeError: [Errno 32] Broken pipe)"
