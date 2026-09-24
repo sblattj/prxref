@@ -339,7 +339,7 @@ class TestRuleActiveDrivesAcceptance:
     def test_rule_active_is_a_property_not_a_field(self):
         assert isinstance(PromptContext.__dict__["rule_active"], property)
         assert "rule_active" not in {f.name for f in dataclasses.fields(PromptContext)}
-        assert [f.name for f in dataclasses.fields(PromptContext)][-1] == "rule_request"
+        assert dataclasses.fields(PromptContext)[7].name == "rule_request"
 
     @pytest.mark.parametrize("unit", ["chunk", "sweep"])
     def test_the_reviewer_keeps_rule_only_when_asked(self, unit):
