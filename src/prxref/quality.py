@@ -1698,12 +1698,32 @@ def apply_severity_map(
     before every other pass, so a mapped word reaches the gate as its tier
     and an unmapped one still dies there as ``invalid severity``. Returns a
     new list of the same length and order, rewritten findings being
-    :func:`dataclasses.replace` copies; it drops nothing.
+    :func:`dataclasses.replace` copies (every other field, ``scope``
+    included, is kept); it drops nothing.
 
-    Inert in this build: every finding passes through unchanged until the
-    team-review-rules feature lands.
+    A finding's severity matches a map word after ``strip()``, whitespace
+    collapsing and ``casefold()`` on both sides, so ``" Must  FIX "`` meets
+    ``must fix``. A finding that already carries a ``drop_reason``, one whose
+    word is not in the map, and one that already names one of prxref's own
+    :data:`SEVERITIES` pass through as the same object: the map translates
+    team words only.
     """
-    return list(findings)
+    if not severity_map:
+        return list(findings)
+    table = {_severity_word(word): tier for word, tier in severity_map.items()}
+    out: list[Finding] = []
+    for f in findings:
+        word = _severity_word(f.severity)
+        tier = table.get(word)
+        if f.drop_reason is not None or tier is None or word in SEVERITIES:
+            out.append(f)
+        else:
+            out.append(replace(f, severity=tier))
+    return out
+
+
+def _severity_word(severity: object) -> str:
+    return " ".join(severity.split()).casefold() if isinstance(severity, str) else ""
 
 
 def apply_spec_grounding(

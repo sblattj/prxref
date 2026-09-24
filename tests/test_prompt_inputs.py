@@ -545,12 +545,15 @@ class TestInlineOrderByScope:
 
 
 class TestSeverityMapStub:
-    def test_it_is_the_identity_in_this_build(self):
-        findings = [_finding(3, severity="blocker"), _finding(5, scope=SCOPE_OUT)]
+    def test_it_rewrites_a_mapped_word_and_nothing_else(self):
+        dropped = replace(_finding(7, severity="blocker"), drop_reason="hedged: \"if\"")
+        findings = [_finding(3, severity="blocker", scope=SCOPE_OUT), _finding(5), dropped]
         out = quality.apply_severity_map(findings, {"blocker": "error"})
-        assert out == findings
+        assert [f.severity for f in out] == ["error", "warning", "blocker"]
+        assert out[0] == replace(findings[0], severity="error")
+        assert out[0].scope == SCOPE_OUT
         assert out is not findings
-        assert all(a is b for a, b in zip(out, findings, strict=True))
+        assert out[1] is findings[1] and out[2] is findings[2]
 
     def test_an_empty_input_is_an_empty_list(self):
         assert quality.apply_severity_map((), {}) == []
@@ -572,8 +575,6 @@ class TestSeverityMapCall:
     CHUNK = [_finding(3, severity="blocker", title="Team word"), _finding(5, title="Plain")]
 
     def test_a_mapped_word_survives_the_gate_as_its_tier(self, monkeypatch, tmp_path, caplog):
-        calls = []
-        monkeypatch.setattr(orchestrator, "apply_severity_map", _remapper(calls))
         with caplog.at_level(logging.INFO, logger="prxref"):
             res, _, events = _review(
                 monkeypatch, tmp_path, chunk=self.CHUNK, rules=FakeRules({"blocker": "error"}),
@@ -584,11 +585,10 @@ class TestSeverityMapCall:
         assert res["verdict"] == "Request-Changes"
         assert [e["meta"] for e in _of(events, "rules", "remap")] == [{"findings": 1}]
         assert "severity map: rewrote 1 finding(s)" in caplog.text
-        assert calls[0][1] == {"blocker": "error"}
 
-    def test_the_real_stub_leaves_the_word_to_die_at_the_gate(self, monkeypatch, tmp_path):
+    def test_an_unmapped_word_still_dies_at_the_gate(self, monkeypatch, tmp_path):
         res, _, events = _review(
-            monkeypatch, tmp_path, chunk=self.CHUNK, rules=FakeRules({"blocker": "error"}),
+            monkeypatch, tmp_path, chunk=self.CHUNK, rules=FakeRules({"major": "warning"}),
         )
         assert [f.drop_reason for f in res["findings_dropped"]] == ["invalid severity: 'blocker'"]
         assert res["verdict"] == "Approved"

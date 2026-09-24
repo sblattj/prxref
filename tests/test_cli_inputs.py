@@ -4,9 +4,9 @@
 ``PRXREF_TICKET_CONTEXT_FILE`` ride the ``load_config`` override path (``""``
 blanks the variable for one run) and are loaded after config and before the
 forge and the LLM client exist. The replay flags are validated before the URL
-is even parsed. In this build the rules file and the replay flags fail closed,
-and a ticket file that cannot be read does too: each exits 2 naming the input
-that asked for it, so nothing configured is ever silently ignored.
+is even parsed. A rules or ticket-context file that cannot be read exits 2
+naming the input that supplied it. In this build replay fails closed: any replay
+flag exits 2 naming the flag, so nothing configured is ever silently ignored.
 
 The daemon never reads a ticket file and says so once at startup. ``--spec``
 is proven end to end here: through the real orchestrator and the real
@@ -43,7 +43,7 @@ from tests.test_orchestrator import REF, FakeForge, _added_file_diff
 
 CLI_URL = "https://github.com/org/repo/pull/7"
 
-RULES_WIRED = "loading a team review-rules file is not wired in this build"
+RULES_MISSING = "cannot read rules file 'team.md': No such file or directory"
 TICKET_MISSING = "cannot read ticket-context file 'team.md': No such file or directory"
 REPLAY_WIRED = "replay mode is not wired in this build"
 
@@ -107,32 +107,28 @@ def _assert_nothing_ran(rec) -> None:
 
 
 class TestStubLoaders:
-    """``rules`` fails closed in this build; ``ticket`` fails closed on a file
-    it cannot read."""
-
-    LOADERS = [
-        (load_review_rules, "--rules-file", RULES_WIRED),
-        (load_review_rules, "PRXREF_REVIEW_RULES", RULES_WIRED),
-    ]
+    """Both loaders are real: an unset path loads nothing, and a file that
+    cannot be read fails naming the input that supplied it."""
 
     @pytest.mark.parametrize("loader", [load_review_rules, load_ticket_context])
     @pytest.mark.parametrize("path", [None, "", "   "])
     def test_an_unset_path_loads_nothing(self, loader, path):
         assert loader(path, max_chars=100, source="--x") is None
 
-    @pytest.mark.parametrize(("loader", "source", "phrase"), LOADERS)
-    def test_a_configured_path_fails_closed_naming_its_source(
-        self, loader, source, phrase, tmp_path,
-    ):
-        real = tmp_path / "input.md"
-        real.write_text("a real, readable file\n", encoding="utf-8")
+    @pytest.mark.parametrize("source", ["--rules-file", "PRXREF_REVIEW_RULES"])
+    def test_a_missing_rules_file_fails_naming_its_source(self, source, tmp_path):
+        missing = tmp_path / "absent.md"
         with pytest.raises(ConfigError) as exc:
-            loader(str(real), max_chars=100, source=source)
-        assert str(exc.value) == f"{source}: {phrase}"
+            load_review_rules(str(missing), max_chars=100, source=source)
+        assert str(exc.value) == (
+            f"{source}: cannot read rules file {str(missing)!r}: No such file or directory"
+        )
 
-    def test_the_front_matter_splitter_fails_closed(self):
-        with pytest.raises(ConfigError, match=r"^--rules-file: .*is not wired in this build"):
-            split_front_matter("---\n---\nbody\n", source="--rules-file", path="r.md")
+    def test_the_front_matter_splitter_rejects_a_malformed_map_naming_its_source(self):
+        with pytest.raises(ConfigError, match=r"^--rules-file: r\.md:3: unknown severity 'eror'"):
+            split_front_matter(
+                "---\nseverity:\n  blocker: eror\n---\nbody\n", source="--rules-file", path="r.md",
+            )
 
     def test_spec_is_the_one_severity_rules_cannot_map_onto(self):
         assert RESERVED_SEVERITIES == frozenset({"spec"})
@@ -234,13 +230,15 @@ def _real_run(**kw):
 
 
 class TestStubSurfaceRidesTheRealPipeline:
-    """The stub types satisfy the orchestrator's duck-typed surface: loaded
+    """The loaded types satisfy the orchestrator's duck-typed surface: loaded
     objects run the real pipeline, are recorded, and change no prompt. The
-    ticket is an EMPTY one, the only state that adds nothing to the prompts;
-    a ticket with text is proven in tests/test_issue_64_ticket_context.py."""
+    rules and the ticket are EMPTY ones, the only state that adds nothing to
+    the prompts; rules with text are proven in
+    tests/test_issue_63_review_rules.py and a ticket with text in
+    tests/test_issue_64_ticket_context.py."""
 
     def test_loaded_objects_are_recorded_and_change_no_prompt(self, tmp_path):
-        rules = ReviewRules(path="r.md", body=cap_text("rules", 100), severity_map={})
+        rules = ReviewRules(path="r.md", body=cap_text("", 100), severity_map={})
         ticket = TicketContext(
             path="t.md", capped=cap_text("", 100), text="",
             has_acceptance_criteria=False,
@@ -286,7 +284,7 @@ class TestParser:
 
 class TestRulesAndContextFailClosed:
     CASES = [
-        ("--rules-file", "PRXREF_REVIEW_RULES", RULES_WIRED),
+        ("--rules-file", "PRXREF_REVIEW_RULES", RULES_MISSING),
         ("--context-file", "PRXREF_TICKET_CONTEXT_FILE", TICKET_MISSING),
     ]
 
@@ -455,7 +453,7 @@ class TestWebhookDaemon:
             cli._webhook_handler(CLI_URL)
         assert runtime.orchestrate == []
         errors = [r.exc_info[1] for r in caplog.records if r.exc_info]
-        assert [str(e) for e in errors] == [f"PRXREF_REVIEW_RULES: {RULES_WIRED}"]
+        assert [str(e) for e in errors] == [f"PRXREF_REVIEW_RULES: {RULES_MISSING}"]
 
 
 class TestServeWarnsAboutTheTicketFile:
