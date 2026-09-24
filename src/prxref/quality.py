@@ -1960,6 +1960,7 @@ def _fold_group(
         severity=top_severity,
         confidence=findings[most_confident].confidence,
         body=body,
+        locations=tuple((representative.file, line) for line in other_lines),
     )
     reason = f"{GROUPED_INTO_PREFIX}{representative.file}:{anchor_line}"
     for i in members:
@@ -2005,7 +2006,9 @@ def apply_rule_grouping(
     followed by every other positive line of the group as a backticked
     ``<file>:<line>``, comma-separated, once each, in line order. A line
     the representative sits on, and a file-level member, add no location;
-    when nothing is left the body is unchanged.
+    when nothing is left the body is unchanged. The representative's
+    ``locations`` is set to exactly the ``(file, line)`` pairs that paragraph
+    lists, in the same order, and to ``()`` when it lists none.
     Every other member keeps its identity and gains ``drop_reason``
     ``grouped into <file>:<line>``, naming the representative's location.
 

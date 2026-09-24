@@ -105,8 +105,12 @@ class Finding:
     the ticket the PR implements, ``unknown`` whenever no ticket is active.
     ``rule`` is the rule or standard the reviewer applied, as normalized by
     :func:`normalize_rule`; ``None`` whenever the prompt did not ask for one
-    or the answer was not usable. The new fields trail the old ones, so every
-    positional construction keeps working.
+    or the answer was not usable. ``locations`` is set only on the
+    representative of a group that :func:`prxref.quality.apply_rule_grouping`
+    folded: the ``(file, line)`` of every location its ``Also at:`` paragraph
+    lists, in the same order, and ``()`` on every other finding. It is not
+    part of any identity or dedup key. The new fields trail the old ones, so
+    every positional construction keeps working.
     """
 
     file: str
@@ -118,6 +122,7 @@ class Finding:
     drop_reason: str | None = None
     scope: str = SCOPE_UNKNOWN
     rule: str | None = None
+    locations: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass

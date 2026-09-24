@@ -42,7 +42,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    failed chunk in the partial-review banner.
 6. Deterministic checks and quality passes, in exactly this order — the
    raw chunk + sweep findings have their ``scope`` held to ``unknown``
-   unless a ticket is active (``_enforce_scope``), then gain
+   unless a ticket is active (``_enforce_scope``) and their ``rule`` held
+   to ``None`` unless finding grouping is on (``_enforce_rule``), then gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
    about a PR that is ≥80% release machinery yet also touches source),
    folded in BEFORE the passes so it is filtered like any other finding,
@@ -76,7 +77,15 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
-   ``apply_quality_gate(confidence_floor=, max_errors=)``, which returns
+   ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
+   in one file that break one rule, or that name no rule and share a
+   normalized title, fold into one representative that lists
+   the other lines after ``Also at:``, the rest dropped as ``grouped into
+   <file>:<line>``; sweep findings are never grouped, and running before
+   the gate is what makes every cap count groups; one INFO line and one
+   ``grouping ok`` trace event count the groups and the folded members) →
+   ``apply_quality_gate(confidence_floor=, max_errors=,
+   max_warning_findings=, max_outofscope_findings=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
    re-derived here from finding identity rather than carried across the
    gate as an index → ``apply_sweep_dedup`` (drops a sweep finding that
@@ -159,8 +168,9 @@ from .forges.base import (
 )
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
-from .prompt_templates import PromptTemplates
+from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, placeholders
 from .quality import (
+    GROUPED_INTO_PREFIX,
     active,
     apply_containment_note,
     apply_hedge_gate,
@@ -169,6 +179,7 @@ from .quality import (
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
+    apply_rule_grouping,
     apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_severity_map,
@@ -396,6 +407,9 @@ def orchestrate_review(
     prompts: PromptTemplates | None = None,
     scoped_rules: Any = None,
     scoped_rules_max_chars: int = 24000,
+    group_findings: bool = False,
+    max_warning_findings: int | None = None,
+    max_outofscope_findings: int | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -566,6 +580,34 @@ def orchestrate_review(
     the meta of one ``scoped_rules ok`` trace event, and the ``chunk start``
     and ``sweep start`` events carry their unit's rows as ``rules``. A cap
     below 1 is an error run, not a ``ValueError``, as ``max_chunks=0`` is.
+
+    ``group_findings`` turns on finding grouping (``PRXREF_GROUP_FINDINGS``).
+    Every chunk and the sweep are asked for a per-finding ``rule``
+    (:data:`reviewer.RULE_REQUEST`, through the one
+    :class:`reviewer.PromptContext`), and a model-supplied ``rule`` is kept
+    only then: :func:`_enforce_rule` resets it to ``None`` otherwise. After
+    the hedge gate and before the quality gate,
+    :func:`quality.apply_rule_grouping` folds the chunk findings that break
+    one rule in one file (or, naming no rule, share a normalized title) into
+    one representative, which lists the other lines after ``Also at:`` and
+    in its ``locations``; the other members are kept, dropped as ``grouped
+    into <file>:<line>``. Because grouping runs first, every cap counts
+    groups rather than lines. Sweep findings are never grouped. One INFO line
+    and one ``grouping ok`` trace event (``groups``, ``members``) report the
+    pass on every run with it on, a run that formed no group included. A
+    ``worker`` or ``systemic`` override in ``prompts`` with no
+    ``{rule_example}`` slot after its ``## Review Context`` marker still gets
+    the request, but its example finding shows no ``"rule"`` key, so one
+    WARNING per run names those files and points at ``prxref prompts
+    export``. Off (the default), the prompts, posts, record, trace and logs
+    are exactly a run without it.
+
+    ``max_warning_findings`` and ``max_outofscope_findings`` are forwarded to
+    both ``apply_quality_gate`` calls, the summary-only exit's included, as
+    its per-severity caps of the same names. ``None`` (the default) is
+    unlimited and reads no environment variable; ``0`` drops every finding
+    of that severity. ``outofscope`` is the minor severity, not the ticket
+    scope ``out``.
     """
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -709,6 +751,8 @@ def orchestrate_review(
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             confidence_floor=confidence_floor, max_errors=max_errors,
+            max_warning_findings=max_warning_findings,
+            max_outofscope_findings=max_outofscope_findings,
             ticket_note=ticket_note,
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
@@ -855,7 +899,10 @@ def orchestrate_review(
         spec_digest=injected,
         worker_template=prompts.override("worker") if prompts is not None else "",
         systemic_template=prompts.override("systemic") if prompts is not None else "",
+        rule_request=reviewer.RULE_REQUEST if group_findings else "",
     )
+    if group_findings and prompts is not None:
+        _warn_missing_rule_slot(prompts)
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
@@ -923,6 +970,7 @@ def orchestrate_review(
     )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
     findings = _enforce_scope(findings, ticket_active)
+    findings = _enforce_rule(findings, group_findings)
 
     # Futures were submitted in chunk order, so results[i] is chunk[i]'s
     # outcome for i < len(chunks): the zip pairs each failed review with the
@@ -1022,6 +1070,11 @@ def orchestrate_review(
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
     findings = apply_hedge_gate(findings, spec_digest=injected)
+    if group_findings:
+        findings = _group_findings(
+            findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+            tracer=tracer,
+        )
     # The sweep boundary is positional, and the gate now returns its findings
     # in content order, so the boundary is re-derived from the identity of the
     # sweep's own findings rather than carried across the gate as an index.
@@ -1030,6 +1083,8 @@ def orchestrate_review(
     )
     findings = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
+        max_warning_findings=max_warning_findings,
+        max_outofscope_findings=max_outofscope_findings,
     )
     chunk_part: list[Finding] = []
     sweep_part: list[Finding] = []
@@ -1244,6 +1299,77 @@ def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
         rule = normalize_rule(f.rule) if active else None
         out.append(f if rule == f.rule else replace(f, rule=rule))
     return out
+
+
+def _group_findings(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+    tracer: Tracer,
+) -> list[Finding]:
+    """Run :func:`quality.apply_rule_grouping` and report what it folded.
+
+    Called only with grouping on, after the hedge gate and before the quality
+    gate, while the positional ``sweep_start`` is still valid (every pass
+    before it is 1:1 and order-preserving), with the ``confidence_floor`` the
+    gate gets. ``members`` counts the findings the pass dropped as
+    ``grouped into <file>:<line>`` (:data:`quality.GROUPED_INTO_PREFIX`).
+    ``groups`` counts representatives: the pass rewrites each one and passes
+    every finding it does not fold through as the same object, so an active
+    finding that is no longer the same object is one. Counting distinct drop
+    reasons instead would merge two groups anchored on the same line. Both
+    counts reach one INFO line and one ``grouping ok`` trace event, zeros
+    included.
+    """
+    grouped = apply_rule_grouping(
+        findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    pairs = list(zip(findings, grouped, strict=True))
+    groups = sum(
+        1 for before, after in pairs
+        if after is not before and after.drop_reason is None
+    )
+    members = sum(
+        1 for before, after in pairs
+        if before.drop_reason is None
+        and isinstance(after.drop_reason, str)
+        and after.drop_reason.startswith(GROUPED_INTO_PREFIX)
+    )
+    logger.info(
+        "finding grouping: formed %d group(s), folding %d finding(s) into them",
+        groups, members,
+    )
+    tracer.event("grouping", "ok", groups=groups, members=members)
+    return grouped
+
+
+def _warn_missing_rule_slot(prompts: PromptTemplates) -> None:
+    """Warn once when grouping is on and a review override has no ``{rule_example}``.
+
+    Such an override still gets :data:`reviewer.RULE_REQUEST` and its
+    ``rule`` answers are still kept, but its ``## Output Format`` example
+    finding shows no ``"rule"`` key. Only the text after
+    :data:`prompt_templates.CONTEXT_MARKER` is filled, so a slot above the
+    marker does not count. One WARNING names every such ``worker`` or
+    ``systemic`` file and points at ``prxref prompts export``; nothing is
+    raised. :func:`prompt_templates.load_prompt_templates` stays silent about
+    the slot, because it cannot know whether grouping is on.
+    """
+    missing = [
+        f.path
+        for f in getattr(prompts, "overrides", ())
+        if f.name in REVIEW_TEMPLATES
+        and "rule_example" not in placeholders(f.text.partition(CONTEXT_MARKER)[2])
+    ]
+    if missing:
+        logger.warning(
+            "finding grouping is on, but prompt template override(s) %s have no "
+            "{rule_example} slot after %r, so their example finding shows no "
+            "\"rule\" key; re-export with `prxref prompts export DIR --force` "
+            "and re-apply your edits to pick the slot up",
+            ", ".join(missing), CONTEXT_MARKER,
+        )
 
 
 def _scope_counts(findings: Sequence[Finding]) -> dict[str, int]:
@@ -2257,6 +2383,8 @@ def _summary_only_run(
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
+    max_warning_findings: int | None = None,
+    max_outofscope_findings: int | None = None,
     ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
     summary_template: str = "",
 ) -> dict:
@@ -2271,7 +2399,10 @@ def _summary_only_run(
     ``verdict`` / the summary. An empty diff still yields
     ``release_shape_findings=[]`` (fewer than 2 files can never be
     release-shaped), so this degrades to exactly the prior empty-diff
-    behaviour: ``Approved``, no findings, no banner.
+    behaviour: ``Approved``, no findings, no banner. ``confidence_floor``,
+    ``max_errors``, ``max_warning_findings`` and ``max_outofscope_findings``
+    are that gate's knobs, threaded from :func:`orchestrate_review`. No
+    grouping pass runs here: there is no chunk finding to group.
 
     ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
     ``summary_template`` are handed to :func:`_render_summary` unchanged; all
@@ -2287,6 +2418,8 @@ def _summary_only_run(
         findings = apply_location_validation(findings, [f.path for f in files])
         findings = apply_quality_gate(
             findings, confidence_floor=confidence_floor, max_errors=max_errors,
+            max_warning_findings=max_warning_findings,
+            max_outofscope_findings=max_outofscope_findings,
         )
     findings_active = sorted(active(findings), key=finding_sort_key)
     findings_dropped = sorted(
