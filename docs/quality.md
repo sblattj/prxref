@@ -161,6 +161,32 @@ gains a `drop_reason` for its scope.
   after the cap therefore reads as a ticket without criteria, and the summary
   says scope was judged from its description alone.
 
+## Grouped findings in the output
+
+With `PRXREF_GROUP_FINDINGS` set to `1`, a group (pass 9) reaches the output
+as one active finding, its representative, plus a dropped audit copy of every
+other member.
+
+- **`--format json`.** Every finding row carries `rule` and `locations`, after
+  `scope`. The representative's `locations` lists one
+  `{"file": ..., "line": ...}` object for each location its `Also at:`
+  paragraph names, in the same order. It never repeats the row's own `file`
+  and `line`, and it is `null` when `Also at:` names nothing, because every
+  other member is file-level or sits on the anchor's line. Each other member
+  stays in `findings` as a dropped row with `drop_reason`
+  `grouped into <file>:<line>`, `locations` `null`, and its own `rule`, which
+  may differ in case from the representative's. `prxref eval` credits a group
+  at the row's own location and at each entry of `locations`, never at a
+  member row. With grouping off, `rule` and `locations` are `null` on every
+  row.
+- **Text output** (`--no-post` or `-v`). Every active finding that names a
+  rule, a representative included, ends its line in ` [rule: <rule>]`, after
+  any ` [scope: in]` or ` [scope: out]` tag. A representative's body carries
+  the `Also at:` paragraph. Each member is listed under
+  `dropped:` with its `grouped into <file>:<line>` reason. A group formed by
+  the title fallback names no rule, so its line gains no tag and its `rule` is
+  `null`.
+
 ## Replay runs and the thread passes
 
 A `--no-threads` replay gives passes 4 and 5 (`apply_thread_dedup` and
