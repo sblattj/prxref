@@ -55,6 +55,32 @@ _ERROR_DETAIL_CHARS = 400
 # this size (or one that looks binary) is worth skipping rather than shipping
 # hundreds of KB into a worker prompt.
 _MAX_FILE_CONTENT_BYTES = 512 * 1024
+# The media types GitHub labels a raw file body with. github.com answers the raw
+# Accept with ``application/vnd.github.raw+json``. The bare ``.raw`` and the
+# versioned ``.v3.raw`` spellings are GitHub's older names for the same variant,
+# accepted for GitHub Enterprise Server without a live sighting of either.
+_RAW_MEDIA_TYPES = frozenset({
+    "application/vnd.github.raw+json",
+    "application/vnd.github.raw",
+    "application/vnd.github.v3.raw",
+    "application/vnd.github.v3.raw+json",
+})
+
+
+def _is_json_envelope(content_type: str) -> bool:
+    """True when a contents response's ``Content-Type`` is a JSON envelope, not the file.
+
+    The decision is on the media type (the value before any ``;``, stripped
+    and lowercased), never on a substring: GitHub's raw variant carries
+    ``+json`` in its name but its body is the file's own bytes. A raw variant
+    in ``_RAW_MEDIA_TYPES`` is the file; ``application/json`` (a directory
+    listing) and any other ``+json`` media type is an envelope. Anything else,
+    ``text/*`` included, is the file, left to the size and binary checks.
+    """
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type in _RAW_MEDIA_TYPES:
+        return False
+    return media_type == "application/json" or media_type.endswith("+json")
 
 
 def _is_count(value: object) -> bool:
@@ -627,10 +653,14 @@ class ForgeImpl:
         """Return the text of ``path`` at commit ``sha``, best-effort.
 
         Requests the raw media type so a 2xx response is the file's bytes
-        rather than a base64-wrapped JSON envelope. A JSON body coming back
-        anyway means the raw Accept was not honoured, or ``path`` names a
-        directory or a file over GitHub's 1 MB raw-content ceiling — both
-        read as "no content" here. Never raises.
+        rather than a base64-wrapped JSON envelope. The response is judged by
+        its media type (``_is_json_envelope``): github.com labels the raw body
+        ``application/vnd.github.raw+json``, and that, GitHub's older raw
+        names and any ``text/*`` type are read as the file. A JSON envelope
+        (``path`` names a directory, or the raw Accept was not honoured) reads
+        as "no content". A body over ``_MAX_FILE_CONTENT_BYTES`` is dropped by
+        the size check and one holding a NUL byte by the binary check. Never
+        raises.
         """
         if not sha:
             return None
@@ -651,10 +681,11 @@ class ForgeImpl:
                 "get_file_content got HTTP %s for %s@%s", resp.status_code, path, sha
             )
             return None
-        if "json" in resp.headers.get("Content-Type", "").lower():
+        content_type = resp.headers.get("Content-Type") or ""
+        if _is_json_envelope(content_type):
             logger.debug(
-                "get_file_content got a JSON body for %s@%s (raw Accept not "
-                "honoured, a directory, or over the 1 MB ceiling)", path, sha,
+                "get_file_content got a JSON envelope (%s) for %s@%s (a "
+                "directory, or the raw Accept not honoured)", content_type, path, sha,
             )
             return None
         content = resp.content
