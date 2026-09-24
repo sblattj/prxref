@@ -126,6 +126,7 @@ config-level range check in front of these arguments.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
@@ -135,6 +136,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any
+from urllib.parse import urlparse
 
 from . import chunk_context, costs, heuristics, reviewer, specs, systemic
 from .forges.base import (
@@ -647,6 +649,7 @@ def orchestrate_review(
     # the worker fan-out, then rides the existing chunk + sweep calls.
     spec_digest = ""
     spec_note = ""
+    fetched: list[specs.SpecSource] | None = None
     if spec_sources:
         try:
             fetched = specs.fetch_specs(
@@ -656,29 +659,36 @@ def orchestrate_review(
                 jira_email=jira_email,
                 jira_api_token=jira_api_token,
             )
-            spec_digest = specs.build_spec_digest(fetched, files, spec_digest_tokens)
-            ok = sum(1 for s in fetched if not s.error)
-            tracer.event(
-                "specs", "ok",
-                sources=len(fetched), ok=ok, fail=len(fetched) - ok,
-                digest_chars=len(spec_digest),
-            )
-            spec_note = _spec_note(fetched, spec_digest)
             # The note only reaches a POSTED summary, so a --no-post, dry-run,
             # or inline-only run would otherwise learn nothing about grounding.
-            for s in fetched:
+            # Logged before the digest is built, so a crash there keeps them.
+            for i, s in enumerate(fetched, start=1):
                 if s.error:
                     logger.warning(
-                        "spec source failed (review continues without it): %s",
-                        redact_for_post(s.error),
+                        "spec source %d/%d (%s, %s) failed (best-effort): %s",
+                        i, len(fetched), s.kind or "unknown",
+                        _log_safe_origin(s.origin), redact_for_post(s.error),
                     )
-            logger.info(
-                "spec grounding: %d/%d source(s) fetched, %d constraint(s) injected",
-                ok, len(fetched), specs.constraint_count(spec_digest),
-            )
+            # Committed together at the end, so a crash leaves the run
+            # ungrounded, which is what its record says.
+            digest = specs.build_spec_digest(fetched, files, spec_digest_tokens)
+            note = _spec_note(fetched, digest)
+            spec_digest, spec_note = digest, note
         except Exception as e:  # noqa: BLE001
             logger.error("spec grounding failed (best-effort): %s", e)
-            tracer.event("specs", "fail", error=e.__class__.__name__)
+            fetched = None
+            run_inputs["spec_grounding"] = {
+                "sources": len(spec_sources),
+                "ok": 0,
+                "failed": [f"spec stage crashed: {e.__class__.__name__}"],
+                "constraints": 0,
+                "digest_sha256": None,
+            }
+            tracer.event(
+                "specs", "fail",
+                sources=len(spec_sources), ok=0, constraints=0,
+                reasons=[f"spec stage crashed: {e.__class__.__name__}: {e}"],
+            )
 
     # Grounded means at least one constraint line reached the digest. A digest
     # without one (no sources, every source failed, nothing kept, or a budget
@@ -687,6 +697,38 @@ def orchestrate_review(
     # any `spec` the model emits anyway.
     grounded = specs.constraint_count(spec_digest) > 0
     injected = spec_digest if grounded else ""
+
+    # Recorded before the fan-out, so the total-failure exit carries it too.
+    # The record mirrors the posted note (labels, redacted reasons); the
+    # trace is operator-only and keeps the raw reasons. The hash encodes with
+    # surrogatepass because a Jira body's JSON escapes can decode to a lone
+    # surrogate, and this block sits outside the never-raise fence.
+    if fetched is not None:
+        ok = sum(1 for s in fetched if not s.error)
+        constraints = specs.constraint_count(injected)
+        failed = [
+            (f"source {i}{f' ({s.kind})' if s.kind else ''}", s.error)
+            for i, s in enumerate(fetched, start=1) if s.error
+        ]
+        run_inputs["spec_grounding"] = {
+            "sources": len(fetched),
+            "ok": ok,
+            "failed": [f"{label}: {redact_for_post(error)}" for label, error in failed],
+            "constraints": constraints,
+            "digest_sha256": (
+                hashlib.sha256(injected.encode("utf-8", "surrogatepass")).hexdigest()
+                if injected else None
+            ),
+        }
+        logger.info(
+            "spec grounding: %d/%d source(s) ok, %d constraint(s) injected",
+            ok, len(fetched), constraints,
+        )
+        tracer.event(
+            "specs", "ok" if ok else "fail",
+            sources=len(fetched), ok=ok, constraints=constraints,
+            **({} if ok else {"reasons": [f"{label}: {error}" for label, error in failed]}),
+        )
 
     prompt_context = PromptContext(
         rules_worker=rules.prompt_block("worker") if rules is not None else "",
@@ -1757,6 +1799,25 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
             f"> ⚠️ Spec fetch failed for {len(failed)} source(s): {reasons}"
         )
     return "\n".join(lines) + "\n"
+
+
+def _log_safe_origin(origin: str) -> str:
+    """Name a spec source for the operator's log, never its credentials.
+
+    A URL keeps ``scheme://host[:port]/path`` and loses its userinfo, query,
+    fragment and ``;params``, because CI logs are read more widely than the
+    operator's config. Anything without a scheme and a network location is
+    a local path and is returned verbatim, since it tells the operator which
+    file or directory to fix. A malformed URL is not echoed at all.
+    """
+    try:
+        parsed = urlparse(origin.strip())
+    except ValueError:
+        return "[unparseable origin]"
+    if not (parsed.scheme and parsed.netloc):
+        return origin
+    host = parsed.netloc.rpartition("@")[2]
+    return f"{parsed.scheme}://{host}{parsed.path}"
 
 
 def _chunk_files_label(files: Sequence[str]) -> str:
