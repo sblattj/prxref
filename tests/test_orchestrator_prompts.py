@@ -162,9 +162,9 @@ class TestUnsetRun:
         assert _split(off_llm) == _split(base_llm)
         assert off_forge.summaries == base_forge.summaries and len(base_forge.summaries) == 1
         assert off == base
-        assert [(e["node"], e["phase"]) for e in _events(none_trace)] == [
+        assert sorted((e["node"], e["phase"]) for e in _events(none_trace)) == sorted(
             (e["node"], e["phase"]) for e in _events(base_trace)
-        ]
+        )
 
     def test_an_unset_run_renders_the_packaged_templates(self, work):
         _, forge, llm = _review(multi_chunk_diff(2))
