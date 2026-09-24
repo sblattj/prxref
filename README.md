@@ -162,7 +162,22 @@ The service exposes:
 
 ## Review Against a Spec or Ticket
 
-<!-- 0.14 placeholder: W-SPECDOCS -->
+Give prxref the spec or ticket a change implements, and the review also checks the diff against it. A source is a public web page, a local file, a local directory (up to 20 `.md`, `.markdown`, `.txt` or `.adoc` files directly inside it), or a Jira ticket URL:
+
+```bash
+prxref review --pr-url https://github.com/org/repo/pull/123 \
+  --spec https://jira.example.com/browse/PROJ-42 \
+  --spec https://spec.example.com/client-guidelines.html \
+  --spec /etc/prxref/specs/
+```
+
+prxref fetches each source and keeps its RFC 2119 statements (MUST, SHOULD, MAY), version pins and naming rules; a Jira ticket's summary and description are kept line by line, up to 6,000 characters, and ranked first. It ranks the rest against the diff and adds that bounded digest (`PRXREF_SPEC_DIGEST_TOKENS`) to every chunk worker's prompt and to the whole-PR sweep's, with no extra model call. A finding whose only basis is one of those constraints is a 🔍 `spec` finding, and it quotes the constraint as `Spec: "…"`. `PRXREF_SPEC_SOURCES` sets the sources for every run, the webhook daemon included; `--spec` replaces that list for one run.
+
+- **Jira.** A public ticket needs no configuration. For a private one set `PRXREF_JIRA_BASE_URL`, `PRXREF_JIRA_EMAIL` and `PRXREF_JIRA_API_TOKEN`: credentials only go to `PRXREF_JIRA_BASE_URL`, and every other fetch is anonymous.
+- **Advisory.** 🔍 spec findings are advisory: they never change the verdict, and `PRXREF_FAIL_ON=error` ignores them. `PRXREF_FAIL_ON=any` is the opt-in gate.
+- **Best-effort.** A source that cannot be fetched never fails the review. The summary gains a grounding note that counts the constraints injected and names each failed source by its position and kind (`source 2 (url)`), never by its path or URL. When the digest ends up with no constraint at all, the review runs as if no spec had been given, and a `spec` finding the model emits anyway is relabelled `warning`.
+
+Every setting: [docs/env-vars.md](docs/env-vars.md). How grounding meets the quality passes: [docs/quality.md](docs/quality.md#spec-grounding). Spec sources in CI and on the daemon, fetch time bounds, and what the logs record: [docs/deploy.md](docs/deploy.md#7-spec-sources-in-ci-and-on-the-daemon).
 
 ## Ticket Context and Scope
 

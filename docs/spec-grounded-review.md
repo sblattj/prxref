@@ -1,7 +1,23 @@
 # Spec-Grounded Review — Design
 
-Status: design for implementation (v1). Owner: prxref.
-Grounded against the tree at 0.11.x; `file:line` citations refer to the current source.
+> **This is a design record, not the manual.** It is the pre-implementation
+> design, written against the tree at 0.11.x; the feature shipped in 0.14.0.
+> Its `file:line` citations, line ranges and version numbers are historical
+> and no longer match the source, so resolve a citation by the symbol it
+> names. Where what shipped differs materially from the design, an
+> **As built (0.14.0)** note says so in place, and the shipped behaviour wins.
+>
+> - The dataset contract for `tests/evals/` is
+>   [tests/evals/README.md](../tests/evals/README.md), not §7.
+> - 🟦 in this document is the pre-0.14 `outofscope` glyph. `outofscope` now
+>   renders ⬜, and 🟦 marks a finding outside the ticket's scope. The glyphs
+>   live in one table, `prxref.markers`.
+> - To use the feature, read the README's
+>   [Review Against a Spec or Ticket](../README.md#review-against-a-spec-or-ticket),
+>   [docs/quality.md](quality.md#spec-grounding) and
+>   [docs/deploy.md](deploy.md#7-spec-sources-in-ci-and-on-the-daemon).
+
+Status: design record (v1), implemented in 0.14.0. Owner: prxref.
 
 ## 0. What this feature is
 
@@ -159,8 +175,17 @@ dispatches per source, in the order given:
 - `http://`/`https://` prefix + ticket match → Jira REST (§2.4).
 - `http(s)` otherwise → plain GET (§2.3).
 - existing filesystem path → file or directory (§2.3).
-- anything else → `SpecSource(error="not a URL or path: …")` — a per-source
-  failure, never an abort.
+- anything else → `SpecSource(error="not a URL or path")` — a per-source
+  failure, never an abort. The reason carries no path, because failure
+  reasons are posted (§6.4).
+
+> **As built (0.14.0):** `parse_ticket_url` also accepts a context path of up
+> to two segments before `/browse/` and `/rest/api/{2|3}/issue/` (Jira Server
+> under `/jira`), the Cloud team-managed issue view without `/c/`, and a
+> Cloud board URL on a `/jira/` path carrying `selectedIssue`. The
+> context-path bound keeps a Bitbucket Server `/projects/P/repos/R/browse/…`
+> URL from matching. A local path goes through
+> `text_inputs.confine_to_cwd` before anything stats or reads it (§2.3).
 
 ### 2.3 Web + local fetching
 
@@ -183,6 +208,41 @@ dispatches per source, in the order given:
   in sorted filename order, capped at the first 20 files
   (`SPEC_DIR_MAX_FILES = 20`), each through the same cap.
 
+> **As built (0.14.0):** the spec session does not reuse the forge retry
+> policy. `specs._create_default_session` retries **once**
+> (`LoggingRetry(total=1, …)`), with no backoff sleep before that retry, and
+> ignores `Retry-After` (`respect_retry_after_header=False`). The daemon
+> reviews one PR at a time, so a spec host that is down or asks for time is
+> skipped, not waited for. Two module constants bound a source, and neither
+> depends on `--timeout`:
+>
+> - `SPEC_FETCH_TIMEOUT_S = 15`: each attempt's connect timeout and its
+>   timeout per read;
+> - `SPEC_FETCH_BUDGET_S = 30`: the wall clock for the body, counted from
+>   before the request.
+>
+> `specs._read_stream` reads the body one socket read at a time
+> (`raw.read1(8192, decode_content=True)`, or `iter_content(chunk_size=1)`
+> on urllib3 1.x) and checks a monotonic deadline before each read, so a
+> trickling host costs at most the budget plus one read timeout, about 45 s.
+> A host that accepts the connection and never answers costs about 30 s:
+> two attempts of 15 s. The byte
+> cap is `4 * max_chars + 4`. The charset comes from the header, then an HTML
+> `<meta>` in the first 1024 bytes, then strict UTF-8 without a BOM, then
+> cp1252 with replacement. HTML is stripped after the cut, and the
+> truncation marker is appended after the stripping.
+>
+> Local files are read in bounded memory as strict UTF-8 without a BOM
+> (`text_inputs.read_capped_file`). The marker is appended only when a file
+> is longer than `max_chars`. A path under the working directory must still
+> resolve under it once its symlinks are followed, while an absolute path
+> outside it is read as given. A directory is read with `os.scandir`: it
+> skips every symlinked entry, and it skips a file it cannot read or decode
+> without failing the others. Skipped names are logged at WARNING only, and
+> they become the source's error only when no file was read. No reason
+> carries a local path: an `OSError` is reported by its class and
+> `strerror`.
+
 ### 2.4 Jira REST (primary path)
 
 ```
@@ -204,6 +264,18 @@ Authorization: Basic base64(email:api_token)
   original ticket URL if it reappears).
 - MCP as an alternative fetch path is noted here as a future option only
   (§10); REST basic-auth is the designed primary per the locked decisions.
+
+> **As built (0.14.0):** credentials only ever go to `PRXREF_JIRA_BASE_URL`.
+> Basic auth is sent only when that variable, `PRXREF_JIRA_EMAIL` and
+> `PRXREF_JIRA_API_TOKEN` are all set; every other ticket fetch is
+> anonymous. Credentials set without a base URL are withheld, with a WARNING
+> naming `PRXREF_JIRA_BASE_URL`. A plain-`http://` base URL is used, with a
+> WARNING. The variable-naming hint also fires on an anonymous 404, because
+> Jira Cloud hides a private issue from anonymous readers as 404. The
+> response streams through the same budgeted reader as a web page (§2.3): a
+> body over the byte cap, or a 200 that is not a JSON issue, fails the
+> source cleanly. A `Type:` or `Labels:` line whose value is empty is left
+> out, because every non-blank ticket line becomes a digest constraint.
 
 ### 2.5 Failure doctrine
 
@@ -260,6 +332,30 @@ Each kept unit renders as one line:
 `origin-short` is the source's basename or URL path tail; the Jira ticket's
 tag is `[ticket:{KEY}]`.
 
+> **As built (0.14.0):** matching runs on blocks and sentences, not physical
+> lines (`specs._spec_units`).
+>
+> - A paragraph or list item joins its wrapped and indented continuation
+>   lines. A blank line, heading, setext underline, code fence, table row or
+>   new list item ends a block, and a table row or fenced line is a unit of
+>   its own.
+> - Each block is split into sentences (`e.g.`, `i.e.`, common abbreviations
+>   and code spans never end one), and each sentence is matched on its own. A
+>   block over 400 characters, or one with two or more matching sentences,
+>   yields one unit per matching sentence. Otherwise the block is kept whole,
+>   unless its only match is a prose `can`/`discouraged` or a bare version
+>   pin, which keeps just that sentence.
+> - A unit ending in `:` carries the list that follows it, up to the cap. A
+>   version pin counts only on a line that is nothing but the pin. Every unit
+>   is anchored `L{n}` on its block's first line.
+> - Headings render as `[spec:{short}#{slug}] (heading) text`.
+> - A ticket unit renders `[ticket:{KEY}] statement` with no strength label.
+>   Every non-blank ticket line is kept, up to a fixed 6000 characters
+>   (`TICKET_DESC_BUDGET_CHARS`); the `min(spec_max_chars // 4, 6000)`
+>   sub-budget is deferred.
+> - `origin-short` never carries a URL's query, fragment, userinfo or port,
+>   but a credential that *is* the last path segment survives.
+
 ### 3.3 Diff-relevance pruning
 
 Rank kept constraints, then keep until budget:
@@ -282,6 +378,15 @@ Rank kept constraints, then keep until budget:
 4. SHOULDs (2) then MAYs (1) with score 0 are dropped first, then trailing
    unmatched SHOULDs, as budget runs out.
 
+> **As built (0.14.0):** the score is the constraint's content tokens shared
+> with the diff, minus the normative keywords themselves
+> (`specs._NORMATIVE_TOKENS`: `must`, `shall`, `should`, `never`,
+> `required`, …), so a diff line that merely says "must" matches nothing.
+> Relevant constraints sort by score, then source order, then document
+> order. The unmatched tail runs MUST, then SHOULD, then MAY, and the budget
+> walk cuts it from the end. The tokenizer is `quality._tokens` /
+> `_evidence_tokens`, imported, not duplicated.
+
 ### 3.4 Budget
 
 `build_spec_digest(sources, files, token_budget) -> str` enforces
@@ -295,6 +400,21 @@ explained, not inferred away.
 
 The digest is built once per review, after `parse_unified_diff` (files are the
 pruning input) and before the worker fan-out.
+
+> **As built (0.14.0):**
+>
+> - `build_spec_digest` returns `""` when sources were given but no unit was
+>   extracted from any of them, so the prompts show their no-specs text.
+> - A failed source gets no line in the digest; the grounding note (§6.4)
+>   reports it. The not-contributed line uses the short origin:
+>   `[spec:{short}: nothing diff-relevant kept]`.
+> - Ranking interleaves sections, so a constraint's heading line is
+>   re-emitted whenever the open section changes, and a unit with no heading
+>   after one that had one is preceded by `[spec:{short}] (heading) (no
+>   section)`.
+> - `specs.constraint_count` counts only the constraint lines. The intro,
+>   heading lines, truncation markers and bookkeeping lines never count, and
+>   a digest with no constraint line is not injected at all (§4.1).
 
 ---
 
@@ -327,6 +447,26 @@ Plumbing:
   sources/ok/fail counts and final digest chars, between `build_chunks` and
   the worker span.
 
+> **As built (0.14.0):**
+>
+> - The digest travels in `reviewer.PromptContext.spec_digest`, alongside
+>   the other context blocks, rather than as a separate keyword on each call.
+> - Only a grounded digest is injected: `grounded =
+>   specs.constraint_count(digest) > 0`. A digest with no constraint line (no
+>   sources, every source failed, nothing extracted, or a budget too small
+>   for one line) is not injected, so every prompt shows `(no specs provided
+>   for this review)`.
+> - The trace records `specs ok|fail` with `{sources, ok, constraints}`. A
+>   `fail` event (no source fetched) also carries the raw, unredacted
+>   `reasons`, and a crashed spec stage emits `specs fail` with one
+>   `spec stage crashed: …` reason. Digest chars are not recorded. The event
+>   is emitted after the thread listing and before the worker fan-out. A
+>   later `specs relabel {findings}` event marks ungrounded `spec` findings
+>   relabelled `warning` (§5.2).
+> - The operator-facing WARNING and INFO lines and the run record's
+>   `spec_grounding` key are documented in
+>   [docs/deploy.md](deploy.md#what-the-logs-the-run-record-and-the-trace-say).
+
 ### 4.2 What the prompts say
 
 `prompts/worker.md` — extend `## Severity Vocabulary` (`worker.md:7-11`) with:
@@ -344,16 +484,34 @@ for this review)`, `spec` is not a legal severity. Cite the diff line that
 violates it (same `file`/`line` contract as every finding, `worker.md:62`).
 
 `prompts/systemic.md` — same vocabulary bullet, plus one mission line: with
-the whole-diff digest plus constraints in view, the sweep is the natural seat
-for cross-file spec classes (naming rules, version pins, "no component may do
-X" rules), while per-chunk seats catch line-local violations. Nothing else in
-the sweep's class list changes (`systemic.md:5-15`).
+the whole-diff digest plus any spec constraints in view, the sweep is the
+natural seat for cross-file spec classes (naming rules, version pins, "no
+component may do X" rules), while per-chunk seats catch line-local
+violations. Nothing else in the sweep's class list changes
+(`systemic.md:5-15`).
 
 `prompts/summary.md` — see §6.1 (counts line only).
 
 Severity wording matters for eval scoring: the constraint quote convention
 (`Spec: "…"`) gives expected.json a machine-checkable field and gives the
 severity-consistency pass distinctive titles (§5.3).
+
+> **As built (0.14.0):**
+>
+> - Each template splits at `## Review Context`. The severity bullet and the
+>   `## Spec-grounded rules` section sit in the system half; the
+>   `### Spec constraints` block with `{spec_digest}` sits in the user half,
+>   before the diff or digest. So every prompt changed in 0.14.0, and the
+>   worker and sweep prompts carry spec text on every run, with sources or
+>   without.
+> - Both rule sections add one override sentence: when the only basis for a
+>   finding is a constraint quoted in the block, its severity is `spec`. The
+>   sweep's rules add that its own built-in classes (RLS, secrets, …) are
+>   never spec constraints.
+> - The expected.json field this paragraph anticipates was not built. The
+>   shipped dataset matches findings by `must_match` (see §7).
+> - A `Spec: "…"` quote also exempts its verbatim digest text from the hedge
+>   gate (§5.2).
 
 ---
 
@@ -390,6 +548,15 @@ continue to map unknown → outofscope 🟦 for anything that reaches them. A
 model that misspells `spec` therefore loses the finding loudly (drop, audit
 trail) rather than silently mis-rendering it.
 
+> **As built (0.14.0):** `orchestrator._SEVERITY_MARKERS` no longer exists.
+> Every glyph comes from one table, `prxref.markers.SEVERITY_MARKERS`
+> (`error` 🟥, `warning` 🟧, `spec` 🔍, `outofscope` ⬜), and the orchestrator
+> renders through `markers.severity_marker`. An unknown severity renders
+> `markers.FALLBACK_MARKER`, which is ⬜, the `outofscope` glyph; 🟦 is now
+> `markers.OUT_OF_TICKET_MARKER`, a scope prefix, never a severity.
+> `formatter._norm_severity` still maps an unknown severity to `outofscope`.
+> The three rank tables above shipped as designed.
+
 ### 5.2 Gate mechanics per pass
 
 - **Location validation** (`quality.py:70-93`): severity-agnostic — a spec
@@ -414,6 +581,24 @@ trail) rather than silently mis-rendering it.
 - **Sweep dedup** (`quality.py:577-615`): unchanged; a sweep-emitted spec
   finding restating a surviving chunk finding still dedups on
   `(file, normalize_title)`.
+
+> **As built (0.14.0):** two behaviours this list did not plan.
+>
+> - **A new pass, `quality.apply_spec_grounding`,** runs after the team
+>   severity map and before location validation, over chunk and sweep
+>   findings alike. On an ungrounded run it relabels every `spec` finding as
+>   `warning` (compared trimmed and lower-cased); it never drops a finding and
+>   never raises one to `spec`, and on a grounded run it changes nothing.
+>   Because it runs ahead of severity consistency, an ungrounded `spec` can
+>   never lift a same-title sibling. A relabel logs one INFO line and one
+>   `specs relabel {findings}` trace event.
+> - **The hedge gate exempts a verbatim spec quote.** After a `Spec:` marker,
+>   the text a finding copies verbatim from the injected digest, compared
+>   case-insensitively, up to a closing quote, is not read for hedges, in a
+>   finding of any severity. With no digest injected, nothing is exempt.
+>
+> The user-facing description, including the hedge exemption's known
+> limitation, is [docs/quality.md](quality.md#spec-grounding).
 
 ### 5.3 Verdict and exit codes
 
@@ -449,6 +634,12 @@ existing orchestrator-template pin tests
 (`tests/test_orchestrator.py:30`, `tests/test_formatter.py:103,:115`) are
 updated to the new counts line in the same change.
 
+> **As built (0.14.0):** the shipped counts line ends `⬜ {outofscope_count}
+> outofscope`, not 🟦 (see §5.1), and `🔍 {spec_count} spec` appears on every
+> run, with spec sources or without. The line after it in
+> `prompts/summary.md` is `{spec_note}{ticket_note}`. A parity test holds
+> the summary templates' glyph literals to `prxref.markers`.
+
 ### 6.2 Inline rendering
 
 Spec findings post as ordinary inline comments (`orchestrator.py:519-538`)
@@ -480,47 +671,54 @@ comment is redacted; URLs are stripped by `_URL_RE`). A total fetch failure
 renders only the failure line, and the review reads as un-grounded — which it
 was.
 
+> **As built (0.14.0):** a failed source is labelled by its 1-based position
+> in the configured list and its kind, `source 2 (url)`, or `source 2` when
+> the kind was never determined; it is never named by its origin. The
+> example above is therefore stale: the shipped failure line reads
+> `> ⚠️ Spec fetch failed for 1 source(s): source 1 (jira): …`. The
+> `Spec-grounded` line counts every configured source and the constraint
+> lines actually injected, so it can read `0 constraint(s) injected` when
+> sources fetched but none held a constraint. Because the note reaches only
+> a posted summary, the same facts also go to the log and the run record on
+> every run with spec sources, `--no-post` included (see
+> [docs/deploy.md](deploy.md#what-the-logs-the-run-record-and-the-trace-say)).
+
 ---
 
 ## 7. Golden eval dataset: `tests/evals/`
 
-The sibling worker lands three cases under `tests/evals/<case>/` with this
-contract (defined here so runner and data agree):
+> **As built (0.14.0):** the dataset shipped; the runner and the scoring did
+> not. **[`tests/evals/README.md`](../tests/evals/README.md) is the dataset
+> contract**, and it replaces the layout and `expected.json` schema this
+> section first proposed. In short:
+>
+> - Three cases ship, each a `tests/evals/case-NNN-<slug>/` directory holding
+>   `ticket.md`, `docs/`, `diff.patch`, `expected.json` and `meta.json`.
+> - `expected.json` is a flat JSON array of must-find entries, each with
+>   exactly `id`, `file`, `line_hint`, `severity`, `must_match` (a substring,
+>   or a regex when prefixed `re:`) and `source` (`spec` for a planted
+>   violation, `generic` for a plain bug). There is no `title_hint`, no
+>   `constraint_ref` and no `nonfindings` list.
+> - `meta.json` carries a planted-violation manifest that maps one-to-one
+>   onto the `source: "spec"` entries. It carries no score floor.
+> - `tests/evals/test_evals.py` is a structural scorer only. It proves every
+>   case is well-formed and self-consistent and runs no LLM:
+>   `uv run pytest tests/evals -q`.
+>
+> `source` keeps the meaning proposed here: `generic` marks an ordinary bug
+> the unguided reviewer should also catch, so a later scoring pass can check
+> that grounding costs no generic recall.
 
-```
-tests/evals/<case>/
-  ticket.md        # ticket text; fed to specs.py as a file source
-  docs/            # spec corpus (e.g. trimmed MCP best-practice pages)
-  diff.patch       # unified diff with planted violations + clean lines
-  expected.json    # ground truth (shape below)
-  meta.json        # case name, spec version pin, planted-line inventory, floor
-```
+### 7.1 Runner (planned, not built)
 
-`expected.json`:
+> **Planned, not built.** Nothing in §7.1 or §7.2 exists in 0.14.0: there is
+> no `harness.py`, no stub-LLM plumbing or recorded mode, and no P/R/F1
+> scoring. The design is kept for the later pass that
+> `tests/evals/README.md` anticipates.
 
-```json
-{
-  "findings": [
-    {"file": "src/mcp/server.py", "line": 42, "severity": "spec",
-     "title_hint": "forbidden header", "constraint_ref": "docs/lifecycle.md#MUST-close",
-     "source": "spec"}
-  ],
-  "nonfindings": [
-    {"file": "src/mcp/util.py", "line": 7, "source": "generic",
-     "note": "clean refactor; must NOT attract a spec finding"}
-  ]
-}
-```
-
-`source` labels ground truth as `"spec"` (violation of a corpus/ticket
-constraint) or `"generic"` (ordinary bug the *unguided* reviewer should also
-catch, kept to measure that grounding does not cost generic recall).
-
-### 7.1 Runner
-
-`tests/evals/harness.py` (data-local, not shipped) + a thin
-`tests/test_evals.py` wrapper so `uv run pytest tests/test_evals.py` runs it
-in CI:
+`tests/evals/harness.py` (data-local, not shipped) + a thin wrapper in
+`tests/evals/test_evals.py` (the file that holds today's structural scorer)
+so `uv run pytest tests/evals -q` runs it in CI:
 
 1. Load the case; build sources as `["<case>/ticket.md", "<case>/docs"]`
    (file sources — the fetch layer is exercised by `test_specs.py` with
@@ -541,7 +739,17 @@ in CI:
 4. Score **post-gate, post-alignment** output against `expected.json` —
    never raw model output, so the eval measures what a PR author receives.
 
-### 7.2 Scoring metric
+### 7.2 Scoring metric (planned, not built)
+
+> **Against the shipped dataset:** `expected.json` has no `line`,
+> `title_hint`, `constraint_ref` or `nonfindings`. A scorer would match on
+> `file`, on `line_hint` within the line tolerance, and on `must_match`
+> against the finding body; the specificity check has no list to read; and
+> a per-case floor would live in the scorer, since `meta.json` holds none.
+> The line self-check below did ship, tighter than designed:
+> `test_line_hints_anchor_added_lines` requires every `line_hint` to be an
+> added line of the case diff, and `test_expected_json_schema` requires it
+> to be at least 1, so there is no file-level `0`.
 
 Matching rule, in order: same `file` (exact) **and**
 `|pred.line − exp.line| ≤ quality.DEFAULT_LINE_TOLERANCE` (5,
@@ -578,24 +786,32 @@ The four-surface rule is enforced, not aspirational:
 misses any surface, and when `docs/env-vars.md`'s **stated counts** go stale.
 For six new keys:
 
-- [ ] `src/prxref/config.py`: `_DEFAULTS` + six keys; `_LIST_KEYS` +=
+- [x] `src/prxref/config.py`: `_DEFAULTS` + six keys; `_LIST_KEYS` +=
       `spec_sources`; `_INT_KEYS` += `spec_max_chars`, `spec_digest_tokens`;
       `_RANGES` += both; module docstring env table (lines 5-83) += six
       entries.
-- [ ] `.env.example`: six commented entries with defaults (file pattern
+- [x] `.env.example`: six commented entries with defaults (file pattern
       `.env.example:11-60`).
-- [ ] `docs/env-vars.md`: six table rows (LLM & Pipeline section for the
+- [x] `docs/env-vars.md`: six table rows (LLM & Pipeline section for the
       three spec keys; a new "Spec Sources / Jira" subsection for the three
       `PRXREF_JIRA_*` keys); update the stated totals —
       `**35** configuration keys` → `**41**`, and
       `for 36 accepted variable names` → `for 42` (`docs/env-vars.md:122-128`;
       the test asserts these strings, `test_docs_consistency.py:103-118`).
-- [ ] `README.md`: short "Review against a spec or ticket" section with one
+- [x] `README.md`: short "Review against a spec or ticket" section with one
       copy-paste example.
-- [ ] `src/prxref/cli.py`: `--spec` flag + plumbing (§1.1).
-- [ ] Prompt templates: `worker.md`, `systemic.md` (§4.2), `summary.md` (§6.1).
-- [ ] No new `_CHOICE_KEYS` entry is needed (no enum-valued key in this
+- [x] `src/prxref/cli.py`: `--spec` flag + plumbing (§1.1).
+- [x] Prompt templates: `worker.md`, `systemic.md` (§4.2), `summary.md` (§6.1).
+- [x] No new `_CHOICE_KEYS` entry is needed (no enum-valued key in this
       feature).
+
+> **As built (0.14.0):** every item shipped. The 35→41 / 36→42 totals above
+> are history: other keys landed between this design and the spec keys, and
+> when the spec keys landed the table held 55 configuration keys and 56
+> accepted names (the 55 plus the one deprecated alias). The test does not
+> hard-code either number. It computes them from `len(config._DEFAULTS)` and
+> `config._LEGACY_ENV_ALIASES` and checks the totals `docs/env-vars.md`
+> states.
 
 ---
 
@@ -639,6 +855,10 @@ For six new keys:
   exit codes are unchanged (advisory doctrine preserved), and that
   `PRXREF_FAIL_ON=any` is the opt-in gate for spec findings.
 
+> **As built:** the feature shipped in **0.14.0**, not 0.12.0. The eval work
+> that shipped is the dataset plus its structural scorer (§7), not a
+> harness.
+
 ---
 
 ## 10. Open questions / explicit non-goals (v1)
@@ -657,12 +877,15 @@ For six new keys:
   digest into existing chunk + sweep prompts. If recorded-mode evals show the
   sweep prompt too loaded to catch spec classes, v2 adds a third single-shot
   unit (mirroring `_run_sweep`, `orchestrator.py:847-918`) — one more
-  `chunk_count` unit, same failure shape.
+  `chunk_count` unit, same failure shape. *As built (0.14.0): recorded-mode
+  evals were not built (§7.1), so this trigger cannot fire yet.*
 - **No MCP ticket fetch** in v1 (locked: REST basic-auth is primary; MCP noted
   as an alternative path for a future backend).
 - **No per-source timeout/Retry config knobs** in v1: module constants
   (`SPEC_FETCH_TIMEOUT_S`, `SPEC_DIR_MAX_FILES`); promote to env vars only if
-  real usage demands it.
+  real usage demands it. *As built (0.14.0): a third constant,
+  `SPEC_FETCH_BUDGET_S = 30`, bounds one source's body in wall-clock
+  seconds (§2.3).*
 - **Jira comments not fetched** (v1 keeps summary+description): comment
   threads are noisy and frequently carry the debate the review is supposed to
   settle.
@@ -670,6 +893,9 @@ For six new keys:
 ---
 
 ## 11. Judgment calls for the user to confirm
+
+> **As built (0.14.0):** all eight calls shipped as proposed. The notes on J4
+> and J6 record what changed around them.
 
 - **J1 — `--spec` replaces `PRXREF_SPEC_SOURCES`; no merge.** Matches load_config
   override precedence (`config.py:104`). Alternative: flag values append to
@@ -684,12 +910,16 @@ For six new keys:
   `Request-Changes`.
 - **J4 — ordering `error > warning > spec > outofscope`; unknown still falls
   back to outofscope/🟦 at the render layer and is dropped by the gate.**
+  *As built (0.14.0): the fallback glyph is now ⬜, `markers.FALLBACK_MARKER`,
+  because `outofscope` itself renders ⬜ (§5.1).*
 - **J5 — severity-consistency can rewrite a `spec` finding to `warning`/
   `error` on a title collision** (current max-raise semantics with `spec` at
   rank 2). Alternative: make `spec` sticky (exempt from raises), at the cost
   of the pass's group-coherence guarantee.
 - **J6 — no extra LLM call in v1**: the digest rides chunk prompts + the
   systemic sweep. Alternative: a dedicated third sweep unit for spec classes.
+  *As built (0.14.0): held; the recorded-mode evals that would test it were
+  not built (§7.1, §10).*
 - **J7 — list coercion widened to comma-or-whitespace for ALL list keys**
   (touches `llm_models`' coercion too; behavior-identical for it). 
   Alternative: a `spec_sources`-only split rule.
