@@ -158,10 +158,17 @@ PR. Each new input is off until you configure it.
   and `cost_estimated` is set. Otherwise it is `null`, never `0` and never a
   partial sum, and one INFO line names the unpriced models. `PRXREF_POST_COST=1`
   appends the cost to the posted attribution line, `-v` prints it (`$…`,
-  `~$… (est.)` or `cost unknown`), and the `chunk ok`, `sweep ok` and `run ok`
-  trace events, each unit's `<unit>.meta.json` (`cost_usd`, `cost_source`) and
-  the openai-compat attempt log line (`cost=`) carry it. prxref never asks a
-  provider to add usage to a response. See `docs/llm.md` "Cost accounting".
+  `$… (API-equivalent)`, `~$… (est.)` or `cost unknown`), and the `chunk ok`,
+  `sweep ok` and `run ok` trace events, each unit's `<unit>.meta.json`
+  (`cost_usd`, `cost_source`) and the openai-compat attempt log line (`cost=`)
+  carry it. A run whose every reported figure came from the Claude Code CLI
+  shows its cost as `$0.0202 (API-equivalent)` on the `-v` line and on the
+  posted attribution, because `total_cost_usd` is the API list price, not a
+  subscription bill; an estimated run keeps `~$… (est.)`. The run record marks
+  such a run with `cost_api_equivalent: true`, a key no other run carries, and
+  `--format json` gains no key, because each unit's `cost_source` already says
+  `claude-cli`. prxref never asks a provider to add usage to a response. See
+  `docs/llm.md` "Cost accounting".
 - **PR size advisory (#8).** Set `PRXREF_SIZE_WARN_LINES` (lines added plus
   removed) and/or `PRXREF_SIZE_WARN_FILES` (files changed), and a PR strictly
   above either one gets a line at the top of its summary: "This PR changes N
@@ -201,6 +208,10 @@ PR. Each new input is off until you configure it.
 - **`PRXREF_LLM_MODELS` splits on whitespace as well as commas**, like the new
   list-valued `PRXREF_SPEC_SOURCES` and `PRXREF_SIZE_IGNORE_GLOBS`. 0.13.0 split
   it on commas only.
+- **GitLab MR diffs are requested without `access_raw_diffs`.** Every earlier
+  release sent it to `/merge_requests/:iid/diffs`, which ignores it: gitlab.com
+  returned byte-identical diffs with and without it, and only the deprecated
+  `/changes` endpoint reads it. The reviewed diff is unchanged.
 
 ### Fixed
 
@@ -233,6 +244,17 @@ PR. Each new input is off until you configure it.
   a review in which every chunk failed all return an `Error` result rather than
   raising, so a gating lane read those broken runs as green. The default
   `never` is unchanged.
+- **A total LLM failure no longer counts a successful sweep as failed.** When
+  every chunk worker failed but the whole-PR sweep answered, the run correctly
+  ended with verdict `Error` but reported `chunks_reviewed` 0 and every review
+  unit failed. It now counts the sweep as reviewed: `chunks_reviewed` is 1,
+  `chunks_failed` is the number of chunks, and the two still add up to
+  `chunk_count`. The text output therefore reads `coverage: 1/2 chunks
+  reviewed` on a one-chunk PR. The verdict, the posted error notice and the
+  `PRXREF_FAIL_ON` exit code are unchanged.
+- **The `forge.get_diff` trace span counts bytes.** Its `bytes` field counted
+  characters, so a diff with non-ASCII text or a byte-order mark read short
+  (15,647 against 15,651 on one live Azure DevOps pull request).
 - **Documentation corrections.** `docs/deploy.md` no longer says there is no
   `PRXREF_FAIL_ON` (there is: `never`, `error` or `any`, default `never`), its
   exit-code table gains the `1` row, and its webhook table lists the Bitbucket
@@ -241,8 +263,12 @@ PR. Each new input is off until you configure it.
   `docs/env-vars.md` no longer say that an unset `PRXREF_LLM_SEED` leaves the
   seed out of the request: prxref sends one random seed per process and reports
   it as `sampling.seed`. `docs/llm.md` names the backends that apply the seed,
-  the reasoning effort and the max-tokens settings, and `docs/forges.md`
-  documents GitLab's paged diff listing.
+  the reasoning effort and the max-tokens settings. `docs/forges.md` documents
+  GitLab's paged diff listing, and that reading a merge request's threads on
+  gitlab.com needs `PRXREF_GITLAB_TOKEN` even for a public project: gitlab.com
+  answers anonymous `/notes` and `/discussions` requests with HTTP 401, so a
+  tokenless review logs `discussion feed read was incomplete` and dedups against
+  no threads.
 
 ### Security
 
@@ -302,6 +328,11 @@ PR. Each new input is off until you configure it.
 - **A Jira ticket passed with `--spec` is not ticket context.** It grounds
   `spec` findings but sets no finding's scope; to judge scope, pass the
   ticket's text with `--context-file`.
+- **Spec grounding can crowd out a generic finding.** In the bundled eval,
+  case-002's one expected non-spec finding was missed in all 4 grounded runs,
+  across two models, and found in 3 of the 4 runs without the spec. That is two
+  runs per model in each arm, and the cause, grounding displacing generic
+  review, is inferred, not proven.
 - **`kiro-cli` runs always read "cost unknown".** Kiro meters credits, not
   dollars, and reports no token counts, so a price table cannot estimate it
   either; each call's INFO line carries the credits instead.
@@ -324,11 +355,17 @@ PR. Each new input is off until you configure it.
   the PR's current title and description, pinned SHAs without `--no-threads`
   still show the current threads, and a `--diff-file` without `--head-sha` reads
   file context at the PR's current head; the last two each log a warning.
-- **Azure DevOps is verified live for anonymous reads only.** Posting the
-  summary and inline threads, pruning, PAT and `SYSTEM_ACCESSTOKEN`
-  authentication, the service-hook payload and the pinned-range replay are
-  tested against recorded API shapes, and Azure DevOps Server (a release that
-  accepts REST `api-version=7.1`) is untested.
+- **Azure DevOps is verified live for anonymous reads only.** On a public Azure
+  DevOps Services project, the forge reads, the dry-run output shape, the
+  pinned-range compare diff (including a PR whose target branch had moved on)
+  and a pinned-range replay were checked live. Posting the summary and inline
+  threads, pruning, PAT and `SYSTEM_ACCESSTOKEN` authentication and the
+  service-hook payload are tested against recorded API shapes only, and Azure
+  DevOps Server (a release that accepts REST `api-version=7.1`) is untested.
+- **A mistyped or unrecognized `--pr-url` exits 0 even under
+  `PRXREF_FAIL_ON=error` or `any`.** prxref prints the unrecognized-URL hint to
+  stderr and exits 0, because nothing was reviewed and there is no outcome to
+  gate on, so a gating lane with a malformed URL stays green.
 
 ## [0.13.0] — 2026-09-17
 
