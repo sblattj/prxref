@@ -1,8 +1,9 @@
 # Deterministic Checks, Quality Passes, and Drop Reasons
 
 Most findings come from the LLM fallback chain. Everything on this page is
-computed from the parsed diff, the PR's own discussion and the prompt
-templates the run used — no model call, no non-determinism, no knob unless
+computed from the parsed diff and the changed files, the PR's own
+discussion, the prompt templates the run used, and any review rules or spec
+it was given — no model call, no non-determinism, no knob unless
 one is named below.
 
 A finding that fails a pass is **never deleted silently**. It keeps its
