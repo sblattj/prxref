@@ -13,7 +13,7 @@ Per-chunk reviewers each see one slice of the diff and reliably miss classes tha
 - A removed guard: a deleted numeric limit constant (`MAX_*_LENGTH`, `*_SIZE`, `*_BYTES`, `*_TIMEOUT`) or a deleted validator/sanitiser definition (`isValid*`, `validate*`, `sanitize*`, `check*`, `assert*`, `escape*`) on a path that consumes remote or third-party input. The digest shows these as `-` lines; the code that remains says nothing about the bound that is gone, so the deletion itself is the finding.
 - Repo-config drift: two lockfiles for one package manager root — a lockfile newly added while another lockfile or a `packageManager` pin also appears in the PR. The digest states this collision on a `! repo-config:` line.
 
-Nothing else. Per-file bugs inside one chunk are the chunk workers' job; repeating them here only duplicates their findings, which are deduplicated away. One cross-file addition: with the whole-diff digest plus the spec constraints in view, this sweep is the natural seat for cross-file spec classes — naming rules, version pins, and `no component may` rules — while per-chunk seats catch line-local violations.
+Nothing else. Per-file bugs inside one chunk are the chunk workers' job; repeating them here only duplicates their findings, which are deduplicated away. One cross-file addition: with the whole-diff digest plus any spec constraints in view, this sweep is the natural seat for cross-file spec classes — naming rules, version pins, and `no component may` rules — while per-chunk seats catch line-local violations.
 
 Do not raise a subject the reviewers already argued out under `### Existing discussion` — that decision was made with more context than the digest carries. If you raise it anyway, say in the body why the discussion's conclusion is wrong.
 
@@ -23,6 +23,10 @@ Do not raise a subject the reviewers already argued out under `### Existing disc
 - `warning` — risk or smell the diff introduces or worsens: race-prone pattern, resource leak, missing error handling, load-bearing duplication.
 - `spec` — the diff violates a constraint quoted in the Spec constraints block below: a MUST/SHALL/required behaviour not implemented, a forbidden behaviour implemented, a version pin or naming rule broken. Only when specs were provided. Quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 - `outofscope` — minor: misleading naming, a TODO without context, dead code the diff adds.
+
+## Spec-grounded rules
+
+Emit `spec` only for a conflict between the diff and a constraint quoted in the Spec constraints block — never for a generic best practice not present in the block. This prompt's built-in classes (RLS, secrets, …) are never spec constraints. When the only basis for a finding is a constraint quoted in the Spec constraints block, its severity is `spec`. When the block reads `(no specs provided for this review)`, `spec` is not a legal severity. Cite the digest line that violates it — the same `file`/`line` contract as every finding — and quote the violated constraint verbatim in the body, prefixed `Spec: "`.
 
 ## Confidence
 

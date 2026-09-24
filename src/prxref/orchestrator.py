@@ -25,9 +25,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 4. Spec grounding (best-effort, only when ``spec_sources`` is non-empty):
    ``specs.fetch_specs`` + ``specs.build_spec_digest`` run inside the same
    never-raise fence as every other stage, and the digest rides the
-   existing chunk calls and the systemic sweep — no extra LLM unit. A run
-   whose every source failed behaves exactly like a run with no specs,
-   plus a grounding note in the summary.
+   existing chunk calls and the systemic sweep — no extra LLM unit. The
+   run is grounded only when the digest holds at least one constraint
+   (``specs.constraint_count`` above 0); otherwise no digest is injected
+   and the prompts show their no-specs text. A run whose every source
+   failed behaves exactly like a run with no specs, plus a grounding note
+   in the summary.
 5. Systemic sweep: after the chunk workers, ONE more worker-style
    single-shot call over the whole-PR digest built by
    ``systemic.build_digest`` (every file with hunk headers; short files and
@@ -50,7 +53,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
-   maps to; drops nothing) → ``apply_location_validation`` (a ``file``
+   maps to; drops nothing) → ``apply_spec_grounding`` (on an ungrounded
+   run every ``spec`` finding, the sweep's included, is relabelled
+   ``warning``, counted by a ``specs relabel`` trace event; drops nothing)
+   → ``apply_location_validation`` (a ``file``
    naming no path of the parsed diff is dropped, not rendered) →
    ``apply_manifest_claim_check`` (a
    ``package.json`` claim whose dependency is not the key on the anchored
@@ -66,7 +72,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    title counts toward its group) → ``apply_removal_claim_check`` (a
    claim that a NAMED path was removed when the post-image still carries
    it) → ``apply_hedge_gate`` (a finding whose own text conditions the
-   defect on something the worker never established) →
+   defect on something the worker never established; a ``Spec:`` quote
+   of the injected digest is not read as the finding's own text) →
    ``apply_quality_gate(confidence_floor=, max_errors=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
    re-derived here from finding identity rather than carried across the
@@ -152,6 +159,7 @@ from .quality import (
     apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_severity_map,
+    apply_spec_grounding,
     apply_sweep_dedup,
     apply_thread_dedup,
     finding_rank_key,
@@ -428,7 +436,12 @@ def orchestrate_review(
     raises and never fails the run: sources that fail become a grounding
     note in the summary (failure reasons pass through
     :func:`redact_for_post` before posting), and a run whose every source
-    failed is exactly a run with no specs plus that note. The remaining
+    failed is exactly a run with no specs plus that note. A digest holding
+    no constraint (:func:`prxref.specs.constraint_count` is 0) is not
+    injected, and on such a run, with or without sources, every
+    model-emitted ``spec`` finding is relabelled ``warning``
+    (:func:`quality.apply_spec_grounding`); when any is, one INFO line and
+    one ``specs relabel`` trace event count them. The remaining
     spec keywords mirror the config keys of the same names
     (``spec_max_chars``, ``spec_digest_tokens``, ``jira_base_url``,
     ``jira_email``, ``jira_api_token``); the defaults restate
@@ -667,12 +680,20 @@ def orchestrate_review(
             logger.error("spec grounding failed (best-effort): %s", e)
             tracer.event("specs", "fail", error=e.__class__.__name__)
 
+    # Grounded means at least one constraint line reached the digest. A digest
+    # without one (no sources, every source failed, nothing kept, or a budget
+    # too small for any unit) is not injected, so every prompt shows its
+    # no-specs text and forbids `spec`; apply_spec_grounding below relabels
+    # any `spec` the model emits anyway.
+    grounded = specs.constraint_count(spec_digest) > 0
+    injected = spec_digest if grounded else ""
+
     prompt_context = PromptContext(
         rules_worker=rules.prompt_block("worker") if rules is not None else "",
         rules_sweep=rules.prompt_block("sweep") if rules is not None else "",
         ticket_scope=ticket.scope_block() if ticket_active else "",
         ticket_context=ticket.prompt_block() if ticket_active else "",
-        spec_digest=spec_digest,
+        spec_digest=injected,
     )
     reader = _make_file_reader(forge, ref, pr)
     results = _run_workers(
@@ -787,6 +808,25 @@ def orchestrate_review(
             tracer.event("rules", "remap", findings=remapped)
         findings = mapped
 
+    # Right after the map (whose tiers never include `spec`) and ahead of
+    # consistency, so an ungrounded `spec` can never raise a same-title
+    # sibling to spec. Covers the sweep's findings too; 1:1 and
+    # order-preserving, so sweep_start still marks the boundary.
+    graded = apply_spec_grounding(findings, grounded=grounded)
+    relabelled = sum(
+        1
+        for before, after in zip(findings, graded, strict=True)
+        if before.severity != after.severity
+    )
+    if relabelled:
+        logger.info(
+            "spec grounding: relabelled %d spec finding(s) as warning "
+            "(no spec constraint was injected)",
+            relabelled,
+        )
+        tracer.event("specs", "relabel", findings=relabelled)
+    findings = graded
+
     findings = apply_location_validation(findings, [f.path for f in files])
     # BEFORE apply_line_align, deliberately: the manifest check compares the
     # model's raw anchor against the key and section it claims, and realignment
@@ -810,7 +850,7 @@ def orchestrate_review(
         )
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
-    findings = apply_hedge_gate(findings)
+    findings = apply_hedge_gate(findings, spec_digest=injected)
     # The sweep boundary is positional, and the gate now returns its findings
     # in content order, so the boundary is re-derived from the identity of the
     # sweep's own findings rather than carried across the gate as an index.

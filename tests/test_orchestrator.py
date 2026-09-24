@@ -2134,7 +2134,8 @@ class TestSpecGrounding:
         forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
         orchestrate_review(forge, REF, FakeLLM(self.SPEC_FINDINGS))
         summary = forge.summaries[0]
-        assert "🔍 1 spec" in summary
+        assert "🔍 0 spec" in summary
+        assert "🟧 1 warning" in summary
         assert "Spec-grounded" not in summary
         assert "{spec_note}" not in summary
         assert "{spec_count}" not in summary
@@ -2267,10 +2268,12 @@ class TestSpecGrounding:
             spec_sources=["docs/spec.md"],
         )
         assert res["verdict"] == "Approved"
+        assert [f.severity for f in res["findings_active"]] == ["warning"]
         summary = forge.summaries[0]
         assert "Spec-grounded" not in summary
         assert "Spec fetch failed" not in summary
         assert "Forbidden header sent" in summary
+        assert "🔍 0 spec" in summary
 
     def test_no_specs_asked_runs_no_spec_stage(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
@@ -2284,7 +2287,14 @@ class TestSpecGrounding:
             trace_file=str(target),
         )
         events = [json.loads(x) for x in target.read_text().splitlines() if x.strip()]
-        assert [e for e in events if e["node"] == "specs"] == []
+        assert [
+            e for e in events
+            if e["node"] == "specs" and e["phase"] in ("ok", "fail")
+        ] == []
+        relabels = [e for e in events if e["node"] == "specs"]
+        assert [(e["phase"], e["meta"]) for e in relabels] == [
+            ("relabel", {"findings": 1}),
+        ]
 
 
 class TestRunTrace:
