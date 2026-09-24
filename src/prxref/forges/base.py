@@ -90,6 +90,10 @@ class FeedReadError(RuntimeError):
     empty list for any exception, so returning the pages that WERE read beats
     throwing them away. It logs a warning instead, so the under-read is
     visible rather than silent.
+
+    It is not only about comments: GitLab's ``get_diff`` raises it when the
+    paged MR diff listing cannot be read to the end, because the files that
+    did arrive would otherwise be reviewed as if they were the whole MR.
     """
 
 

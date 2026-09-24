@@ -12,10 +12,12 @@ self-consistent: every case parses with the production diff parser
 (:func:`prxref.triage.parse_unified_diff`), both JSON schemas hold, every
 planted violation in ``meta.json`` maps to exactly one ``spec``-sourced entry
 in ``expected.json`` and vice versa, and every expected finding anchors on a
-line the diff actually adds. A later pass runs the real pipeline per case and
-scores its findings against ``expected.json``; ``must_match`` is the
-acceptance predicate for that pass (plain substring, or a regex when prefixed
-``re:``).
+line the diff actually adds. Each case also runs through the real pipeline
+with one replay-mode CLI call; ``test_eval_replay.py`` does that offline with
+a stub LLM that finds nothing, so it proves the wiring, not the review.
+Scoring a real run's findings against ``expected.json`` is still a manual,
+offline step; ``must_match`` is the acceptance predicate for that step (plain
+substring, or a regex when prefixed ``re:``).
 """
 
 from __future__ import annotations
