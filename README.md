@@ -263,6 +263,25 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --rules-file "$RUN
 
 **Read the rules from a trusted checkout, never from the PR under review.** In CI the workspace is usually the PR's own code, so a rules file inside it lets the PR rewrite its own review rules. Copy the file from the target branch or keep it outside the repository. See [docs/review-rules.md](docs/review-rules.md) for the grammar, the CI recipes, and the daemon.
 
+## Prompt Template Overrides
+
+Team rules add to prxref's review prompts but cannot take a line out of them. To change the prompts themselves, give prxref a directory of your own templates:
+
+```bash
+prxref prompts export ~/acme-prompts    # the packaged templates, byte for byte
+# edit ~/acme-prompts/worker.md, and delete the templates you leave unchanged
+prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/acme-prompts
+
+# or for every run, the webhook daemon included
+export PRXREF_PROMPTS_DIR=~/acme-prompts
+```
+
+- **What can be overridden.** `worker.md` (each chunk worker's prompt), `systemic.md` (the whole-PR sweep's prompt) and `summary.md` (the posted summary comment). A template missing from the directory keeps the packaged one. The judge prompt of `prxref eval` cannot be overridden, so runs with different prompts are always graded by the same judge.
+- **Checked before any network call.** A directory or template that fails a check exits `2`, naming `--prompts-dir` or `PRXREF_PROMPTS_DIR`, whichever supplied it. The checks are stated once, under `PRXREF_PROMPTS_DIR` in [docs/env-vars.md](docs/env-vars.md). `--prompts-dir DIR` wins over the variable for one run, and `--prompts-dir ""` turns it off.
+- **Stamped on every run.** The run record's `prompt_templates` holds the directory and, for each overridden template, its path, the SHA-256 of its raw bytes and its length in characters, never its text. It appears in `--format json` (`null` without a prompts directory) and the JSONL trace. The `-v` line reads `prompts: DIR summary=<sha256> worker=<sha256>`, showing the first 12 characters of each SHA-256, so every review names the exact templates that produced it.
+
+**Read the templates from a trusted checkout, never from the PR under review.** Whoever controls the directory controls the whole review, so a PR that commits templates into the checkout CI reviews rewrites its own review. Copy the directory from the target branch or keep it outside the repository. See [docs/prompt-templates.md](docs/prompt-templates.md) for each template's placeholders, the CI recipe, the daemon, and upgrading.
+
 ## Finding Markers
 
 Each severity has one glyph. It is the same in the summary's counts line, the summary's findings list, and the header of every inline comment:
@@ -295,8 +314,9 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
 - `--spec URL_OR_PATH` — a spec or ticket to review the PR against: a public web URL, a local file or directory, or a Jira ticket URL. Repeatable. When given, the flags replace `PRXREF_SPEC_SOURCES` entirely rather than adding to it. See [Review Against a Spec or Ticket](#review-against-a-spec-or-ticket).
 - `--rules-file PATH` — your team's review rules (Markdown or text, with optional front matter carrying a `severity:` map), added to every review prompt. Overrides `PRXREF_REVIEW_RULES` for this run, and `--rules-file ""` turns an environment-configured file off. Read it from a trusted checkout, never from the PR under review. See [Team Review Rules](#team-review-rules).
 - `--context-file PATH` — the ticket the PR is meant to implement (plain text or Markdown). Every finding is then marked in, out of, or of unknown ticket scope, and an empty file means "this PR has no ticket". Overrides `PRXREF_TICKET_CONTEXT_FILE` for this run, and `--context-file ""` turns it off. See [Ticket Context and Scope](#ticket-context-and-scope).
+- `--prompts-dir DIR` — a directory of `worker.md`, `systemic.md` and `summary.md` templates that replace the packaged prompts; a template missing from it keeps the packaged one. Overrides `PRXREF_PROMPTS_DIR` for this run, and `--prompts-dir ""` turns it off. A directory that fails its checks exits `2` before any network call. Read it from a trusted checkout, never from the PR under review. See [Prompt Template Overrides](#prompt-template-overrides).
 - `--trace-dir DIR` — write each review unit's exact prompt halves, raw model response, and metadata to `DIR` (`chunk0.system.md`, `chunk0.user.md`, `chunk0.response.json`, `chunk0.meta.json`, and so on for each chunk and for the whole-PR `sweep`). `PRXREF_TRACE_DIR` does the same for every run; the flag wins when both are set.
-- `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
+- `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the prompt templates, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
 - `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout, with these keys in this order:
   - `verdict`;
   - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `title`, `body`, `drop_reason`;
@@ -304,6 +324,7 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
   - `cost_usd`: the run's cost in USD, `null` when no source could price it (never `0` for an unknown cost), and `cost_estimated`: `true` when any part of it came from `PRXREF_PRICE_TABLE`. See [Cost accounting](docs/llm.md#cost-accounting);
   - `posted`;
   - `review_rules` (`path`, `sha256`, `chars`, `max_chars`, `truncated`, `severity_map`), `ticket_context` (`path`, `sha256`, `chars`, `max_chars`, `truncated`, `has_acceptance_criteria`, `empty`; never the ticket text), `spec_grounding` (`sources`, `ok`, `failed`, `constraints`, `digest_sha256`), and `size_advisory` (`changed_lines`, `changed_files`, `lines_limit`, `files_limit`, `triggered`, `message`). These four are always present and `null` when their feature is off;
+  - `prompt_templates`: the prompt-template directory in force (`dir`, plus `templates` holding the `path`, `sha256` and `chars` of each overridden template; never the template text). Always present, and `null` when no prompts directory is configured. See [Prompt Template Overrides](#prompt-template-overrides);
   - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
   - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`), on replay runs only.
 
@@ -320,7 +341,7 @@ Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evalua
 
 The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
 
-`prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden.
+`prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
 `prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its three actions:
 
