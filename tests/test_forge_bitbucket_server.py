@@ -1077,3 +1077,141 @@ def test_prune_survives_an_unreadable_feed():
 
     assert removed == 0
     session.delete.assert_not_called()
+
+
+# --- repository-level URLs ------------------------------------------------------
+
+
+def test_get_file_content_keeps_the_scheme_and_the_context_path():
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(200, text="x\n")
+    ref = _ref("http://tools.internal:7990/bitbucket/projects/PLAT/repos/api/pull-requests/9")
+
+    ForgeImpl(session=session).get_file_content(ref, "src/app.py", sha="deadbeef")
+
+    assert session.get.call_args[0][0] == (
+        "http://tools.internal:7990/bitbucket/rest/api/1.0"
+        "/projects/PLAT/repos/api/raw/src/app.py"
+    )
+
+
+# --- get_compare_diff (replay) ------------------------------------------------
+
+
+BASE_SHA = "a" * 40
+HEAD_SHA = "b" * 40
+MERGE_BASE_SHA = "c" * 40
+CONTEXT_REPO = "http://tools.internal:7990/bitbucket/rest/api/1.0/projects/PLAT/repos/api"
+
+
+def _context_ref():
+    return _ref("http://tools.internal:7990/bitbucket/projects/PLAT/repos/api/pull-requests/9")
+
+
+def test_get_compare_diff_resolves_merge_base_then_streams_raw_diff(monkeypatch):
+    monkeypatch.setenv("PRXREF_BITBUCKET_SERVER_TOKEN", "t0ken")
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(json_data={"id": MERGE_BASE_SHA, "displayId": MERGE_BASE_SHA[:11]}),
+        _mock_response(text=DIFF),
+    ]
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _context_ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == DIFF
+    merge_base_call, diff_call = session.get.call_args_list
+    assert merge_base_call[0][0] == f"{CONTEXT_REPO}/commits/{HEAD_SHA}/merge-base"
+    assert merge_base_call[1]["params"] == {"otherCommitId": BASE_SHA}
+    assert merge_base_call[1]["headers"] == {"Authorization": "Bearer t0ken"}
+    # The spec lists the raw diff only as text/plain at a low quality factor,
+    # so that request names it; the merge-base lookup answers JSON and keeps
+    # the session's default Accept.
+    assert diff_call[0][0] == f"{CONTEXT_REPO}/diff"
+    assert diff_call[1]["params"] == {"since": MERGE_BASE_SHA, "until": HEAD_SHA}
+    assert diff_call[1]["headers"] == {"Authorization": "Bearer t0ken", "Accept": "text/plain"}
+
+
+def test_get_compare_diff_builds_the_personal_repo_url():
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(json_data={"id": MERGE_BASE_SHA}),
+        _mock_response(text=DIFF),
+    ]
+    ref = _ref("https://bitbucket.corp.example/users/jdoe/repos/scratch/pull-requests/1")
+
+    ForgeImpl(session=session).get_compare_diff(ref, base_sha=BASE_SHA, head_sha=HEAD_SHA)
+
+    assert session.get.call_args_list[1][0][0] == (
+        "https://bitbucket.corp.example/rest/api/1.0/projects/~jdoe/repos/scratch/diff"
+    )
+
+
+@pytest.mark.parametrize(
+    "merge_base",
+    [
+        _mock_response(404, json_data={"errors": [{"message": "no such commit"}]}),
+        requests.ConnectionError("down"),
+        _mock_response(204, text=""),
+        _mock_response(200, json_data={"displayId": "no-id"}),
+        _mock_response(200, json_data=["not", "a", "commit"]),
+    ],
+    ids=["http-404", "transport", "no-content", "no-id", "not-an-object"],
+)
+def test_get_compare_diff_falls_back_to_base_sha_when_merge_base_fails(merge_base, caplog):
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [merge_base, _mock_response(text=DIFF)]
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.bitbucket_server"):
+        diff = ForgeImpl(session=session).get_compare_diff(
+            _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+    assert diff == DIFF
+    assert session.get.call_args_list[1][1]["params"] == {"since": BASE_SHA, "until": HEAD_SHA}
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "diffing from base_sha directly" in warnings[0].getMessage()
+
+
+def test_get_compare_diff_does_not_warn_when_merge_base_resolves(caplog):
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(json_data={"id": MERGE_BASE_SHA}),
+        _mock_response(text=DIFF),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="prxref.forges.bitbucket_server"):
+        ForgeImpl(session=session).get_compare_diff(
+            _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_get_compare_diff_returns_an_empty_range_as_empty_text():
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(json_data={"id": HEAD_SHA}),
+        _mock_response(text=""),
+    ]
+
+    diff = ForgeImpl(session=session).get_compare_diff(
+        _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+    )
+
+    assert diff == ""
+
+
+def test_get_compare_diff_raises_on_http_error():
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _mock_response(json_data={"id": MERGE_BASE_SHA}),
+        _mock_response(400, json_data={"errors": [{"message": "bad range"}]}),
+    ]
+
+    with pytest.raises(requests.HTTPError):
+        ForgeImpl(session=session).get_compare_diff(
+            _ref(), base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
