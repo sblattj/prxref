@@ -162,8 +162,21 @@ class PromptContext:
     lines: ``ticket_context`` (the fenced ticket text), then ``spec_digest``
     (the Spec constraints block), then the diff or digest.
 
+    TEMPLATES: ``worker_template`` replaces ``prompts/worker.md`` for chunk
+    units and ``systemic_template`` replaces ``prompts/systemic.md`` for the
+    sweep, each holding an operator override's text as
+    :meth:`prxref.prompt_templates.PromptTemplates.override` returns it. An
+    override is split at the ``## Review Context`` marker exactly as the
+    packaged template is: its head becomes the SYSTEM half, with the rules and
+    ``ticket_scope`` blocks appended in the order above and nothing filled in,
+    and its tail is the USER half, filled in one :func:`fill_template` pass
+    and never through :meth:`str.format`, so stray or foreign braces in the
+    override render literally.
+
     Every field defaults to ``""``, which injects nothing; ``spec_digest``
-    empty renders ``(no specs provided for this review)`` as before.
+    empty renders ``(no specs provided for this review)`` as before, and an
+    empty template field renders the packaged template read by
+    :func:`load_prompt`, byte for byte as before.
     :attr:`scope_active` is true only when the scope instructions are in the
     prompt, and it alone decides whether a model-supplied ``scope`` is read
     and whether the ``## Output Format`` example finding shows a ``"scope"``
@@ -175,6 +188,8 @@ class PromptContext:
     ticket_scope: str = ""
     ticket_context: str = ""
     spec_digest: str = ""
+    worker_template: str = ""
+    systemic_template: str = ""
 
     @property
     def scope_active(self) -> bool:
@@ -247,7 +262,7 @@ def _render_prompt(
     *,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> tuple[str, str]:
-    template = load_prompt("worker.md")
+    template = prompt_context.worker_template or load_prompt("worker.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
     if not marker:
         raise ValueError(f"worker.md is missing the {_CONTEXT_MARKER!r} split marker")
@@ -310,7 +325,7 @@ def _render_systemic_prompt(
     *,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> tuple[str, str]:
-    template = load_prompt("systemic.md")
+    template = prompt_context.systemic_template or load_prompt("systemic.md")
     head, marker, tail = template.partition(_CONTEXT_MARKER)
     if not marker:
         raise ValueError(f"systemic.md is missing the {_CONTEXT_MARKER!r} split marker")
