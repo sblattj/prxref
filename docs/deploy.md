@@ -57,7 +57,24 @@ Configure secret tokens and match the events accepted by `prxref`:
 
 ### Azure DevOps service hooks
 
-<!-- 0.14 placeholder: W62B -->
+Azure DevOps sends no event header and no signature. prxref recognizes its service hooks by the JSON body (`publisherId: "tfs"`) and authenticates them with HTTP Basic auth: the password must equal `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` (compared in constant time), and the user name is ignored. With the secret unset, every Azure DevOps webhook gets `401` unless `PRXREF_ALLOW_UNSIGNED=1`.
+
+In **Project settings → Service hooks**, create two **Web Hooks** subscriptions:
+
+| Subscription | Trigger | Filters |
+|---|---|---|
+| Pull request created (`git.pullrequest.created`) | a PR is opened | repository and target branch, as you like |
+| Pull request updated (`git.pullrequest.updated`) | a PR changes | **Change: Source branch updated** |
+
+Set the **Change** filter on the updated subscription. Without it, every reviewer vote, status change and description edit triggers a full re-review: the receiver cannot tell those updates from a push, so it relies on the subscription to filter them.
+
+On the **Action** page of each subscription:
+- **URL:** `https://<host>/webhook`, with TLS in front of `prxref serve`. Basic auth carries the secret itself, as GitLab's token header does, rather than a signature of the body, so over plain HTTP anyone on the path can read it.
+- **Basic authentication username:** anything, e.g. `prxref`.
+- **Basic authentication password:** the value of `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`.
+- **Resource details to send:** **All**. prxref builds the PR URL from `resource.repository` and `resource.pullRequestId`, and reads `resource.status`; a smaller setting can leave them out, and the PR is then not reviewed.
+
+prxref reviews only a PR whose status is `active`. An update that completes or abandons a PR, and every other event type, is acknowledged with `202` and not reviewed. The daemon posts with `PRXREF_AZURE_DEVOPS_TOKEN`: a PAT with **Code (Read & write)**. Posting to Azure DevOps and the service-hook payload are verified against recorded shapes only, not a live server; see [Azure DevOps](forges.md#5-azure-devops-services--server).
 
 ---
 
