@@ -251,6 +251,12 @@ The known limitations, in full in the CHANGELOG:
   header-only, and an MR past 5,000 files fails. Reading an MR's threads on
   gitlab.com needs `PRXREF_GITLAB_TOKEN` even for a public project; without one,
   thread dedup runs against no threads.
+- **GitHub.** A pull request whose diff runs past 20,000 lines gets HTTP `406`
+  `too_large` from the diff endpoint and ends as an `Error` run. The 0.14.0
+  release PR itself, at about 32,600 changed lines, hit this in CI. The fix is
+  a fallback that rebuilds the diff from the paged `/pulls/{number}/files`
+  listing, as the GitLab adapter does, with files GitHub sends without a
+  `patch` listed header-only.
 - **Replay.** A `--diff-file` run without `--pr-url` sees only the diff.
 - **Azure DevOps.** Only anonymous reads are verified live: the forge reads, the
   dry-run output shape, the pinned-range compare diff and a pinned-range replay.

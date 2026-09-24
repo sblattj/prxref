@@ -53,7 +53,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
 - **API Endpoints & Behavior:**
   - **Base URL:** `https://api.github.com` for `github.com`, or `https://{host}/api/v3` for GHES.
   - **Metadata:** `GET /repos/{owner}/{repo}/pulls/{number}`
-  - **Diffs:** `GET /repos/{owner}/{repo}/pulls/{number}` with `Accept: application/vnd.github.v3.diff, application/vnd.diff`.
+  - **Diffs:** `GET /repos/{owner}/{repo}/pulls/{number}` with `Accept: application/vnd.github.v3.diff, application/vnd.diff`. GitHub refuses this diff for a pull request whose diff runs past 20,000 lines (HTTP `406`, error code `too_large`), so such a PR ends as an `Error` run and gets the error notice. There is no fallback to the paged `/pulls/{number}/files` listing yet.
   - **Summary Comments:** Managed on the issue comments endpoint (`/repos/{owner}/{repo}/issues/{number}/comments`). Summary deduplication is handled via the embedded hidden HTML marker `<!-- prxref-summary -->`. If an existing review comment contains this marker, it is updated via `PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}` instead of creating a duplicate comment.
   - **Inline Comments:** `POST /repos/{owner}/{repo}/pulls/{number}/comments` with `body`, `path`, `line`, and `side` (`RIGHT`). HTTP 422 errors (e.g. comment line not part of diff hunk) are gracefully skipped.
   - **Thread List:** `GET /repos/{owner}/{repo}/pulls/{number}/comments`.

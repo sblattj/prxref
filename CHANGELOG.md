@@ -347,6 +347,11 @@ PR. Each new input is off until you configure it.
   header-only and not reviewed; a warning names each such file.
 - **GitLab merge requests past 5,000 files fail.** An MR whose diff listing runs
   past 50 pages of 100 files fails the review rather than reviewing part of it.
+- **GitHub pull requests past 20,000 diff lines are not reviewed.** GitHub
+  refuses the unified diff of such a pull request with HTTP `406`
+  (`too_large`), so the review ends with verdict `Error` and posts the error
+  notice. There is no fallback to the paged file listing yet. This limit
+  applies to every earlier release too.
 - **A forge-less replay sees only the diff.** A `--diff-file` run without
   `--pr-url` gives the workers no library versions and no out-of-hunk
   definitions, gives the manifest claim check no full-file lines, and has no
