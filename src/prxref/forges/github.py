@@ -13,6 +13,7 @@ from requests.adapters import HTTPAdapter
 
 from prxref.retry_logging import LoggingRetry
 
+from ._diff_render import render_diff_entries
 from .base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
@@ -198,6 +199,72 @@ class ForgeImpl:
         resp = self.session.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         return resp.text
+
+    def _get_diff_from_files(self, ref: PRRef) -> str:
+        """Rebuild the PR's unified diff from its ``/pulls/{n}/files`` listing.
+
+        The fallback for a diff too large for the diff media type. Each listed
+        file is mapped into the renderer's per-file entry: ``filename`` is the
+        new path, ``previous_filename`` (else ``filename``) the old path, and
+        the ``added``, ``removed`` and ``renamed`` statuses pick the new, deleted
+        and rename headers; every other status renders plain ``---``/``+++``.
+        ``patch`` supplies the hunks. A file listed without a ``patch`` (a
+        binary, a patch GitHub withheld as too large, a pure rename) renders
+        header-only, with one WARNING naming it.
+
+        Completeness is checked, not assumed: the listing is compared with the
+        PR's ``changed_files``, and a shorter listing (GitHub caps it at 3,000
+        files) raises ``ValueError`` instead of returning a partial diff, as
+        does PR metadata carrying no integer ``changed_files``. A failed
+        listing read raises ``FeedReadError``; a failed PR metadata read raises
+        as ``get_pr`` does.
+        """
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+            f"/pulls/{ref.number}/files"
+        )
+        listed: list[dict] = []
+        for page in self._iter_pages(
+            ref, url, self._headers(ref.host), what="changed-file listing"
+        ):
+            listed.extend(page)
+
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        changed_files = self.get_pr(ref).raw.get("changed_files")
+        if not isinstance(changed_files, int) or isinstance(changed_files, bool):
+            raise ValueError(
+                f"GitHub PR diff for {where} cannot be checked for completeness: "
+                "the PR metadata carries no integer changed_files; refusing to "
+                "review a diff that may be partial"
+            )
+        if len(listed) < changed_files:
+            raise ValueError(
+                f"GitHub PR diff for {where} cannot be rebuilt whole: "
+                f"changed_files={changed_files} but the changed-file listing "
+                f"returned {len(listed)} (GitHub caps the listing at 3,000 "
+                "files); refusing to review a partial diff"
+            )
+
+        entries: list[dict] = []
+        for f in listed:
+            filename = f.get("filename") or ""
+            status = f.get("status")
+            patch = f.get("patch")
+            if not patch:
+                logger.warning(
+                    "GitHub PR diff: %s has no inline diff (no patch in the "
+                    "files listing); it is reviewed as header-only",
+                    filename,
+                )
+            entries.append({
+                "old_path": f.get("previous_filename") or filename,
+                "new_path": filename,
+                "new_file": status == "added",
+                "deleted_file": status == "removed",
+                "renamed_file": status == "renamed",
+                "diff": patch,
+            })
+        return render_diff_entries(entries)
 
     def _iter_pages(
         self,
