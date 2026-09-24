@@ -1012,6 +1012,82 @@ def normalize_title(title: str) -> str:
     return " ".join(trimmed.split())
 
 
+_TITLE_WORD_RE = re.compile(r"[a-z0-9]+")
+
+_TITLE_TOKEN_MIN_LEN = 3
+
+_TITLE_STOPWORDS: frozenset[str] = frozenset({
+    "the", "and", "but", "for", "nor", "with", "without", "within", "into",
+    "onto", "from", "via", "per", "instead", "rather", "than", "then",
+    "that", "this", "these", "those", "its", "their", "when", "where",
+    "which", "while", "can", "could", "should", "would", "must", "may",
+    "might", "will", "are", "was", "were", "been", "being", "has", "have",
+    "had", "does", "did",
+    "use", "uses", "using", "replace", "add", "restore", "missing",
+    "remove", "avoid", "ensure", "consider", "prefer", "fix", "make",
+    "potential", "possible", "possibly", "likely",
+})
+
+TITLE_MIN_SHARED_TOKENS: int = 3
+"""Fewest distinct title tokens two findings must share to count as similar.
+
+Jaccard alone over-merges short titles: "SQL injection" against "SQL
+injection in search query" scores exactly 0.5 while naming only two
+words. Requiring three shared tokens keeps such a pair apart and still
+admits every reworded duplicate measured for issue #10, which share
+four or five.
+"""
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Content words of a finding title, for reworded-duplicate scoring.
+
+    The ASCII ``[a-z0-9]+`` words of :func:`normalize_title`, at least
+    three characters long, minus English function words and the generic
+    remedy verbs and hedges (``use``, ``replace``, ``add``, ``restore``,
+    ``missing``, ``potential``) that reworded titles swap freely. Hyphens
+    and other punctuation split words, so ``string-literal`` and
+    ``string literal`` yield the same tokens. Deliberately separate from
+    :func:`_tokens`: its stopword list drops ``null`` and ``string`` and
+    its four-character floor drops ``key``, which are exactly the words
+    that tell two same-line titles apart.
+    """
+    return {
+        word
+        for word in _TITLE_WORD_RE.findall(normalize_title(title))
+        if len(word) >= _TITLE_TOKEN_MIN_LEN and word not in _TITLE_STOPWORDS
+    }
+
+
+def title_similarity(a: str, b: str) -> tuple[float, int]:
+    """Score how closely two finding titles restate one problem.
+
+    Returns ``(jaccard, shared)``: the Jaccard index of the two titles'
+    :func:`_title_tokens` sets and the number of distinct tokens they
+    share. Two titles with no tokens between them score ``(0.0, 0)``.
+    Symmetric in its arguments and a pure function of the two strings.
+    """
+    tokens_a = _title_tokens(a)
+    tokens_b = _title_tokens(b)
+    shared = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    if union == 0:
+        return 0.0, 0
+    return shared / union, shared
+
+
+def titles_similar(a: str, b: str, threshold: float) -> bool:
+    """Return True when two finding titles are reworded restatements.
+
+    Similar means :func:`title_similarity` reaches ``threshold`` on the
+    Jaccard index AND the titles share at least
+    :data:`TITLE_MIN_SHARED_TOKENS` tokens. The token floor is what keeps
+    a short title from merging into any longer one that contains it.
+    """
+    jaccard, shared = title_similarity(a, b)
+    return jaccard >= threshold and shared >= TITLE_MIN_SHARED_TOKENS
+
+
 def finding_sort_key(finding: Finding) -> tuple[str, int, str]:
     """Content-derived ordering key for a finding: ``(file, line, title)``.
 
