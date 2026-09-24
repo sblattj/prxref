@@ -13,9 +13,11 @@ from requests.adapters import HTTPAdapter
 from prxref.forges._diff_render import render_diff_entries as _render_diff_entries
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
+    MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     FeedReadError,
     InlineComment,
+    PathListing,
     PRData,
     PRRef,
     Thread,
@@ -567,6 +569,85 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``, best-effort.
+
+        Walks the paged ``repository/tree?recursive=true`` listing,
+        ``_PAGE_SIZE`` entries a page, requesting pages 1, 2, 3 and so on.
+        Only ``blob`` entries are kept, so directories (``tree``) and
+        submodules (``commit``) are dropped, and the paths are sorted and
+        deduplicated. The walk ends when a page's ``X-Next-Page`` header is
+        absent or empty, never on a short page. It reads at most
+        ``MAX_LISTING_PAGES`` pages; when the last page it reads still names
+        a next page, the paths read so far come back with ``complete=False``.
+        A failure on the first page (a transport failure, a non-2xx status, a
+        body that is not JSON, or one that is not a list) gives ``None``; the
+        same failure on a later page gives the paths read so far with
+        ``complete=False``. An empty ``sha`` gives ``None`` with no request.
+        Never raises.
+        """
+        if not sha:
+            return None
+        headers = self._get_auth_headers()
+        url = f"{self._api_base(ref)}/repository/tree"
+        where = f"{self._project_path(ref)}@{sha}"
+        paths: set[str] = set()
+        for page_number in range(1, MAX_LISTING_PAGES + 1):
+            params: dict[str, int | str] = {
+                "recursive": "true",
+                "per_page": _PAGE_SIZE,
+                "page": page_number,
+                "ref": sha,
+            }
+            try:
+                resp = self._session.get(
+                    url, headers=headers, params=params, timeout=_REQUEST_TIMEOUT
+                )
+            except requests.RequestException as e:
+                return self._listing_stopped(paths, page_number, where, f"a transport failure ({e})")
+            if not resp.ok:
+                return self._listing_stopped(paths, page_number, where, f"HTTP {resp.status_code}")
+            try:
+                entries = resp.json()
+            except ValueError as e:
+                return self._listing_stopped(paths, page_number, where, f"a non-JSON body ({e})")
+            if not isinstance(entries, list):
+                return self._listing_stopped(
+                    paths, page_number, where, f"a {type(entries).__name__} body, not a list"
+                )
+            paths.update(
+                entry["path"] for entry in entries
+                if isinstance(entry, dict) and entry.get("type") == "blob"
+                and isinstance(entry.get("path"), str) and entry["path"]
+            )
+            if not (resp.headers.get("X-Next-Page") or "").strip():
+                return PathListing(paths=tuple(sorted(paths)), complete=True)
+        logger.debug(
+            "list_paths stopped at the %d-page cap for %s with %d paths",
+            MAX_LISTING_PAGES, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
+
+    @staticmethod
+    def _listing_stopped(
+        paths: set[str], page_number: int, where: str, reason: str
+    ) -> PathListing | None:
+        """Log why a ``list_paths`` walk stopped early and return what it has.
+
+        A failure on the first page means there is no listing at all, so the
+        result is ``None``. A failure on a later page keeps the paths already
+        read, marked ``complete=False``, because a partial listing still
+        helps the name search.
+        """
+        if page_number == 1:
+            logger.debug("list_paths got %s for %s", reason, where)
+            return None
+        logger.debug(
+            "list_paths got %s at page %d for %s; keeping the %d paths read so far",
+            reason, page_number, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
 
     def prune_inline_comments(self, ref: PRRef) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
