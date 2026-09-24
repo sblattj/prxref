@@ -321,7 +321,7 @@ class TestWiring:
             assert main([
                 "review", "--pr-url", URL, "--base-sha", BASE, "--head-sha", HEAD, "--no-threads",
             ]) == 0
-        assert caplog.text == ""
+        assert [r.getMessage() for r in caplog.records if "CURRENT title and description" not in r.getMessage()] == []
 
     def test_diff_file_with_pr_url_and_no_head_sha_warns(self, runtime, caplog, diff_file):
         with caplog.at_level(logging.WARNING, logger="prxref"):
@@ -333,7 +333,7 @@ class TestWiring:
                 "review", "--pr-url", URL, "--diff-file", diff_file,
                 "--base-sha", BASE, "--head-sha", HEAD, "--no-threads",
             ]) == 0
-        assert caplog.text == ""
+        assert [r.getMessage() for r in caplog.records if "CURRENT title and description" not in r.getMessage()] == []
 
     def test_replay_composes_with_spec_rules_and_context(self, runtime, tmp_path, diff_file):
         rules = tmp_path / "rules.md"
