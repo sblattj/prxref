@@ -135,7 +135,7 @@ class TestNormalizeRule:
 class TestFindingRuleField:
     def test_rule_is_the_trailing_field_and_defaults_to_none(self):
         names = [f.name for f in dataclasses.fields(Finding)]
-        assert names == [*BASE_FIELDS, "rule"]
+        assert names == [*BASE_FIELDS, "rule", "locations"]
         assert Finding("a.py", 1, "error", 0.9, "t", "b").rule is None
 
     def test_positional_construction_through_scope_still_works(self):
