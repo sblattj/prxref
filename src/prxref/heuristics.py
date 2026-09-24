@@ -51,6 +51,11 @@ _LOCKFILE_BASENAMES = frozenset({
     "composer.lock",
 })
 
+# The same set, public, for callers outside this module: the PR-size advisory
+# hands it to ``triage.count_size_relevant_changes``, because triage must never
+# import heuristics. This module's own checks keep using the private name.
+LOCKFILE_BASENAMES: frozenset[str] = _LOCKFILE_BASENAMES
+
 # Case-insensitive basename prefixes: CHANGELOG.md, changelog.rst,
 # HISTORY.txt, RELEASE_NOTES.md all match regardless of extension or case.
 _PREFIX_BASENAMES = ("changelog", "history", "release_notes")

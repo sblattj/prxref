@@ -7,7 +7,9 @@ directory proximity plus risk instead of call-graph connectivity.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -359,6 +361,59 @@ FILE_PENALTIES: list[tuple[str, int]] = [
     (r"\.(generated|auto)\.", -50),
     (r"\.(idea|vscode)/", -50),
 ]
+
+# The generated-file half of FILE_PENALTIES (snapshots, minified bundles,
+# source maps, ``*.generated.*`` / ``*.auto.*``) as a yes/no test for the
+# PR-size advisory rather than a chunking-priority score. The ``.lock`` and
+# ``-lock.*`` alternatives are left out on purpose: lockfiles are matched by
+# exact basename from the set the caller passes in.
+GENERATED_FILE_RE = re.compile(r"(\.snap|\.min\.js|\.map)$|__snapshots__/|\.(generated|auto)\.")
+
+
+def is_size_ignored(
+    path: str,
+    *,
+    lockfile_basenames: frozenset[str] = frozenset(),
+    ignore_globs: Sequence[str] = (),
+) -> bool:
+    """True when the PR-size advisory must not count ``path``.
+
+    That is a lockfile (its basename is in ``lockfile_basenames``), a
+    generated file (:data:`GENERATED_FILE_RE`), or a path matched by one of
+    the operator's ``ignore_globs``. The globs are added to the two built-in
+    tests, never a replacement for them. Each is matched with
+    :func:`fnmatch.fnmatchcase` against the full POSIX path, so the match is
+    case-sensitive on every host and ``*`` crosses ``/``: ``dist/*`` also
+    matches ``dist/sub/app.js``.
+    """
+    if PurePosixPath(path).name in lockfile_basenames:
+        return True
+    if GENERATED_FILE_RE.search(path):
+        return True
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in ignore_globs)
+
+
+def count_size_relevant_changes(
+    files: Sequence[FileDiff],
+    *,
+    lockfile_basenames: frozenset[str] = frozenset(),
+    ignore_globs: Sequence[str] = (),
+) -> tuple[int, int]:
+    """``(changed_lines, changed_files)`` over the files the advisory counts.
+
+    A file :func:`is_size_ignored` rejects leaves both numbers. Each counted
+    file adds ``lines_added + lines_removed`` and one file, so a binary file,
+    a pure rename or a header-only entry counts as one file and zero lines.
+    ``changed_lines`` is therefore a lower bound when a forge omits a file's
+    hunks.
+    """
+    counted = [
+        f for f in files
+        if not is_size_ignored(
+            f.path, lockfile_basenames=lockfile_basenames, ignore_globs=ignore_globs,
+        )
+    ]
+    return sum(f.lines_added + f.lines_removed for f in counted), len(counted)
 
 
 def score_file(file: FileDiff, churn: int = 0) -> float:

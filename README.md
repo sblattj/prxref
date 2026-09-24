@@ -66,7 +66,23 @@ knob: [docs/quality.md](docs/quality.md).
 
 ## PR Size Advisory
 
-<!-- 0.14 placeholder: W68 -->
+A team that keeps PRs small can set `PRXREF_SIZE_WARN_LINES` (lines added plus
+removed) and/or `PRXREF_SIZE_WARN_FILES` (files changed). A PR above either
+threshold gets one line at the top of its summary, such as `This PR changes 812
+lines in 24 files, above the team guideline of 500 lines and 20 files. Consider
+splitting it.` The line names only the limits that were exceeded. Both
+thresholds are unset by default, which turns the advisory off; `0` is a real
+threshold that flags any change at all. The counts come from the parsed diff and
+skip the common ecosystems' lockfiles (`package-lock.json`, `uv.lock`,
+`Cargo.lock`, `go.sum`, …), generated files (`*.snap`, `__snapshots__/`, `*.min.js`, `*.map`,
+`*.generated.*`, `*.auto.*`), and any path matching `PRXREF_SIZE_IGNORE_GLOBS`,
+which adds to those built-ins and never replaces them. A binary file counts as one
+file and zero lines, so the line count is a lower bound when a forge omits a
+file's hunks. The advisory is not a finding: it never changes the verdict or the
+exit code, and with `--no-post` or `PRXREF_POST_MODE=inline` it appears only in
+the run record, under `--format json` as `size_advisory`, and as a
+`size advisory:` line in the CLI output. See
+[docs/env-vars.md](docs/env-vars.md) for the glob syntax.
 
 ## Quickstart
 
