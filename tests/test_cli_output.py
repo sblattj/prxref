@@ -47,7 +47,9 @@ NEW_RECORD_KEYS = [
     "cost_usd", "cost_estimated", "review_rules", "ticket_context", "spec_grounding", "size_advisory",
     "prompt_templates",
 ]
-FINDING_KEYS = ["file", "line", "severity", "confidence", "scope", "title", "body", "drop_reason"]
+FINDING_KEYS = [
+    "file", "line", "severity", "confidence", "scope", "rule", "locations", "title", "body", "drop_reason",
+]
 
 RULES = {
     "path": ".prxref/rules.md", "sha256": "a1b2c3d4e5f6" + "0" * 52, "chars": 420,

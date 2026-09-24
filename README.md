@@ -58,10 +58,11 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through eleven more deterministic passes: location validation, `package.json` claim
+through twelve more deterministic passes: location validation, `package.json` claim
 checks, line alignment, thread dedup, settled-thread suppression, severity
-consistency, the removal-claim check, the hedge gate, the quality gate, sweep
-dedup, and the containment note. A filtered finding is never discarded
+consistency, the removal-claim check, the hedge gate, finding grouping (opt-in
+with `PRXREF_GROUP_FINDINGS`), the quality gate, sweep dedup, and the
+containment note. A filtered finding is never discarded
 silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
 
@@ -297,7 +298,7 @@ Each severity has one glyph. It is the same in the summary's counts line, the su
 
 - **Summary:** those findings are listed after the others, under their own heading, for example `**🟦 Outside the ticket (2)**` followed by ``- 🟦 🟧 `src/app.py:12` — …``. If every finding is outside the ticket, the first list reads `No in-ticket findings.`.
 - **Inline comments:** the header reads, for example, `🤖 🟦 🟧 **[WARNING · OUTSIDE TICKET] …**`.
-- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket.
+- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket. With finding grouping on, a finding that names a rule gets ` [rule: <rule>]` after that tag (see [docs/quality.md](docs/quality.md)).
 
 Findings inside the ticket (`in`) and findings the reviewer could not place (`unknown`) carry no scope marker, so a run without a ticket context renders exactly the severity glyphs. Scope never changes a finding's severity. It is not counted separately either: the counts line counts every active finding by severity, and the verdict, the error cap, and `PRXREF_FAIL_ON` ignore scope.
 
@@ -319,7 +320,7 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
 - `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the prompt templates, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
 - `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout, with these keys in this order:
   - `verdict`;
-  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `title`, `body`, `drop_reason`;
+  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `rule` (the rule the finding names; `null` when it names none, and always `null` with finding grouping off), `locations` (on a grouped finding, the other places its `Also at:` list names, in that order, as `{"file", "line"}` objects; `null` on every other row, including each member dropped as `grouped into <file>:<line>`, which keeps its own rule; see [docs/quality.md](docs/quality.md)), `title`, `body`, `drop_reason`;
   - `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`;
   - `cost_usd`: the run's cost in USD, `null` when no source could price it (never `0` for an unknown cost), and `cost_estimated`: `true` when any part of it came from `PRXREF_PRICE_TABLE`. See [Cost accounting](docs/llm.md#cost-accounting);
   - `posted`;
