@@ -30,10 +30,15 @@ is applied: ``max_tokens`` is accepted and ignored, and each client's
 ``temperature`` and ``seed`` attributes are ``None``, which the run record's
 ``sampling`` reports truthfully.
 
-``kiro-cli`` is not wired in this build: :func:`build_cli_client` fails closed
-with a :class:`~prxref.llm.ConfigError` naming ``PRXREF_LLM_BACKEND``, which
-``prxref review`` reports as a configuration error (exit 2) before any forge
-or model call.
+``kiro-cli`` runs ``kiro-cli chat --no-interactive`` on the v2 agent engine,
+because the v1 engine does not emit ``stream-json``. That engine does not
+apply a ``--model`` flag, so every attempt writes a working-directory-local agent file,
+``.kiro/agents/prxref-review.json``, that carries the system prompt and the
+chain model and allows no tools, MCP servers or resources. The environment is
+passed through unchanged, and ``PRXREF_LLM_REASONING_EFFORT`` is not applied.
+Kiro reports no token counts and meters credits rather than dollars, so a
+kiro answer counts zero tokens and its ``cost_usd`` is ``None``; the credits
+and the Kiro session id go to the INFO ok line instead.
 
 The module is stdlib-only and is imported lazily by
 :func:`prxref.llm_backends.create_llm_client`, so the HTTP backends never load
@@ -44,6 +49,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -88,11 +94,8 @@ _REAP_TIMEOUT_S = 5.0
 _DETAIL_CHARS = 200
 _UNRECOGNIZED_MODEL_MARKER = "[claude-code:unrecognized_model]"
 _CLAUDE_INPUT_TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-
-
-def _not_wired(backend: str) -> ConfigError:
-    """The fail-closed error for a CLI backend this build cannot run."""
-    return ConfigError(f"PRXREF_LLM_BACKEND: {backend} is not wired in this build")
+KIRO_AGENT_NAME = "prxref-review"
+_KIRO_LIST_MODELS_HINT = " (possibly an unknown model; check kiro-cli chat --list-models)"
 
 
 def _not_a_cli_backend(backend: str) -> ConfigError:
@@ -108,8 +111,9 @@ class _Attempt(NamedTuple):
     which case ``failure`` is the ``"<model>: ..."`` reason. ``unavailable``
     marks the model as gone for the rest of the run. ``reported`` is the
     ``(cost_usd, cost_source)`` of a response that came back -- billed even
-    when it is an error -- or ``None`` when nothing was received.
-    ``log_extra`` is appended to the INFO ok line.
+    when it is an error -- or ``None`` when nothing was received or the
+    backend never reports a dollar figure (kiro). ``log_extra`` is appended
+    to the INFO ok line.
     """
 
     result: InvokeResult | None
@@ -117,6 +121,18 @@ class _Attempt(NamedTuple):
     unavailable: bool = False
     reported: tuple[float | None, str] | None = None
     log_extra: str = ""
+
+
+class _ProcessFailed(Exception):
+    """An ``OSError`` raised while a launched CLI process ran; the process has been killed.
+
+    It keeps a failure after launch apart from a failure to launch, which
+    :meth:`_CLIClient._attempt` reports differently. ``error`` is the original.
+    """
+
+    def __init__(self, error: OSError):
+        super().__init__(str(error))
+        self.error = error
 
 
 def _run_with_deadline(
@@ -128,7 +144,8 @@ def _run_with_deadline(
     leads its own session, so a deadline miss kills the whole group rather
     than just the direct child (a wrapper script would otherwise leave the
     model process behind). Any other exception while the process runs also
-    kills it before propagating.
+    kills it before propagating; an ``OSError`` propagates as
+    :class:`_ProcessFailed`, so it is not mistaken for a failed launch.
     """
     posix = os.name == "posix"
     proc = runner(
@@ -152,6 +169,9 @@ def _run_with_deadline(
         except subprocess.TimeoutExpired:
             proc.kill()
         return proc.returncode, "", "", True
+    except OSError as exc:
+        _kill_tree(proc, posix)
+        raise _ProcessFailed(exc) from exc
     except BaseException:
         _kill_tree(proc, posix)
         raise
@@ -323,6 +343,9 @@ class _CLIClient(LLMClient):
                     self._runner, argv, user, cwd, self._child_env(), deadline
                 )
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            except _ProcessFailed as exc:
+                error = exc.error
+                return _Attempt(None, f"{model}: process failed ({type(error).__name__}: {error})")
             except OSError as exc:
                 return _Attempt(None, f"{model}: launch failed ({type(exc).__name__}: {exc})")
             finally:
@@ -562,6 +585,164 @@ class ClaudeCLIClient(_CLIClient):
         )
 
 
+class KiroCLIClient(_CLIClient):
+    """``kiro-cli``: the user's own logged-in Kiro CLI, one headless chat process per call.
+
+    The argv is ``kiro-cli chat --no-interactive --agent prxref-review
+    --output-format stream-json --trust-tools= --agent-engine v2``. The v1
+    engine does not emit ``stream-json``, and v2 does not apply a ``--model``
+    flag, so each attempt writes ``.kiro/agents/prxref-review.json`` into
+    its temporary working directory: the system prompt, the chain model, and
+    no tools, allowed tools, MCP servers or resources. The environment is the
+    parent's, unchanged, and a reasoning effort is not applied.
+
+    The answer is the ``runFinished`` event's ``finalText``, or the joined
+    ``agent_message_chunk`` texts when Kiro marks that text truncated.
+    Success needs exit 0, no ``runError``, status ``success`` and a
+    non-empty answer. Kiro reports no tokens and meters credits, not
+    dollars, so the result counts zero tokens, names the requested model
+    (Kiro does not echo it) and has ``cost_usd`` ``None``; the summed
+    ``credit`` metering and the session id go to the INFO ok line. A
+    ``runError`` fails the model as ``<stage> error: <message>``, with a
+    ``--list-models`` hint at the ``prompt`` stage, where an unknown model
+    fails. No kiro failure marks a model unavailable, because none names the
+    model.
+    """
+
+    backend_name = "kiro-cli"
+
+    def _prepare(self, root: str, model: str, sys_text: str) -> str:
+        agents = os.path.join(root, ".kiro", "agents")
+        os.makedirs(agents)
+        agent = {
+            "name": KIRO_AGENT_NAME,
+            "description": "prxref single-shot reviewer: no tools, no MCP, no resources",
+            "prompt": sys_text,
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+            "includeMcpJson": False,
+            "resources": [],
+            "model": model,
+        }
+        with open(os.path.join(agents, f"{KIRO_AGENT_NAME}.json"), "w", encoding="utf-8") as fh:
+            json.dump(agent, fh)
+        return root
+
+    def _argv(self, root: str, model: str) -> list[str]:
+        return [
+            self.binary, "chat", "--no-interactive",
+            "--agent", KIRO_AGENT_NAME,
+            "--output-format", "stream-json",
+            "--trust-tools=",
+            "--agent-engine", "v2",
+        ]
+
+    def _parse(self, model: str, rc: int | None, out: str, err: str, elapsed_ms: int) -> _Attempt:
+        chunks: list[str] = []
+        finished: dict | None = None
+        run_error: dict | None = None
+        session = ""
+        credits: float | None = None
+        lines = [line for line in (raw.strip() for raw in out.splitlines()) if line]
+        skipped = 0
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            if not isinstance(event, dict):
+                skipped += 1
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            if not session and isinstance(data.get("sessionId"), str):
+                session = data["sessionId"]
+            kind = event.get("type")
+            if kind == "metadata":
+                metered = _kiro_credits(data.get("meteringUsage"))
+                if metered is not None:
+                    credits = metered if credits is None else credits + metered
+            elif kind == "sessionUpdate":
+                update = data.get("update")
+                if isinstance(update, dict) and update.get("sessionUpdate") == "agent_message_chunk":
+                    content = update.get("content")
+                    if isinstance(content, dict) and isinstance(content.get("text"), str):
+                        chunks.append(content["text"])
+            elif kind == "runFinished":
+                finished = data
+            elif kind == "runError":
+                run_error = data
+        if skipped:
+            logger.debug("kiro-cli: skipped %d non-event stdout line(s) for model=%s", skipped, model)
+
+        final = finished.get("finalText") if finished is not None else None
+        if isinstance(final, str) and final.strip() and finished.get("finalTextTruncated") is not True:
+            text = final
+        else:
+            text = "".join(chunks)
+        status = finished.get("status") if finished is not None else None
+        if rc != 0 or run_error is not None or status != "success" or not text.strip():
+            if run_error is not None:
+                return _Attempt(None, self._run_error_reason(model, run_error))
+            unparseable = bool(lines) and skipped == len(lines)
+            if unparseable:
+                kind = "unparseable output"
+            elif rc != 0:
+                kind = f"exit {rc}"
+            elif finished is None:
+                kind = "no runFinished event"
+            elif status != "success":
+                kind = f"run status {status!r}"
+            else:
+                kind = "empty answer"
+            detail = _one_line(err)[-_DETAIL_CHARS:] if err.strip() else "(no output)"
+            return _Attempt(None, f"{model}: {kind}: {detail}")
+
+        stop_reason = finished.get("stopReason")
+        return _Attempt(
+            InvokeResult(
+                text=text,
+                input_tokens=0,
+                output_tokens=0,
+                model=model,
+                backend=self.backend_name,
+                elapsed_ms=elapsed_ms,
+                finish_reason=stop_reason if isinstance(stop_reason, str) else "",
+            ),
+            log_extra=(
+                f" credits={'-' if credits is None else format(credits, '.4f')}"
+                f" session={session or '-'}"
+            ),
+        )
+
+    @staticmethod
+    def _run_error_reason(model: str, run_error: dict) -> str:
+        """``<model>: <stage> error: <message>``, plus the list-models hint at the prompt stage."""
+        stage = run_error.get("stage")
+        stage = stage if isinstance(stage, str) and stage.strip() else "run"
+        message = run_error.get("message")
+        detail = _one_line(message)[:_DETAIL_CHARS] if isinstance(message, str) and message.strip() else "(no message)"
+        hint = _KIRO_LIST_MODELS_HINT if stage == "prompt" else ""
+        return f"{model}: {stage} error: {detail}{hint}"
+
+
+def _kiro_credits(metering: object) -> float | None:
+    """The summed ``credit`` values of one Kiro ``meteringUsage`` list, or ``None`` if it has none."""
+    if not isinstance(metering, list):
+        return None
+    total: float | None = None
+    for entry in metering:
+        if not isinstance(entry, dict) or entry.get("unit") != "credit":
+            continue
+        value = entry.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            continue
+        total = value if total is None else total + value
+    return total
+
+
 def resolve_cli_binary(backend: str, cli_path: str, *, which=shutil.which) -> str:
     """Resolve the CLI binary for ``backend`` to an absolute executable path.
 
@@ -617,9 +798,9 @@ def build_cli_client(
     ``which`` and ``runner`` are the binary lookup and the process launcher,
     injectable for tests. Building never starts a process.
 
-    ``claude-cli`` returns a :class:`ClaudeCLIClient`. ``kiro-cli`` is not
-    wired in this build and raises the fail-closed ``ConfigError`` naming
-    ``PRXREF_LLM_BACKEND``.
+    ``claude-cli`` returns a :class:`ClaudeCLIClient` and ``kiro-cli`` a
+    :class:`KiroCLIClient`; a reasoning effort set for ``kiro-cli`` is
+    dropped with one INFO line saying so.
     """
     if backend not in CLI_BACKENDS:
         raise _not_a_cli_backend(backend)
@@ -627,7 +808,15 @@ def build_cli_client(
         raise ConfigError(f"PRXREF_LLM_CLI_CONCURRENCY: must be an integer at least 1, got {concurrency!r}")
     binary = resolve_cli_binary(backend, cli_path, which=which)
     if backend == "kiro-cli":
-        raise _not_wired(backend)
+        if reasoning_effort:
+            logger.info("PRXREF_LLM_REASONING_EFFORT is not applied by kiro-cli")
+        return KiroCLIClient(
+            binary=binary,
+            models=models,
+            default_timeout=default_timeout,
+            concurrency=concurrency,
+            runner=runner,
+        )
     return ClaudeCLIClient(
         binary=binary,
         models=models,
