@@ -38,6 +38,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Payload:** PR URL read from `pullrequest.links.html.href`.
   - **Signature Header:** `X-Hub-Signature` (HMAC-SHA256) validated against `PRXREF_BITBUCKET_WEBHOOK_SECRET`.
 - **Pinned Commit Range (Replay):** `GET /2.0/repositories/{owner}/{repo}/diff/{head_sha}..{base_sha}?topic=true` with `Accept: text/plain`, returning the changes on the head side of the merge-base. Bitbucket spells a range SOURCE..DEST, the reverse of git, so the head SHA comes first; the other order names the reverse range and returns a different diff that still parses. `topic=true` is the merge-base ("three-dot") form and is sent explicitly rather than left to the default, because `topic=false` diffs the two commits directly and so also shows whatever landed on the base after the fork. The text is returned unmodified, an empty range returns empty text, and an HTTP or transport error raises.
+- **Description History (Replay):** `GET /2.0/repositories/{owner}/{repo}/pullrequests/{number}` (the creation date, the author, and the current title and description), then the pull request's `GET …/pullrequests/{number}/activity` feed (`pagelen=50`, following `next`, at most 50 pages), then `GET /2.0/repositories/{owner}/{repo}/commit/{sha}` for the head commit's `date` (`--head-sha` when given, else the pull request's source commit). Each `update` entry's `changes.description` carries the old and the new text with the update's `date`, and `changes.title` a rename. The first human review is the earliest approval, change request or comment by a user account (not an app) other than the pull request's author, skipping deleted comments and prxref's own posts. A history that cannot be trusted whole pins nothing: a feed longer than the page budget, an unreadable change entry, or edits that do not chain to the current text leave the current title and description in place, with a warning. The requests carry the same credentials as everything above, and a public repository needs none. On 2026-09-24 the reader was run live, read-only and with no token, against a public pull request whose description had been edited: it read the whole history, took the approval as the first review (an app's comment was skipped), and pinned the text in force then. The `changes.title` shape has not been seen live, because that pull request was never renamed.
 
 ---
 
@@ -63,6 +64,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Accepted Actions:** `opened`, `synchronize`
   - **Signature Header:** `X-Hub-Signature-256` (HMAC-SHA256) validated against `PRXREF_GITHUB_WEBHOOK_SECRET`.
 - **Pinned Commit Range (Replay):** `GET /repos/{owner}/{repo}/compare/{base_sha}...{head_sha}` on the same base URL (GHES included), with `Accept: application/vnd.github.diff`. The three dots are the merge-base form and are required, because the two-dot spelling returns 404. Without the diff media type the endpoint returns its JSON comparison object rather than a diff. The text is returned unmodified, an empty range (a head already merged into the base) returns empty text, and an HTTP or transport error raises. The compare endpoint does not apply the pull-request diff's 20,000-line limit: two read-only probes of public tag ranges on 2026-09-24, one of about 1.0 million diff lines across 3,316 files and one of about 1.05 million lines across 10,373 files, each returned HTTP `200` with the whole diff. So a `--base-sha`/`--head-sha` replay is unaffected by the limit and has no files-listing fallback.
+- **Description History (Replay):** one GraphQL query, `POST https://api.github.com/graphql` for `github.com` or `POST https://{host}/api/graphql` on GHES, reads the pull request's description versions (`userContentEdits`, one full text per edit, ordered by `editedAt`), every title rename (the `RENAMED_TITLE_EVENT` timeline), its reviews and conversation comments, and the head commit's `committedDate` (of `--head-sha` when given, else of the pull request's last commit). A connection longer than one page (100 nodes) is read by a further POST, up to 50 in all. The first human review is the earliest submitted review or comment by a `User` (not a bot) other than the pull request's author, skipping prxref's own posts. GitHub's GraphQL API refuses anonymous reads, so this needs `PRXREF_GITHUB_TOKEN` (or `PRXREF_GITHUB_ENTERPRISE_TOKEN` on GHES); without one, and on any failed read, the replay keeps the current title and description and logs a warning. The fields the query reads were checked live against public `github.com` pull requests while the reader was designed, and its tests use recorded response shapes. The GHES endpoint has **not been probed**.
 
 ---
 
@@ -87,6 +89,7 @@ Every host is covered, but not by the same means. GitHub and GitLab are host-agn
   - **Accepted Actions:** `open`, `update`
   - **Signature Header:** `X-Gitlab-Token` (plain secret token) validated against `PRXREF_GITLAB_WEBHOOK_SECRET`.
 - **Pinned Commit Range (Replay):** `GET /repository/compare?from={base_sha}&to={head_sha}&straight=false`. `straight=false` is the merge-base form; `straight=true` would diff the two commits directly. `unidiff` is deliberately not requested, so each entry's `diff` holds only its hunks, and the entries are rendered by the same header reconstruction as **Diffs** above. A response with `compare_timeout: true` raises rather than reviewing an incomplete file list. An entry flagged `too_large` or `collapsed` carries no inline diff: it is logged as a warning and reviewed as a header-only file. An empty range returns empty text, and an HTTP or transport error raises.
+- **Description History (Replay):** none. The adapter cannot read an MR's description history, so a `--pr-url` replay here shows the MR's current title and description and logs a warning, and `--as-of` exits `2`. GitLab's system notes answered anonymous reads with HTTP `401`, and whether they carry the old description text is unverified.
 
 ---
 
@@ -178,6 +181,10 @@ paging rather than `page`/`pagelen`. It therefore gets its own adapter.
   have **not been probed against a live Data Center**. No minimum version is claimed, but one
   Atlassian knowledge-base article reports that the path-less `/diff` returns 400 on some older
   versions.
+- **Description History (Replay):** none. The adapter cannot read a pull request's
+  description history (whether the `/activities` feed carries the old text is unverified),
+  so a `--pr-url` replay here shows the current title and description and logs a warning,
+  and `--as-of` exits `2`.
 
 ---
 
@@ -341,3 +348,6 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   files that it left out. A range whose two ends are the same commit returned empty
   text. Beyond that run, its tests use recorded response shapes. Azure DevOps Server is
   untested, as above.
+- **Description History (Replay):** none. The adapter cannot read a pull request's
+  description history, so a `--pr-url` replay here shows the current title and
+  description and logs a warning, and `--as-of` exits `2`.

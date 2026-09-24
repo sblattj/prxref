@@ -27,7 +27,9 @@ uv run prxref review \
 ```
 
 Such a run never posts anywhere, and its JSON record carries a `replay` stamp
-(`"threads": "hidden"`, `diff_file` as passed). It needs a configured LLM
+(`"threads": "hidden"`, `diff_file` as passed, and `"description": "file"`
+with a null `as_of`, because the diff file is the only description source;
+see "Replay Mode" in the top-level README). It needs a configured LLM
 (`PRXREF_LLM_MODELS` and the backend's credentials, see `docs/llm.md`). Add
 `--trace-dir DIR` to keep every prompt and raw model answer.
 

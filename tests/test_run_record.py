@@ -57,6 +57,9 @@ REPLAY = {
     "head_sha": "a" * 40,
     "threads": "hidden",
     "diff_file": None,
+    "description": "pinned",
+    "as_of": "2026-05-01T09:30:00Z",
+    "as_of_source": "first-review",
 }
 
 PATHS = (
@@ -225,7 +228,9 @@ class TestTheRecordKeys:
         res, _, _ = _run(monkeypatch, path, tmp_path, replay=dict(REPLAY))
         assert set(res) == BASE_KEYS | RECORD_KEYS | {"prompt_templates", "replay"}
         assert res["replay"] == REPLAY
-        assert list(res["replay"]) == ["base_sha", "head_sha", "threads", "diff_file"]
+        assert list(res["replay"]) == [
+            "base_sha", "head_sha", "threads", "diff_file", "description", "as_of", "as_of_source",
+        ]
 
     def test_the_stamp_is_a_copy_of_the_callers_mapping(self, monkeypatch, tmp_path):
         stamp = dict(REPLAY)
