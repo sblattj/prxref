@@ -1,8 +1,9 @@
 """Deterministic quality passes over worker findings.
 
-Thirteen passes run before posting, in the order ``orchestrate_review``
+Fourteen passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map. A fourteenth deterministic check, the release-shaped-PR
+severity map, and pass 11 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on. A fifteenth deterministic check, the release-shaped-PR
 heuristic, is not a pass at all: ``heuristics.release_shape_findings``
 ADDS a finding before pass 1 and it then flows through every pass below
 exactly like a model finding. Every ``drop_reason`` prefix these passes
@@ -77,7 +78,15 @@ emit is tabulated for operators in ``docs/quality.md``.
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-11. ``apply_quality_gate``: drop findings below the confidence floor
+11. ``apply_rule_grouping``: fold chunk findings in one file that name the
+    same ``rule`` (casefolded), or that name none and share a normalized
+    title, into one finding at the group's smallest positive line, with
+    the group's highest severity and highest confidence and an
+    ``Also at: `<file>:<line>`, ...`` paragraph listing the other lines;
+    the other members are dropped as ``grouped into <file>:<line>``. Sweep
+    findings are never grouped. It runs before the gate, so the caps count
+    groups rather than lines.
+12. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -86,7 +95,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-12. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+13. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -100,7 +109,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-13. ``apply_containment_note``: a finding that asserts a throw, panic,
+14. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -1149,6 +1158,13 @@ def apply_sweep_dedup(
     when the sweep phrased the pattern first: the chunk seat cited the exact
     line.
 
+    A chunk finding that :func:`apply_rule_grouping` folded into its group
+    (``drop_reason`` ``grouped into <file>:<line>``) still adds its key: its
+    location is listed on the group's representative, so a sweep copy that
+    restates it adds no recall either, and the key set is the same whether
+    grouping ran before this pass or not. A member adds its key even when a
+    cap later drops its representative.
+
     ``similarity`` switches on a second, reworded tier that runs after the
     exact tier; ``None`` (the default) skips it entirely, so the pass is
     the exact tier alone. The tier compares findings that are still active,
@@ -1187,7 +1203,7 @@ def apply_sweep_dedup(
     chunk_keys = {
         (f.file, normalize_title(f.title))
         for f in findings[:start]
-        if f.drop_reason is None
+        if f.drop_reason is None or f.drop_reason.startswith(GROUPED_INTO_PREFIX)
     }
     result: list[Finding] = []
     for i, f in enumerate(findings):
@@ -1841,6 +1857,178 @@ def apply_hedge_gate(
             continue
         out.append(replace(f, drop_reason=f'hedged: "{span}"'))
     return out
+
+
+GROUPED_INTO_PREFIX: str = "grouped into "
+"""``drop_reason`` prefix of a finding :func:`apply_rule_grouping` folded away.
+
+The full reason is ``grouped into <file>:<line>``, naming the location of
+the representative that now lists the finding's own location.
+"""
+
+
+def _grouping_line(finding: Finding) -> int | None:
+    line = finding.line
+    if line is None:
+        return 0
+    if isinstance(line, bool) or not isinstance(line, int):
+        return None
+    return line if line > 0 else 0
+
+
+def _grouping_confidence(finding: Finding) -> float | None:
+    raw = finding.confidence
+    if raw is None:
+        return 0.0
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return float(raw)
+
+
+def _grouping_key(finding: Finding) -> tuple[str, str, str] | None:
+    title = finding.title
+    if title is not None and not isinstance(title, str):
+        return None
+    rule = finding.rule
+    if rule is not None and not isinstance(rule, str):
+        return None
+    label = " ".join(rule.split()).casefold() if rule is not None else ""
+    if label:
+        return (finding.file, "rule", label)
+    normalized = normalize_title(title or "")
+    if not normalized:
+        return None
+    return (finding.file, "title", normalized)
+
+
+def _grouping_candidate_key(
+    finding: Finding, floor: float
+) -> tuple[str, str, str] | None:
+    if finding.drop_reason is not None:
+        return None
+    if not isinstance(finding.file, str) or not finding.file:
+        return None
+    if finding.body is not None and not isinstance(finding.body, str):
+        return None
+    severity = finding.severity
+    if not isinstance(severity, str) or severity.strip().lower() not in SEVERITIES:
+        return None
+    confidence = _grouping_confidence(finding)
+    if confidence is None or not confidence >= floor:
+        return None
+    if _grouping_line(finding) is None:
+        return None
+    return _grouping_key(finding)
+
+
+def _group_anchor_key(
+    findings: Sequence[Finding], index: int
+) -> tuple[int, int, tuple[float, str, int, str], int]:
+    finding = findings[index]
+    line = _grouping_line(finding) or 0
+    return (0 if line > 0 else 1, line, finding_rank_key(finding), index)
+
+
+def _fold_group(
+    findings: Sequence[Finding], members: Sequence[int], result: list[Finding]
+) -> None:
+    anchor = min(members, key=lambda i: _group_anchor_key(findings, i))
+    representative = findings[anchor]
+    anchor_line = _grouping_line(representative) or 0
+    top_severity = min(
+        (findings[i].severity.strip().lower() for i in members),
+        key=lambda s: _SEVERITY_RANK[s],
+    )
+    most_confident = max(
+        members,
+        key=lambda i: (_grouping_confidence(findings[i]) or 0.0, -i),
+    )
+    other_lines = sorted({
+        line
+        for i in members
+        if (line := _grouping_line(findings[i]) or 0) > 0 and line != anchor_line
+    })
+    body = representative.body or ""
+    if other_lines:
+        locations = ", ".join(
+            f"`{representative.file}:{line}`" for line in other_lines
+        )
+        also_at = f"Also at: {locations}"
+        body = f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
+    result[anchor] = replace(
+        representative,
+        severity=top_severity,
+        confidence=findings[most_confident].confidence,
+        body=body,
+    )
+    reason = f"{GROUPED_INTO_PREFIX}{representative.file}:{anchor_line}"
+    for i in members:
+        if i != anchor:
+            result[i] = replace(findings[i], drop_reason=reason)
+
+
+def apply_rule_grouping(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[Finding]:
+    """Fold chunk findings that break one rule in one file into one finding.
+
+    Opt-in with ``PRXREF_GROUP_FINDINGS``: the caller runs this pass only
+    when grouping is on, so a run without it never reaches this code.
+
+    A finding is a candidate when it has no ``drop_reason``, its severity is
+    in :data:`SEVERITIES` after trimming and lower-casing, its confidence is
+    at or above the floor :func:`apply_quality_gate` would apply
+    (``confidence_floor``, else ``PRXREF_CONFIDENCE_FLOOR``, else
+    :data:`DEFAULT_CONFIDENCE_FLOOR`), and it sits on the chunk side of the
+    list, before ``sweep_start``. Whole-PR sweep findings are never grouped
+    and never anchor a group. ``sweep_start`` below zero is treated as zero
+    (everything is sweep output); past the end, every finding is on the
+    chunk side.
+
+    Candidates group on their file plus their ``rule``, compared after
+    whitespace collapsing and ``casefold()``. A finding without a rule
+    groups on its file plus its :func:`normalize_title` title instead, and
+    never with a finding that has one. The file is part of the key, so the
+    same rule in two files forms two groups. Scope is not part of the key.
+
+    Only a group of two or more changes anything. Its representative is the
+    member on the smallest positive line; a file-level (line 0) member
+    anchors only when no member has a positive line. A tie on the line goes
+    to the member :func:`finding_rank_key` ranks first, then to the earlier
+    one. The representative keeps its own position, title and scope, takes
+    the group's highest severity (``error`` > ``warning`` > ``spec`` >
+    ``outofscope``) and, independently, its highest confidence. Its body
+    gains a last paragraph, after a blank line, that reads ``Also at:``
+    followed by every other positive line of the group as a backticked
+    ``<file>:<line>``, comma-separated, once each, in line order. A line
+    the representative sits on, and a file-level member, add no location;
+    when nothing is left the body is unchanged.
+    Every other member keeps its identity and gains ``drop_reason``
+    ``grouped into <file>:<line>``, naming the representative's location.
+
+    Runs after the thread, removal and hedge passes, so each member is judged
+    at its own line and a dropped member is never listed, and before
+    :func:`apply_quality_gate`, so the caps count groups rather than lines.
+    Pure apart from reading ``PRXREF_CONFIDENCE_FLOOR`` when
+    ``confidence_floor`` is ``None``; the result has the input's length and
+    order, and a finding whose fields are not the documented types is
+    passed through untouched rather than raising.
+    """
+    floor = _resolve_confidence_floor(confidence_floor)
+    start = max(0, sweep_start)
+    groups: dict[tuple[str, str, str], list[int]] = {}
+    for i, f in enumerate(findings[:start]):
+        key = _grouping_candidate_key(f, floor)
+        if key is not None:
+            groups.setdefault(key, []).append(i)
+    result = list(findings)
+    for members in groups.values():
+        if len(members) >= 2:
+            _fold_group(findings, members, result)
+    return result
 
 
 def apply_quality_gate(
