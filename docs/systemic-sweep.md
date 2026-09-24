@@ -69,6 +69,11 @@ in the same file and on the same line, as
 dropped only when it is no more severe than the chunk copy, so a sweep finding
 never takes a chunk finding's place.
 
+Finding grouping (`PRXREF_GROUP_FINDINGS`) is the one pass a sweep finding
+skips: `apply_rule_grouping` folds chunk findings only, so a sweep finding is
+never grouped and never anchors a group. A sweep finding that restates a
+grouped chunk member is still dropped as `duplicate of chunk finding`.
+
 `settled in thread` is line-independent on purpose: `apply_line_align` has
 already demoted a file-level finding to line 0 by the time it runs, so a
 distance test could never fire. A resolved thread still settles its subject —
