@@ -21,6 +21,14 @@ variable off for one run. Both files are read before any network call, so an
 unusable one is a configuration error. The webhook daemon reads the rules
 file from its own environment and never reads a ticket-context file.
 
+``--prompts-dir DIR`` (``PRXREF_PROMPTS_DIR``) replaces the packaged
+``worker.md``, ``systemic.md`` and ``summary.md`` prompt templates with the
+ones in ``DIR``, the flag winning and ``--prompts-dir ""`` turning the
+variable off for one run. The directory is loaded and validated before any
+network call, so a bad one exits 2 naming its source; the webhook daemon
+reads it from its own environment on every webhook. The run record's
+``prompt_templates`` stamps each override's sha256.
+
 The replay flags review a pinned, reproducible input for evaluation:
 ``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
 repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
@@ -87,7 +95,7 @@ from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
 from prxref.forges.replay import LocalDiffForge, ReplayForge
 from prxref.llm import ConfigError
-from prxref.prompt_templates import export_prompt_templates
+from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
 from prxref.rules import load_review_rules
 from prxref.text_inputs import check_readable_path, decode_text
 from prxref.ticket import load_ticket_context
@@ -167,6 +175,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "implement; findings get a scope of in/out/unknown against it; "
             "overrides PRXREF_TICKET_CONTEXT_FILE, and '' turns it off for "
             "this run"
+        ),
+    )
+    rev.add_argument(
+        "--prompts-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "directory of worker.md, systemic.md and summary.md templates "
+            "that replace the packaged prompts (start from 'prxref prompts "
+            "export DIR'); overrides PRXREF_PROMPTS_DIR, and '' turns it off "
+            "for this run; read it from a trusted checkout, never from the PR "
+            "under review"
         ),
     )
     rev.add_argument(
@@ -452,9 +472,11 @@ def _print_summary(
     ``size advisory:`` when the PR-size advisory fired; and ``replay:`` when
     the run was a replay, so a replay can never be read as a live review.
     Under ``-v`` it adds the finding counts, the ``elapsed/tokens/cost`` line,
-    and one line for each configured input: ``rules:``, ``ticket:`` (with the
-    active findings' scope counts), and ``spec:``. ``result`` may be partial,
-    or not a dict at all; a missing or ``None`` record prints nothing.
+    and one line for each configured input: ``rules:``, ``prompts:`` (the
+    directory, then ``<name>=<sha256 prefix>`` for each overridden template
+    in name order), ``ticket:`` (with the active findings' scope counts), and
+    ``spec:``. ``result`` may be partial, or not a dict at all; a missing or
+    ``None`` record prints nothing.
     """
     target = sys.stdout if out is None else out
     record = result if isinstance(result, dict) else {}
@@ -488,6 +510,15 @@ def _print_summary(
             f"chars={_dash(rules.get('chars'))}{truncated}",
             file=target,
         )
+    prompts = record.get("prompt_templates")
+    if isinstance(prompts, dict):
+        templates = prompts.get("templates")
+        templates = templates if isinstance(templates, dict) else {}
+        stamps = "".join(
+            f" {name}={_dash(info.get('sha256') if isinstance(info, dict) else None, 12)}"
+            for name, info in sorted(templates.items())
+        )
+        print(f"prompts: {_dash(prompts.get('dir'))}{stamps}", file=target)
     ticket = record.get("ticket_context")
     if isinstance(ticket, dict):
         truncated = " truncated" if ticket.get("truncated") else ""
@@ -585,15 +616,16 @@ def _build_json_result(result: Any) -> dict:
     Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
     ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
-    ``ticket_context``, ``spec_grounding``, ``size_advisory``, then
-    ``sampling`` and ``replay`` when present.
+    ``ticket_context``, ``spec_grounding``, ``size_advisory``,
+    ``prompt_templates``, then ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
     to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
-    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) are
-    always emitted and are ``null`` when their feature is off; ``cost_usd`` is
-    also ``null`` when no source could price the run, never ``0``.
+    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) and
+    0.15's ``prompt_templates`` are always emitted and are ``null`` when their
+    feature is off; ``cost_usd`` is also ``null`` when no source could price
+    the run, never ``0``.
     ``sampling`` and ``replay`` are forwarded only when the result already
     carries them. ``replay`` is on replay runs only, so a normal run's
     payload has no ``replay`` key at all.
@@ -623,6 +655,7 @@ def _build_json_result(result: Any) -> dict:
         "ticket_context": result.get("ticket_context"),
         "spec_grounding": result.get("spec_grounding"),
         "size_advisory": result.get("size_advisory"),
+        "prompt_templates": result.get("prompt_templates"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -899,6 +932,23 @@ def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> 
         raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
 
 
+def _load_prompts_dir(path: str | None, *, source: str) -> Any:
+    """Load the prompt-template overrides in ``path``, fenced as :func:`_load_text_input` fences a file.
+
+    ``None``, ``""`` and whitespace mean "no overrides" and return ``None``,
+    so ``--prompts-dir ""`` turns ``PRXREF_PROMPTS_DIR`` off. The loader
+    raises ``ConfigError`` naming ``source`` itself; an ``OSError`` or
+    ``ValueError`` that escapes it becomes one too, so an unusable directory
+    always exits 2 before any network call.
+    """
+    try:
+        return load_prompt_templates(path, source=source)
+    except ConfigError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{source}: cannot load prompts directory {path!r}: {exc}") from exc
+
+
 def _run_review(
     url: str | None,
     *,
@@ -909,6 +959,7 @@ def _run_review(
     spec_sources: list[str] | None = None,
     rules_file: str | None = None,
     context_file: str | None = None,
+    prompts_dir: str | None = None,
     base_sha: str | None = None,
     head_sha: str | None = None,
     no_threads: bool = False,
@@ -937,13 +988,14 @@ def _run_review(
         ref = detect_forge(url)
         if ref is None:
             return None
-    # --max-chunks, --timeout, --spec, --rules-file and --context-file arrive
-    # as load_config overrides (None is ignored, "" is not), so each flag rides
-    # exactly the path its environment variable does: --max-chunks and
-    # --timeout are range-checked on the same pass as PRXREF_MAX_CHUNKS and
-    # PRXREF_LLM_TIMEOUT, --spec replaces PRXREF_SPEC_SOURCES wholesale rather
-    # than merging with it, and --rules-file "" / --context-file "" blank
-    # their variable for one run. Precedence is derived once, here. There is
+    # --max-chunks, --timeout, --spec, --rules-file, --context-file and
+    # --prompts-dir arrive as load_config overrides (None is ignored, "" is
+    # not), so each flag rides exactly the path its environment variable does:
+    # --max-chunks and --timeout are range-checked on the same pass as
+    # PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, --spec replaces
+    # PRXREF_SPEC_SOURCES wholesale rather than merging with it, and
+    # --rules-file "" / --context-file "" / --prompts-dir "" blank their
+    # variable for one run. Precedence is derived once, here. There is
     # deliberately no way to inject a pre-built config dict: that would bypass
     # _check_ranges and make every range guarantee conditional on nobody using
     # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
@@ -955,6 +1007,7 @@ def _run_review(
         spec_sources=spec_sources,
         review_rules=rules_file,
         ticket_context_file=context_file,
+        prompts_dir=prompts_dir,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -963,12 +1016,14 @@ def _run_review(
             "spec_sources": "--spec",
             "review_rules": "--rules-file",
             "ticket_context_file": "--context-file",
+            "prompts_dir": "--prompts-dir",
         },
     )
-    # Both files are read here, after config and before make_forge and the LLM
-    # client, so an unusable one exits 2 before any network I/O. load_config
-    # stays I/O-free. Each is reported under the input that supplied its
-    # path: the flag whenever it was given, else the variable.
+    # Both files and the prompts directory are read here, after config and
+    # before make_forge and the LLM client, so an unusable one exits 2 before
+    # any network I/O. load_config stays I/O-free. Each is reported under the
+    # input that supplied its path: the flag whenever it was given, else the
+    # variable.
     rules = _load_text_input(
         load_review_rules, cfg["review_rules"],
         max_chars=cfg["review_rules_max_chars"],
@@ -980,6 +1035,10 @@ def _run_review(
         source=(
             "--context-file" if context_file is not None else "PRXREF_TICKET_CONTEXT_FILE"
         ),
+    )
+    prompts = _load_prompts_dir(
+        cfg["prompts_dir"],
+        source="--prompts-dir" if prompts_dir is not None else "PRXREF_PROMPTS_DIR",
     )
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -1045,6 +1104,7 @@ def _run_review(
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
         replay=replay.stamp(has_forge=url is not None) if replay is not None else None,
+        prompts=prompts,
     )
 
 
@@ -1057,9 +1117,10 @@ def _webhook_handler(url: str) -> None:
 
     ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
     webhook: one static ticket file cannot describe every PR the daemon sees,
-    so its findings always carry scope ``unknown``. The team rules file still
-    comes from the daemon's environment, re-read on every webhook. The daemon
-    passes no replay flag, so it never replays.
+    so its findings always carry scope ``unknown``. The team rules file and
+    the ``PRXREF_PROMPTS_DIR`` templates still come from the daemon's
+    environment, re-read on every webhook. The daemon passes no replay flag,
+    so it never replays.
     """
     try:
         _run_review(url, post=True, context_file="")
@@ -1132,6 +1193,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             spec_sources=args.spec,
             rules_file=args.rules_file,
             context_file=args.context_file,
+            prompts_dir=args.prompts_dir,
             base_sha=args.base_sha,
             head_sha=args.head_sha,
             no_threads=args.no_threads,

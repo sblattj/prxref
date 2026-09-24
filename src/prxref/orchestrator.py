@@ -100,8 +100,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    temperature, seed, and model chain actually in force, and the run-record
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
-   ``spec_grounding``, ``size_advisory``; ``replay`` on replays only, and
-   ``cost_api_equivalent`` on claude-cli-priced runs only).
+   ``spec_grounding``, ``size_advisory``, ``prompt_templates``; ``replay``
+   on replays only, and ``cost_api_equivalent`` on claude-cli-priced runs
+   only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;
