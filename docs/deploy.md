@@ -48,8 +48,10 @@ Configure secret tokens and match the events accepted by `prxref`:
 | Forge | Secret Env Var | Reviewable Events | Notes |
 |---|---|---|---|
 | **GitHub** | `PRXREF_GITHUB_WEBHOOK_SECRET` | `Pull request` (actions: `opened`, `synchronize`) | HMAC-SHA256 in `X-Hub-Signature-256` |
-| **Bitbucket Cloud** | `PRXREF_BITBUCKET_WEBHOOK_SECRET` | `Pull Request: Created` (`pr:opened`), `Pull Request: Updated` (`pr:modified`) | HMAC-SHA256 in `X-Hub-Signature` |
+| **Bitbucket Cloud** | `PRXREF_BITBUCKET_WEBHOOK_SECRET` | `Pull Request: Created` (`pullrequest:created`), `Pull Request: Updated` (`pullrequest:updated`) | HMAC-SHA256 in `X-Hub-Signature` |
+| **Bitbucket Server / Data Center** | `PRXREF_BITBUCKET_WEBHOOK_SECRET` (the same secret as Cloud) | `pr:opened`, `pr:modified`, `pr:from_ref_updated` (the source branch moved) | HMAC-SHA256 in `X-Hub-Signature`; the same `X-Event-Key` header as Cloud, told apart by event name and payload shape |
 | **GitLab** | `PRXREF_GITLAB_WEBHOOK_SECRET` | `Merge request events` (actions: `open`, `update`) | Secret token in `X-Gitlab-Token` header |
+| **Azure DevOps** | `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` | `git.pullrequest.created`, `git.pullrequest.updated`, on a PR whose status is `active` | No event header and no signature: recognized by `publisherId: "tfs"` in the body, authenticated by the HTTP Basic auth password (the user name is ignored). Subscriptions: see [Azure DevOps service hooks](#azure-devops-service-hooks) |
 
 *Note on Insecure Development Bypass:* Setting `PRXREF_ALLOW_UNSIGNED=1` allows unsigned payloads for local testing. Do not use in production.
 
@@ -149,13 +151,14 @@ The container includes a built-in curl-free health check using Python standard l
 
 | Code | Meaning | Pipeline effect |
 |---|---|---|
-| `0` | The run finished. This **includes every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized PR URL, or a review in which every chunk failed. Diagnostics are printed to stderr. | Step stays green. |
+| `0` | The run finished. This **includes every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized PR URL, or a review in which every chunk failed. Diagnostics are printed to stderr. With `PRXREF_FAIL_ON` set to `error` or `any`, a review whose findings trip that policy, or one that fails to complete, exits `1` instead (next row). | Step stays green. |
+| `1` | A **gated review outcome**, only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that fails to complete also exits `1`. The reason is printed to stderr. An unrecognized PR URL still exits `0`. | Step fails, because the lane opted in. |
 | `2` | A **usage or configuration error**: no subcommand, invalid arguments, or a required value missing, malformed, or out of range. The message names the source that supplied it — the environment variable, or the CLI flag when a flag was what the operator typed. | Step fails. This is the intended failure: it means prxref was invoked wrong or is misconfigured, not that your code is bad. |
 
 ```bash
 # A URL prxref cannot review — still exit 0
-$ prxref review --pr-url https://bitbucket.example.com/projects/P/repos/r/pull-requests/42
-unrecognized PR URL '...' — expected bitbucket.org, github.com, or gitlab.com PR/MR link
+$ prxref review --pr-url https://github.com/org/repo/issues/42
+unrecognized PR URL 'https://github.com/org/repo/issues/42' — expected a Bitbucket pull-requests, GitHub pull, or GitLab merge_requests link (bitbucket.org, github.com, gitlab.com, or a self-hosted Bitbucket Data Center, GitHub Enterprise Server, or GitLab host), or an Azure DevOps pullrequest link (dev.azure.com, *.visualstudio.com, or an Azure DevOps Server host); the URL must keep the forge's own path shape.
 $ echo $?
 0
 
@@ -176,7 +179,7 @@ $ echo $?
 Practical consequences for a pipeline:
 
 - **Do not add `continue-on-error` to hide review failures.** They already exit `0`. Suppressing errors instead hides the `2` that tells you the deployment is misconfigured — and a review step that can never fail is a review step nobody notices has stopped running.
-- **Do not gate a merge on the exit code.** There is deliberately no `PRXREF_FAIL_ON`. A probabilistic reviewer used as a gate is worse than no gate: the first false positive teaches the team to bypass it. Read the verdict from the posted summary comment instead.
+- **Do not gate a merge on the exit code.** By default it never gates: `PRXREF_FAIL_ON` defaults to `never`, under which no finding moves the exit code, and `PRXREF_FAIL_ON=error` or `PRXREF_FAIL_ON=any` is the explicit opt-in for a lane that wants the gate (the `1` row above). Think hard before you set it. A probabilistic reviewer used as a gate is worse than no gate: the first false positive teaches the team to bypass it. Read the verdict from the posted summary comment instead.
 - **Watch for the partial-review banner.** A run where some chunks failed still exits `0` and still posts a summary; the banner in that summary (and the `coverage: N/M chunks reviewed` line on stdout) is the only signal that the review was incomplete. The most common cause is a starved completion budget — see [Reasoning models and the token budget](env-vars.md#reasoning-models-and-the-token-budget).
 
 ---

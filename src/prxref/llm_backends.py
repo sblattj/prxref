@@ -201,8 +201,6 @@ class OpenAICompatClient(LLMClient):
 
     Tries each model in ``models`` order (cheap first for speed). A model
     fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
-    Tries each model in ``models`` order (cheap first for speed). A model
-    fails on HTTP >= 500, HTTP 429, any other HTTP error, a connection
     error, a timeout, a malformed body, or a truncated completion
     (``finish_reason`` ``length``/``max_tokens``) — the next model is tried
     at once, and exhausting the chain raises :class:`LLMError` with

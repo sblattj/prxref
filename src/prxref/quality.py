@@ -1,25 +1,33 @@
 """Deterministic quality passes over worker findings.
 
-Twelve passes run before posting, in the order ``orchestrate_review``
-applies them. A thirteenth deterministic check, the release-shaped-PR
+Thirteen passes run before posting, in the order ``orchestrate_review``
+applies them; pass 1 runs only when the team review rules declare a
+severity map. A fourteenth deterministic check, the release-shaped-PR
 heuristic, is not a pass at all: ``heuristics.release_shape_findings``
 ADDS a finding before pass 1 and it then flows through every pass below
 exactly like a model finding. Every ``drop_reason`` prefix these passes
 emit is tabulated for operators in ``docs/quality.md``.
 
-1. ``apply_spec_grounding``: on a run that injected no spec constraint
+1. ``apply_severity_map``: when the team review rules declare a severity
+   map, rewrite a team severity word (``blocker``) to the prxref tier the
+   map gives it (``error``), compared after whitespace collapsing and
+   ``casefold()``. It runs first because every later pass reads the
+   severity. A dropped finding, an unmapped word and one of prxref's own
+   severities pass through unchanged; it drops nothing, and without a map
+   it is not called.
+2. ``apply_spec_grounding``: on a run that injected no spec constraint
    (``specs.constraint_count`` of the digest is 0 — no sources, every
    source failed, or nothing kept), relabel every ``spec`` finding as
    ``warning``: the prompts showed the no-specs text, so the label has
-   nothing to be grounded in. It runs first, right after the team severity
+   nothing to be grounded in. It runs right after the team severity
    map, so ``apply_severity_consistency`` never raises a same-title
    sibling to ``spec`` on the strength of an ungrounded label. It drops
    nothing.
-2. ``apply_location_validation``: drop findings whose ``file`` names no
+3. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-3. ``apply_manifest_claim_check``: for findings on a manifest or
+4. ``apply_manifest_claim_check``: for findings on a manifest or
    npm-family lockfile (``package.json``, ``bun.lock``, ...), drop a
    claim whose named dependency is not the key on the anchored line
    (``anchor mismatch:``) or sits under a different dependency section
@@ -27,7 +35,7 @@ emit is tabulated for operators in ``docs/quality.md``.
    own hunk holds no section header, the served full-file lines decide
    the enclosing section. It runs BEFORE ``apply_line_align`` so it
    reads the model's raw anchor.
-4. ``apply_line_align``: a line explicitly cited in the finding's own
+5. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
    line lands on an added line — or a context line within tolerance of
@@ -43,45 +51,45 @@ emit is tabulated for operators in ``docs/quality.md``.
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-5. ``apply_thread_dedup``: drop findings that duplicate an already-open
+6. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``.
-6. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+7. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing thread already argued out — same path plus shared
    distinctive tokens, with NO line test, because line alignment has already
    demoted a file-level finding to line 0 by this point
    (``settled in thread: <author>``).
-7. ``apply_severity_consistency``: findings sharing one normalized title —
+8. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-8. ``apply_removal_claim_check``: drop findings whose removal verb governs
+9. ``apply_removal_claim_check``: drop findings whose removal verb governs
    a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
    path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
    header produces when a worker reads a copy as a move (issue #03).
    Only a claim that NAMES a diff path is judged, so a finding about a
    removed guard or constant is untouched.
-9. ``apply_hedge_gate``: drop findings whose title or body conditions the
-   defect on a precondition the worker never established from the diff
-   ("If X still leases a client", "unless the backfill already ran"),
-   with ``drop_reason`` ``hedged: "<matched span>"``. A body's
-   ``Spec: "..."`` quote is not read for the text it copies verbatim from
-   the spec digest the workers were shown.
-10. ``apply_quality_gate``: drop findings below the confidence floor
+10. ``apply_hedge_gate``: drop findings whose title or body conditions the
+    defect on a precondition the worker never established from the diff
+    ("If X still leases a client", "unless the backfill already ran"),
+    with ``drop_reason`` ``hedged: "<matched span>"``. A body's
+    ``Spec: "..."`` quote is not read for the text it copies verbatim from
+    the spec digest the workers were shown.
+11. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), and enforce the
     {error, warning, spec, outofscope} severity vocabulary
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-11. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+12. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
     duplicate and then die at the gate itself.
-12. ``apply_containment_note``: a finding that asserts a throw, panic,
+13. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
