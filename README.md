@@ -132,7 +132,7 @@ prxref review --pr-url https://ado.corp.example/tfs/DefaultCollection/project/_g
 
 ## LLM Configuration
 
-prxref operates without direct cloud provider SDK keys (no Anthropic API keys). It ships with **no default endpoint and no default model chain**: point it at any OpenAI-compatible `/chat/completions` server (OpenRouter, Together, Groq, vLLM, Ollama, a self-hosted gateway), or install the optional `litellm` extra. `PRXREF_LLM_BASE_URL` and `PRXREF_LLM_MODELS` are required — leaving either unset exits `2` with an error naming the variable.
+prxref operates without direct cloud provider SDK keys (no Anthropic API keys). It ships with **no default endpoint and no default model chain**: point it at any OpenAI-compatible `/chat/completions` server (OpenRouter, Together, Groq, vLLM, Ollama, a self-hosted gateway), install the optional `litellm` extra, or run the `claude` or `kiro-cli` CLI you are already logged in to. `PRXREF_LLM_MODELS` is required on every backend and `PRXREF_LLM_BASE_URL` on `openai-compat`; leaving a required one unset exits `2` with an error naming the variable.
 
 ```bash
 # Default backend: plain HTTP to any OpenAI-compatible endpoint
@@ -147,11 +147,18 @@ export PRXREF_LLM_MAX_TOKENS=4096              # raise this if you raise the eff
 # pip install 'prxref[litellm]'
 export PRXREF_LLM_BACKEND=litellm
 export PRXREF_LLM_MODELS="openrouter/meta-llama/llama-3.3-70b-instruct,bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0"
+
+# Optional: your own logged-in Claude Code CLI, on your own machine
+export PRXREF_LLM_BACKEND=claude-cli
+export PRXREF_LLM_MODELS="sonnet"
+export PRXREF_LLM_TIMEOUT=120                    # each call includes CLI start-up
 ```
+
+`claude-cli` and `kiro-cli` run the CLI already installed and logged in on your machine, on your subscription and for your own use only. Do not use them for a team, a shared webhook, or CI; use an API key through `openai-compat` or `litellm` there. See [Subscription CLI backends](docs/llm.md#subscription-cli-backends-claude-cli-and-kiro-cli).
 
 On a reasoning model the hidden reasoning trace draws from the **same** completion budget as the answer, so turning `PRXREF_LLM_REASONING_EFFORT` up makes truncation *more* likely. A truncated chunk is counted as failed and the posted summary names the reason and the variable to raise; see [Reasoning models and the token budget](docs/env-vars.md#reasoning-models-and-the-token-budget).
 
-Temperature `0.0` and a sampling `seed` are sent on every call — `PRXREF_LLM_SEED` when set, else one random seed per process shared by the whole run (issue #56) — but neither makes a review bit-reproducible — provider fingerprints, load-balanced backends, and gateways that ignore `seed` all still vary the model's output. Everything downstream of the model is deterministic: findings are ordered by `(file, line, title)` and the caps break ties by content, and the run record's `sampling` field reports which knobs were in force. See [Determinism](docs/llm.md#determinism-what-is-pinned-and-what-still-varies).
+On `openai-compat` and `litellm`, temperature `0.0` and a sampling `seed` are sent on every call — `PRXREF_LLM_SEED` when set, else one random seed per process shared by the whole run (issue #56) — but neither makes a review bit-reproducible — provider fingerprints, load-balanced backends, and gateways that ignore `seed` all still vary the model's output. The CLI backends send neither, and the run record's `sampling` field shows both as `null`. Everything downstream of the model is deterministic: findings are ordered by `(file, line, title)` and the caps break ties by content, and the run record's `sampling` field reports which knobs were in force. See [Determinism](docs/llm.md#determinism-what-is-pinned-and-what-still-varies).
 
 See [docs/llm.md](docs/llm.md) for architecture, failover behavior, and backend setup, and [docs/env-vars.md](docs/env-vars.md#tuning-for-your-team) for tuning the confidence floor and finding caps to your team.
 
