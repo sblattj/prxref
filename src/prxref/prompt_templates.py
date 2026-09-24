@@ -307,6 +307,16 @@ def _validate(name: str, text: str, path: str, source: str) -> None:
         )
 
 
+def packaged_text(name: str) -> str:
+    """The packaged text of template ``name``, read as :func:`prxref.reviewer.load_prompt` reads it.
+
+    What a run renders for a template it does not override. Any name outside
+    :data:`TEMPLATE_NAMES` raises ``ValueError``.
+    """
+    _require_name(name)
+    return _packaged_text(name)
+
+
 def _packaged_text(name: str) -> str:
     return resources.files("prxref").joinpath("prompts").joinpath(f"{name}.md").read_text(encoding="utf-8")
 

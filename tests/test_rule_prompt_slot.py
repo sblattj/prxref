@@ -95,11 +95,15 @@ CONTEXTS = {
 }
 
 # sha256 of (system, user) for every prompt below, captured by rendering the
-# same inputs at 328d1c9 before any #13 T2 edit.
+# same inputs at 328d1c9 before any #13 T2 edit. The five worker USER hashes
+# were re-derived when worker.md dropped its "roughly 30k tokens" promise
+# (0.15, seat Q-ECHO): each is the earlier render with that one sentence
+# replaced by "The diff below is the complete chunk.", and every system hash
+# and every sweep hash is unchanged.
 BASE_GOLDEN = {
     "worker/off": (
         "7484254cf7461fb7dab2aeee4599d9e4992af293f23e00d967801f8a48e99a7c",
-        "cf572de703d5bf6f0f1d82d74972d5aaa78d75e91195afac7c73a76dc4d5a119",
+        "4efbc87d908fc50b2ea9adb6dbc43b58e144a8c99734cef5790e425851b2f0f4",
     ),
     "sweep/off": (
         "1ff5d002746e76e39f456d76db1e935aaacad22296b5319ccda23e392bbd65b6",
@@ -107,7 +111,7 @@ BASE_GOLDEN = {
     ),
     "worker/scope": (
         "9dadd864c8c99ecd8937c7e111b8ae6cd26eb3e0cd7cebd09efd5e03cc5d4539",
-        "0dff53911c55ca04986133d6a810d57afe019cccfae6a464817bf07866ecb2e5",
+        "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/scope": (
         "a1c032c184f4dd82fdb986f7087a95971fb1a596aa6b49887aaa33687a27eb50",
@@ -115,7 +119,7 @@ BASE_GOLDEN = {
     ),
     "worker/full": (
         "19aea16e223c4c80c809728fde826c6bc7185f4173fece80f83b28e491f662a4",
-        "7c421027716fbfb9c4b6e6d13806cde4a2135b67d27a347bfd0af82f929c544a",
+        "118d48be8eeac397b8246b5c6bfc3afb1478100f678c2a540648e41a37f4b715",
     ),
     "sweep/full": (
         "82e4d0907a0f57da0f7f69ee8754b0bc3ba5ec9d22a77b78f172cea8b122c9a2",
@@ -123,7 +127,7 @@ BASE_GOLDEN = {
     ),
     "worker/override": (
         "7518a47a993e55aceaf61f8141c3a6748ce73b63c87f460948fdaefd64aef69d",
-        "0dff53911c55ca04986133d6a810d57afe019cccfae6a464817bf07866ecb2e5",
+        "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/override": (
         "2395bb9b0607756b574773f6c49b4dbd89bac79dcbef6942b5bc732cad93aa72",
@@ -135,7 +139,7 @@ BASE_GOLDEN = {
     ),
     "orchestrator/1": (
         "7484254cf7461fb7dab2aeee4599d9e4992af293f23e00d967801f8a48e99a7c",
-        "d615d33ff494623782bbef0512383f062812bbdb06792fd728bef7a08c27208c",
+        "0113e78e0815af17dbbc6f2e642bfacc237f9464ead72197801a6c23799b2239",
     ),
 }
 
