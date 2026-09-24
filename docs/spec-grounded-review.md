@@ -712,9 +712,14 @@ was.
 ### 7.1 Runner (planned, not built)
 
 > **Planned, not built.** Nothing in §7.1 or §7.2 exists in 0.14.0: there is
-> no `harness.py`, no stub-LLM plumbing or recorded mode, and no P/R/F1
-> scoring. The design is kept for the later pass that
-> `tests/evals/README.md` anticipates.
+> no `harness.py`, no plumbing or recorded stub-LLM mode, and no P/R/F1
+> scoring. What did ship, outside this design, is one pipeline run per case:
+> [`tests/evals/test_eval_replay.py`](../tests/evals/test_eval_replay.py)
+> reviews each case with one replay-mode `prxref review` call against a stub
+> LLM that finds nothing, which proves the wiring, not the review. Scoring the
+> findings against `expected.json` is still a manual, offline step
+> ([`tests/evals/README.md`](../tests/evals/README.md), "Running a case"). The
+> design below is kept for a later pass that automates that scoring.
 
 `tests/evals/harness.py` (data-local, not shipped) + a thin wrapper in
 `tests/evals/test_evals.py` (the file that holds today's structural scorer)

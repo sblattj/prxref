@@ -282,7 +282,8 @@ class ForgeImpl:
         cannot be read, or a listing that outruns the page budget, raises
         ``FeedReadError`` rather than handing back the files that happened to
         arrive. An entry GitLab marks ``collapsed`` or ``too_large`` carries no
-        hunks and is rendered as a header-only file. Raises ``ValueError`` for
+        hunks; it is rendered as a header-only file and logged at WARNING, as
+        ``get_compare_diff`` does. Raises ``ValueError`` for
         an MR with no file entries at all.
         """
         headers = self._get_auth_headers()
@@ -303,6 +304,13 @@ class ForgeImpl:
                 f"Empty diff received from GitLab for {ref.owner}/{ref.repo}#{ref.number}"
             )
 
+        for d in diffs:
+            if d.get("too_large") or d.get("collapsed"):
+                logger.warning(
+                    "GitLab MR diff: %s has no inline diff (too_large/collapsed); "
+                    "it is reviewed as header-only",
+                    d.get("new_path") or d.get("old_path"),
+                )
         return _render_diff_entries(diffs)
 
     def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
