@@ -272,16 +272,20 @@ def _fmt_tokens(result: Any) -> str:
 def _fmt_cost(result: Any) -> str:
     """Render the run's cost for the ``-v`` line.
 
-    ``costs.cost_label`` of the record's ``cost_usd`` and ``cost_estimated``
-    (``$0.0007``, ``~$0.0007 (est.)``, or ``cost unknown`` for ``None``), and
-    ``-`` when the result carries no ``cost_usd`` key at all. An absent key
-    means nothing measured the cost; ``None`` means it was measured and no
-    source could price it. The two are different claims, so they print
-    differently.
+    ``costs.cost_label`` of the record's ``cost_usd``, ``cost_estimated`` and
+    ``cost_api_equivalent`` (``$0.0007``, ``$0.0007 (API-equivalent)`` for a
+    claude-cli-priced run, ``~$0.0007 (est.)``, or ``cost unknown`` for
+    ``None``), and ``-`` when the result carries no ``cost_usd`` key at all.
+    An absent key means nothing measured the cost; ``None`` means it was
+    measured and no source could price it. The two are different claims, so
+    they print differently.
     """
     if not isinstance(result, dict) or "cost_usd" not in result:
         return "-"
-    return cost_label(result.get("cost_usd"), result.get("cost_estimated") is True)
+    return cost_label(
+        result.get("cost_usd"), result.get("cost_estimated") is True,
+        api_equivalent=result.get("cost_api_equivalent") is True,
+    )
 
 
 def _dash(value: Any, width: int | None = None) -> str:
