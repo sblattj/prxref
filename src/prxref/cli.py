@@ -1198,12 +1198,16 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     """Route ``eval run|score|compare`` to ``prxref.evals`` and return its exit code.
 
     ``prxref.evals`` is imported here rather than at module top, because the
-    eval modules must never import the CLI back. A ``ConfigError`` from any
-    action exits 2, printed exactly as ``review`` prints one.
+    eval modules must never import the CLI back. For the same reason ``run``
+    is handed :func:`_run_review` and :func:`_build_json_result` as keyword
+    arguments. A ``ConfigError`` from any action exits 2, printed exactly as
+    ``review`` prints one.
     """
     evals = importlib.import_module("prxref.evals")
     action = {
-        "run": evals.eval_run,
+        "run": lambda parsed: evals.eval_run(
+            parsed, run_review=_run_review, build_record=_build_json_result,
+        ),
         "score": evals.eval_score,
         "compare": evals.eval_compare,
     }[args.eval_command]
