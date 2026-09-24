@@ -183,7 +183,19 @@ Practical consequences for a pipeline:
 
 ## 6. CLI Model Backends in Docker and CI
 
-<!-- 0.14 placeholder: W66B -->
+The `claude-cli` and `kiro-cli` backends run the Claude Code CLI or the Kiro CLI that a developer has installed and logged in to on their own machine, on that developer's own subscription. They are not for the Docker image, CI, or the webhook daemon:
+
+- **The Docker image ships neither CLI.** It is `python:3.12-slim` plus the prxref wheel, so `claude` and `kiro-cli` are not on its `PATH`.
+- **Do not install or log in to one in CI or on the daemon.** A pipeline or a shared webhook server reviews for a whole team, and a personal subscription login is for your own use; Anthropic's terms do not allow a third-party product to offer claude.ai login or subscription rate limits without approval. Use an API key through `openai-compat` or `litellm` there, or Workload Identity Federation or Bedrock/Vertex/Foundry. The policy and everything else about these backends is in [Subscription CLI backends](llm.md#subscription-cli-backends-claude-cli-and-kiro-cli).
+
+A CLI backend whose binary cannot be found is a configuration error, so a lane that selects one by mistake fails loudly with exit `2` before any network call instead of posting nothing:
+
+```
+$ PRXREF_LLM_BACKEND=claude-cli PRXREF_LLM_MODELS=sonnet prxref review --pr-url https://github.com/org/repo/pull/1
+configuration error: PRXREF_LLM_BACKEND: claude-cli needs the 'claude' CLI, which was not found on PATH; install it and log in, or set PRXREF_LLM_CLI_PATH to its absolute path
+$ echo $?
+2
+```
 
 ---
 
