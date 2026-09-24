@@ -516,7 +516,9 @@ def test_only_read_verbs_are_retryable():
 def test_get_file_content_returns_text_on_200():
     session = MagicMock(spec=requests.Session)
     session.get.return_value = _mock_response(
-        200, text="print('hi')\n", headers={"Content-Type": "text/plain; charset=utf-8"}
+        200,
+        text="print('hi')\n",
+        headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
     )
 
     result = ForgeImpl(session=session).get_file_content(
@@ -586,7 +588,9 @@ def test_get_file_content_returns_none_on_a_json_body():
 def test_get_file_content_returns_none_on_binary_content():
     session = MagicMock(spec=requests.Session)
     session.get.return_value = _mock_response(
-        200, content=b"\x89PNG\x00\x01\x02", headers={"Content-Type": "text/plain"}
+        200,
+        content=b"\x89PNG\x00\x01\x02",
+        headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
     )
 
     result = ForgeImpl(session=session).get_file_content(
@@ -601,7 +605,7 @@ def test_get_file_content_returns_none_on_oversize_body():
     session.get.return_value = _mock_response(
         200,
         content=b"a" * (github._MAX_FILE_CONTENT_BYTES + 1),
-        headers={"Content-Type": "text/plain"},
+        headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
     )
 
     result = ForgeImpl(session=session).get_file_content(
@@ -730,7 +734,10 @@ def _routed_session(summary_feed):
         if "/compare/" in url:
             return _mock_response(text=COMPARE_DIFF)
         if "/contents/" in url:
-            return _mock_response(text="x = 1\n", headers={"Content-Type": "text/plain"})
+            return _mock_response(
+                text="x = 1\n",
+                headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
+            )
         if url.endswith("/issues/42/comments"):
             return _mock_response(json_data=summary_feed)
         if url.endswith("/pulls/42/comments"):
