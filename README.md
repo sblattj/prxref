@@ -312,6 +312,11 @@ Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evalua
 - `--base-sha SHA` / `--head-sha SHA` — review the pinned range `BASE...HEAD` of the `--pr-url` repository (the merge-base diff, as the PR's own diff is), with file context read at `HEAD`. The two come as a pair, must be full 40- or 64-character hex commit SHAs, must differ, and need `--pr-url`.
 - `--no-threads` — hide the PR's existing threads from the prompt and from the thread-dedup passes.
 - `--diff-file PATH` — review this unified diff (`git diff` or `git format-patch` output) instead of fetching one; `--pr-url` becomes optional.
+- `--as-of TIME` — show the reviewer the PR's title and description as they were at `TIME`: an ISO-8601 time with a UTC offset, such as `2026-05-01T09:30:00Z` or `2026-05-01T11:30:00+02:00`. A date alone or a time without an offset exits `2` rather than being read in the local time zone, and so does a value that is not ISO-8601. Needs `--pr-url`.
+- `--description-file PATH` — use this file's text as the PR description, with or without `--pr-url`. It is read like `--rules-file`: a missing, unreadable or non-regular file, a file that is not UTF-8 or contains NUL bytes, and a path under the working directory that symlinks out of it each exit `2`. A blank file is an empty description.
+- `--no-description` — review with an empty PR description.
+
+`--as-of`, `--description-file` and `--no-description` are mutually exclusive: giving two or more exits `2` naming each one given. They are CLI-only, with no environment variable.
 
 The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
 

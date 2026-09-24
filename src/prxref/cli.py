@@ -21,7 +21,10 @@ The replay flags review a pinned, reproducible input for evaluation:
 ``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
 repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
 optional, and no forge is contacted without it), and ``--no-threads`` hides
-the PR's existing threads. Any of them makes the run a replay: it never
+the PR's existing threads. At most one of ``--as-of TIME`` (the description
+in force at that time), ``--description-file PATH`` and ``--no-description``
+chooses the PR description a replay shows; each is CLI-only, with no
+environment variable. Any replay flag makes the run a replay: it never
 posts, and its run record gains a ``replay`` stamp. They are validated
 before the URL is parsed, and a bad set exits 2 naming the flag. The webhook
 daemon never replays.
@@ -59,14 +62,18 @@ location, title, and body, followed by any dropped findings and their reason.
 from __future__ import annotations
 
 import argparse
+import codecs
+import errno
 import importlib
 import json
 import logging
 import os
 import re
+import stat
 import sys
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +85,7 @@ from prxref.forges.replay import LocalDiffForge, ReplayForge
 from prxref.llm import ConfigError
 from prxref.prompt_templates import export_prompt_templates
 from prxref.rules import load_review_rules
+from prxref.text_inputs import check_readable_path, decode_text
 from prxref.ticket import load_ticket_context
 from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
 from prxref.viz import render_file
@@ -192,6 +200,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "replay: review this unified diff (git diff or git format-patch "
             "output) instead of fetching one; --pr-url becomes optional; "
             "implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--as-of",
+        default=None,
+        metavar="TIME",
+        help=(
+            "replay: show the PR's title and description as they were at TIME, "
+            "an ISO-8601 time with a UTC offset (2026-05-01T09:30:00Z); needs "
+            "--pr-url; excludes --description-file and --no-description; "
+            "implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--description-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "replay: use this UTF-8 text file as the PR description; excludes "
+            "--as-of and --no-description; implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--no-description",
+        action="store_true",
+        help=(
+            "replay: review with an empty PR description; excludes --as-of "
+            "and --description-file; implies no posting"
         ),
     )
     rev.add_argument(
@@ -522,6 +558,14 @@ class _ReplayRequest:
     ``None``. ``diff_file`` is the path exactly as the operator typed it, and
     ``diff_text`` is that file's text once ``_run_review`` has read it
     (``None`` until then, and without ``--diff-file``).
+
+    The description fields (issue #16) hold at most one choice, because
+    ``--as-of``, ``--description-file`` and ``--no-description`` are mutually
+    exclusive. ``as_of`` is the ``--as-of`` time as a timezone-aware UTC
+    ``datetime``. ``description_file`` is the path as typed, and
+    ``description_text`` is its decoded text once ``_run_review`` has read it
+    (``None`` until then, and without ``--description-file``).
+    ``no_description`` is ``--no-description``.
     """
 
     base_sha: str | None = None
@@ -529,6 +573,10 @@ class _ReplayRequest:
     no_threads: bool = False
     diff_file: str | None = None
     diff_text: str | None = None
+    as_of: datetime | None = None
+    description_file: str | None = None
+    description_text: str | None = None
+    no_description: bool = False
 
     def stamp(self, *, has_forge: bool) -> dict[str, Any]:
         """The run record's ``replay`` stamp: four keys, in a fixed order, all present.
@@ -552,20 +600,28 @@ def _resolve_replay(
     head_sha: str | None = None,
     no_threads: bool = False,
     diff_file: str | None = None,
+    as_of: str | None = None,
+    description_file: str | None = None,
+    no_description: bool = False,
 ) -> _ReplayRequest | None:
     """Validate the replay flags; ``None`` means a normal, non-replay run.
 
     Pure: it reads nothing and calls nothing. ``_run_review`` calls it first,
     before ``detect_forge``, so a bad set of replay flags exits 2 even next
     to an unrecognised URL. A flag counts as given whenever it is not
-    ``None``, so an empty value is validated rather than ignored.
+    ``None`` (``--no-description`` whenever it is true), so an empty value
+    is validated rather than ignored.
 
     The checks run in this order, each a ``ConfigError`` naming its flag:
     no ``--pr-url`` and no ``--diff-file``; only one of ``--base-sha`` /
     ``--head-sha``; either one not a full 40- or 64-character hex SHA; the
-    two naming the same commit (compared lowercased); and a range without
-    ``--pr-url`` to resolve it in. Whether the forge can fetch the range is
-    only known once it exists, so ``_run_review`` checks that.
+    two naming the same commit (compared lowercased); a range without
+    ``--pr-url`` to resolve it in; two or more of ``--as-of``,
+    ``--description-file`` and ``--no-description``, naming every one
+    given; an ``--as-of`` that :func:`_parse_as_of` refuses; and an
+    ``--as-of`` without ``--pr-url``, whose history it reads. Whether the
+    forge can fetch the range is only known once it exists, so
+    ``_run_review`` checks that.
     """
     if url is None and diff_file is None:
         raise ConfigError("--pr-url: required unless --diff-file is given")
@@ -587,12 +643,68 @@ def _resolve_replay(
                 "--base-sha/--head-sha: need --pr-url (the range is resolved in "
                 "that PR's repository)"
             )
-    if head_sha is None and not no_threads and diff_file is None:
+    chosen = [
+        flag for flag, given in (
+            ("--as-of", as_of is not None),
+            ("--description-file", description_file is not None),
+            ("--no-description", bool(no_description)),
+        ) if given
+    ]
+    if len(chosen) > 1:
+        raise ConfigError(
+            f"{'/'.join(chosen)}: cannot be combined (give at most one of "
+            "--as-of, --description-file and --no-description)"
+        )
+    cutoff = _parse_as_of(as_of) if as_of is not None else None
+    if cutoff is not None and url is None:
+        raise ConfigError(
+            "--as-of: needs --pr-url (the description history is read from "
+            "that PR)"
+        )
+    if head_sha is None and not no_threads and diff_file is None and not chosen:
         return None
     return _ReplayRequest(
         base_sha=base_sha, head_sha=head_sha, no_threads=bool(no_threads),
-        diff_file=diff_file,
+        diff_file=diff_file, as_of=cutoff, description_file=description_file,
+        no_description=bool(no_description),
     )
+
+
+def _parse_as_of(value: str) -> datetime:
+    """Parse ``--as-of`` into a timezone-aware UTC ``datetime``; refusals are a ``ConfigError``.
+
+    The value is ISO-8601 as :meth:`datetime.fromisoformat` reads it, and it
+    must carry a UTC offset (``Z`` or ``+02:00``). A date alone
+    (``2026-05-01``) and a time without an offset are refused rather than
+    read in this machine's time zone or at an assumed hour, because either
+    guess would move the cutoff with the host running the replay. A time
+    whose UTC equivalent falls outside ``datetime``'s range is refused too.
+    """
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        pass
+    else:
+        raise ConfigError(
+            f"--as-of: {value!r} is a date without a time; give a time with a "
+            f"UTC offset, such as '{day.isoformat()}T00:00:00Z'"
+        )
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ConfigError(
+            "--as-of: must be an ISO-8601 time with a UTC offset, such as "
+            f"'2026-05-01T09:30:00Z', got {value!r}"
+        ) from None
+    if parsed.utcoffset() is None:
+        raise ConfigError(
+            f"--as-of: {value!r} has no UTC offset; add one, such as 'Z' for "
+            "UTC or '+02:00'"
+        )
+    try:
+        return parsed.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise ConfigError(f"--as-of: {value!r} is out of range in UTC") from None
 
 
 def _read_diff_file(path: str) -> str:
@@ -611,6 +723,42 @@ def _read_diff_file(path: str) -> str:
         raise ConfigError(
             f"--diff-file: cannot read {path!r}: {exc.strerror or exc}"
         ) from exc
+
+
+def _read_description_file(path: str) -> str:
+    """Read the ``--description-file`` text; every failure is a ``ConfigError`` naming the flag.
+
+    The file is configuration, not review input, so it is read as the rules
+    file is: through :func:`prxref.text_inputs.check_readable_path` (a path
+    under the working directory that symlinks out of it is refused, and so
+    is anything but a regular file), then decoded strictly by
+    :func:`prxref.text_inputs.decode_text` (a leading BOM dropped, CRLF and
+    CR folded to LF). A missing, unreadable or non-regular file, invalid
+    UTF-8 and NUL bytes each raise. A blank file is not an error: it is an
+    empty description.
+    """
+    try:
+        resolved = check_readable_path(path, confine=True)
+        with open(resolved, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise OSError(errno.EINVAL, "not a regular file", path)
+            raw = fh.read()
+    except OSError as exc:
+        raise ConfigError(
+            f"--description-file: cannot read {path!r}: {exc.strerror or exc}"
+        ) from exc
+    try:
+        text = decode_text(raw)
+    except UnicodeDecodeError as exc:
+        offset = exc.start + (len(codecs.BOM_UTF8) if raw.startswith(codecs.BOM_UTF8) else 0)
+        raise ConfigError(
+            f"--description-file: {path!r} is not UTF-8 text ({exc.reason} at byte {offset})"
+        ) from exc
+    if "\x00" in text:
+        raise ConfigError(
+            f"--description-file: {path!r} contains NUL bytes; expected Markdown or plain text"
+        )
+    return text
 
 
 def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
@@ -681,16 +829,24 @@ def _run_review(
     head_sha: str | None = None,
     no_threads: bool = False,
     diff_file: str | None = None,
+    as_of: str | None = None,
+    description_file: str | None = None,
+    no_description: bool = False,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
-        diff_file=diff_file,
+        diff_file=diff_file, as_of=as_of, description_file=description_file,
+        no_description=no_description,
     )
     # The diff file is read with the flags, before the URL is parsed, so an
     # unreadable one exits 2 whatever the URL. Without --pr-url it is the
     # whole input: a synthetic "local" ref, and no forge is ever built.
     if replay is not None and replay.diff_file is not None:
         replay = replace(replay, diff_text=_read_diff_file(replay.diff_file))
+    if replay is not None and replay.description_file is not None:
+        replay = replace(
+            replay, description_text=_read_description_file(replay.description_file),
+        )
     if url is None:
         ref = LocalDiffForge.ref_for(replay.diff_file)
     else:
@@ -895,6 +1051,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
             head_sha=args.head_sha,
             no_threads=args.no_threads,
             diff_file=args.diff_file,
+            as_of=args.as_of,
+            description_file=args.description_file,
+            no_description=args.no_description,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
