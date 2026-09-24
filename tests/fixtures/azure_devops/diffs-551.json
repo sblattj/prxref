@@ -1,0 +1,117 @@
+{
+  "allChangesIncluded": true,
+  "changeCounts": {
+    "Edit": 9,
+    "Delete": 1,
+    "Add": 1
+  },
+  "commonCommit": "d82bd8eda4e7e90fd2dece6e67e13fc8c9d2dbe7",
+  "baseCommit": "d82bd8eda4e7e90fd2dece6e67e13fc8c9d2dbe7",
+  "targetCommit": "41449294c4fc8ffdfb063a9176b560dc70ef7dd0",
+  "aheadCount": 7,
+  "behindCount": 0,
+  "changes": [
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "c3bfc36c4d673d93c2b0fde03486f599a9c3106e",
+        "originalObjectId": "b26f2671c8e6551a473700a98e1f4cb9dc2f9ca7",
+        "gitObjectType": "tree",
+        "path": "/AcmeWeb",
+        "isFolder": true
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "205567414040509f84f1dd39087363a33256b64a",
+        "originalObjectId": "16c76c77622c30b4f94495561b800f3922ffb2b7",
+        "gitObjectType": "tree",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate",
+        "isFolder": true
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "5be030b33f038b2a6f6dc314a82746b0bf6e35ce",
+        "originalObjectId": "fd1f11c1acea4ad73a8f3d1fe250801a2f8c80f5",
+        "gitObjectType": "tree",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell",
+        "isFolder": true
+      }
+    },
+    {
+      "changeType": "delete",
+      "item": {
+        "objectId": "",
+        "originalObjectId": "87d2fbfd3750367237157fd7d031b3390823e18b",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell/KeyVault - Copy.ps1"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "a6cb7aaf5d490fda1c1d169a8f681885bc4d14c1",
+        "originalObjectId": "87d2fbfd3750367237157fd7d031b3390823e18b",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell/KeyVault.ps1"
+      }
+    },
+    {
+      "changeType": "add",
+      "item": {
+        "objectId": "b66d7f74f0ecadb879e06bcd8820d46cea3b9432",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/PowerShell/KeyVaultCleanup.ps1"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "d840a3ed95397c469773564f31f609948fcd5320",
+        "originalObjectId": "ad7512d769af208278b9abe7825341eedc8c8a83",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/AcmeWeb.Environment.ARMTemplate.deployproj"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "77310b16d7c896bdfd2515d2f81c2be7ece561ae",
+        "originalObjectId": "625280e4a05a1ea177e4f0881dd287634e33c5f3",
+        "gitObjectType": "tree",
+        "path": "/AcmeWeb/AcmeWeb.FunctionalTests",
+        "isFolder": true
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "898c90b50be7dd5c7d810e41e241826fd9b2ad33",
+        "originalObjectId": "3b0126bb2b1a7d93caa670b697c73901cbe47dd8",
+        "gitObjectType": "blob",
+        "path": "/AcmeWeb/AcmeWeb.FunctionalTests/test.runsettings"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "aeda269da90452b18d97b7d627b8e1a60865b2ed",
+        "originalObjectId": "8e0e451af030956a450401ac0de200634dac3a61",
+        "gitObjectType": "blob",
+        "path": "/azure-pipelines-build-template.yml"
+      }
+    },
+    {
+      "changeType": "edit",
+      "item": {
+        "objectId": "b21e69b9340d9472c16be2ac10f0cde0f48579ab",
+        "originalObjectId": "5b88de2b26220c902512cb56b36be818fcb6cd88",
+        "gitObjectType": "blob",
+        "path": "/azure-pipelines.yml"
+      }
+    }
+  ]
+}

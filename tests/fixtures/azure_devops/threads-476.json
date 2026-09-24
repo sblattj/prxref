@@ -1,0 +1,122 @@
+{
+  "value": [
+    {
+      "id": 2695,
+      "status": "fixed",
+      "isDeleted": false,
+      "threadContext": {
+        "filePath": "/AcmeWeb/AcmeWeb.Environment.ARMTemplate/Templates/FrontDoor.json"
+      },
+      "pullRequestThreadContext": {
+        "iterationContext": {
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 1
+        },
+        "changeTrackingId": 1
+      },
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "content": "Submitted conflict resolution for the file(s).\n- [/AcmeWeb/AcmeWeb.Environment.ARMTemplate/Templates/FrontDoor.json](https://dev.azure.com/acme/AcmeWeb/_git/AcmeWeb/pullrequest/476?_a=ms-devlabs.conflicts-tab.conflict-tab&contributionId=ms-devlabs.conflicts-tab.conflict-tab&path=/AcmeWeb/AcmeWeb.Environment.ARMTemplate/Templates/FrontDoor.json) ",
+          "commentType": "text",
+          "author": {
+            "displayName": "Example User",
+            "uniqueName": null
+          }
+        }
+      ]
+    },
+    {
+      "id": 2696,
+      "isDeleted": false,
+      "threadContext": null,
+      "pullRequestThreadContext": null,
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "content": "Example User joined as a reviewer",
+          "commentType": "system",
+          "author": {
+            "displayName": "Microsoft.VisualStudio.Services.TFS",
+            "uniqueName": null
+          }
+        }
+      ]
+    },
+    {
+      "id": 2697,
+      "isDeleted": false,
+      "threadContext": null,
+      "pullRequestThreadContext": null,
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "content": "Example User voted 10",
+          "commentType": "system",
+          "author": {
+            "displayName": "Example User",
+            "uniqueName": null
+          }
+        }
+      ]
+    },
+    {
+      "id": 2698,
+      "isDeleted": false,
+      "threadContext": null,
+      "pullRequestThreadContext": null,
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "content": "Example User set auto-complete",
+          "commentType": "system",
+          "author": {
+            "displayName": "Microsoft.VisualStudio.Services.TFS",
+            "uniqueName": null
+          }
+        }
+      ]
+    },
+    {
+      "id": 2699,
+      "isDeleted": false,
+      "threadContext": null,
+      "pullRequestThreadContext": null,
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "content": "Policy status has been updated",
+          "commentType": "system",
+          "author": {
+            "displayName": "Example User",
+            "uniqueName": null
+          }
+        }
+      ]
+    },
+    {
+      "id": 2700,
+      "isDeleted": false,
+      "threadContext": null,
+      "pullRequestThreadContext": null,
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "content": "Example User updated the pull request status to Completed",
+          "commentType": "system",
+          "author": {
+            "displayName": "Example User",
+            "uniqueName": null
+          }
+        }
+      ]
+    }
+  ],
+  "count": 6
+}
