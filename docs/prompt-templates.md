@@ -73,6 +73,13 @@ the comma it needs. When the PR has threads, the sweep's user prompt also
 gains an `### Existing discussion` block after the template; it is not a
 placeholder.
 
+The example finding's title is read back out of your template on every run.
+A finding whose title, normalized, equals it is dropped as
+`echoes the prompt's example: "<title>"`, because a model that copies the
+example reports nothing it found. Only fenced blocks tagged `json` or left
+untagged are read. So give the example a title that no real finding of yours
+should carry. See [Example echoes](quality.md#example-echoes).
+
 ### `summary.md`
 
 The whole file is filled: `{verdict}`, `{title}`, `{file_count}`,

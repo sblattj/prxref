@@ -1,9 +1,9 @@
 """Deterministic quality passes over worker findings.
 
-Fourteen passes run before posting, in the order ``orchestrate_review``
+Fifteen passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, and pass 11 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on. A fifteenth deterministic check, the release-shaped-PR
+severity map, and pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on. A sixteenth deterministic check, the release-shaped-PR
 heuristic, is not a pass at all: ``heuristics.release_shape_findings``
 ADDS a finding before pass 1 and it then flows through every pass below
 exactly like a model finding. Every ``drop_reason`` prefix these passes
@@ -24,11 +24,20 @@ emit is tabulated for operators in ``docs/quality.md``.
    map, so ``apply_severity_consistency`` never raises a same-title
    sibling to ``spec`` on the strength of an ungrounded label. It drops
    nothing.
-3. ``apply_location_validation``: drop findings whose ``file`` names no
+3. ``apply_example_echo_check``: drop a finding whose normalized title
+   equals the title of an example finding in the worker or sweep prompt
+   template in force for the run, packaged or overridden
+   (``echoes the prompt's example: "<title>"``): the model copied the
+   output example rather than reporting a defect. It is the first pass that
+   drops, so an echo never reaches a thread, consistency or grouping
+   comparison, a cap, or sweep dedup, and its audit copy keeps the model's
+   own anchor. The match is exact, so a title that only resembles an
+   example stays.
+4. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
    bullet anchored to nothing.
-4. ``apply_manifest_claim_check``: for findings on a manifest or
+5. ``apply_manifest_claim_check``: for findings on a manifest or
    npm-family lockfile (``package.json``, ``bun.lock``, ...), drop a
    claim whose named dependency is not the key on the anchored line
    (``anchor mismatch:``) or sits under a different dependency section
@@ -36,7 +45,7 @@ emit is tabulated for operators in ``docs/quality.md``.
    own hunk holds no section header, the served full-file lines decide
    the enclosing section. It runs BEFORE ``apply_line_align`` so it
    reads the model's raw anchor.
-5. ``apply_line_align``: a line explicitly cited in the finding's own
+6. ``apply_line_align``: a line explicitly cited in the finding's own
    title or body (``line 553``, ``at line 553``, an own-file
    ``path:line``) outranks a drifted ``line`` field whenever the cited
    line lands on an added line — or a context line within tolerance of
@@ -52,33 +61,33 @@ emit is tabulated for operators in ``docs/quality.md``.
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-6. ``apply_thread_dedup``: drop findings that duplicate an already-open
+7. ``apply_thread_dedup``: drop findings that duplicate an already-open
    or existing thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``.
-7. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+8. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing thread already argued out — same path plus shared
    distinctive tokens, with NO line test, because line alignment has already
    demoted a file-level finding to line 0 by this point
    (``settled in thread: <author>``).
-8. ``apply_severity_consistency``: findings sharing one normalized title —
+9. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
    join the same group (issue #30).
-9. ``apply_removal_claim_check``: drop findings whose removal verb governs
-   a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
-   path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
-   header produces when a worker reads a copy as a move (issue #03).
-   Only a claim that NAMES a diff path is judged, so a finding about a
-   removed guard or constant is untouched.
-10. ``apply_hedge_gate``: drop findings whose title or body conditions the
+10. ``apply_removal_claim_check``: drop findings whose removal verb governs
+    a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
+    path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
+    header produces when a worker reads a copy as a move (issue #03).
+    Only a claim that NAMES a diff path is judged, so a finding about a
+    removed guard or constant is untouched.
+11. ``apply_hedge_gate``: drop findings whose title or body conditions the
     defect on a precondition the worker never established from the diff
     ("If X still leases a client", "unless the backfill already ran"),
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-11. ``apply_rule_grouping``: fold chunk findings in one file that name the
+12. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -86,7 +95,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-12. ``apply_quality_gate``: drop findings below the confidence floor
+13. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -95,7 +104,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-13. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+14. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -109,7 +118,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-14. ``apply_containment_note``: a finding that asserts a throw, panic,
+15. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -122,11 +131,12 @@ so review runstores and logs can explain every filter decision. Use
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -2182,3 +2192,95 @@ def apply_spec_grounding(
         else f
         for f in findings
     ]
+
+
+EXAMPLE_ECHO_PREFIX: str = "echoes the prompt's example: "
+
+_EXAMPLE_FENCE_INFO: frozenset[str] = frozenset({"json", ""})
+_EXAMPLE_TITLE_RE = re.compile(r'"title"\s*:\s*"((?:[^"\\\n]|\\.)*)"')
+
+
+def prompt_example_titles(*templates: str) -> tuple[str, ...]:
+    """The example-finding titles written into prompt templates, in first-seen order.
+
+    Reads each template's fenced code blocks whose info string is ``json``
+    (any case) or empty, and takes every ``"title": "<text>"`` string pair
+    in them, JSON escapes decoded; a block of any other language (the
+    worker's ``diff`` block) is never read. It scans rather than parses,
+    because a packaged example is not valid JSON before rendering: the
+    ``{scope_example}{rule_example}`` slots follow its last value. An empty
+    title and a repeat are skipped. Pure; reads no file.
+    """
+    titles: list[str] = []
+    for template in templates:
+        for block in _fenced_blocks(template if isinstance(template, str) else ""):
+            for raw in _EXAMPLE_TITLE_RE.findall(block):
+                title = _json_string(raw)
+                if title.strip() and title not in titles:
+                    titles.append(title)
+    return tuple(titles)
+
+
+def _fenced_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    info: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        fence = line.strip().startswith("```")
+        if info is None:
+            if fence:
+                info = line.strip()[3:].strip().casefold()
+                body = []
+        elif fence:
+            if info in _EXAMPLE_FENCE_INFO:
+                blocks.append("\n".join(body))
+            info = None
+        else:
+            body.append(line)
+    return blocks
+
+
+def _json_string(raw: str) -> str:
+    try:
+        value = json.loads(f'"{raw}"')
+    except ValueError:
+        return raw
+    return value if isinstance(value, str) else raw
+
+
+def apply_example_echo_check(
+    findings: Sequence[Finding], example_titles: Iterable[str],
+) -> list[Finding]:
+    """Drop a finding whose title repeats a prompt template's example finding.
+
+    ``example_titles`` are the titles of the example findings in the
+    templates the run's review units were shown (:func:`prompt_example_titles` of
+    the worker and sweep templates in force, packaged or overridden). A
+    finding whose :func:`normalize_title` equals one of theirs copied the
+    output example instead of reporting a defect, and gains ``drop_reason``
+    ``echoes the prompt's example: "<title>"``, naming the example's title
+    as the template writes it. The match is exact after normalization, so
+    a title that only resembles an example stays. Chunk and sweep findings
+    are treated alike, against every title given.
+
+    Pure and order-preserving: returns a new list of the same length,
+    already-dropped findings and findings without a string title pass
+    through untouched, and with no usable example title it drops nothing.
+    """
+    examples: dict[str, str] = {}
+    for title in example_titles:
+        key = normalize_title(title) if isinstance(title, str) else ""
+        if key:
+            examples.setdefault(key, title)
+    out: list[Finding] = []
+    for f in findings:
+        example = (
+            examples.get(normalize_title(f.title))
+            if examples and f.drop_reason is None and isinstance(f.title, str)
+            else None
+        )
+        out.append(
+            f if example is None
+            else replace(f, drop_reason=f'{EXAMPLE_ECHO_PREFIX}"{example}"')
+        )
+    return out

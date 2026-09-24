@@ -59,6 +59,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    maps to; drops nothing) → ``apply_spec_grounding`` (on an ungrounded
    run every ``spec`` finding, the sweep's included, is relabelled
    ``warning``, counted by a ``specs relabel`` trace event; drops nothing)
+   → ``apply_example_echo_check`` (the first pass that drops: a finding
+   whose normalized title equals an example finding's title in the worker
+   or sweep template the run rendered, packaged or overridden, is dropped
+   as ``echoes the prompt's example: "<title>"``, counted by a
+   ``prompts echo`` trace event)
    → ``apply_location_validation`` (a ``file``
    naming no path of the parsed diff is dropped, not rendered) →
    ``apply_manifest_claim_check`` (a
@@ -168,11 +173,12 @@ from .forges.base import (
 )
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
-from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, placeholders
+from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
 from .quality import (
     GROUPED_INTO_PREFIX,
     active,
     apply_containment_note,
+    apply_example_echo_check,
     apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
@@ -188,6 +194,7 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    prompt_example_titles,
 )
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .trace import Tracer, get_tracer
@@ -546,6 +553,9 @@ def orchestrate_review(
     through the one :class:`reviewer.PromptContext`, and the ``summary``
     override is the template of every summary render, the empty-diff summary
     and the inline-accounting re-post included, but never of the error notice.
+    The example-finding titles of the worker and sweep templates the units
+    rendered, overridden or packaged, are what
+    :func:`quality.apply_example_echo_check` drops echoes of.
 
     ``scoped_rules`` is the loaded path-scoped review rules
     (:class:`prxref.rules.ScopedRules`, as
@@ -1046,6 +1056,24 @@ def orchestrate_review(
         tracer.event("specs", "relabel", findings=relabelled)
     findings = graded
 
+    # The first pass that drops: an echo of the prompt's own example never
+    # reaches the thread, consistency or grouping comparisons, a cap, or
+    # sweep dedup, and its audit copy keeps the model's raw anchor. 1:1 and
+    # order-preserving, so sweep_start still marks the boundary.
+    checked = apply_example_echo_check(findings, _example_titles(prompt_context))
+    echoes = sum(
+        1
+        for before, after in zip(findings, checked, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    if echoes:
+        logger.info(
+            "example echo: dropped %d finding(s) titled like a prompt template's example finding",
+            echoes,
+        )
+        tracer.event("prompts", "echo", findings=echoes)
+    findings = checked
+
     findings = apply_location_validation(findings, [f.path for f in files])
     # BEFORE apply_line_align, deliberately: the manifest check compares the
     # model's raw anchor against the key and section it claims, and realignment
@@ -1299,6 +1327,34 @@ def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
         rule = normalize_rule(f.rule) if active else None
         out.append(f if rule == f.rule else replace(f, rule=rule))
     return out
+
+
+def _example_titles(prompt_context: PromptContext) -> tuple[str, ...]:
+    """The example-finding titles of the worker and sweep templates this run rendered.
+
+    Each template is the one the review units rendered: the override text
+    ``prompt_context`` carries (``worker_template`` / ``systemic_template``),
+    else the packaged file, read through
+    :func:`prompt_templates.packaged_text` rather than
+    ``reviewer.load_prompt``, which the orchestrator asks for the summary
+    template only. The titles come from :func:`quality.prompt_example_titles`
+    and feed :func:`quality.apply_example_echo_check`. A packaged template
+    that cannot be read contributes no title and logs one WARNING, so this
+    never raises out of the review.
+    """
+    texts: list[str] = []
+    for override, name in (
+        (prompt_context.worker_template, "worker"),
+        (prompt_context.systemic_template, "systemic"),
+    ):
+        if override:
+            texts.append(override)
+            continue
+        try:
+            texts.append(packaged_text(name))
+        except (OSError, ValueError) as e:
+            logger.warning("example echo check: cannot read packaged %s.md (continuing without it): %s", name, e)
+    return prompt_example_titles(*texts)
 
 
 def _group_findings(
