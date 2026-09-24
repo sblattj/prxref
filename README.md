@@ -174,7 +174,24 @@ The service exposes:
 
 ## Finding Markers
 
-<!-- 0.14 placeholder: W64B -->
+Each severity has one glyph. It is the same in the summary's counts line, the summary's findings list, and the header of every inline comment:
+
+| Marker | Severity | Meaning |
+|---|---|---|
+| 🟥 | `error` | The change breaks at runtime or is a real bug. |
+| 🟧 | `warning` | A risk or smell the diff introduces or worsens. |
+| 🔍 | `spec` | The diff contradicts a constraint quoted from a spec source. See [Review Against a Spec or Ticket](#review-against-a-spec-or-ticket). |
+| ⬜ | `outofscope` | Minor: misleading naming, a TODO without context, dead code the diff adds. An unrecognised severity also renders ⬜. |
+
+🟦 is not a severity. It marks a finding that the [ticket context](#ticket-context-and-scope) puts outside the ticket (`scope` is `out`), and it goes in front of the severity glyph, never in place of it:
+
+- **Summary:** those findings are listed after the others, under their own heading, for example `**🟦 Outside the ticket (2)**` followed by ``- 🟦 🟧 `src/app.py:12` — …``. If every finding is outside the ticket, the first list reads `No in-ticket findings.`.
+- **Inline comments:** the header reads, for example, `🤖 🟦 🟧 **[WARNING · OUTSIDE TICKET] …**`.
+- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket.
+
+Findings inside the ticket (`in`) and findings the reviewer could not place (`unknown`) carry no scope marker, so a run without a ticket context renders exactly the severity glyphs. Scope never changes a finding's severity. It is not counted separately either: the counts line counts every active finding by severity, and the verdict, the error cap, and `PRXREF_FAIL_ON` ignore scope.
+
+Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every run, and 🟦 means only "outside the ticket".
 
 ## CLI Flags
 

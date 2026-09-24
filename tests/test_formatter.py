@@ -1,13 +1,15 @@
 """Tests for prxref.formatter: inline comments, summary, attribution."""
 from __future__ import annotations
 
+import pytest
+
 from prxref.formatter import (
     _DEFAULT_SUMMARY_TEMPLATE,
     build_attribution,
     format_inline_comment,
     format_summary,
 )
-from prxref.triage import Finding
+from prxref.triage import SCOPE_IN, SCOPE_OUT, SCOPE_UNKNOWN, Finding
 
 
 def _f(**kwargs) -> Finding:
@@ -223,3 +225,64 @@ class TestTemplateFallback:
         ):
             assert "{" + key + "}" not in text
         assert _DEFAULT_SUMMARY_TEMPLATE  # inline fallback stays non-empty
+
+
+class TestScopeMarkers:
+    """Issue #64: scope ``out`` prefixes the severity glyph with 🟦; ``in``
+    and ``unknown`` render byte-identically to a finding without a ticket."""
+
+    @pytest.mark.parametrize("scope", [SCOPE_IN, SCOPE_UNKNOWN])
+    def test_inline_comment_in_and_unknown_are_unchanged(self, scope):
+        text = format_inline_comment(
+            _f(severity="error", title="T", body="B", scope=scope), "attr-here"
+        )
+        assert text == "🟥 **T**\n\nB\n\n*attr-here*"
+
+    def test_inline_comment_out_of_ticket_is_prefixed_and_labelled(self):
+        text = format_inline_comment(
+            _f(severity="error", title="T", body="B", scope=SCOPE_OUT), "attr-here"
+        )
+        assert text == "🟦 🟥 **[OUTSIDE TICKET] T**\n\nB\n\n*attr-here*"
+
+    def test_inline_comment_out_keeps_the_severity_normalization(self):
+        assert format_inline_comment(
+            _f(severity=" ERROR ", scope=SCOPE_OUT), "a"
+        ).startswith("🟦 🟥 **[OUTSIDE TICKET] ")
+        assert format_inline_comment(
+            _f(severity="bogus", scope=SCOPE_OUT), "a"
+        ).startswith("🟦 ⬜ **[OUTSIDE TICKET] ")
+
+    def test_table_row_out_of_ticket_is_prefixed(self):
+        text = _summary(
+            findings_active=[
+                _f(severity="error", file="z.py", line=2, title="Boom", scope=SCOPE_OUT),
+                _f(severity="spec", file="z.py", line=3, title="Breach", scope=SCOPE_IN),
+                _f(severity="outofscope", file="z.py", line=4, title="Nit"),
+            ]
+        )
+        assert "| 🟦 🟥 | z.py:2 | Boom |" in text
+        assert "| 🔍 | z.py:3 | Breach |" in text
+        assert "| ⬜ | z.py:4 | Nit |" in text
+
+    def test_scope_does_not_reorder_the_table_or_change_the_counts(self):
+        text = _summary(
+            findings_active=[
+                _f(severity="warning", file="z.py", line=1, scope=SCOPE_IN),
+                _f(severity="error", file="z.py", line=2, scope=SCOPE_OUT),
+            ]
+        )
+        assert text.index("z.py:2") < text.index("z.py:1")
+        assert "🟥 1 error · 🟧 1 warning" in text
+
+    @pytest.mark.parametrize("scope", [SCOPE_IN, SCOPE_UNKNOWN])
+    def test_summary_in_and_unknown_are_byte_identical_to_the_default(self, scope):
+        def scoped(s):
+            return [
+                _f(severity=sev, line=n, scope=s)
+                for n, sev in enumerate(["error", "warning", "spec", "outofscope", "x"], 1)
+            ]
+
+        assert _summary(findings_active=scoped(scope)) == _summary(
+            findings_active=scoped(SCOPE_UNKNOWN)
+        )
+        assert "🟦" not in _summary(findings_active=scoped(scope))

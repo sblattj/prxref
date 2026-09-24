@@ -356,12 +356,21 @@ def _print_summary(
 
 
 def _fmt_finding_line(f: Any) -> str:
-    """Render one active finding as ``<severity> <file>:<line> <title> (confidence 0.NN)``."""
+    """Render one active finding as ``<severity> <file>:<line> <title> (confidence 0.NN)``.
+
+    A finding the ticket judged gains `` [scope: in]`` or `` [scope: out]``
+    after the frozen prefix; ``unknown`` (always the case without a ticket)
+    adds nothing.
+    """
     severity = getattr(f, "severity", None) or ""
     location = f"{getattr(f, 'file', '')}:{getattr(f, 'line', 0)}"
     title = getattr(f, "title", None) or ""
     confidence = getattr(f, "confidence", None) or 0.0
-    return f"{severity} {location} {title} (confidence {confidence:.2f})"
+    line = f"{severity} {location} {title} (confidence {confidence:.2f})"
+    scope = getattr(f, "scope", None)
+    if scope in (SCOPE_IN, SCOPE_OUT):
+        line = f"{line} [scope: {scope}]"
+    return line
 
 
 def _fmt_indented_body(body: str) -> str:

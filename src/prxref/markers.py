@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from .triage import SCOPE_OUT
+from .triage import SCOPE_OUT, Finding
 
 SEVERITY_MARKERS: Mapping[str, str] = MappingProxyType({
     "error": "🟥",
@@ -52,3 +52,21 @@ def marker_for(severity: str, scope: str) -> str:
     """
     marker = severity_marker(severity)
     return f"{OUT_OF_TICKET_MARKER} {marker}" if scope == SCOPE_OUT else marker
+
+
+def inline_header(f: Finding) -> str:
+    """Return the first line of the pipeline's inline comment for ``f``.
+
+    The shape is ``🤖 <marker> **[<SEVERITY>] <title>** (`<file>:<line>`)``,
+    with the marker from :func:`marker_for` and ``:<line>`` omitted for a
+    file-level finding. A finding outside the ticket also carries its
+    :data:`SCOPE_LABELS` entry inside the brackets, as
+    ``[WARNING · OUTSIDE TICKET]``; scope ``"in"`` and ``"unknown"`` render
+    exactly the severity header.
+    """
+    label = f.severity.upper()
+    scope_label = SCOPE_LABELS.get(f.scope)
+    if scope_label:
+        label = f"{label} · {scope_label}"
+    loc = f"{f.file}:{f.line}" if f.line > 0 else f.file
+    return f"🤖 {marker_for(f.severity, f.scope)} **[{label}] {f.title}** (`{loc}`)"
