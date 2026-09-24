@@ -56,6 +56,7 @@ from importlib import resources
 from typing import Any
 
 from .chunk_context import sibling_summary_block
+from .costs import valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
@@ -453,6 +454,8 @@ def _invoke_and_parse(
     meta["input_tokens"] = result.input_tokens
     meta["output_tokens"] = result.output_tokens
     meta["model"] = result.model
+    meta["cost_usd"] = valid_usd(getattr(result, "cost_usd", None))
+    meta["cost_source"] = str(getattr(result, "cost_source", "") or "") if meta["cost_usd"] is not None else ""
 
     stop_reason = _budget_stop_reason(result)
     truncated_error = _TRUNCATED_ERROR.format(budget=budget, reason=stop_reason)
