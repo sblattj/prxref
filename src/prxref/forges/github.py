@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from collections.abc import Iterator, Sequence
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -17,11 +18,14 @@ from ._diff_render import render_diff_entries
 from .base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
+    DescriptionVersion,
     FeedReadError,
     InlineComment,
     PRData,
+    PRHistory,
     PRRef,
     Thread,
+    TitleRename,
     with_summary_marker,
 )
 
@@ -583,3 +587,314 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, removed, e,
             )
         return removed
+
+    _PR_HISTORY_QUERY = """
+query PrxrefPRHistory(
+  $owner: String!, $repo: String!, $number: Int!, $pageSize: Int!,
+  $head: GitObjectID, $byHead: Boolean!, $byLastCommit: Boolean!,
+  $withEdits: Boolean!, $editsAfter: String,
+  $withRenames: Boolean!, $renamesAfter: String,
+  $withReviews: Boolean!, $reviewsAfter: String,
+  $withComments: Boolean!, $commentsAfter: String
+) {
+  repository(owner: $owner, name: $repo) {
+    object(oid: $head) @include(if: $byHead) {
+      ... on Commit { committedDate }
+    }
+    pullRequest(number: $number) {
+      createdAt
+      author { __typename login }
+      commits(last: 1) @include(if: $byLastCommit) {
+        nodes { commit { oid committedDate } }
+      }
+      userContentEdits(first: $pageSize, after: $editsAfter) @include(if: $withEdits) {
+        pageInfo { hasNextPage endCursor }
+        nodes { editedAt deletedAt diff }
+      }
+      timelineItems(itemTypes: [RENAMED_TITLE_EVENT], first: $pageSize, after: $renamesAfter)
+        @include(if: $withRenames) {
+        filteredCount
+        pageInfo { hasNextPage endCursor }
+        nodes { ... on RenamedTitleEvent { createdAt previousTitle currentTitle } }
+      }
+      reviews(first: $pageSize, after: $reviewsAfter) @include(if: $withReviews) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          submittedAt
+          body
+          author { __typename login }
+          comments(first: 1) { nodes { body } }
+        }
+      }
+      comments(first: $pageSize, after: $commentsAfter) @include(if: $withComments) {
+        pageInfo { hasNextPage endCursor }
+        nodes { createdAt body author { __typename login } }
+      }
+    }
+  }
+}
+"""
+
+    _PR_HISTORY_CONNECTIONS: tuple[tuple[str, str, str], ...] = (
+        ("userContentEdits", "withEdits", "editsAfter"),
+        ("timelineItems", "withRenames", "renamesAfter"),
+        ("reviews", "withReviews", "reviewsAfter"),
+        ("comments", "withComments", "commentsAfter"),
+    )
+
+    def get_pr_history(self, ref: PRRef, *, head_sha: str | None = None) -> PRHistory:
+        """Return the PR's description versions, title renames and replay cutoff inputs.
+
+        Reads GitHub's GraphQL API, which has no anonymous access: without a
+        token from the same lookup the REST calls use, it raises
+        ``FeedReadError`` before any request is made. The endpoint is
+        ``https://api.github.com/graphql`` for github.com and
+        ``https://{host}/api/graphql`` for an Enterprise Server host; the
+        Enterprise path follows GitHub's documented layout and has not been
+        probed against a live instance.
+
+        Each POST carries one query that reads the next page of every
+        connection still open: ``userContentEdits`` (one node per description
+        version, newest first, the original included once the body has been
+        edited), the ``RENAMED_TITLE_EVENT`` timeline, ``reviews`` and the
+        conversation ``comments``. The first POST also reads ``createdAt``,
+        the PR author and the head commit date: ``committedDate`` of
+        ``head_sha`` when one is given, else of the PR's last commit. At most
+        ``_MAX_PAGES`` POSTs are made.
+
+        ``first_review_at`` is the earliest submitted review or conversation
+        comment written by a ``User`` other than the PR author and carrying
+        neither ``ATTRIBUTION_MARKER`` nor ``SUMMARY_MARKER``; a review counts
+        as prxref's own when its body or its first inline comment carries one.
+
+        When the budget runs out with description versions still unread, the
+        history is returned with ``complete=False`` and the newest versions
+        read. When the title renames, the reviews or the comments could not
+        all be read, it is returned with ``complete=False`` and no description
+        versions, which pins nothing; ``first_review_at`` is then ``None`` if
+        the reviews or comments were the ones cut short.
+
+        Raises ``FeedReadError`` on a missing token, a transport failure, a
+        non-OK status (401 and 403 included), an unreadable body, a 200 whose
+        body carries a GraphQL ``errors`` array, a PR the response does not
+        contain, or a timestamp that is missing, malformed or naive.
+        """
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        headers = self._headers(ref.host)
+        if "Authorization" not in headers:
+            env_names = (
+                "PRXREF_GITHUB_TOKEN"
+                if ref.host.lower() == "github.com"
+                else "PRXREF_GITHUB_ENTERPRISE_TOKEN or PRXREF_GITHUB_TOKEN"
+            )
+            raise FeedReadError(
+                f"PR history for {where} needs a token: GitHub's GraphQL API "
+                f"refuses anonymous reads; set {env_names}"
+            )
+
+        cursors: dict[str, str | None] = {field: None for field, _, _ in self._PR_HISTORY_CONNECTIONS}
+        nodes: dict[str, list[dict]] = {field: [] for field in cursors}
+        open_fields = set(cursors)
+        renames_expected: object = None
+
+        repository = self._post_pr_history_page(
+            ref, headers, self._pr_history_variables(ref, head_sha, cursors, open_fields, first_page=True),
+        )
+        pr = repository["pullRequest"]
+        created_at = self._history_time(pr.get("createdAt"), "createdAt", where)
+        author = pr.get("author")
+        pr_author = author.get("login") if isinstance(author, dict) else None
+        head_committed_at = self._head_committed_at(repository, pr, head_sha, where)
+        pages = 1
+        while True:
+            for field in sorted(open_fields):
+                connection = pr.get(field)
+                if not isinstance(connection, dict):
+                    raise FeedReadError(f"PR history for {where} returned no {field} connection")
+                nodes[field].extend(node for node in connection.get("nodes") or () if isinstance(node, dict))
+                if field == "timelineItems":
+                    renames_expected = connection.get("filteredCount")
+                page_info = connection.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    open_fields.discard(field)
+                    continue
+                cursor = page_info.get("endCursor")
+                if not isinstance(cursor, str) or not cursor:
+                    raise FeedReadError(f"PR history for {where} reported more {field} but no endCursor")
+                cursors[field] = cursor
+            if not open_fields or pages >= _MAX_PAGES:
+                break
+            repository = self._post_pr_history_page(
+                ref, headers, self._pr_history_variables(ref, head_sha, cursors, open_fields, first_page=False),
+            )
+            pr = repository["pullRequest"]
+            pages += 1
+
+        versions = tuple(self._description_versions(nodes["userContentEdits"], where))
+        renames, renames_readable = self._title_renames(nodes["timelineItems"], where)
+        first_review_at = self._first_review_at(nodes["reviews"], nodes["comments"], pr_author, where)
+        renames_short = (
+            "timelineItems" in open_fields
+            or not renames_readable
+            or (isinstance(renames_expected, int) and len(renames) < renames_expected)
+        )
+        feedback_short = "reviews" in open_fields or "comments" in open_fields
+        if renames_short or feedback_short:
+            logger.debug(
+                "PR history for %s is incomplete after %d page(s) (renames short: %s, reviews or "
+                "comments short: %s); it pins nothing",
+                where, pages, renames_short, feedback_short,
+            )
+            return PRHistory(
+                created_at=created_at,
+                title_renames=renames,
+                first_review_at=None if feedback_short else first_review_at,
+                head_committed_at=head_committed_at,
+                complete=False,
+            )
+        if "userContentEdits" in open_fields:
+            logger.debug(
+                "PR history for %s holds the newest %d description versions after %d page(s); older ones "
+                "were not read",
+                where, len(versions), pages,
+            )
+        return PRHistory(
+            created_at=created_at,
+            description_versions=versions,
+            title_renames=renames,
+            first_review_at=first_review_at,
+            head_committed_at=head_committed_at,
+            complete="userContentEdits" not in open_fields,
+        )
+
+    def _graphql_url(self, ref: PRRef) -> str:
+        if ref.host.lower() == "github.com":
+            return "https://api.github.com/graphql"
+        return f"https://{ref.host}/api/graphql"
+
+    def _pr_history_variables(
+        self,
+        ref: PRRef,
+        head_sha: str | None,
+        cursors: dict[str, str | None],
+        open_fields: set[str],
+        *,
+        first_page: bool,
+    ) -> dict[str, Any]:
+        variables: dict[str, Any] = {
+            "owner": ref.owner,
+            "repo": ref.repo,
+            "number": ref.number,
+            "pageSize": _PAGE_SIZE,
+            "head": head_sha if first_page else None,
+            "byHead": first_page and head_sha is not None,
+            "byLastCommit": first_page and head_sha is None,
+        }
+        for field, include_name, after_name in self._PR_HISTORY_CONNECTIONS:
+            variables[include_name] = field in open_fields
+            variables[after_name] = cursors[field]
+        return variables
+
+    def _post_pr_history_page(
+        self, ref: PRRef, headers: dict[str, str], variables: dict[str, Any],
+    ) -> dict[str, Any]:
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        try:
+            resp = self.session.post(
+                self._graphql_url(ref),
+                json={"query": self._PR_HISTORY_QUERY, "variables": variables},
+                headers=headers,
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            raise FeedReadError(f"PR history for {where} could not be read: {e}") from e
+        if not resp.ok:
+            raise FeedReadError(
+                f"PR history for {where} returned HTTP {resp.status_code}: {_response_detail(resp)}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as e:
+            raise FeedReadError(f"PR history for {where} returned an unreadable body: {e}") from e
+        if not isinstance(body, dict):
+            raise FeedReadError(f"PR history for {where} returned {type(body).__name__}, not an object")
+        if body.get("errors"):
+            raise FeedReadError(
+                f"PR history for {where} returned GraphQL errors: {_response_detail(resp)}"
+            )
+        repository = (body.get("data") or {}).get("repository")
+        if not isinstance(repository, dict) or not isinstance(repository.get("pullRequest"), dict):
+            raise FeedReadError(f"PR history for {where} returned no pull request")
+        return repository
+
+    @staticmethod
+    def _history_time(value: object, what: str, where: str) -> datetime:
+        if not isinstance(value, str):
+            raise FeedReadError(f"PR history for {where} carries no {what} timestamp")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as e:
+            raise FeedReadError(f"PR history for {where} carries a malformed {what} {value!r}") from e
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise FeedReadError(f"PR history for {where} carries a naive {what} {value!r}")
+        return parsed
+
+    def _head_committed_at(
+        self, repository: dict[str, Any], pr: dict[str, Any], head_sha: str | None, where: str,
+    ) -> datetime | None:
+        if head_sha is not None:
+            commit = repository.get("object")
+        else:
+            last = ((pr.get("commits") or {}).get("nodes") or [None])[-1]
+            commit = last.get("commit") if isinstance(last, dict) else None
+        if not isinstance(commit, dict) or commit.get("committedDate") is None:
+            return None
+        return self._history_time(commit.get("committedDate"), "committedDate", where)
+
+    def _description_versions(self, edits: list[dict], where: str) -> Iterator[DescriptionVersion]:
+        for edit in edits:
+            edited_at = self._history_time(edit.get("editedAt"), "userContentEdits.editedAt", where)
+            diff = edit.get("diff")
+            text = diff if isinstance(diff, str) and edit.get("deletedAt") is None else None
+            yield DescriptionVersion(text=text, edited_at=edited_at)
+
+    def _title_renames(self, events: list[dict], where: str) -> tuple[tuple[TitleRename, ...], bool]:
+        renames: list[TitleRename] = []
+        readable = True
+        for event in events:
+            previous_title = event.get("previousTitle")
+            current_title = event.get("currentTitle")
+            if not isinstance(previous_title, str) or not isinstance(current_title, str):
+                readable = False
+                continue
+            created_at = self._history_time(event.get("createdAt"), "RenamedTitleEvent.createdAt", where)
+            renames.append(TitleRename(previous_title, current_title, created_at))
+        return tuple(renames), readable
+
+    def _first_review_at(
+        self, reviews: list[dict], comments: list[dict], pr_author: str | None, where: str,
+    ) -> datetime | None:
+        times: list[datetime] = []
+        for review in reviews:
+            submitted_at = review.get("submittedAt")
+            if submitted_at is None:
+                continue
+            inline = (review.get("comments") or {}).get("nodes") or ()
+            bodies = [review.get("body"), *(c.get("body") for c in inline if isinstance(c, dict))]
+            if self._is_human_post(review.get("author"), bodies, pr_author):
+                times.append(self._history_time(submitted_at, "reviews.submittedAt", where))
+        for comment in comments:
+            if self._is_human_post(comment.get("author"), [comment.get("body")], pr_author):
+                times.append(self._history_time(comment.get("createdAt"), "comments.createdAt", where))
+        return min(times, default=None)
+
+    @staticmethod
+    def _is_human_post(author: object, bodies: list[object], pr_author: str | None) -> bool:
+        if not isinstance(author, dict) or author.get("__typename") != "User":
+            return False
+        if pr_author is not None and author.get("login") == pr_author:
+            return False
+        return not any(
+            isinstance(body, str) and (ATTRIBUTION_MARKER in body or SUMMARY_MARKER in body)
+            for body in bodies
+        )
