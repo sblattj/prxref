@@ -101,7 +101,7 @@ These two backends review with the Claude Code CLI or the Kiro CLI that is alrea
   ```
 
 - **The CLI is logged in.** For `claude`, run `claude` once and `/login`; in a headless shell, create a token with `claude setup-token` and export it as `CLAUDE_CODE_OAUTH_TOKEN`, which is passed through to the CLI. For `kiro-cli`, the browser login is enough, and `kiro-cli whoami` shows the account it uses. A `KIRO_API_KEY` in the environment is passed through unchanged.
-- A logged-out CLI is not a configuration error. Every model fails, the review fails the way an unreachable endpoint does, and `prxref review` exits `0` (see [Troubleshooting](#troubleshooting)).
+- A logged-out CLI is not a configuration error. Every model fails, the review fails the way an unreachable endpoint does, and `prxref review` exits `0` — `1` under `PRXREF_FAIL_ON=error` or `any`, like any review that does not complete (see [Troubleshooting](#troubleshooting)).
 
 ### Configuration example
 
