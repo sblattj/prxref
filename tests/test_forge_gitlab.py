@@ -1049,7 +1049,9 @@ def test_get_diff_reads_every_page_of_a_large_mr():
     sent = [c[1]["params"] for c in session.get.call_args_list]
     assert [p["page"] for p in sent] == [1, 2, 3]
     assert {p["per_page"] for p in sent} == {gitlab._PAGE_SIZE}
-    assert all(p["access_raw_diffs"] == "true" for p in sent)
+    # /diffs ignores access_raw_diffs (byte-identical bodies with and without
+    # it on gitlab.com); only the deprecated /changes endpoint reads it.
+    assert not any("access_raw_diffs" in p for p in sent)
     assert all(
         c[0][0] == "https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/7/diffs"
         for c in session.get.call_args_list
