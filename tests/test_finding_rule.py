@@ -6,8 +6,9 @@ from model output only when the run asked for it (``accept_rule``), through
 is pinned:
 
 - ``normalize_rule``: strings only, whitespace collapsed, case kept; empty,
-  whitespace-only, oversized and non-printable values are dropped, never
-  raised or truncated;
+  whitespace-only and oversized values, and values holding a control,
+  surrogate, private-use or bidi-control character, are dropped, never raised
+  or truncated;
 - the three parsers (``reviewer._finding_from``, ``reviewer._invoke_and_parse``
   and ``orchestrator._coerce_finding``) keep a rule only when it is accepted;
 - ``orchestrator._enforce_rule`` holds rules to the run's state, like
@@ -70,7 +71,11 @@ def _rule_reply(*rules: object) -> str:
 
 NOT_STRINGS = [None, 42, 4.2, True, False, ["no-print"], {"id": "no-print"}, b"no-print"]
 BLANKS = ["", " ", "\n\t \r\n", "  "]
-UNPRINTABLE = ["no\x00print", "no-print\x1b[31m", "no‮print", "no​print", "no\x7fprint"]
+UNPRINTABLE = [
+    "no\x00print", "no-print\x1b[31m", "no\x7fprint", "no\x9bprint",
+    "no\ud800print", "no\ue000print",
+    "no\u202aprint", "no\u202eprint", "no\u2066print", "no\u2069print",
+]
 OVERSIZED = ["r" * (RULE_MAX_CHARS + 1), "a " * RULE_MAX_CHARS]
 
 
