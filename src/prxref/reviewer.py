@@ -64,7 +64,7 @@ from .costs import valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
-from .triage import SCOPE_IN, SCOPE_UNKNOWN, FileDiff, Finding, normalize_scope, trim_hunk_context
+from .triage import SCOPE_IN, SCOPE_UNKNOWN, FileDiff, Finding, normalize_rule, normalize_scope, trim_hunk_context
 
 logger = logging.getLogger("prxref")
 
@@ -354,7 +354,9 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _finding_from(raw: Any, *, accept_scope: bool = False) -> Finding | None:
+def _finding_from(
+    raw: Any, *, accept_scope: bool = False, accept_rule: bool = False,
+) -> Finding | None:
     if not isinstance(raw, dict):
         return None
     file = str(raw.get("file") or raw.get("path") or "").strip()
@@ -372,6 +374,7 @@ def _finding_from(raw: Any, *, accept_scope: bool = False) -> Finding | None:
         title=str(raw.get("title") or "").strip(),
         body=str(raw.get("body") or "").strip(),
         scope=normalize_scope(raw.get("scope")) if accept_scope else SCOPE_UNKNOWN,
+        rule=normalize_rule(raw.get("rule")) if accept_rule else None,
     )
 
 
@@ -435,6 +438,7 @@ def _write_trace_files(
 def _invoke_and_parse(
     llm: LLMClient, system: str, user: str, *, budget: int, label: str,
     trace_dir: str = "", trace_label: str = "", accept_scope: bool = False,
+    accept_rule: bool = False,
 ) -> tuple[list[Finding], dict]:
     """One single-shot invoke plus lenient JSON parse, shared by both reviewers.
 
@@ -452,6 +456,10 @@ def _invoke_and_parse(
     :func:`prxref.triage.normalize_scope`); false, the default, stamps every
     finding ``unknown``, because a prompt that never asked for ``scope`` has
     no answer worth reading.
+
+    ``accept_rule`` does the same for ``rule`` (through
+    :func:`prxref.triage.normalize_rule`); false, the default, leaves every
+    finding's ``rule`` at ``None``.
     """
     t0 = time.perf_counter()
     meta = {
@@ -532,7 +540,10 @@ def _invoke_and_parse(
     if not isinstance(raw_findings, list):
         raw_findings = []
     findings = [
-        f for f in (_finding_from(r, accept_scope=accept_scope) for r in raw_findings)
+        f for f in (
+            _finding_from(r, accept_scope=accept_scope, accept_rule=accept_rule)
+            for r in raw_findings
+        )
         if f is not None
     ]
 
@@ -620,7 +631,9 @@ def review_chunk(
     renders the literal ``(no specs provided for this review)``, and the
     prompt tells the model ``spec`` is then not a legal severity. A finding's
     ``scope`` is read from the response only when
-    :attr:`PromptContext.scope_active`; otherwise it is ``unknown``. The
+    :attr:`PromptContext.scope_active`; otherwise it is ``unknown``. Its
+    ``rule`` is read only when the context's ``rule_active`` is true;
+    otherwise it is ``None``. The
     default :data:`NO_PROMPT_CONTEXT` injects nothing. The orchestrator
     always passes this keyword too, so any test double must accept it.
     """
@@ -639,6 +652,7 @@ def review_chunk(
         llm, system, user, budget=budget, label=f"chunk of {len(chunk)} files",
         trace_dir=trace_dir, trace_label=trace_label,
         accept_scope=prompt_context.scope_active,
+        accept_rule=getattr(prompt_context, "rule_active", False),
     )
 
 
@@ -694,4 +708,5 @@ def review_systemic(
         llm, system, user, budget=budget, label="systemic sweep",
         trace_dir=trace_dir, trace_label=trace_label,
         accept_scope=prompt_context.scope_active,
+        accept_rule=getattr(prompt_context, "rule_active", False),
     )
