@@ -1620,6 +1620,24 @@ def _resolve_max_errors(explicit: int | None) -> int:
     return DEFAULT_MAX_ERRORS
 
 
+def _apply_severity_cap(staged: list[Finding], severity: str, cap: int) -> None:
+    active_indices: list[int] = [
+        i for i, f in enumerate(staged)
+        if f.drop_reason is None and f.severity == severity
+    ]
+
+    if len(active_indices) > cap:
+        ranked = sorted(
+            active_indices,
+            key=lambda idx: finding_rank_key(staged[idx]),
+        )
+        for dropped_idx in ranked[cap:]:
+            staged[dropped_idx] = replace(
+                staged[dropped_idx],
+                drop_reason=f"{severity} cap exceeded (max {cap})",
+            )
+
+
 def _hedge_span(text: str) -> str | None:
     for _name, pattern in HEDGE_RULES:
         m = pattern.search(text)
@@ -1707,8 +1725,10 @@ def apply_quality_gate(
     *,
     confidence_floor: float | None = None,
     max_errors: int | None = None,
+    max_warning_findings: int | None = None,
+    max_outofscope_findings: int | None = None,
 ) -> list[Finding]:
-    """Filter findings through vocabulary, confidence, and per-review error caps.
+    """Filter findings through vocabulary, confidence, and per-severity caps.
 
     Order:
     1. Severity vocabulary: non-empty lowercase must be in
@@ -1716,10 +1736,28 @@ def apply_quality_gate(
        invalid severities are dropped.
     2. Confidence floor: drop findings below the threshold (default 0.6).
     3. Error cap: among surviving errors, keep the top N ranked by
-       :func:`finding_rank_key` and drop the rest, so ties are broken by
-       content rather than by arrival order. ``spec`` findings never count
-       toward the cap: a spec-heavy review is neither crowded out by it nor
-       crowding it out.
+       :func:`finding_rank_key` and drop the rest
+       (``error cap exceeded (max N)``), so ties are broken by content
+       rather than by arrival order. ``max_errors`` falls back to
+       ``PRXREF_MAX_ERROR_FINDINGS`` and then to :data:`DEFAULT_MAX_ERRORS`.
+    4. Warning and outofscope caps: ``max_warning_findings`` and
+       ``max_outofscope_findings`` apply the same ranking to the surviving
+       findings of their own severity, dropping the excess as
+       ``warning cap exceeded (max N)`` and
+       ``outofscope cap exceeded (max N)``. ``None`` (the default) means
+       unlimited and reads no environment variable, so a call that omits
+       both is identical to one without these caps; ``0`` drops every
+       finding of that severity.
+
+    Each cap counts only its own severity, and only findings that are still
+    active after steps 1 and 2. ``spec`` findings are never capped and never
+    count toward a cap: a spec-heavy review is neither crowded out by one
+    nor crowding one out. A capped finding is kept with its ``drop_reason``
+    set, never removed.
+
+    A cap narrows ``PRXREF_FAIL_ON`` and never widens it: under ``any``, a
+    cap of ``0`` removes that severity from the active findings, so a run
+    whose only findings were of that severity exits 0 instead of 1.
 
     The returned list is sorted by :func:`finding_sort_key`.
     """
@@ -1753,21 +1791,11 @@ def apply_quality_gate(
 
         staged.append(norm)
 
-    active_error_indices: list[int] = [
-        i for i, f in enumerate(staged)
-        if f.drop_reason is None and f.severity == "error"
-    ]
-
-    if len(active_error_indices) > cap:
-        ranked = sorted(
-            active_error_indices,
-            key=lambda idx: finding_rank_key(staged[idx]),
-        )
-        for dropped_idx in ranked[cap:]:
-            staged[dropped_idx] = replace(
-                staged[dropped_idx],
-                drop_reason=f"error cap exceeded (max {cap})",
-            )
+    _apply_severity_cap(staged, "error", cap)
+    if max_warning_findings is not None:
+        _apply_severity_cap(staged, "warning", max_warning_findings)
+    if max_outofscope_findings is not None:
+        _apply_severity_cap(staged, "outofscope", max_outofscope_findings)
 
     return sorted(staged, key=finding_sort_key)
 
