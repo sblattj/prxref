@@ -62,6 +62,13 @@ LLM / pipeline:
                                 PRXREF_TICKET_CONTEXT_FILE); ``spec`` is
                                 never capped. >= 0; unset (default) =
                                 unlimited
+  PRXREF_MAX_FINDINGS_PER_RULE  Per-rule cap (0.15.0): the most findings
+                                one team rule may produce in a review,
+                                across files. Applies only when a review
+                                rules file (PRXREF_REVIEW_RULES or
+                                PRXREF_SCOPED_RULES) is loaded; the excess
+                                fold into the best one's ``Also at:``
+                                list. >= 0, where 0 = off (default 2)
   PRXREF_GROUP_FINDINGS         Finding grouping (0.15.0): literal "1" folds
                                 chunk findings that break the same rule in
                                 the same file (by normalized title when the
@@ -350,6 +357,7 @@ _DEFAULTS: dict[str, object] = {
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_warning_findings": None,
     "max_outofscope_findings": None,
+    "max_findings_per_rule": 2,
     "group_findings": False,
     "dedup_similarity": None,
     "max_chunks": 8,
@@ -416,6 +424,7 @@ _INT_KEYS = frozenset({
     "llm_cli_concurrency", "review_rules_max_chars",
     "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
+    "max_findings_per_rule",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
 _BOOL_KEYS = frozenset({
@@ -458,7 +467,8 @@ class _Range(NamedTuple):
     worker count (``ThreadPoolExecutor`` rejects it) and for a chunk count
     (``build_chunks`` raises on the overflow branch). Zero IS meaningful for the
     error, warning and outofscope caps, where it means "report none of that
-    severity", for the context-line count, where it means "emit the changed
+    severity", for the per-rule cap, where it turns the cap off, for the
+    context-line count, where it means "emit the changed
     lines only", for the sampling seed,
     where 0 is a perfectly valid seed, and for the PR-size thresholds, where
     0 flags any change at all.
@@ -510,6 +520,7 @@ _RANGES: dict[str, _Range] = {
     "size_warn_files": _Range(0, low_inclusive=True),
     "max_warning_findings": _Range(0, low_inclusive=True),
     "max_outofscope_findings": _Range(0, low_inclusive=True),
+    "max_findings_per_rule": _Range(0, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),

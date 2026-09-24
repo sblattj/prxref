@@ -58,11 +58,12 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through thirteen more deterministic passes: the example-echo check, location validation, `package.json` claim
+through fourteen more deterministic passes: the example-echo check, location validation, `package.json` claim
 checks, line alignment, thread dedup, settled-thread suppression, severity
 consistency, the removal-claim check, the hedge gate, finding grouping (opt-in
-with `PRXREF_GROUP_FINDINGS`), the quality gate, sweep dedup, and the
-containment note. A filtered finding is never discarded
+with `PRXREF_GROUP_FINDINGS`), the per-rule cap (on by default when review
+rules are loaded; `PRXREF_MAX_FINDINGS_PER_RULE`), the quality gate, sweep
+dedup, and the containment note. A filtered finding is never discarded
 silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
 
@@ -261,6 +262,7 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --rules-file "$RUN
 - Optional front matter can map your team's severity words onto prxref's tiers in a `severity:` block (`blocker: error`, `major: warning`, `nit: outofscope`). A mapped word the model writes anyway is rewritten before every quality pass, so it is never dropped as an invalid severity. Other front-matter keys are ignored, so a skill file works unmodified.
 - `PRXREF_REVIEW_RULES_MAX_CHARS` (default `12000`) caps the body, with a warning when it truncates. The run record's `review_rules` carries the file's `sha256`, its character count, and the parsed map, never the rules text. It appears in `--format json`, the `-v` output, and the JSONL trace.
 - **Path-scoped rules.** `--scoped-rules PATH` (repeatable), or `PRXREF_SCOPED_RULES` for every run, adds rules files that reach only part of the PR, next to that one file: each entry is a rules file, or a directory whose `*.md` files are read one level deep. A file's `applies_to:` front matter (alias `applyTo`, the `.github/instructions` spelling) lists the paths it covers, for example `applies_to: ["**/*.java", "!**/src/test/**"]`. Each chunk worker then gets only the files that match one of its paths, and the sweep gets the union; a file without `applies_to` reaches every unit. `PRXREF_SCOPED_RULES_MAX_CHARS` (default `24000`) caps the scoped text one unit receives. The run record's `scoped_rules` stamps each file's `sha256` and which unit received which file, and `-v` prints `scoped rules: 2 file(s) rules/helm.md=<first 12 hex> rules/java.md=<first 12 hex> cap=24000`. See [Path-scoped rules](docs/review-rules.md#path-scoped-rules).
+- **Per-rule cap (0.15.0).** With either kind of rules file loaded, the model is asked to name the rule each finding applies, and one rule may produce at most `PRXREF_MAX_FINDINGS_PER_RULE` findings per review (default `2`), across files. The rest fold into the best one (highest severity, then confidence), whose comment lists them as `Also at: …`. `0` turns the cap off; without a rules file it does nothing. See [docs/quality.md](docs/quality.md).
 - A missing, unreadable, or malformed file exits `2` before any network call, naming `--rules-file` or `PRXREF_REVIEW_RULES` (`--scoped-rules` or `PRXREF_SCOPED_RULES` for a scoped file).
 
 **Read the rules from a trusted checkout, never from the PR under review.** In CI the workspace is usually the PR's own code, so a rules file inside it lets the PR rewrite its own review rules. Copy the file from the target branch or keep it outside the repository. See [docs/review-rules.md](docs/review-rules.md) for the grammar, the CI recipes, and the daemon.
@@ -299,7 +301,7 @@ Each severity has one glyph. It is the same in the summary's counts line, the su
 
 - **Summary:** those findings are listed after the others, under their own heading, for example `**🟦 Outside the ticket (2)**` followed by ``- 🟦 🟧 `src/app.py:12` — …``. If every finding is outside the ticket, the first list reads `No in-ticket findings.`.
 - **Inline comments:** the header reads, for example, `🤖 🟦 🟧 **[WARNING · OUTSIDE TICKET] …**`.
-- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket. With finding grouping on, a finding that names a rule gets ` [rule: <rule>]` after that tag (see [docs/quality.md](docs/quality.md)).
+- **CLI text output** (`--no-post` or `-v`): the finding line ends in ` [scope: out]`, or ` [scope: in]` for a finding inside the ticket. With finding grouping on, or the per-rule cap active (review rules loaded), a finding that names a rule gets ` [rule: <rule>]` after that tag (see [docs/quality.md](docs/quality.md)).
 
 Findings inside the ticket (`in`) and findings the reviewer could not place (`unknown`) carry no scope marker, so a run without a ticket context renders exactly the severity glyphs. Scope never changes a finding's severity. It is not counted separately either: the counts line counts every active finding by severity, and the verdict, the error cap, and `PRXREF_FAIL_ON` ignore scope.
 
@@ -322,7 +324,7 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
 - `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the scoped rules files, the prompt templates, the ticket context (with the active findings' scope counts), and the spec sources when they are configured. In text mode this also prints finding bodies and dropped findings, same as `--no-post`.
 - `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout, with these keys in this order:
   - `verdict`;
-  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `rule` (the rule the finding names; `null` when it names none, and always `null` with finding grouping off), `locations` (on a grouped finding, the other places its `Also at:` list names, in that order, as `{"file", "line"}` objects; `null` on every other row, including each member dropped as `grouped into <file>:<line>`, which keeps its own rule; see [docs/quality.md](docs/quality.md)), `title`, `body`, `drop_reason`;
+  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `rule` (the rule the finding names; `null` when it names none, and always `null` with finding grouping off and the per-rule cap inactive), `locations` (on a grouped finding, the other places its `Also at:` list names, in that order, as `{"file", "line"}` objects; on the best finding of a rule the per-rule cap folded, every location folded into it, across files, even past the five its `Also at:` list shows; `null` on every other row, including each member dropped as `grouped into <file>:<line>`, which keeps its own rule; see [docs/quality.md](docs/quality.md)), `title`, `body`, `drop_reason`;
   - `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`;
   - `cost_usd`: the run's cost in USD, `null` when no source could price it (never `0` for an unknown cost), and `cost_estimated`: `true` when any part of it came from `PRXREF_PRICE_TABLE`. See [Cost accounting](docs/llm.md#cost-accounting);
   - `posted`;
