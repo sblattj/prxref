@@ -1,0 +1,62 @@
+openapi: 3.0.3
+info:
+  title: Acme Connectors API
+  version: "1.0.0"
+paths:
+  /connectors/{connectorId}/transports:
+    post:
+      operationId: createTransport
+      summary: Create a transport configuration for a connector.
+      parameters:
+        - name: connectorId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransportRequest'
+      responses:
+        '201':
+          description: The created transport configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransportConfig'
+components:
+  schemas:
+    TransportConfig:
+      type: object
+      description: >-
+        url and legacyUrl are mutually exclusive: exactly one of the two
+        fields must be set.
+      properties:
+        url:
+          type: string
+        legacyUrl:
+          type: string
+    CreateTransportRequest:
+      type: object
+      properties:
+        idempotencyKey:
+          type: string
+        url:
+          type: string
+        legacyUrl:
+          type: string
+    IdempotencyKey:
+      type: object
+      description: >-
+        An idempotency key is unique per (tenant, connector, key); replaying
+        the same key for a different connector in the same tenant must be
+        rejected, not silently merged.
+      properties:
+        tenantId:
+          type: string
+        connectorId:
+          type: string
+        key:
+          type: string
