@@ -45,6 +45,10 @@ names the path instead of a case. When a case has a diff file, every label
 must anchor on a line that diff adds (:func:`check_anchors`); a case pinned
 to a pull request's range has no diff until it runs, so its labels are
 checked for shape only.
+
+``prxref eval run`` keeps each case beside its record as ``case.json``,
+written by :func:`case_to_json` and read back by
+:func:`case_from_json_record`, so a run can be scored without its dataset.
 """
 from __future__ import annotations
 
@@ -149,6 +153,88 @@ def check_anchors(case: EvalCase, diff_text: str, *, source: str = "--cases") ->
     """
     files = parse_unified_diff(diff_text)
     _check_anchors(case.expected, files, f"case {case.id!r}", "expected", _JSON_SPELLING, source)
+
+
+def is_safe_id(name: object) -> bool:
+    """Whether ``name`` passes the case-id rule: one safe path segment.
+
+    The rule is letters, digits, ``.``, ``_`` and ``-``, starting with a
+    letter or digit, so ``''``, ``.``, ``..`` and anything holding ``/`` or
+    ``\\`` are refused. ``prxref eval run`` applies the same rule to
+    ``--label``, which names a directory under ``--out``.
+    """
+    return isinstance(name, str) and _CASE_ID_RE.fullmatch(name) is not None
+
+
+def case_to_json(case: EvalCase) -> dict[str, Any]:
+    """Serialise ``case`` as a JSON-ready dict that :func:`case_from_json_record` reads back.
+
+    The keys follow the ``cases.json`` spelling in a fixed order: ``id``,
+    ``pr_url``, ``base_sha``, ``head_sha``, ``diff_file``, ``context_file``,
+    ``spec`` (a list, empty when the case sets none) and ``expected``, a list
+    of labels each keyed ``id``, ``file``, ``line``, ``severity``,
+    ``category``, ``accepted``, ``text`` and ``must_match``. Every field is
+    written, ``null`` when unset. Paths are written exactly as the case holds
+    them, already joined onto the dataset directory when it was loaded.
+    """
+    return {
+        "id": case.id,
+        "pr_url": case.pr_url,
+        "base_sha": case.base_sha,
+        "head_sha": case.head_sha,
+        "diff_file": case.diff_file,
+        "context_file": case.context_file,
+        "spec": list(case.spec),
+        "expected": [
+            {key: getattr(finding, key) for key in _EXPECTED_KEYS} for finding in case.expected
+        ],
+    }
+
+
+def case_from_json_record(obj: Any, *, source: str = "case.json") -> EvalCase:
+    """Rebuild the :class:`EvalCase` that :func:`case_to_json` wrote.
+
+    The shape is checked (an object with a safe ``id``, only the known keys,
+    text fields that are non-empty strings or ``null``, ``spec`` a list of
+    non-empty strings) and every label is validated as the loader validates
+    one, but the files the case names are never opened: they may have moved
+    since the run. Each problem raises :class:`~prxref.llm.ConfigError` whose
+    message is ``<source>: case '<id>': <field>: <problem>``, naming
+    ``source`` (the file the record was read from).
+    """
+    if not isinstance(obj, dict):
+        raise ConfigError(f"{source}: must be an object, got {_kind(obj)}")
+    case_id = obj.get("id")
+    if not is_safe_id(case_id):
+        raise ConfigError(
+            f"{source}: id: must be a name of letters, digits, '.', '_' and '-' that "
+            f"starts with a letter or digit, got {_kind(case_id)}"
+        )
+    where = f"case {case_id!r}"
+    unknown = sorted(set(obj) - set(_CASE_KEYS))
+    if unknown:
+        raise ConfigError(
+            f"{source}: {where}: {', '.join(unknown)}: unknown field; "
+            f"allowed: {', '.join(_CASE_KEYS)}"
+        )
+    texts = {
+        key: _optional_text(obj, key, where, source)
+        for key in ("pr_url", "base_sha", "head_sha", "diff_file", "context_file")
+    }
+    spec = obj.get("spec")
+    if spec is None:
+        spec = []
+    if not isinstance(spec, list):
+        raise ConfigError(f"{source}: {where}: spec: must be an array of strings, got {_kind(spec)}")
+    for index, item in enumerate(spec):
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"{source}: {where}: spec[{index}]: must be a non-empty string, got {_kind(item)}"
+            )
+    if "expected" not in obj:
+        raise ConfigError(f"{source}: {where}: expected: required (an array of findings, possibly empty)")
+    expected = _expected_findings(obj["expected"], where, "expected", _JSON_SPELLING, source)
+    return EvalCase(id=case_id, expected=expected, spec=tuple(spec), **texts)
 
 
 def _load_cases_json(root: Path, source: str) -> list[EvalCase]:
