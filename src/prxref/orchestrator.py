@@ -101,8 +101,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``apply_quality_gate(confidence_floor=, max_errors=,
    max_warning_findings=, max_outofscope_findings=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
-   re-derived here from finding identity rather than carried across the
-   gate as an index → ``apply_sweep_dedup`` (drops a sweep finding that
+   re-derived here from finding identity and the gate's stable sort
+   (``_split_at_sweep``) rather than carried across the gate as an index
+   → ``apply_sweep_dedup`` (drops a sweep finding that
    restates a chunk finding that SURVIVED the gate, on file + normalized
    title; running it after the gate is what keeps a sub-floor chunk
    finding from suppressing its higher-confidence sweep duplicate and
@@ -1154,26 +1155,16 @@ def orchestrate_review(
             findings, cap=max_findings_per_rule, confidence_floor=confidence_floor,
             sweep_start=sweep_start, tracer=tracer,
         )
-    # The sweep boundary is positional, and the gate now returns its findings
-    # in content order, so the boundary is re-derived from the identity of the
-    # sweep's own findings rather than carried across the gate as an index.
-    sweep_identities = Counter(
-        _origin_key(f) for f in findings[sweep_start:]
-    )
-    findings = apply_quality_gate(
+    # The sweep boundary is positional, and the gate returns its findings in
+    # content order, so _split_at_sweep re-derives the boundary from finding
+    # identity and the gate's stable sort rather than carrying it across the
+    # gate as an index.
+    gated = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
         max_warning_findings=max_warning_findings,
         max_outofscope_findings=max_outofscope_findings,
     )
-    chunk_part: list[Finding] = []
-    sweep_part: list[Finding] = []
-    for f in findings:
-        key = _origin_key(f)
-        if sweep_identities[key] > 0:
-            sweep_identities[key] -= 1
-            sweep_part.append(f)
-        else:
-            chunk_part.append(f)
+    chunk_part, sweep_part = _split_at_sweep(gated, findings, sweep_start)
     # AFTER the gate, deliberately: the duplicate set is built from chunk
     # findings that survived it, so a sub-floor chunk finding cannot suppress
     # its higher-confidence sweep duplicate and then die at the gate itself —
@@ -1323,26 +1314,72 @@ def orchestrate_review(
 def _origin_key(finding: Finding) -> tuple:
     """Identity used to re-derive the chunk/sweep boundary across the gate.
 
-    ``severity`` and ``confidence`` are part of the key: without them a chunk
-    finding and a sweep finding that agree on file, line, title, and body
-    collide, ``finding_sort_key`` ties them, and the Counter walk hands the
-    first survivor to the sweep side — dropping the higher-confidence chunk
-    copy as a "duplicate of chunk finding". ``scope`` is in it for the same
-    reason: with a ticket active the two copies can disagree on it, and a
-    swap would put the sweep copy's scope in the chunk copy's slot. ``rule``
-    is in it for that reason too, and sits before ``scope``, which stays the
-    last element.
+    The file, line, title, body, severity, confidence, rule and scope, in
+    that order: ``rule`` sits before ``scope``, which stays the last
+    element. :func:`quality.apply_quality_gate` rewrites none of them but
+    ``severity``, which it trims and lower-cases, so the key holds the
+    severity in that form and a finding has the same key on both sides of
+    the gate, which :func:`_split_at_sweep` relies on. A key built from the
+    raw severity changed across the gate for a model that wrote
+    ``Warning``, and the sweep's copy was posted as a second comment.
+
+    ``severity`` and ``confidence`` are part of the key, so a chunk finding
+    and a sweep finding that agree on file, line, title and body but not on
+    those never share one and neither can take the other's slot, the
+    higher-confidence chunk copy included. ``scope`` is in it for the same
+    reason: with a ticket active the two copies can disagree on it. So is
+    ``rule``. ``drop_reason`` and ``locations`` are not: they are state a
+    pass sets on one copy and not the other, not identity.
     """
     return (
         finding.file,
         finding.line,
         finding.title,
         finding.body,
-        finding.severity,
+        (finding.severity or "").strip().lower(),
         finding.confidence,
         finding.rule,
         finding.scope,
     )
+
+
+def _split_at_sweep(
+    gated: Sequence[Finding], before: Sequence[Finding], sweep_start: int
+) -> tuple[list[Finding], list[Finding]]:
+    """Split the quality gate's output back into chunk findings and sweep findings.
+
+    ``before`` is the list :func:`quality.apply_quality_gate` was given,
+    whose first ``sweep_start`` findings came from the chunk workers, and
+    ``gated`` is what it returned. Returns ``(chunk findings, sweep
+    findings)``, each in ``gated`` order.
+
+    The gate sorts by :func:`quality.finding_sort_key`, whose fields every
+    :func:`_origin_key` holds, and the sort is stable, so the findings that
+    share a key leave the gate in the order they entered it: every chunk
+    copy of a key ahead of every sweep copy. The first copies of each key,
+    as many as the chunk side had, are therefore the chunk findings, and
+    the next, as many as the sweep side had, the sweep's. That holds
+    whatever a pass set on one copy and not the other: grouping or the
+    per-rule cap dropping the chunk copy before the gate, or a severity cap
+    in the gate keeping the chunk copy and dropping the sweep copy. A
+    finding whose key neither side had is filed with the chunk findings,
+    so it is never dropped as a sweep duplicate.
+    """
+    chunk_left = Counter(_origin_key(f) for f in before[:sweep_start])
+    sweep_left = Counter(_origin_key(f) for f in before[sweep_start:])
+    chunk_part: list[Finding] = []
+    sweep_part: list[Finding] = []
+    for f in gated:
+        key = _origin_key(f)
+        if chunk_left[key] > 0:
+            chunk_left[key] -= 1
+            chunk_part.append(f)
+        elif sweep_left[key] > 0:
+            sweep_left[key] -= 1
+            sweep_part.append(f)
+        else:
+            chunk_part.append(f)
+    return chunk_part, sweep_part
 
 
 def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:

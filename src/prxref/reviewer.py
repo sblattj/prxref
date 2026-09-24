@@ -90,8 +90,10 @@ _NO_SPECS_TEXT = "(no specs provided for this review)"
 _SCOPE_EXAMPLE = f',\n      "scope": "{SCOPE_IN}"'
 
 # The SYSTEM-prompt block that asks for a per-finding ``rule``, passed as
-# ``PromptContext.rule_request`` when ``PRXREF_GROUP_FINDINGS`` is on. The
-# label it asks for is what :func:`prxref.triage.normalize_rule` keeps.
+# ``PromptContext.rule_request`` when ``PRXREF_GROUP_FINDINGS`` is on or the
+# per-rule cap is active (a review rules file loaded and
+# ``PRXREF_MAX_FINDINGS_PER_RULE`` above 0). The label it asks for is what
+# :func:`prxref.triage.normalize_rule` keeps.
 RULE_REQUEST = "\n\n".join((
     "## Rule names",
     "When a finding applies a named rule or standard from the team review rules, add a "
@@ -186,7 +188,9 @@ class PromptContext:
     team review rules), then ``ticket_scope`` (the instructions that ask the
     model for a per-finding ``scope``), then ``rule_request`` (the
     instructions that ask for a per-finding ``rule``, :data:`RULE_REQUEST`
-    when finding grouping is on). USER half, after the Review Context
+    when finding grouping is on or the per-rule cap is active, that is with
+    a review rules file loaded and ``PRXREF_MAX_FINDINGS_PER_RULE`` above
+    0). USER half, after the Review Context
     lines: ``ticket_context`` (the fenced ticket text), then ``spec_digest``
     (the Spec constraints block), then the diff or digest.
 
