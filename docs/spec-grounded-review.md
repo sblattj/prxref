@@ -304,7 +304,8 @@ Per source, in document order, collect:
 - **Headings**: `^#{1,6} ` (markdown), `^\n[A-Z][^\n]{0,80}\n[-=]{3,}$`
   (setext/asciidoc) — kept as `[heading]` scoping lines so a constraint stays
   attached to its section (e.g. "Client BEST PRACTICES" vs "Server").
-- **Normative statements**: lines containing RFC-2119-strength keywords —
+- **Normative statements**: sentences carrying RFC-2119-strength keywords,
+  matched inside blocks rather than physical lines (see *As built* below) —
   `MUST`, `MUST NOT`, `SHALL`, `SHALL NOT`, `REQUIRED`, `SHALL NOT`,
   `FORBIDDEN`, `MUST NEVER` (strength 3); `SHOULD`, `SHOULD NOT`,
   `RECOMMENDED`, `recommended to`, `forbidden to` (strength 2); `MAY`,
@@ -315,7 +316,7 @@ Per source, in document order, collect:
   `version|protocol|revision|draft`. A pinned version inside a kept constraint
   is quoted verbatim; a version pin on its own line is kept as its own
   constraint.
-- **Naming/shape rules**: lines matching
+- **Naming/shape rules**: sentences matching
   `(?:MUST|SHOULD|SHALL)[^.]{0,120}(?:named|name|prefix|suffix|header|field|snake_case|camelCase|lowercase|uppercase)`
   — the "tools MUST be named `mcp__`"-class constraints.
 - **Ticket text** (`kind == "jira"`): the summary always, and the description
@@ -345,6 +346,12 @@ tag is `[ticket:{KEY}]`.
 >   yields one unit per matching sentence. Otherwise the block is kept whole,
 >   unless its only match is a prose `can`/`discouraged` or a bare version
 >   pin, which keeps just that sentence.
+> - Known limitation: only `.`, `;`, `!` or `?` ends a sentence, so keyword
+>   lines with no such punctuation, one after another in a paragraph with no
+>   blank line between them, form one sentence and so one unit, labelled with
+>   the highest strength any of them carries (`specs._split_sentences`,
+>   `specs._strength`): `Clients MAY cache tokens` directly above
+>   `Servers MUST reject expired tokens` is a single `(MUST)` unit.
 > - A unit ending in `:` carries the list that follows it, up to the cap. A
 >   version pin counts only on a line that is nothing but the pin. Every unit
 >   is anchored `L{n}` on its block's first line.

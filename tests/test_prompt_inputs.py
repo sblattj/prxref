@@ -544,7 +544,7 @@ class TestInlineOrderByScope:
         assert "Outside" in body
 
 
-class TestSeverityMapStub:
+class TestSeverityMapRewritesOnlyMappedWords:
     def test_it_rewrites_a_mapped_word_and_nothing_else(self):
         dropped = replace(_finding(7, severity="blocker"), drop_reason="hedged: \"if\"")
         findings = [_finding(3, severity="blocker", scope=SCOPE_OUT), _finding(5), dropped]

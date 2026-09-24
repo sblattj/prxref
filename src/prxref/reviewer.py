@@ -637,8 +637,8 @@ def review_systemic(
     sweep's system prompt takes ``rules_sweep`` instead of ``rules_worker``.
     Its ``spec_digest`` rides the same prompt under the Spec constraints
     block: empty renders ``(no specs provided for this review)``, and with
-    the whole-diff digest plus constraints in view the sweep is the natural
-    seat for cross-file spec classes.
+    the whole-diff digest plus any spec constraints in view, this sweep is
+    the natural seat for cross-file spec classes.
 
     Returns ``(findings, meta)`` under exactly the :func:`review_chunk`
     contract — never raises, ``meta["error"]`` empty on success, truncation
