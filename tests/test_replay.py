@@ -38,9 +38,15 @@ HEAD = "c" * 40
 APP_DIFF = _added_file_diff("src/app.py", 20)
 COMPARE_DIFF = _added_file_diff("src/pinned.py", 5)
 FILE_DIFF = _added_file_diff("src/from_file.py", 5)
-PINNED_STAMP = {"base_sha": BASE, "head_sha": HEAD, "threads": "hidden", "diff_file": None}
+PINNED_STAMP = {
+    "base_sha": BASE, "head_sha": HEAD, "threads": "hidden", "diff_file": None,
+    "description": "pinned", "as_of": "2026-05-01T09:30:00Z", "as_of_source": "first-review",
+}
 LOCAL_PATH = "cases/empty.patch"
-LOCAL_STAMP = {"base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": LOCAL_PATH}
+LOCAL_STAMP = {
+    "base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": LOCAL_PATH,
+    "description": "file", "as_of": None, "as_of_source": None,
+}
 THREAD = Thread(
     path="src/app.py", line=3, resolved=False, author="reviewer-bot",
     body_snippet="rename data before merging",

@@ -55,7 +55,7 @@ Configuration is loaded from built-in defaults, overridden by environment variab
 | `PRXREF_TICKET_CONTEXT_FILE` | *(empty — off)* | Plain-text or Markdown file holding the ticket this PR implements. When set, every finding is marked in, out of, or of unknown ticket scope. An empty or whitespace-only file means "this PR has no ticket". A missing or non-UTF-8 file raises `ConfigError` and `prxref review` exits `2`. The webhook daemon ignores it (and says so once). `--context-file PATH` wins for one run, and `--context-file ""` turns it off. |
 | `PRXREF_TICKET_CONTEXT_MAX_CHARS` | `6000` | Characters of ticket text kept in the prompt; longer text is truncated with a visible marker. Must be **greater than 0**. |
 
-The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`, `--diff-file`) deliberately have no environment variable: set in the environment, a replay pin would silently pin every run, the webhook daemon's included.
+The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`, `--diff-file`, `--as-of`, `--description-file`, `--no-description`) deliberately have no environment variable: set in the environment, a replay pin would silently pin every run, the webhook daemon's included.
 
 ### Per-Forge Authentication
 

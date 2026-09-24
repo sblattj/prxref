@@ -62,7 +62,10 @@ SIZE = {
     "changed_lines": 1200, "changed_files": 9, "lines_limit": 400, "files_limit": None,
     "triggered": True, "message": "This PR changes 1200 lines (limit 400); consider splitting it.",
 }
-REPLAY = {"base_sha": BASE_SHA, "head_sha": HEAD_SHA, "threads": "hidden", "diff_file": None}
+REPLAY = {
+    "base_sha": BASE_SHA, "head_sha": HEAD_SHA, "threads": "hidden", "diff_file": None,
+    "description": "pinned", "as_of": "2026-05-01T09:30:00Z", "as_of_source": "first-review",
+}
 SAMPLING = {"temperature": 0.0, "seed": 7, "models": ["m"]}
 
 
@@ -218,7 +221,8 @@ class TestTextSummaryAlwaysLines:
             "verdict: Commented",
             "coverage: 1/2 chunks reviewed",
             f"size advisory: {SIZE['message']}",
-            f"replay: base={BASE_SHA[:12]} head={HEAD_SHA[:12]} threads=hidden diff_file=-",
+            f"replay: base={BASE_SHA[:12]} head={HEAD_SHA[:12]} threads=hidden diff_file=- "
+            "description=pinned as_of=2026-05-01T09:30:00Z (first-review)",
         ]
 
     def test_the_lines_print_under_verbose_too(self):
@@ -237,14 +241,23 @@ class TestTextSummaryAlwaysLines:
         assert not any(line.startswith("replay:") for line in lines)
 
     def test_a_diff_file_replay_prints_dashes_for_the_missing_shas(self):
-        stamp = {"base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": "cases/x.patch"}
+        stamp = {
+            "base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": "cases/x.patch",
+            "description": "file", "as_of": None, "as_of_source": None,
+        }
         lines = _summary(_full_result(replay=stamp, size_advisory=None), verbose=False)
-        assert lines == ["verdict: Commented", "replay: base=- head=- threads=hidden diff_file=cases/x.patch"]
+        assert lines == [
+            "verdict: Commented",
+            "replay: base=- head=- threads=hidden diff_file=cases/x.patch description=file",
+        ]
 
     def test_a_pinned_replay_with_threads_shown(self):
         stamp = {**REPLAY, "threads": "shown"}
         lines = _summary(_full_result(replay=stamp, size_advisory=None), verbose=False)
-        assert lines[-1] == f"replay: base={BASE_SHA[:12]} head={HEAD_SHA[:12]} threads=shown diff_file=-"
+        assert lines[-1] == (
+            f"replay: base={BASE_SHA[:12]} head={HEAD_SHA[:12]} threads=shown diff_file=- "
+            "description=pinned as_of=2026-05-01T09:30:00Z (first-review)"
+        )
 
     def test_non_verbose_prints_none_of_the_verbose_lines(self):
         lines = _summary(_full_result(), verbose=False)
@@ -371,7 +384,8 @@ class TestThroughTheEntryPoint:
         out = capsys.readouterr().out
         for needle in (
             f"size advisory: {SIZE['message']}",
-            f"replay: base={BASE_SHA[:12]} head={HEAD_SHA[:12]} threads=hidden diff_file=-",
+            f"replay: base={BASE_SHA[:12]} head={HEAD_SHA[:12]} threads=hidden diff_file=- "
+            "description=pinned as_of=2026-05-01T09:30:00Z (first-review)",
             "tokens: 1000+200 cost: $0.0007",
             "rules: .prxref/rules.md sha256=a1b2c3d4e5f6 chars=420",
             "ticket: ticket.md sha256=feedfacecafe chars=812 in=1 out=1 unknown=0",

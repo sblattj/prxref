@@ -70,6 +70,7 @@ def test_each_case_replays_with_one_cli_call(case, monkeypatch, capsys, tmp_path
     record = json.loads(out)
     assert record["replay"] == {
         "base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": diff,
+        "description": "file", "as_of": None, "as_of_source": None,
     }
     assert record["posted"] is False
     assert record["chunks_reviewed"] >= 1
