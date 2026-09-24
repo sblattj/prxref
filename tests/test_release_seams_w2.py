@@ -59,7 +59,10 @@ from tests.test_orchestrator import FakeForge, FakeLLM, _added_file_diff
 from tests.test_replay import BASE, HEAD, RAW_OK
 
 URL = "https://github.com/acme/widget/pull/7"
-PINNED_STAMP = {"base_sha": BASE, "head_sha": HEAD, "threads": "hidden", "diff_file": None}
+PINNED_STAMP = {
+    "base_sha": BASE, "head_sha": HEAD, "threads": "hidden", "diff_file": None,
+    "description": "none", "as_of": None, "as_of_source": None,
+}
 CHUNKS = 3
 REVIEW_DIFF = "".join(_added_file_diff(f"src/mod_{i}.py", 6) for i in range(CHUNKS))
 CALL_COST = 0.125
@@ -258,7 +261,10 @@ class TestReplayCarriesTheCost:
 
     def test_diff_file_replay_json_carries_the_stamp_and_the_summed_cost(self, rig, capsys, diff_file):
         payload, record, events = _review(rig, capsys, ["--diff-file", diff_file])
-        stamp = {"base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": diff_file}
+        stamp = {
+            "base_sha": None, "head_sha": None, "threads": "hidden", "diff_file": diff_file,
+            "description": "file", "as_of": None, "as_of_source": None,
+        }
         assert rig.made == []
         assert payload["replay"] == stamp
         assert record["replay"] == stamp
