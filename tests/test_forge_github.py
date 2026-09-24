@@ -738,6 +738,11 @@ def _routed_session(summary_feed):
                 text="x = 1\n",
                 headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
             )
+        if "/git/trees/" in url:
+            return _mock_response(json_data={
+                "sha": HEAD_SHA, "truncated": False,
+                "tree": [{"path": "src/app.py", "type": "blob"}],
+            })
         if url.endswith("/issues/42/comments"):
             return _mock_response(json_data=summary_feed)
         if url.endswith("/pulls/42/comments"):
@@ -791,6 +796,9 @@ def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
         ) == "x = 1\n",
         "prune_inline_comments": lambda: forge.prune_inline_comments(ref) == 1,
         "get_pr_history": lambda: forge.get_pr_history(ref).complete,
+        "list_paths": lambda: getattr(
+            forge.list_paths(ref, sha=HEAD_SHA), "paths", None
+        ) == ("src/app.py",),
         # Both branches: no summary yet (POST), and one to update (PATCH).
         "post_summary": lambda: (
             forge.post_summary(ref, "first") is None
