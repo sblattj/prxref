@@ -449,7 +449,7 @@ rules are configured:
 | `--format json` | the `scoped_rules` key, right after `prompt_templates`, always present, `null` when off |
 | `-v` text output | `scoped rules: 2 file(s) .prxref/scoped/helm.md=<first 12 hex> .prxref/scoped/java.md=<first 12 hex> cap=24000`, after the `rules:` line when there is one |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `scoped_rules ok` event whose meta is the record without `units`, right after `rules ok` (after `run start` with no always-on file); each `chunk start` and `sweep start` event carries its unit's rows as `rules` |
-| `--trace-dir` | each unit's own block, in its `<unit>.system.md` |
+| `--trace-dir` | each unit's own block, in its `<unit>.system.md`; chunk files count from 0, so the `chunk start` event with `index` N is `chunk{N-1}.system.md` |
 
 ## Cost
 
@@ -464,9 +464,14 @@ matches, plus the sweep whenever any chunk does. So it adds
 24000 characters, roughly 6000 tokens, by default.
 
 Scoping saves tokens only when the chunks split by path. prxref fills
-chunks by size and by `PRXREF_CHUNK_MAX_FILES`, not by language, so a small
-PR that mixes Java and Helm files often lands in one chunk, which then
-carries both files' rules.
+chunks by size and by `PRXREF_CHUNK_MAX_FILES`, not by language: a file
+joins an existing chunk whenever one still has room under both caps, and a
+new chunk opens only when none has. When more than one chunk has room, the
+file goes to the one holding a file that shares the most leading directories
+with it (the earlier chunk on a tie; `triage.build_chunks`), so directory
+proximity decides between chunks but never opens one. A small PR that mixes
+Java and Helm files therefore often lands in one chunk, which then carries
+both files' rules.
 
 All the rules also count toward the prefill share of `PRXREF_LLM_TIMEOUT`,
 and the timeout retry keeps them. Keep each file to rules a reviewer can

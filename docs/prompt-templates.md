@@ -127,7 +127,7 @@ These only warn, and the run goes on:
 ## What is recorded
 
 The run record's `prompt_templates` names the directory and fingerprints each
-overridden template. It never holds template text.
+template file in it. It never holds template text.
 
 ```json
 "prompt_templates": {
@@ -144,12 +144,14 @@ overridden template. It never holds template text.
 
 - `dir` and `path` are as configured. `sha256` is taken over the file's raw
   bytes, so it equals `shasum -a 256 worker.md`, and `chars` is the length of
-  the decoded text. A template left packaged has no entry.
+  the decoded text. Every template file present in the directory gets an
+  entry, edited or not, so an unchanged `prxref prompts export` copy is
+  stamped too; a template absent from the directory has no entry.
 - `--format json` always carries the key; it is `null` without a prompts
   directory. The JSONL trace (`PRXREF_TRACE_FILE`) gains one `prompts ok`
   event with the same fields.
 - `-v` prints one line, the directory followed by the first 12 characters of
-  each overridden template's SHA-256, in name order. For the record above it
+  each stamped template's SHA-256, in name order. For the record above it
   is `prompts: /etc/prxref/prompts worker=4f6a0c1e9b7d`; with `summary.md`
   overridden too, `summary=` comes before `worker=`.
 - `--trace-dir` writes the prompts each review unit actually sent

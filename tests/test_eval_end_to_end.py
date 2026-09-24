@@ -27,14 +27,12 @@ The judge stub grades like a judge that reads lines as a hint: each label is
 credited to the same-file AI finding on the nearest line, and graded
 ``none`` when its file has no AI finding.
 
-``cli._finding_json`` gains its ``locations`` key with #13's JSON emission,
-which may postdate the tree this file runs on. :func:`_bridge_locations` adds
-the key exactly as decided for it, from the ``Finding.locations`` the
-grouping pass sets, and only when the row lacks it, so the bridge is inert
-once the CLI emits the key. :class:`TestGroupedWithoutTheBridge` runs the
-grouped case without it; its per-location credit through the record is a
-strict expected failure only while the CLI does not emit the key, and a
-plain test once it does.
+``cli._finding_json`` writes each row's ``locations`` from the
+``Finding.locations`` the grouping pass sets, so every run here goes through
+the CLI's own JSON emission, with no stand-in. :class:`TestGroupedWithoutTheBridge`
+(named for the stand-in an earlier tree needed) runs the grouped case alone
+and checks both the record's ``locations`` and the judge tier's credit at
+the member location read back from it.
 """
 from __future__ import annotations
 
@@ -250,29 +248,6 @@ def rig(monkeypatch):
     return state
 
 
-def _bridge_locations(monkeypatch) -> None:
-    """Emit each JSON finding row's ``locations`` as decided for #13, when the CLI does not yet."""
-    emit = cli._finding_json
-
-    def with_locations(f, *, drop_reason):
-        row = emit(f, drop_reason=drop_reason)
-        if "locations" not in row:
-            pairs = getattr(f, "locations", ())
-            row["locations"] = [{"file": file, "line": line} for file, line in pairs] or None
-        return row
-
-    monkeypatch.setattr(cli, "_finding_json", with_locations)
-
-
-def _cli_emits_locations() -> bool:
-    """Whether ``cli._finding_json`` writes a ``locations`` key at this tree (#13's JSON emission)."""
-    probe = SimpleNamespace(file="a.py", line=1, severity="error", confidence=0.9, title="t", body="b")
-    return "locations" in cli._finding_json(probe, drop_reason=None)
-
-
-CLI_EMITS_LOCATIONS = _cli_emits_locations()
-
-
 def _write_dataset(root: Path, cases: list[dict[str, Any]]) -> Path:
     root.mkdir(parents=True)
     (root / "grouped.patch").write_text(GROUPED_DIFF, encoding="utf-8")
@@ -311,9 +286,8 @@ def _row_at(record: dict, file: str, line: int) -> dict[str, Any]:
 
 
 @pytest.fixture
-def pipeline(rig, tmp_path, monkeypatch, capsys, caplog):
+def pipeline(rig, tmp_path, capsys, caplog):
     """Run both arms, score both, compare twice, then rescore ``base``; every step through ``cli.main``."""
-    _bridge_locations(monkeypatch)
     directory_cases = [case_to_json(case) for case in load_cases(EVALS_DIR)]
     cases = _write_dataset(tmp_path / "dataset", [*directory_cases, PINNED_CASE, GROUPED_CASE])
     rules = tmp_path / "rules.md"
@@ -541,11 +515,6 @@ class TestGroupedWithoutTheBridge:
         for human_id in ("M1", "M2"):
             assert _grade(unbridged.score, "case-grouped", human_id)["grade"] == "full"
 
-    @pytest.mark.xfail(
-        not CLI_EMITS_LOCATIONS, strict=True, raises=KeyError,
-        reason="#13 JSON emission (Q13-F) pending: cli._finding_json does not emit `locations`, so the "
-               "judge sees the grouped finding at its representative's line only",
-    )
     def test_the_record_itself_credits_the_member_location_in_the_judge_tier(self, unbridged):
         rep = _row_at(unbridged.record, GROUPED_PATH, REP_LINE)
         assert rep["locations"] == [{"file": GROUPED_PATH, "line": MEMBER_LINE}]
