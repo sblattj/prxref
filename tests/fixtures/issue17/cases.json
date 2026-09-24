@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "issue17-repo-context",
+      "diff_file": "pr.diff",
+      "expected": [
+        {
+          "id": "L1",
+          "file": "db/changelog/003-idempotency-unique.sql",
+          "line": 4,
+          "severity": "error",
+          "text": "The unique index on idempotency_keys omits connector_id, so a key is only unique per (tenant, key) even though the OpenAPI IdempotencyKey contract (api/openapi/connectors.yaml) requires uniqueness per (tenant, connector, key).",
+          "must_match": "re:(?i)connector_id"
+        },
+        {
+          "id": "L2",
+          "file": "src/main/java/com/acme/connectors/ConnectorService.java",
+          "line": 23,
+          "severity": "error",
+          "text": "createTransport passes both request.url() and request.legacyUrl() into the TransportConfig constructor, but TransportConfig's compact constructor (and the OpenAPI TransportConfig schema) require the two fields to be mutually exclusive, so this always throws IllegalArgumentException when a client sends both.",
+          "must_match": "re:(?i)(mutually exclusive|exactly one of)"
+        }
+      ]
+    }
+  ]
+}
