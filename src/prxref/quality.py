@@ -79,7 +79,9 @@ emit is tabulated for operators in ``docs/quality.md``.
     the spec digest the workers were shown.
 11. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
-    (``error cap exceeded (max N)``), and enforce the
+    (``error cap exceeded (max N)``), optionally cap warnings and
+    outofscope findings the same way (``warning cap exceeded (max N)``,
+    ``outofscope cap exceeded (max N)``), and enforce the
     {error, warning, spec, outofscope} severity vocabulary
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
@@ -88,7 +90,16 @@ emit is tabulated for operators in ``docs/quality.md``.
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
-    duplicate and then die at the gate itself.
+    duplicate and then die at the gate itself. With a similarity
+    threshold set, a second tier then drops reworded restatements: two
+    active findings in the same file on the same line (line 0 is never
+    compared) whose titles pass ``titles_similar``
+    (``duplicate of chunk finding (reworded, similarity 0.57)``, or
+    ``duplicate of sweep finding ...`` between two sweep findings).
+    Across the boundary the chunk copy always survives and a sweep copy
+    is dropped only when it is no more severe; on one side the more
+    severe, then higher-confidence, copy is kept. Without a threshold
+    the tier does not run.
 13. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
@@ -1121,7 +1132,10 @@ logger = logging.getLogger(__name__)
 
 
 def apply_sweep_dedup(
-    findings: Sequence[Finding], sweep_start: int
+    findings: Sequence[Finding],
+    sweep_start: int,
+    *,
+    similarity: float | None = None,
 ) -> list[Finding]:
     """Drop systemic-sweep findings that restate a chunk finding.
 
@@ -1131,8 +1145,35 @@ def apply_sweep_dedup(
     finding adds no recall — it is the same pattern the chunk seat already
     reported — and is dropped with ``drop_reason="duplicate of chunk
     finding"``, the same retained-not-silenced convention every other pass
-    uses. Chunk findings are never dropped by this pass, even when the sweep
-    phrased the pattern first: the chunk seat cited the exact line.
+    uses. A sweep finding never causes a chunk finding to be dropped, even
+    when the sweep phrased the pattern first: the chunk seat cited the exact
+    line.
+
+    ``similarity`` switches on a second, reworded tier that runs after the
+    exact tier; ``None`` (the default) skips it entirely, so the pass is
+    the exact tier alone. The tier compares findings that are still active,
+    in the same file and on the same line; a line-0 (file-level) finding is
+    never compared. Two such findings are duplicates when
+    :func:`titles_similar` holds at ``similarity``.
+
+    - Across the chunk/sweep boundary the chunk copy always survives. The
+      sweep copy is dropped only when its severity is no higher than the
+      chunk copy's; a MORE severe sweep copy is kept alongside it, so the
+      tier can never lower a review's worst severity. Confidence plays no
+      part here.
+    - Between two findings on the same side (chunk vs chunk, or sweep vs
+      sweep), the more severe one is kept, then the one ranked first by
+      :func:`finding_rank_key`: higher confidence, then content.
+
+    Chunk findings are settled among themselves first; each sweep finding
+    is then compared with the chunk copies kept on its line before the
+    sweep copies kept there. A finding is only ever compared with copies
+    already kept, in a fixed content order, so the result does not depend
+    on input order and a dropped copy never drops a third. The dropped
+    copy's ``drop_reason`` names the side of the copy it restates and the
+    :func:`title_similarity` Jaccard score to two decimals:
+    ``duplicate of chunk finding (reworded, similarity 0.57)`` or
+    ``duplicate of sweep finding (reworded, similarity 0.57)``.
 
     Runs after :func:`apply_quality_gate`, so the duplicate set is built
     from chunk findings that SURVIVED it — a sub-floor chunk finding never
@@ -1158,6 +1199,88 @@ def apply_sweep_dedup(
             result.append(replace(f, drop_reason="duplicate of chunk finding"))
         else:
             result.append(f)
+    if similarity is None:
+        return result
+    return _dedup_reworded(result, start, similarity)
+
+
+def _reworded_severity_rank(finding: Finding) -> int:
+    severity = (finding.severity or "").strip().lower()
+    return _SEVERITY_RANK.get(severity, len(_SEVERITY_RANK))
+
+
+def _reworded_keep_key(
+    finding: Finding,
+) -> tuple[int, tuple[float, str, int, str], str]:
+    return (
+        _reworded_severity_rank(finding),
+        finding_rank_key(finding),
+        repr(finding),
+    )
+
+
+def _first_reworded_match(
+    findings: Sequence[Finding],
+    candidate: int,
+    kept: Sequence[int],
+    threshold: float,
+) -> float | None:
+    title = findings[candidate].title or ""
+    for k in kept:
+        kept_title = findings[k].title or ""
+        if titles_similar(title, kept_title, threshold):
+            return title_similarity(title, kept_title)[0]
+    return None
+
+
+def _reworded_drop(finding: Finding, side: str, jaccard: float) -> Finding:
+    return replace(
+        finding,
+        drop_reason=f"duplicate of {side} finding (reworded, similarity {jaccard:.2f})",
+    )
+
+
+def _dedup_reworded(
+    findings: list[Finding], start: int, threshold: float
+) -> list[Finding]:
+    lines: dict[tuple[str, int], list[int]] = {}
+    for i, f in enumerate(findings):
+        if f.drop_reason is None and (f.line or 0) > 0:
+            lines.setdefault((f.file, f.line), []).append(i)
+    result = list(findings)
+    for indices in lines.values():
+        if len(indices) < 2:
+            continue
+        chunk_side = sorted(
+            (i for i in indices if i < start),
+            key=lambda i: _reworded_keep_key(findings[i]),
+        )
+        sweep_side = sorted(
+            (i for i in indices if i >= start),
+            key=lambda i: _reworded_keep_key(findings[i]),
+        )
+        kept_chunk: list[int] = []
+        for i in chunk_side:
+            jaccard = _first_reworded_match(findings, i, kept_chunk, threshold)
+            if jaccard is None:
+                kept_chunk.append(i)
+            else:
+                result[i] = _reworded_drop(findings[i], "chunk", jaccard)
+        kept_sweep: list[int] = []
+        for i in sweep_side:
+            rank = _reworded_severity_rank(findings[i])
+            at_least_as_severe = [
+                k for k in kept_chunk if _reworded_severity_rank(findings[k]) <= rank
+            ]
+            jaccard = _first_reworded_match(findings, i, at_least_as_severe, threshold)
+            if jaccard is not None:
+                result[i] = _reworded_drop(findings[i], "chunk", jaccard)
+                continue
+            jaccard = _first_reworded_match(findings, i, kept_sweep, threshold)
+            if jaccard is None:
+                kept_sweep.append(i)
+            else:
+                result[i] = _reworded_drop(findings[i], "sweep", jaccard)
     return result
 
 
