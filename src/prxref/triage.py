@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -57,6 +58,18 @@ def normalize_scope(raw: object) -> str:
 # merge two different rules into one group.
 RULE_MAX_CHARS: int = 120
 
+# A rule label reaches posted comments and terminal output, so a label holding
+# one of these is dropped: control (Cc), surrogate (Cs) and private-use (Co)
+# code points, and the bidi embedding, override and isolate controls that can
+# reorder the text around them. Every other format character stays, because
+# ZWNJ and ZWJ are part of ordinary Persian, Urdu and emoji labels.
+_RULE_DROPPED_CATEGORIES = frozenset({"Cc", "Cs", "Co"})
+_RULE_BIDI_CONTROLS = frozenset(chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+
+
+def _rule_char_dropped(ch: str) -> bool:
+    return ch in _RULE_BIDI_CONTROLS or unicodedata.category(ch) in _RULE_DROPPED_CATEGORIES
+
 
 def normalize_rule(raw: object) -> str | None:
     """Map a model-supplied ``rule`` value onto a short label, or ``None``.
@@ -65,14 +78,17 @@ def normalize_rule(raw: object) -> str | None:
     to one space and the ends are stripped. ``None`` is returned for anything
     else: a non-string (``None``, a number, a bool, a list), a value that is
     empty after collapsing, one longer than :data:`RULE_MAX_CHARS`, or one
-    that still holds a non-printable character (a control or bidi-override
-    code point). Case is kept as given; a grouping key casefolds it itself.
-    Never raises.
+    that still holds a character of Unicode category ``Cc`` (control), ``Cs``
+    (surrogate) or ``Co`` (private use), or a bidi embedding, override or
+    isolate control (U+202A to U+202E, U+2066 to U+2069). Every other
+    character is kept, including the zero-width non-joiner (U+200C) and
+    joiner (U+200D) that Persian, Urdu and emoji labels need. Case is kept as
+    given; a grouping key casefolds it itself. Never raises.
     """
     if not isinstance(raw, str):
         return None
     value = " ".join(raw.split())
-    if not value or len(value) > RULE_MAX_CHARS or not value.isprintable():
+    if not value or len(value) > RULE_MAX_CHARS or any(_rule_char_dropped(ch) for ch in value):
         return None
     return value
 
