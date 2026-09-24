@@ -1,175 +1,232 @@
-# HANDOFF — v0.5.0 shipped: the Bitbucket Server / Data Center forge
+# HANDOFF — v0.14.0 shipped: the inputs release
 
-**Repo:** `sblattj/prxref` (public) · **Released:** 2026-08-28 · **Supersedes** the
-"cut v0.5.0" handoff written the same day.
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-24 · **Supersedes** the
+v0.5.0 handoff.
 
-The Bitbucket Server / Data Center forge is released. It had been finished and
-proven in real use but lived only on `origin/feat/bitbucket-server-forge`
-(`cc58915`), so every deployment that needed it ran a hand-maintained overlay of
-`bitbucket_server.py` on top of a tagged release. **Delete that overlay** — v0.5.0
-carries the forge natively.
+0.14.0 lets a review read more than the diff: the spec a PR implements, a team's
+own review rules, and the ticket the PR is for. It also adds a replay mode for
+evaluation, Azure DevOps as the fifth forge, two backends that run on a Claude
+Code or Kiro CLI login, a dollar cost for every run, and a PR size advisory. The
+user-facing account is the `[0.14.0]` section of `CHANGELOG.md`. This file is for
+whoever cuts the next release.
+
+This is the first release on the rewritten history. The repository was recreated
+on 2026-09-24. Every tag and nearly every commit before 0.14.0 has a new SHA, so
+re-clone rather than pull, and treat any SHA quoted in an older note as dead.
+Issue numbers restarted too: the eight 0.14.0 issues are #1 to #8 on the new
+tracker.
 
 ## What landed
 
-- `src/prxref/forges/bitbucket_server.py` — project and personal (`~slug`)
-  repositories, deployment context paths, anchored inline comments, `start`/`limit`
-  paging, and the `version` field Data Center requires when updating a comment.
-- Registration in both places that matter: the `detect_forge` module tuple in
-  `forges/base.py` and the `impls` dict in `config.py`'s `make_forge`.
-- Three env vars: `PRXREF_BITBUCKET_SERVER_TOKEN` (falls back to
-  `PRXREF_BITBUCKET_TOKEN`), `PRXREF_BITBUCKET_SERVER_USER` and
-  `PRXREF_BITBUCKET_SERVER_PASSWORD`.
-- **A real bug fix, not just the new forge:** Bitbucket webhooks were broken for
-  *both* products. The receiver accepted only `pr:opened` / `pr:modified` —
-  Bitbucket **Server** event names — while reading the PR URL from
-  `pullrequest.links.html.href`, which is Bitbucket **Cloud**'s payload shape. A
-  genuine Cloud webhook was rejected as not reviewable; a genuine Server webhook
-  produced no URL. Both dialects now work.
-- Docs, README, `CLAUDE.md` and `.env.example` updated, and every "Bitbucket is
-  Cloud only" / "Server is not supported" claim removed.
+- **Spec-grounded review.** `--spec` / `PRXREF_SPEC_SOURCES` fetch web pages,
+  local files or directories, and Jira tickets. `specs.build_spec_digest` prunes
+  them to the constraints relevant to the diff, and the digest goes into every
+  worker and sweep prompt. A diff that breaks a quoted constraint draws an
+  advisory `spec` finding. The finding has to be earned. When no constraint
+  reached the prompts, `quality.apply_spec_grounding` relabels any `spec` finding
+  as a `warning`. On a grounded run, `quality.apply_hedge_gate(...,
+  spec_digest=...)` skips the text a finding quotes verbatim from the digest.
+  The run record carries `spec_grounding`.
+- **#1 litellm without a base URL.** Only `openai-compat`, `ferry` and `http`
+  need `PRXREF_LLM_BASE_URL`. The other backends ignore it and log one INFO line.
+- **#2 Azure DevOps.** `forges/azure_devops.py` covers Services and Server, and
+  `detect_forge` asks it last. Azure DevOps has no unified-diff endpoint, so the
+  adapter rebuilds the diff from the Diffs API change list plus blob contents.
+  Webhooks arrive as service hooks, checked against a Basic-auth secret.
+- **#3 Team review rules.** `rules.py` reads `--rules-file` /
+  `PRXREF_REVIEW_RULES` into the system prompt. Optional `severity:` front matter
+  maps team words onto prxref severities, and `quality.apply_severity_map`
+  rewrites them before every other quality pass.
+- **#4 Ticket context and scope.** `ticket.py` reads `--context-file` /
+  `PRXREF_TICKET_CONTEXT_FILE`, and every finding is judged `in`, `out` or
+  `unknown` against it (`triage.normalize_scope`). 🟦 now marks an
+  out-of-ticket finding, so minor findings moved to ⬜.
+- **#5 Replay.** `--base-sha` / `--head-sha`, `--no-threads` and `--diff-file`
+  review a pinned range or a diff file. Every forge implements
+  `Forge.get_compare_diff`, `forges/replay.py` holds `LocalDiffForge` and
+  `ReplayForge`, and a replay never posts. `tests/evals/test_eval_replay.py`
+  replays each eval case with one offline CLI call.
+- **#6 Subscription CLI backends.** `llm_cli_backends.py` adds `claude-cli` and
+  `kiro-cli`. Each model attempt is one process started in a fresh temporary
+  directory, the credential-routing variables are stripped from its
+  environment, and a missed deadline kills the whole process group.
+- **#7 Dollar cost.** In `costs.py`, a figure the backend reported always wins.
+  Otherwise `PRXREF_PRICE_TABLE` gives an estimate, and without one the cost is
+  `null`, never `0` and never a partial sum.
+- **#8 Size advisory.** `PRXREF_SIZE_WARN_LINES` / `PRXREF_SIZE_WARN_FILES` flag
+  an oversized PR. `triage.count_size_relevant_changes` counts the parsed diff,
+  skipping lockfiles, generated files and `PRXREF_SIZE_IGNORE_GLOBS` matches.
+- **Fixes found on the way.** GitLab's MR diff listing now reads every page and
+  fails on a short read instead of stopping at 20 files. GitHub calls time out.
+  Prompts and the summary fill in a single pass, so a `{diff}` in PR text stays
+  literal. `load_config` no longer shares list defaults between calls. An
+  unrecognized `PRXREF_LLM_BACKEND` exits 2.
+- **Config went from 36 to 55 keys.** The 19 new keys are the CLI path and
+  concurrency, cost, size, spec, rules and ticket keys, the Jira credentials, and
+  the Azure DevOps token and webhook secret.
 
-## Four things the previous handoff got wrong
+## What this release taught
 
-Recorded because each one would have cost the next person real time.
+Written down because each one cost a seat real time.
 
-1. **The Cloud-before-Server ordering rationale was false.** The old handoff said
-   Cloud's parser is the more specific of the two and that Server-first would make
-   Cloud URLs match Server. Tested by reversing the tuple and running six URLs
-   through `detect_forge`: **every case resolved identically.** The parsers are
-   disjoint — Cloud pins `^https?://bitbucket\.org/` plus a bare
-   `owner/repo/pull-requests/N`; Server requires a `/projects|users/KEY/repos/REPO/`
-   prefix. No URL matches both, including the adversarial `bitbucket.org` host with
-   a Server-shaped path, which only Server matches under either order. The Cloud-first
-   order is kept as **defence in depth** — if either parser is later loosened, the
-   failure degrades into a shadowed forge rather than a mis-routed one — but it is
-   not load-bearing, and no document should claim it is.
-
-2. **Both registration line numbers pointed at the wrong line.** `forges/base.py:93`
-   and `config.py:378` are the `def` lines; the literals that actually need editing
-   were the tuple at `base.py:97` and the dict at `config.py:386-390`. Cite the
-   construct, not the function.
-
-3. **`uv run pytest` works again — the invocation is now the bare one.** It used
-   to die with `Failed to spawn: pytest / No such file or directory (os error 2)`,
-   because pytest lived in `[project.optional-dependencies] dev` and `uv run` never
-   installs a project *extra*; the error reads like a broken venv rather than a
-   missing flag. The dev tools now live in `[dependency-groups] dev`, which uv
-   installs by default, so the `--extra dev` form is gone from every surface:
-
-   ```bash
-   uv run pytest
-   ```
-
-4. **The diff direction that reads "what the branch changed" is backwards here.**
-   `cc58915` was cut from v0.2.0, so `git diff main...cc58915` renders main's own
-   v0.3/v0.4 work as *additions* — applying it literally reverts the entire config-surface
-   release (17 config rows and 4 sections in `docs/env-vars.md` alone). Most hunks on
-   that branch are regressions, not features. Diff the branch's **own** delta instead:
-
-   ```bash
-   git diff a7abbf1 cc58915 -- <path>
-   ```
+1. **Lay the seams first, and make every stub fail closed.** A foundation stage
+   landed every shared surface with a placeholder body before any feature seat
+   started: config keys, run-record and JSON keys, prompt slots, trace events,
+   the glyph table and the new `Forge` method. That let the eight issue seats run
+   in parallel on disjoint files. A stub that fails closed cannot ship as a
+   silent no-op. The cost is that placeholder prose outlives the placeholder.
+   Docstrings saying the loaders "fail closed in this build" and the cost hooks
+   are "inert in this build" survived after the real bodies landed, and the
+   release had to sweep them. Grep for `in this build` before cutting.
+2. **Cite the symbol, not the line.** Several seats found the `file:line` pins in
+   their briefs stale against the base they had been given, and every one of
+   them still resolved by symbol name. Pin a SHA if you must give a line, and
+   prefer `module.function`.
+3. **Keep one table per cross-cutting literal.** Every severity and scope glyph
+   comes from `prxref.markers`, and `tests/test_markers.py`
+   (`TestGlyphsLiveInOnePlace`) fails when a glyph literal turns up anywhere else
+   in the package. So a glyph change is made in one table, and the test finds
+   any stray copy.
+4. **`Tracer.event(node, phase, **meta)` reserves two keyword names.** A dict
+   splatted into it must not carry a `node` or `phase` key. Such a call raises
+   `TypeError` at the call site, before tracing's never-raise guard can catch it.
+5. **A mutation check needs `PYTHONDONTWRITEBYTECODE=1`.** To prove a test can
+   fail, revert a line, watch the test go red, then restore the line and `cmp` it.
+   Without the variable, the mutant's bytecode gets cached. A same-size restore
+   within the same second can then run the mutant again.
+6. **Two contract rules over one field need a tiebreak.** One rule said every
+   new JSON key is always present and `null` when its feature is off. Another
+   said `replay` is absent on a normal run. The code followed the second, and a
+   seam test now pins that. The next contract should say which rule wins before
+   any seat starts.
 
 ## The coupling that will catch the next person adding a config key
 
-`tests/test_docs_consistency.py` compiles `docs/env-vars.md` and `.env.example`
-against `config._DEFAULTS` **in both directions**, and asserts two hard-coded
-integers built as `f"**{len(_DEFAULTS)}** configuration keys"` and
+`tests/test_docs_consistency.py` checks `docs/env-vars.md` and `.env.example`
+against `config._DEFAULTS` **in both directions**. It also asserts two hard-coded
+integers, built as `f"**{len(_DEFAULTS)}** configuration keys"` and
 `f"for {len(_DEFAULTS)+len(_LEGACY_ENV_ALIASES)} accepted variable names"`.
 
-So a new config key is not a source change — it is an atomic four-surface change:
-`_DEFAULTS`, the `config.py` docstring, `.env.example`, and `docs/env-vars.md`
-including its counts and its `Per-Forge Auth (N)` section heading. Adding three keys
-here failed five tests until all four surfaces moved together. Current values: **55**
-keys, **1** legacy alias, **56** accepted names.
+So a new config key is not a source change. It is an atomic change across four
+surfaces: `_DEFAULTS` plus the `_INT_KEYS` / `_FLOAT_KEYS` / `_RANGES` /
+`_CHOICE_KEYS` tables, the `config.py` docstring, `.env.example`, and
+`docs/env-vars.md`, including its counts and its per-section headings. 0.14.0
+added 19 keys this way. Current values: **55** keys, **1** legacy alias, **56**
+accepted names.
 
 ## Release shape (follow this next time)
 
+How 0.14.0 was built:
+
+1. **Foundation.** Seats lay the shared seams every feature needs, each with a
+   placeholder body that fails closed. Nothing user-visible lands here.
+2. **Wave 1.** One seat per issue runs in parallel, each in its own worktree
+   with a disjoint file list. A seat fills a placeholder; it does not add a seam.
+3. **Wave 2.** Next come the pieces that needed two wave-1 bodies in place (the
+   replay CLI, replay over Azure DevOps, the second CLI backend) and the forge
+   fixes wave 1 surfaced.
+4. **One integration gate per merge.** Each seat branch merges into
+   `release/X.Y.Z` on its own, and a merge stays only if the full
+   `uv run pytest` and `uv run ruff check src tests` pass on the merged tree.
+5. **REL.** Parallel seats sweep stale docs, add cross-seat seam tests, and
+   write the version bump, the CHANGELOG and this file. Read-only live checks
+   follow against public PRs and real CLIs, all run with `--no-post`.
+
+Cutting the release:
+
 ```bash
-uv build                       # produces BOTH sdist and wheel
-gh release upload vX.Y.Z dist/prxref-X.Y.Z.tar.gz dist/prxref-X.Y.Z-py3-none-any.whl
+# bump pyproject.toml and src/prxref/__init__.py, then:
+uv lock                              # uv.lock carries the version too
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-Both assets matter: the v0.4.0 release ships both, and at least one consumer updates
-itself with `gh release download --pattern '*.tar.gz'`, which does **not** match
-GitHub's auto-generated source archive. A release without the attached sdist silently
-breaks those consumers.
+Pushing a `v*` tag runs `.github/workflows/release.yml`. Its `release` job runs
+`uv build` and creates the GitHub release with the wheel **and** the sdist
+attached. The job lists both by explicit pattern, not `dist/*`, which once
+shipped a stray `.gitignore` as an asset. Its `publish` job builds again and
+publishes to PyPI by OIDC trusted publishing, so no token is stored anywhere. The
+two jobs build separately, which makes the PyPI files and the release assets two
+builds of the same tag. Keep the attached sdist: at least one consumer updates
+itself with `gh release download --pattern '*.tar.gz'`, and that pattern does not
+match GitHub's auto-generated source archive.
+
+The repository was recreated, so check three things before its first tag push:
+Actions is enabled, the `pypi` environment exists, and the PyPI trusted
+publisher still names owner `sblattj`, repository `prxref`, workflow
+`release.yml` and environment `pypi`.
 
 ## Verified at release
 
 ```
-840 passed                                    uv run pytest
-All checks passed!                            uv run ruff check src/ tests/
-0.5.0                                         uv run prxref --version
-bitbucket-server   .../projects/PROJ/repos/app/pull-requests/42
-bitbucket          https://bitbucket.org/ws/app/pull-requests/7
-github             https://github.com/o/r/pull/3
-gitlab             https://gitlab.com/o/r/-/merge_requests/9
-make_forge(ref) -> prxref.forges.bitbucket_server.ForgeImpl, name 'bitbucket-server'
+4109 passed                                   uv run pytest -q
+All checks passed!                            uv run ruff check src tests
+0.14.0                                        uv run prxref --version
 ```
 
-The counts are the ones the v0.5.0 release run produced; the commands are written
-in today's form. That run spelled them `uv run --extra dev …`, which was correct
-before the dev tools moved to `[dependency-groups]` and does not work now.
+These counts come from the version-bump commit. It branched before the
+release's own test seats merged, so the merged tip runs more tests.
+
+<!-- 0.14 verified: orchestrator -->
 
 ## Still open — not part of this release
 
-- **Observability / tracing** — prompt+response tracing and a `PRXREF_TRACE_DIR`
-  are **done** — they landed as the `review --trace-dir` flag and the
-  `PRXREF_TRACE_DIR` env var. Still open from this item: per-finding drop reasons
-  and a machine-readable run report.
-- ~~**`review --timeout SECONDS`** — the per-run counterpart to `PRXREF_LLM_TIMEOUT`,
-  which shipped natively in v0.4.0.~~ **Done** — the flag has landed.
+The known limitations, in full in the CHANGELOG:
 
-The next three came out of the v0.5.0 release review, which raised them against
-`bitbucket_server.py`. Each one is real, and each one is **repo-wide, not a porting
-defect**: the new adapter does what its siblings already do, so all three were left
-alone rather than fixed in one adapter and creating a four-way inconsistency. Whoever
-takes one on should change all four adapters in the same commit.
+- **Spec digest.**
+  - Unpunctuated keyword lines in one paragraph merge into one constraint, and a
+    run of them past 400 characters is cut.
+  - A spec directory reads only its first 20 files. It names the files it skips
+    in a log line only, and its constraints carry the directory's name rather
+    than each file's.
+  - A Jira ticket's fixed 6,000-character share can crowd out the rest of the
+    spec.
+  - A `spec` finding's quote is not checked against the digest.
+  - A `Spec: "…"` quote that never closes is barely exempt from the hedge gate.
+  - A Jira ticket passed with `--spec` sets no finding's scope.
+- **`kiro-cli`.** It always reports "cost unknown". Whether user-level Kiro
+  configuration such as `~/.kiro/steering/` reaches prxref's per-call agent has
+  not been verified. The model that actually ran is not reported, and every chat
+  is kept under `~/.kiro/sessions/cli/`.
+- **GitLab.** Files GitLab withholds as `too_large` or `collapsed` are listed
+  header-only, and an MR past 5,000 files fails. Nobody has checked live whether
+  `access_raw_diffs` changes what `/diffs` returns. If it changes nothing, drop
+  the parameter from `gitlab.get_diff` and `docs/forges.md`.
+- **Replay.** A `--diff-file` run without `--pr-url` sees only the diff.
+- **Azure DevOps.** Only anonymous reads are verified live. Posting, pruning,
+  PAT and `SYSTEM_ACCESSTOKEN` authentication, service hooks and the pinned-range
+  replay are tested against recorded API shapes only. Azure DevOps Server is
+  untested.
 
-- **Retries re-send non-idempotent writes.** All four retry sessions list `POST` in
-  `allowed_methods` against `status_forcelist [429, 500, 502, 503, 504]` with
-  `total=3` — `bitbucket_server.py:62-65`, `bitbucket.py:33-36`, `gitlab.py:33-36`,
-  `github.py:27-29` (which adds `PATCH`). If a comment POST commits server-side and
-  the response is lost to a 502/504 or a read timeout, urllib3 re-sends it and the
-  comment is duplicated. The fix is to drop the write verbs from `allowed_methods`
-  and let the caller decide, but it changes retry behaviour for every forge.
-- **Comment listings are capped and the cap is silent.** Bitbucket Server reads
-  5 x 100 activities (`bitbucket_server.py:17-18,267`) and Bitbucket Cloud 5 x 100
-  comments (`bitbucket.py:216-220`); GitLab reads a single page of 50
-  (`gitlab.py:232,321`) and GitHub a single unparameterised page, so 30
-  (`github.py:124,167`). Past the cap `list_threads` under-reports and `post_summary`
-  can miss its own `<!-- prxref-summary -->` and post a second summary. Server is the
-  *most* thorough of the four here, not the least. A shared paging helper with an
-  explicit "truncated" signal would fix all four at once.
-- **A failed comment-listing read is treated as "no summary exists".** In
-  `post_summary`, a listing that errors leaves the existing-summary handle unset and
-  control falls through to the create-a-new-comment POST:
-  `bitbucket_server.py:310-311` then `:324`, and `gitlab.py:241-242` then `:254`.
-  GitHub has no `try` at all — a transport error propagates — but a non-`ok`
-  response takes the same fall-through (`github.py:125` -> `:139`). Bitbucket Cloud
-  is furthest from correct: `post_summary` (`bitbucket.py:165`) never looks for an
-  existing summary, so it posts a duplicate on *every* re-review. Distinguishing
-  "read failed" from "nothing found" and skipping the post is the fix, and it is the
-  same three-line change in each adapter.
-- ~~**Move the dev tools to a dependency group.**~~ **Done** — the dev tools moved
-  from `[project.optional-dependencies] dev` to `[dependency-groups] dev`, so the bare
-  `uv run pytest` and `uv run ruff check` work on a cold checkout and the `--extra dev`
-  form is gone from CI and every doc. The behaviour change was accepted deliberately:
-  dependency groups are not published in package metadata, so `pip install prxref[dev]`
-  no longer resolves the tools. See the `Unreleased` section of `CHANGELOG.md`.
+Follow-ups a seat reported that did not land:
 
-- **`origin/feat/bitbucket-server-forge` can be deleted** once you are satisfied with
-  v0.5.0. Everything worth keeping from it is on `main`; the rest is v0.2.0-era text.
-- **`CONTRIBUTING.md` has no inbound link any more.** Deleting the
-  `### Bitbucket Server / Data Center (unsupported)` section from `docs/forges.md`
-  removed the docs' only pointer to it. The file still exists and GitHub surfaces it
-  natively, so nothing is broken — but nothing points at it either.
+- **`docs/env-vars.md` lags `docs/llm.md` on the CLI backends.** The
+  `PRXREF_LLM_REASONING_EFFORT` row does not say that `claude-cli` maps it to
+  `--effort`. The `PRXREF_LLM_MAX_TOKENS` row does not say that the CLI backends
+  do not apply it.
+- **The eval runner docs are behind the code.** Section 7.1 of
+  `docs/spec-grounded-review.md` is still headed "Runner (planned, not built)",
+  and the `tests/evals/test_evals.py` docstring still calls the pipeline
+  "future". In fact `tests/evals/test_eval_replay.py` replays every case today.
+  Scoring (section 7.2) really is not built: judging findings against a case's
+  `expected.json` needs a live model and stays manual.
+- **One seam is tested only in halves.** The size advisory and the cost label
+  are each tested on the inline-accounting refresh post and on the summary-only
+  run, but never together.
+- **`CONTRIBUTING.md` still has no inbound link.** This is carried over from
+  0.5.0.
+
+The v0.5.0 handoff left three forge-wide items open. All three are **fixed**:
+
+- Every retry session allows only `GET`, `HEAD` and `OPTIONS`.
+- A comment listing that fails or comes back short raises `FeedReadError`
+  instead of passing for "no summary exists".
+- Every forge, Bitbucket Cloud included, finds its own summary by
+  `SUMMARY_MARKER` and updates it in place.
 
 | Item | Value |
 |---|---|
-| Released version | `0.5.0` (minor — new forge plus a webhook fix, nothing breaking) |
-| Registration points | the tuple in `forges/base.py`, the `impls` dict in `config.py` |
+| Released version | `0.14.0` (minor: new inputs, a forge and two backends; an unrecognized `PRXREF_LLM_BACKEND` now exits 2) |
+| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
-| Release assets | sdist **and** wheel, both attached |
+| Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
