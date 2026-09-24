@@ -227,6 +227,12 @@ PR. Each new input is off until you configure it.
 - **`load_config` no longer shares list defaults between calls.** Appending to
   one loaded config's `llm_models` changed the default that every later load
   started from.
+- **Under `PRXREF_FAIL_ON=error` or `any`, a review that ends with verdict
+  `Error` exits 1**, as documented since 0.4.0. Before, only a crash did: a
+  forge that could not be read, a diff that could not be parsed or chunked, and
+  a review in which every chunk failed all return an `Error` result rather than
+  raising, so a gating lane read those broken runs as green. The default
+  `never` is unchanged.
 - **Documentation corrections.** `docs/deploy.md` no longer says there is no
   `PRXREF_FAIL_ON` (there is: `never`, `error` or `any`, default `never`), its
   exit-code table gains the `1` row, and its webhook table lists the Bitbucket

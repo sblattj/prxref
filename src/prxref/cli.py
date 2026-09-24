@@ -38,11 +38,14 @@ usage error rather than a review outcome and exits 2. Both kinds raise
 ``PRXREF_FAIL_ON`` is the one opt-out of that doctrine. The default ``never``
 is the doctrine itself: findings never move the exit code. ``error`` exits 1
 when the completed review carries an active error-severity finding; ``any``
-exits 1 on any active finding; and under either value a review that fails to
-complete also exits 1, because a gate that silently passes on a broken run is
-worse than none. An unrecognized PR URL still exits 0 under every value —
-nothing was reviewed, so there is no outcome to gate on. The webhook daemon
-has no exit code and is unaffected by the knob.
+exits 1 on any active finding; and under either value a review that does not
+complete also exits 1 — it crashes, or it ends with verdict ``Error`` (the
+forge could not be read, the diff could not be parsed or chunked, or every
+chunk review failed) — because a gate that silently passes on a broken run is
+worse than none. An empty PR diff is not a failure: it is reviewed as
+``Approved`` and exits 0. An unrecognized PR URL still exits 0 under every
+value — nothing was reviewed, so there is no outcome to gate on. The webhook
+daemon has no exit code and is unaffected by the knob.
 
 ``PRXREF_DRY_RUN=1`` suppresses every write to the forge on both paths — the
 one-shot review and the webhook daemon — and ``--no-post`` does the same for a
@@ -579,7 +582,8 @@ def _read_diff_file(path: str) -> str:
     covers a missing file and a directory alike. Undecodable bytes are
     replaced, not refused, because the diff is review input rather than
     configuration. A blank file is not a configuration error either: the
-    replay forge raises on it, and the run ends as an ``Error`` run (exit 0).
+    replay forge raises on it, and the run ends as an ``Error`` run (exit 0,
+    or 1 under ``PRXREF_FAIL_ON=error`` or ``any``).
     """
     try:
         return Path(path).read_text(encoding="utf-8", errors="replace")
@@ -803,19 +807,31 @@ def _webhook_handler(url: str) -> None:
 
 
 def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
-    """The exit code a completed review earns under the ``fail_on`` policy.
+    """The exit code a returned review result earns under the ``fail_on`` policy.
 
-    Severity is compared exactly as the verdict is built in the orchestrator
-    (``Request-Changes`` iff an active finding has severity ``error``), so the
-    gate and the posted verdict can never disagree about what counts. A result
-    without parseable findings is tolerated the way ``_fmt_counts`` tolerates
-    one: nothing countable means nothing to gate on.
+    ``never`` is always 0. Under ``error`` and ``any``, a result with verdict
+    ``Error`` exits 1 whatever its findings: the orchestrator returns one
+    instead of raising when the forge could not be read, the diff could not be
+    parsed or chunked, or every chunk review failed, so it is a review that did
+    not complete — the same outcome as the crash ``_cmd_review`` gates, and one
+    a gating lane must not read as green.
+
+    Otherwise severity is compared exactly as the verdict is built in the
+    orchestrator (``Request-Changes`` iff an active finding has severity
+    ``error``), so the gate and the posted verdict can never disagree about
+    what counts. A result without parseable findings is tolerated the way
+    ``_fmt_counts`` tolerates one: nothing countable means nothing to gate on.
 
     Returns the exit code and, when the gate fires, the stderr line that says
     why — silence would read as a crash rather than a decision.
     """
     if fail_on == "never":
         return 0, None
+    if isinstance(result, dict) and result.get("verdict") == "Error":
+        return 1, (
+            f"PRXREF_FAIL_ON={fail_on}: review did not complete "
+            "(verdict Error); exiting 1"
+        )
     findings = result.get("findings_active") if isinstance(result, dict) else None
     if not isinstance(findings, list):
         return 0, None
