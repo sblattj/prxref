@@ -315,6 +315,8 @@ Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evalua
 
 The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
 
+`prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden.
+
 ## Replay Mode (Evaluation)
 
 A replay reviews a pinned, reproducible input instead of a PR as it stands, so one change can be reviewed again later, by another model or another prxref build, and compared. Three invocations cover it:
