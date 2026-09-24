@@ -67,6 +67,14 @@ release. The v0.14.0 handoff is in git history.
   closed: a listing shorter than `changed_files`, or totals that disagree with
   the PR's (`_refuse_short_totals`), end the run as `Error`, never as a partial
   review.
+- **GitHub file content.** Start at `get_file_content` in `forges/github.py`.
+  `_is_json_envelope` judges the response by its media type: a type in
+  `_RAW_MEDIA_TYPES` is the file, and `application/json` or any other `+json`
+  type is an envelope that reads as no content. `orchestrator._make_file_reader`
+  wraps the adapter's reader in a per-run cache and feeds it to the chunk
+  context blocks (dependency versions and symbol definitions) and to
+  `quality.apply_manifest_claim_check`. The bug itself is under "Fixes found on
+  the way" below.
 - **#16 Replay pins the title and description.** A `--pr-url` replay goes
   through `cli._replay_forge` → `_resolve_description`. That reads the forge's
   `get_pr_history` once: GitHub over GraphQL, Bitbucket Cloud over `/activity`.
@@ -142,7 +150,9 @@ Written down because each one cost real time.
 7. **Mock the headers the server really sends.** The GitHub file-content bug
    went unnoticed because the tests' success mocks answered
    `text/plain`. github.com answers `application/vnd.github.raw+json`, and
-   only a live check showed it. Copy content types from a recorded response.
+   only a live check showed it. So the `json` substring test that dropped
+   every file stayed green through five releases, 0.12.0 to 0.14.0. Copy
+   content types from a recorded response.
 8. **An unverified API shape may add evidence, never veto verified evidence.**
    Bitbucket Cloud's history reader was first built so that an unverified
    snapshot field could fail the verified `changes.description` history of
@@ -228,16 +238,63 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-6574 passed                                   uv run pytest -q
+6609 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.15.0                                        uv run prxref --version
 ```
 
-These counts come from the release tip, after every feature, fix and test
-branch had merged.
+These counts come from the release branch, measured at the commit that last
+updated this file.
 
 ### Live checks
-<!-- 0.15 verified: orchestrator -->
+
+- **#15, before the fix: GitHub withholds patches.** sblattj/prxref#9 (127
+  files, +32,003/-612) gets a 406 from the diff endpoint. An interim build
+  rebuilt it from the `/files` listing: the 110 files whose patch came back
+  matched the compare diff line for line, but 16 ordinary text files
+  (+6,880/-15, 21% of the added lines) came back at 0/0 with no patch at
+  `per_page=100`, and whole at `per_page=30`. That defect brought in the
+  compare-first path. 0.14.0 ends the same review as `Error`.
+- **#15: GitHub's counts on 23 public PRs.** Across 11 repositories (binaries,
+  renames, a submodule, mode-only, empty and deleted files, 211- and 438-file
+  PRs, 48k-line lockfiles, 10 open PRs, 8 of them from forks), the `/files`
+  sums and the compare diff each matched the PR's counts on 23 of 23. The
+  compare diff was byte-identical to the PR diff on 22 of 22, resolved fork
+  SHAs on 17 of 17, and on 10 of 10 open PRs started from the base tip's merge
+  base. GitHub dropped the patch but kept the counts on 10 lockfile entries in
+  4 ordinary PRs, so such a file is reviewed header-only with a warning.
+- **#15: the shipped fix.** `get_diff` reads sblattj/prxref#9 (127 files,
+  +32,003/-612, refused at 20,000 lines) and ObiterDictum/obiter#226 (438
+  files, refused at 300 files) whole from the compare endpoint in 3 GETs, with
+  no `/files` request; the listing alone would refuse #9 (+25,123/-597 against
+  +32,003/-612). The no-post review of #9 completes: `Request-Changes`, 8
+  chunks plus the sweep, 3 findings, USD 0.0745. The same check found the
+  GitHub file-content bug fixed in this release: that review dropped 83 of 83
+  file reads.
+- **#11, #12 and #13 on pallets/click#3860.** It ran as 3 diff chunks at
+  `PRXREF_CHUNK_TOKEN_BUDGET=1500`. #12: each chunk got exactly the scoped
+  rules its globs matched, the sweep got both, and `--scoped-rules ""` turned
+  them off. #13: gpt-4o-mini named a rule on 20 of 20 raw findings and
+  gpt-4.1-mini on 20 of 26; 2 groups per model, `locations` matching `Also
+  at`; the warning cap left 1 warning each. #11: the record stamped the edited
+  `worker.md`'s SHA-256, and a copy without the marker exited 2 before any
+  network call. #10: 0 candidate pairs in 4 on/off pairs. USD 0.046 over 23
+  runs.
+- **Zero chunk findings on sblattj/prxref#9.** Chunk size is not the cause: 8
+  chunks at 39,962-59,470 input tokens and 32 chunks at 9,488-19,532 both
+  returned 0 findings, as did an exact repeat and gpt-4.1-mini (0 of 56 chunk
+  calls). A positive control found 5 of 8 planted labels, all spec-tier, and 0
+  of 3 generic bugs. `worker.md`'s "roughly 30k tokens" sentence was false at
+  defaults (8 of 8 chunks over it) and is removed. 9 of 12 gpt-4o-mini sweep
+  findings were `tests/evals/` fixture text. USD 0.323.
+- **#16 on GitHub and Bitbucket Cloud.** On astral-sh/ruff#28750 (5
+  description versions, 1 rename), `get_pr_history` read a complete history
+  ending at the live body. Two `--as-of` cutoffs pinned versions 2 and 3 with
+  the pre-rename title, no `--as-of` chose the first review, and with no token
+  the replay fell back to the live text with a WARNING naming
+  `PRXREF_GITHUB_TOKEN`. On Bitbucket Cloud, 4 of 4 cutoffs matched a hand
+  derivation, a 25-PR scan found live `changes.title` renames, a PR renamed
+  twice pinned at 6 of 6 cutoffs, and a two-page feed at 10 of 10. USD 0.0034.
 
 ## Still open — not part of this release
 
@@ -336,6 +393,14 @@ Sizing, recall and GitHub notes:
     The compare fixture is an 8-file subset, not the whole 1.67 MB diff.
   - It is a hypothesis, not isolated, that the 20,000-line trigger skips
     patch-withheld files.
+- **A review past GitHub's diff limit reads the pull request twice.**
+  `orchestrate_review` reads `get_pr` for the review's metadata, and
+  `_get_diff_past_the_limit` reads it again before the compare read. That is
+  one redundant GET per oversized review.
+- **Four #15 branches are covered by unit tests only.** No live check reached
+  the patch-less 0/0 header-only branch, GitHub's 3,000-file listing cap, a
+  406 without `too_large`, or a compare diff whose counts disagree with the
+  PR's.
 
 Carried over from 0.14.0, still true:
 

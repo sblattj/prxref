@@ -256,6 +256,14 @@ limit are reviewed. Each new option is off until you configure it.
   request under the limit makes the same single request as before, and pinned
   `--base-sha`/`--head-sha` replays already read the compare diff and are
   unchanged.
+- **GitHub reviews get full-file context.** The GitHub adapter took GitHub's
+  raw file media type, `application/vnd.github.raw+json`, for a JSON envelope
+  and dropped every file it read, so GitHub reviews got none of the full-file
+  context (dependency versions and symbol definitions) the other forges
+  already had. It now decides by the media type, not by a `json` substring:
+  GitHub's raw variants and `text/*` are read as the file, while a JSON
+  envelope such as a directory listing still returns nothing. Releases 0.12.0
+  through 0.14.0 are affected too.
 - **A finding that copies the prompt's example finding is dropped.** A new
   deterministic pass compares each chunk and sweep finding's normalized title
   with the example-finding titles of the worker and sweep templates the run
@@ -270,6 +278,12 @@ limit are reviewed. Each new option is off until you configure it.
   is an estimate, and `PRXREF_MAX_CHUNKS` overflow can grow a chunk past it.
   The sentence now reads "The diff below is the complete chunk.", so worker
   prompt hashes change.
+- **The documentation matches the 0.15.0 code.** Among the corrections: the
+  run record stamps every template file in the prompts directory, edited or
+  not; `PRXREF_SCOPED_RULES_MAX_CHARS` cuts the overflowing file to the room
+  left, or leaves it out; `--trace-dir` numbers chunks from 0 while the JSONL
+  trace numbers them from 1; and a `live` replay stamp still records `as_of`
+  when a cutoff was chosen.
 
 ### Known limitations
 
@@ -328,9 +342,10 @@ limit are reviewed. Each new option is off until you configure it.
   more than 5,000 reviews, conversation comments or title renames keeps its
   current title and description, even under `--as-of`.
 - **Unauthenticated Bitbucket Cloud replays can fall back to the live text.**
-  Without a credential Bitbucket Cloud allows few API reads an hour, and a
-  history read costs at least three of them (the pull request, its activity
-  feed and the head commit), so a rate-limited read keeps the live text.
+  Without a credential Bitbucket Cloud allows 60 API reads an hour, as
+  observed (Atlassian can change it), and a history read costs at least three
+  of them (the pull request, its activity feed and the head commit), so a
+  rate-limited read keeps the live text.
 - **Bitbucket Cloud's `changes_requested` activity entry is unverified.** It
   has not been seen in a live feed, so a change request that is the first human
   review may not set the cutoff.

@@ -569,8 +569,8 @@ def test_get_file_content_returns_none_when_the_request_raises():
 
 
 def test_get_file_content_returns_none_on_a_json_body():
-    """A directory, or a file over the 1 MB raw ceiling, comes back as JSON
-    even though the raw Accept header was sent."""
+    """A JSON body is an envelope, such as a directory listing, and reads as
+    no content even though the raw Accept header was sent."""
     session = MagicMock(spec=requests.Session)
     session.get.return_value = _mock_response(
         200,
