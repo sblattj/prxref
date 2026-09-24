@@ -38,6 +38,7 @@ skips, naming the missing entry, until that case exists.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import inspect
 import json
@@ -390,6 +391,169 @@ def _serve_bitbucket_server(call: Call, payload: str) -> requests.Response | Non
     return None
 
 
+ADO_REPO = "https://dev.azure.com/acme/example/_apis/git/repositories/api"
+
+ADO_USAGE = (
+    "# Usage\n"
+    "\n"
+    "Call `total()` with the invoice lines and the tax rate.\n"
+    "Amounts are integers in cents.\n"
+    "Tax rates are fractions, so a 20 per cent rate is passed as 0.2.\n"
+)
+ADO_GUIDE = ADO_USAGE.replace("# Usage", "# Guide", 1)
+ADO_BILLING_HEAD = (
+    '"""Invoice arithmetic, in whole cents."""\n'
+    "\n"
+    "\n"
+    "def subtotal(lines: list[tuple[int, int]]) -> int:\n"
+    '    """Return the sum of quantity times unit price."""\n'
+    "    return sum(q * c for q, c in lines)\n"
+    "\n"
+    "\n"
+    "def total(lines: list[tuple[int, int]], tax_rate: float) -> int:\n"
+)
+ADO_BILLING_OLD = ADO_BILLING_HEAD + (
+    '    """Return the subtotal plus tax, in whole cents."""\n'
+    "    return int(subtotal(lines) * (1 + tax_rate))\n"
+)
+ADO_BILLING_NEW = ADO_BILLING_HEAD + (
+    '    """Return the subtotal plus tax, rounded to whole cents."""\n'
+    "    return round(subtotal(lines) * (1 + tax_rate))\n"
+    "\n"
+    "\n"
+    "def discounted(lines: list[tuple[int, int]], percent: int) -> int:\n"
+    '    """Return the subtotal less ``percent`` per cent."""\n'
+    "    return subtotal(lines) * (100 - percent) // 100\n"
+)
+ADO_LEGACY = (
+    '"""Deprecated helpers kept for one release."""\n'
+    "\n"
+    "\n"
+    "def old_total(lines):\n"
+    "    return sum(q * c for q, c in lines)\n"
+)
+ADO_REFUNDS = (
+    '"""Refunds against a settled invoice."""\n'
+    "\n"
+    "\n"
+    "def refund(paid_cents: int, amount_cents: int) -> int:\n"
+    '    """Return the balance left after refunding ``amount_cents``."""\n'
+    "    if amount_cents > paid_cents:\n"
+    '        raise ValueError("refund exceeds the amount paid")\n'
+    "    return paid_cents - amount_cents\n"
+)
+ADO_README_AT_FORK = "acme storefront\n"
+ADO_README_ON_BASE = "acme storefront, now with docs\n"
+
+
+def _git_blob_id(text: str) -> str:
+    """Return git's object id for ``text``: the id the Diffs API and the blobs API use."""
+    data = text.encode("utf-8")
+    return hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest()
+
+
+ADO_BLOBS = {
+    _git_blob_id(text): text.encode("utf-8")
+    for text in (
+        ADO_USAGE, ADO_GUIDE, ADO_BILLING_OLD, ADO_BILLING_NEW, ADO_LEGACY, ADO_REFUNDS,
+        ADO_README_AT_FORK, ADO_README_ON_BASE,
+    )
+}
+
+
+def _ado_blob(change_type: str, path: str, old: str | None, new: str | None, **extra: str) -> dict:
+    """One blob entry of a Diffs API change list, in the recorded shape."""
+    item: dict[str, Any] = {
+        "objectId": _git_blob_id(new) if new is not None else "",
+        "gitObjectType": "blob",
+        "path": path,
+    }
+    if old is not None:
+        item["originalObjectId"] = _git_blob_id(old)
+    return {"changeType": change_type, **extra, "item": item}
+
+
+def _ado_folder(path: str) -> dict:
+    """One folder entry of a Diffs API change list; the adapter must drop it."""
+    return {
+        "changeType": "edit",
+        "item": {"objectId": "d" * 40, "originalObjectId": "e" * 40, "gitObjectType": "tree", "path": path,
+                 "isFolder": True},
+    }
+
+
+ADO_THREE_DOT = [
+    _ado_folder("/docs"),
+    _ado_blob("edit, rename", "/docs/guide.md", ADO_USAGE, ADO_GUIDE, sourceServerItem="/docs/usage.md"),
+    _ado_blob("delete, sourceRename", "/docs/usage.md", ADO_USAGE, None),
+    _ado_folder("/src"),
+    _ado_folder("/src/acme"),
+    _ado_blob("edit", "/src/acme/billing.py", ADO_BILLING_OLD, ADO_BILLING_NEW),
+    _ado_blob("delete", "/src/acme/legacy.py", ADO_LEGACY, None),
+    _ado_blob("add", "/src/acme/refunds.py", None, ADO_REFUNDS),
+]
+ADO_README_TWO_DOT = _ado_blob("edit", "/README.md", ADO_README_ON_BASE, ADO_README_AT_FORK)
+
+
+def _octets(data: bytes, url: str) -> requests.Response:
+    """Return a raw-bytes response the adapter can stream.
+
+    ``iter_content`` and ``close`` read ``raw`` unless the content counts as
+    consumed, and a hand-built response has no ``raw``.
+    """
+    response = _response(200, "", "application/octet-stream", url)
+    response._content = data
+    response._content_consumed = True
+    return response
+
+
+def _serve_azure_devops(call: Call, payload: list[dict]) -> requests.Response | None:
+    """Answer the Diffs API and the blobs API, the two reads a rebuilt Azure DevOps diff takes.
+
+    Azure DevOps serves no diff text, so ``payload`` is the range's change list
+    and the adapter rebuilds the diff from whole files. The ``ADO_*`` texts are
+    those files: committed to a throwaway repository, their ``git diff
+    base...feature`` is ``THREE_DOT`` and their ``git diff base..feature`` is
+    ``README_TWO_DOT + THREE_DOT``, apart from two ``index`` lines. Those two
+    differ because billing.py's first six lines and usage.md's last line lie
+    outside the hunks, so they were written for this file. The other four blobs
+    hash to the ids the fixtures record. The entry shapes (``edit, rename`` with
+    ``sourceServerItem``, its ``delete, sourceRename`` half, folder entries, and
+    ``""`` for a deleted side's id) follow the recordings in
+    ``tests/fixtures/azure_devops/``.
+    """
+    blobs = f"{ADO_REPO}/blobs/"
+    if call.url.startswith(blobs):
+        oid = call.url[len(blobs) :]
+        data = ADO_BLOBS.get(oid)
+        if data is None:
+            return None
+        if call.params.get("$format") != "octetstream":
+            # Without $format the endpoint answers the blob's JSON metadata.
+            return _json({"objectId": oid, "size": len(data)}, call.url)
+        return _octets(data, call.url)
+    if call.url != f"{ADO_REPO}/diffs/commits":
+        return None
+    pinned = {"baseVersion": BASE_SHA, "baseVersionType": "commit", "targetVersion": HEAD_SHA,
+              "targetVersionType": "commit"}
+    if any(call.params.get(key) != value for key, value in pinned.items()):
+        return None
+    # diffCommonCommit=true diffs the head against the merge base; anything else
+    # diffs the two commits directly, so the base's later edit shows up too.
+    merge_base = str(call.params.get("diffCommonCommit")).lower() == "true"
+    changes = payload if merge_base else [ADO_README_TWO_DOT, *payload]
+    skip, top = int(call.params.get("$skip", 0)), int(call.params.get("$top", 100))
+    page = changes[skip : skip + top]
+    body = {
+        "allChangesIncluded": skip + len(page) >= len(changes),
+        "commonCommit": MERGE_BASE_SHA,
+        "baseCommit": BASE_SHA,
+        "targetCommit": HEAD_SHA,
+        "changes": page,
+    }
+    return _json(body, call.url)
+
+
 # --- the cases ------------------------------------------------------------------
 
 
@@ -462,6 +626,16 @@ CASES = [
         empty_payload="",
         expected=DC_CAPTURE_FILES,
         verbatim=True,
+    ),
+    CompareCase(
+        id="azure_devops",
+        forge="azure_devops",
+        pr_url="https://dev.azure.com/acme/example/_git/api/pullrequest/42",
+        serve=_serve_azure_devops,
+        payload=ADO_THREE_DOT,
+        empty_payload=[],
+        expected=THREE_DOT_FILES,
+        verbatim=False,
     ),
 ]
 CASE_IDS = [case.id for case in CASES]

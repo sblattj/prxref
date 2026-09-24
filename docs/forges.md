@@ -280,12 +280,6 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   - **File Content:** `GET {base}/items?path=/{path}&versionDescriptor.version={sha}&versionDescriptor.versionType=commit&download=true`,
     best-effort, read with the same token as everything else above. A `404`, an
     oversize (512 KiB) body, or a binary body returns `None` and is never a hard error.
-  - **Pinned commit range (replay):** `get_compare_diff` runs the same Diffs API
-    listing with `baseVersion={base_sha}` and `targetVersion={head_sha}` (both commits)
-    and `diffCommonCommit=true`, so it diffs `head_sha` against its merge base with
-    `base_sha`, rebuilt as above. Given the PR's own target and source commits it
-    returns the PR's diff. An empty range gives an empty diff, which replay reports as
-    an error run.
 - **Thread statuses and "Check for comment resolution":** inline threads are posted
   `active`, like an unresolved inline comment on every other forge. So a branch policy
   that requires comment resolution holds the PR until someone resolves prxref's
@@ -321,3 +315,23 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   DevOps Server is parsed and authenticated the same way but is **untested**. It needs
   a release that accepts REST `api-version=7.1` (2022.1 or later, going by Microsoft's
   API version table).
+- **Pinned Commit Range (Replay):** the **Diffs** path above with both ends pinned as
+  commits:
+  `GET {base}/diffs/commits?baseVersion={base_sha}&baseVersionType=commit&targetVersion={head_sha}&targetVersionType=commit&diffCommonCommit=true`,
+  paged with `$top=1000`/`$skip`, then `GET {base}/blobs/{objectId}?$format=octetstream`
+  for the file contents. `diffCommonCommit=true` is the merge-base ("three-dot")
+  form: the list runs from the merge base of the two commits to `head_sha`, and each
+  file's old side is its blob at that merge base. `false` would diff the two commits
+  directly and so also list whatever changed on the base after the fork. Given a PR's
+  own target and source commits, the result is the PR's diff. There is no raw text to
+  return unmodified: the diff is rebuilt as for **Diffs**, so it has no `index` lines or
+  function names after `@@`, every mode is `100644`, and a `similarity index` line
+  appears only for a pure rename. The same budgets apply: 512 KiB per blob, 300 files
+  and 16 MiB per diff, and a file past a cap, or whose blob is gone (`404` or `410`), is
+  listed without hunks, with a warning. An empty range returns empty text, which replay
+  reports as an error run. An HTTP or transport error raises, and so do a non-JSON
+  listing, any other failed blob fetch, and a listing longer than 50 pages. While the
+  adapter was designed, a prototype of this method returned a PR's own diff from a
+  public Azure DevOps Services project, and a probe there saw `true` leave out files
+  that `false` listed. This method itself has **not been run against a live server**;
+  its tests use recorded response shapes. Azure DevOps Server is untested, as above.
