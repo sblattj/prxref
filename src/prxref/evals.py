@@ -152,8 +152,14 @@ def eval_run(
     Standard output gets one line per case as it finishes, ``<id>: <verdict>
     (<n> active findings)`` (``finding`` when ``<n>`` is 1),
     ``<id>: failed: <error>`` or ``<id>: skipped (already recorded)``, then
-    ``run directory: <out>/<label>``. Nothing is logged at WARNING or above
-    for a case that runs normally.
+    ``run directory: <out>/<label>``. A diff-file case without a ``pr_url``
+    that runs normally logs nothing at WARNING or above. A case with a
+    ``pr_url`` logs the WARNINGs a ``prxref review`` replay of it logs: one
+    that starts ``replay shows the PR's CURRENT title and description``
+    whenever its title and description fall back to the current ones (a
+    forge without ``get_pr_history``, a failed history read, or a history
+    that cannot pin them), and one more when it gives a ``diff_file`` and no
+    ``head_sha``, because file context is then read at the PR's current head.
     """
     if not is_safe_id(args.label):
         raise ConfigError(

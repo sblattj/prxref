@@ -538,8 +538,8 @@ class ForgeImpl:
         dated ``update.date``. Edits are ordered by that date, never by feed
         position, and the oldest edit's ``old`` is the original, dated
         ``created_on``. A title rename is read from ``changes.title`` in the
-        same shape; that shape is inferred from the description entry and
-        has not been checked against a live PR. A ``null`` text reads as
+        same shape, ``old`` and ``new`` strings, which a live check confirmed
+        on three renamed public pull requests. A ``null`` text reads as
         ``""``, as a missing description does in ``get_pr``.
 
         The history comes back ``complete=False`` with no description

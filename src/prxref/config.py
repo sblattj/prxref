@@ -212,9 +212,12 @@ LLM / pipeline:
                                 replaces the list. Empty (the default) = off
   PRXREF_SCOPED_RULES_MAX_CHARS Path-scoped review rules (0.15.0):
                                 characters of scoped-rules text one review
-                                unit receives; the file that overflows is
-                                truncated with a warning; positive int
-                                (default 24000)
+                                unit receives. Whole files go in while they
+                                fit; the first that does not is cut to the
+                                room left, or left out when no room is left;
+                                every later file is left out, and one
+                                warning per run names this variable;
+                                positive int (default 24000)
   PRXREF_PROMPTS_DIR            Prompt template overrides (0.15.0):
                                 directory of replacement ``worker.md``,
                                 ``systemic.md`` and ``summary.md``; an

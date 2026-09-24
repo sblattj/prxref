@@ -111,7 +111,7 @@ def test_under_the_limit_is_exactly_one_get_with_the_diff_accept_header(
     assert [r for r in caplog.records if r.name == "prxref.forges.github"] == []
 
 
-# --- 406 too_large: rebuild from the listing -----------------------------------
+# --- 406 too_large: _get_diff_past_the_limit, compare first, listing fallback --
 
 
 @pytest.mark.parametrize(
