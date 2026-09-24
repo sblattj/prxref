@@ -76,6 +76,7 @@ from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
 from prxref.forges.replay import LocalDiffForge, ReplayForge
 from prxref.llm import ConfigError
+from prxref.prompt_templates import export_prompt_templates
 from prxref.rules import load_review_rules
 from prxref.ticket import load_ticket_context
 from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
@@ -240,6 +241,21 @@ def _build_parser() -> argparse.ArgumentParser:
     tr_render.add_argument(
         "-o", "--out",
         help="output HTML path (default: the trace path with an .html suffix)",
+    )
+
+    pr = sub.add_parser("prompts", help="work with the overridable prompt templates")
+    pr_sub = pr.add_subparsers(dest="prompts_command")
+    pr_export = pr_sub.add_parser(
+        "export",
+        help="write the packaged worker, systemic and summary templates to DIR as an override starting point",
+    )
+    pr_export.add_argument(
+        "prompts_export_dir", metavar="DIR", help="directory to write into (created when missing)"
+    )
+    pr_export.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite templates already in DIR (without it, an existing one is refused and nothing is written)",
     )
 
     return parser
@@ -956,6 +972,24 @@ def _cmd_trace_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_prompts_export(args: argparse.Namespace) -> int:
+    """Write the packaged prompt templates to ``DIR``, printing one written path per line.
+
+    Exit 2 when an existing template would be overwritten without
+    ``--force``, or when ``DIR`` cannot be created or written: both are
+    ``ConfigError``, reported as ``review`` reports one, and the refusal
+    writes nothing.
+    """
+    try:
+        written = export_prompt_templates(args.prompts_export_dir, force=args.force)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    for path in written:
+        print(path)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point dispatching ``review``, ``serve``, or ``--version``."""
     parser = _build_parser()
@@ -978,6 +1012,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "trace":
         if args.trace_command == "render":
             return _cmd_trace_render(args)
+        parser.print_help(sys.stderr)
+        return 2
+    if args.command == "prompts":
+        if args.prompts_command == "export":
+            return _cmd_prompts_export(args)
         parser.print_help(sys.stderr)
         return 2
 

@@ -336,3 +336,53 @@ def _is_within(path: str, root: str) -> bool:
         return os.path.commonpath([path, root]) == root
     except ValueError:
         return False
+
+
+def export_prompt_templates(dest: str | os.PathLike[str], *, force: bool = False) -> list[str]:
+    """Write the packaged ``worker.md``, ``systemic.md`` and ``summary.md`` into directory ``dest``.
+
+    The starting point for an override directory: each template is written
+    byte for byte as packaged, so the exported directory loads through
+    :func:`load_prompt_templates` without a warning. Only the
+    :data:`TEMPLATE_NAMES` are written, each by name; the package directory
+    is never listed, so the judge prompt, which is not overridable, is never
+    exported. ``dest`` is created, with any missing parents, when it does
+    not exist. Returns the written paths, ``dest`` joined with each file
+    name, in :data:`TEMPLATE_NAMES` order.
+
+    Without ``force``, any target that already exists (a dangling symlink
+    included) is refused before anything is written or created, with a
+    :class:`~prxref.llm.ConfigError` naming every existing file and
+    ``--force``. With ``force`` each target is overwritten, and a symlink is
+    replaced by a regular file rather than written through. An empty
+    ``dest``, or one that cannot be created or written, is a ``ConfigError``
+    too.
+    """
+    raw = os.fspath(dest)
+    if not raw.strip():
+        raise ConfigError("prompts export: DIR must name a directory, got an empty path")
+    targets = [os.path.join(raw, f"{name}.md") for name in TEMPLATE_NAMES]
+    if not force:
+        existing = [target for target in targets if os.path.lexists(target)]
+        if existing:
+            raise ConfigError(
+                f"prompts export: refusing to overwrite {', '.join(repr(t) for t in existing)}; "
+                "pass --force to overwrite"
+            )
+    written: list[str] = []
+    try:
+        os.makedirs(raw, exist_ok=True)
+        for name, target in zip(TEMPLATE_NAMES, targets, strict=True):
+            if os.path.islink(target):
+                os.unlink(target)
+            with open(target, "wb") as fh:
+                fh.write(_packaged_bytes(name))
+            written.append(target)
+    except OSError as exc:
+        where = exc.filename if exc.filename is not None else raw
+        raise ConfigError(f"prompts export: cannot write {os.fspath(where)!r}: {_reason(exc)}") from exc
+    return written
+
+
+def _packaged_bytes(name: str) -> bytes:
+    return resources.files("prxref").joinpath("prompts").joinpath(f"{name}.md").read_bytes()
