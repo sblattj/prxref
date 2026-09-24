@@ -16,6 +16,7 @@ from prxref.cli import main
 from prxref.forges.base import PRRef
 from prxref.llm import ConfigError
 from prxref.triage import Finding
+from tests.test_orchestrator import FakeForge, FakeLLM, _added_file_diff
 
 
 def _install_fake_module(monkeypatch, fullname: str, **attrs) -> types.ModuleType:
@@ -1142,15 +1143,48 @@ class TestFailOnExitPolicy:
         self._install_result(fake_runtime, ["error", "error", "warning"])
         assert self._review() == 0
 
-    def test_a_result_without_countable_findings_is_not_gated(
-        self, fake_runtime, monkeypatch
+    @pytest.mark.parametrize("policy", ["error", "any"])
+    def test_an_error_verdict_exits_1_when_gating(
+        self, fake_runtime, monkeypatch, capsys, policy
     ):
         """A total-LLM-failure run degrades to verdict ``Error`` with no
-        findings list; there is nothing countable, so nothing fires."""
-        monkeypatch.setenv("PRXREF_FAIL_ON", "error")
+        findings list instead of raising. It is a review that did not
+        complete, which the policy has promised to gate since 0.4.0, so the
+        missing findings must not let it through."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", policy)
+        result = {"verdict": "Error", "chunks_failed": 3}
+        fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
+        assert self._review() == 1
+        _, err = capsys.readouterr()
+        assert (
+            f"PRXREF_FAIL_ON={policy}: review did not complete (verdict Error); "
+            "exiting 1"
+        ) in err
+
+    def test_an_error_verdict_still_exits_0_under_never(
+        self, fake_runtime, monkeypatch, capsys
+    ):
+        """Control: the same result under the default doctrine."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "never")
         result = {"verdict": "Error", "chunks_failed": 3}
         fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
         assert self._review() == 0
+        _, err = capsys.readouterr()
+        assert "PRXREF_FAIL_ON" not in err
+
+    @pytest.mark.parametrize("verdict", ["Approved", "Comment"])
+    def test_a_completed_result_without_countable_findings_is_not_gated(
+        self, fake_runtime, monkeypatch, capsys, verdict
+    ):
+        """Control: only verdict ``Error`` fires without findings. A completed
+        result with no findings list is tolerated as before — nothing
+        countable, so nothing to gate on, even under ``any``."""
+        monkeypatch.setenv("PRXREF_FAIL_ON", "any")
+        result = {"verdict": verdict, "chunks_failed": 0}
+        fake_runtime["set_orchestrate_side_effect"](lambda **kwargs: result)
+        assert self._review() == 0
+        _, err = capsys.readouterr()
+        assert "exiting 1" not in err
 
     @pytest.mark.parametrize("policy", ["error", "any"])
     def test_a_failed_review_exits_1_when_gating(
@@ -1206,6 +1240,49 @@ class TestFailOnExitPolicy:
         self._install_result(fake_runtime, ["error"])
         cli._webhook_handler(self.URL)
         assert len(fake_runtime["orchestrate_calls"]) == 1
+
+
+class TestFailOnThroughTheRealOrchestrator:
+    """The gate over an error run the real orchestrator produced.
+
+    Only the forge and the model are doubles, so verdict ``Error`` comes from
+    ``orchestrate_review``'s own handling of a failed ``get_diff`` — it returns
+    an error run instead of raising — rather than from a faked result.
+    """
+
+    REF = PRRef(
+        forge="github",
+        host="github.com",
+        owner="org",
+        repo="repo",
+        number=7,
+        url="https://github.com/org/repo/pull/7",
+    )
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        assert sys.modules["prxref.orchestrator"] is real_orchestrator
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        forge.fail.add("get_diff")
+        llm = FakeLLM({})
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: self.REF)
+        monkeypatch.setattr("prxref.cli.make_forge", lambda ref: forge)
+        monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: llm)
+        return types.SimpleNamespace(forge=forge, llm=llm)
+
+    @pytest.mark.parametrize(("policy", "expected"), [("error", 1), ("never", 0)])
+    def test_a_diff_the_forge_cannot_read_is_gated_only_when_opted_in(
+        self, rig, monkeypatch, capsys, policy, expected
+    ):
+        monkeypatch.setenv("PRXREF_FAIL_ON", policy)
+        argv = ["review", "--pr-url", self.REF.url, "--no-post", "--format", "json"]
+        assert main(argv) == expected
+        out, err = capsys.readouterr()
+        assert json.loads(out)["verdict"] == "Error"
+        assert rig.llm.calls == 0
+        assert rig.forge.summaries == []
+        note = "PRXREF_FAIL_ON=error: review did not complete (verdict Error); exiting 1"
+        assert (note in err) is (policy == "error")
 
 
 class TestModuleEntryPoint:
