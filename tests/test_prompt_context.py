@@ -323,8 +323,8 @@ class TestScopeParsing:
 
 
 class TestFindingScopeField:
-    def test_scope_is_the_last_field_and_defaults_to_unknown(self):
-        assert dataclasses.fields(Finding)[-1].name == "scope"
+    def test_scope_keeps_its_positional_slot_and_defaults_to_unknown(self):
+        assert dataclasses.fields(Finding)[7].name == "scope"
         assert Finding("a.py", 1, "error", 0.9, "t", "b").scope == "unknown"
 
     def test_positional_construction_with_drop_reason_still_works(self):
