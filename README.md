@@ -315,6 +315,18 @@ Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evalua
 
 The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
 
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its three actions:
+
+- `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--resume]` replays every case and writes the run to `DIR/NAME/`:
+  - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
+  - `--label NAME` — the run's name and its directory under `--out`. Required. An existing label exits `2` unless `--resume` is given.
+  - `--out DIR` — the directory that holds the runs (default `./prxref-eval/`). `score` and `compare` take it too.
+  - `--rules-file PATH` — team review rules for every case, as for `review`.
+  - `--resume` — continue an existing `--label` run instead of refusing it.
+- `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
+  - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.
+- `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed. `A` and `B` are each a label under `--out` or a run directory.
+
 ## Replay Mode (Evaluation)
 
 A replay reviews a pinned, reproducible input instead of a PR as it stands, so one change can be reviewed again later, by another model or another prxref build, and compared. Three invocations cover it:
