@@ -1862,7 +1862,8 @@ def apply_quality_gate(
        :func:`finding_rank_key` and drop the rest
        (``error cap exceeded (max N)``), so ties are broken by content
        rather than by arrival order. ``max_errors`` falls back to
-       ``PRXREF_MAX_ERROR_FINDINGS`` and then to :data:`DEFAULT_MAX_ERRORS`.
+       ``PRXREF_MAX_ERROR_FINDINGS``, then to its legacy alias
+       ``PRXREF_MAX_ERRORS``, and then to :data:`DEFAULT_MAX_ERRORS`.
     4. Warning and outofscope caps: ``max_warning_findings`` and
        ``max_outofscope_findings`` apply the same ranking to the surviving
        findings of their own severity, dropping the excess as

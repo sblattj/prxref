@@ -62,7 +62,12 @@ every `drop_reason` string is tabulated in
 and 4+ shared tokens, with no line test) and `duplicate of chunk finding`
 (`apply_sweep_dedup`, which runs after the quality gate so a sub-floor chunk
 finding cannot suppress its higher-confidence sweep duplicate and then die at
-the gate itself).
+the gate itself). That exact match is on file plus normalized title. With
+`PRXREF_DEDUP_SIMILARITY` set, the same pass also drops a reworded restatement
+in the same file and on the same line, as
+`duplicate of <chunk|sweep> finding (reworded, similarity S)`. A sweep copy is
+dropped only when it is no more severe than the chunk copy, so a sweep finding
+never takes a chunk finding's place.
 
 `settled in thread` is line-independent on purpose: `apply_line_align` has
 already demoted a file-level finding to line 0 by the time it runs, so a
