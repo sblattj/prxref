@@ -170,7 +170,18 @@ The service exposes:
 
 ## Team Review Rules
 
-<!-- 0.14 placeholder: W63 -->
+Give prxref your team's review checklist and every chunk worker and the whole-PR sweep review against it:
+
+```bash
+prxref review --pr-url https://github.com/acme/widget/pull/42 --rules-file "$RUNNER_TEMP/prxref-rules.md"
+```
+
+- `--rules-file PATH`, or `PRXREF_REVIEW_RULES` for every run, names a Markdown or plain-text file. Its body is added to the **system** prompt of every review unit under a `## Team review rules` heading. The chunk workers check their chunk against it, and the sweep applies only the whole-PR and cross-file rules. Unset, nothing changes.
+- Optional front matter can map your team's severity words onto prxref's tiers in a `severity:` block (`blocker: error`, `major: warning`, `nit: outofscope`). A mapped word the model writes anyway is rewritten before every quality pass, so it is never dropped as an invalid severity. Other front-matter keys are ignored, so a skill file works unmodified.
+- `PRXREF_REVIEW_RULES_MAX_CHARS` (default `12000`) caps the body, with a warning when it truncates. The run record's `review_rules` carries the file's `sha256`, its character count, and the parsed map, never the rules text. It appears in `--format json`, the `-v` output, and the JSONL trace.
+- A missing, unreadable, or malformed file exits `2` before any network call, naming `--rules-file` or `PRXREF_REVIEW_RULES`.
+
+**Read the rules from a trusted checkout, never from the PR under review.** In CI the workspace is usually the PR's own code, so a rules file inside it lets the PR rewrite its own review rules. Copy the file from the target branch or keep it outside the repository. See [docs/review-rules.md](docs/review-rules.md) for the grammar, the CI recipes, and the daemon.
 
 ## Finding Markers
 
