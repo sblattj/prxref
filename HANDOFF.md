@@ -199,19 +199,14 @@ The known limitations, in full in the CHANGELOG:
 
 Follow-ups a seat reported that did not land:
 
-- **`docs/env-vars.md` lags `docs/llm.md` on the CLI backends.** The
-  `PRXREF_LLM_REASONING_EFFORT` row does not say that `claude-cli` maps it to
-  `--effort`. The `PRXREF_LLM_MAX_TOKENS` row does not say that the CLI backends
-  do not apply it.
-- **The eval runner docs are behind the code.** Section 7.1 of
-  `docs/spec-grounded-review.md` is still headed "Runner (planned, not built)",
-  and the `tests/evals/test_evals.py` docstring still calls the pipeline
-  "future". In fact `tests/evals/test_eval_replay.py` replays every case today.
-  Scoring (section 7.2) really is not built: judging findings against a case's
-  `expected.json` needs a live model and stays manual.
-- **One seam is tested only in halves.** The size advisory and the cost label
-  are each tested on the inline-accounting refresh post and on the summary-only
-  run, but never together.
+- **Eval scoring is manual.** `tests/evals/test_eval_replay.py` replays every
+  case offline, but scoring (section 7.2 of `docs/spec-grounded-review.md`)
+  is not built: judging findings against a case's `expected.json` needs a live
+  model and stays manual.
+- **One seam is tested only in halves on two paths.** The size advisory and
+  the cost label are tested together on the main summary post
+  (`tests/test_release_seams.py`), but on the inline-accounting refresh post
+  and on the summary-only run each is tested alone.
 - **`CONTRIBUTING.md` still has no inbound link.** This is carried over from
   0.5.0.
 
