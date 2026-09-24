@@ -2,10 +2,11 @@
 
 GitHub refuses the diff media type for a pull request whose diff runs past
 20,000 lines, with HTTP 406 and an ``errors`` entry coded ``too_large``. Exactly
-that answer hands the read to ``_get_diff_from_files``, which rebuilds the diff
-from the changed-file listing; every other answer is the single GET it always
-was. ``_get_diff_from_files`` is a double set on the instance in every test
-here, so these pin the detection and the hand-off, not the listing itself.
+that answer hands the read to ``_get_diff_past_the_limit``, which reads the
+compare diff and else the changed-file listing; every other answer is the
+single GET it always was. ``_get_diff_past_the_limit`` is a double set on the
+instance in every test here, so these pin the detection and the hand-off, not
+the read past the limit (tests/test_github_compare_fallback.py).
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ TOO_LARGE = {
 }
 DEBUG_LINE = (
     "diff for acme/api#42 exceeded GitHub's line limit (406 too_large); "
-    "rebuilding it from the files listing"
+    "reading it from the compare endpoint"
 )
 CAP_ERROR = (
     "acme/api#42: changed_files=3200 but the files listing returned 3000 "
@@ -59,9 +60,9 @@ def _forge(resp):
 
 
 def _fallback(monkeypatch, forge, **kwargs):
-    """Stand in for ``_get_diff_from_files``, which is another seat's method."""
+    """Stand in for ``_get_diff_past_the_limit``, the read past the limit."""
     fallback = MagicMock(**kwargs)
-    monkeypatch.setattr(forge, "_get_diff_from_files", fallback, raising=False)
+    monkeypatch.setattr(forge, "_get_diff_past_the_limit", fallback, raising=False)
     return fallback
 
 
@@ -119,7 +120,7 @@ def test_under_the_limit_is_exactly_one_get_with_the_diff_accept_header(
     ],
     ids=["github-body", "too_large-among-other-errors"],
 )
-def test_406_too_large_rebuilds_the_diff_from_the_files_listing(monkeypatch, body):
+def test_406_too_large_hands_the_read_past_the_limit(monkeypatch, body):
     resp = _mock_response(406, json_data=body)
     forge, session = _forge(resp)
     fallback = _fallback(monkeypatch, forge, return_value=DIFF)
@@ -133,8 +134,8 @@ def test_406_too_large_rebuilds_the_diff_from_the_files_listing(monkeypatch, bod
 
 
 def test_the_fallback_logs_one_debug_line_and_nothing_louder(monkeypatch, caplog):
-    """A successful fallback is DEBUG only (decisions #15): the rebuilt diff is
-    the same content, so it earns no warning and no summary line."""
+    """The hand-off is DEBUG only (decisions #15); a successful read past the
+    limit is the same content, so it earns no warning and no summary line."""
     forge, _ = _forge(_mock_response(406, json_data=TOO_LARGE))
     _fallback(monkeypatch, forge, return_value=DIFF)
 
@@ -281,7 +282,7 @@ def _session_refusing_the_diff():
 class TestThroughTheCli:
     """``prxref review`` over the real orchestrator and the real GitHub adapter.
 
-    Only the HTTP session, the model and ``_get_diff_from_files`` are doubles.
+    Only the HTTP session, the model and ``_get_diff_past_the_limit`` are doubles.
     A rebuild that raises is a failed ``get_diff``: verdict ``Error`` and exit
     0, never a partial review. The control lets the same rebuild return a
     diff, and the same rig then reviews it.

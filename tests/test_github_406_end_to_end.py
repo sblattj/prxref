@@ -5,11 +5,12 @@ to ``_get_diff_from_files``, with that method doubled out on every test.
 ``test_github_files_fallback.py`` (seat F15-B) pins the listing rebuild by
 calling ``_get_diff_from_files`` directly, with the diff GET never in the
 picture. Each seat's tests double away the other half, so neither drives the
-real path: a real 406 too_large refusal, a real paged ``/pulls/{n}/files``
-walk, a real PR-metadata read for ``changed_files``, and a real render into a
-unified diff that ``prxref.triage.parse_unified_diff`` can parse. This module
-drives that whole path in one call, with only the HTTP session (and, in the
-CLI cases, the LLM) faked.
+real path: a real 406 too_large refusal, a real PR-metadata read, a compare
+read that fails (HTTP 404 here; the compare-first path has its own module,
+``test_github_compare_fallback.py``), a real paged ``/pulls/{n}/files`` walk,
+and a real render into a unified diff that ``prxref.triage.parse_unified_diff``
+can parse. This module drives that whole path in one call, with only the HTTP
+session (and, in the CLI cases, the LLM) faked.
 """
 from __future__ import annotations
 
@@ -31,6 +32,11 @@ from tests.test_orchestrator import FakeLLM
 API = "https://api.github.com/repos/acme/api"
 PR_API_URL = f"{API}/pulls/42"
 FILES_URL = f"{API}/pulls/42/files"
+COMPARE_URL = f"{API}/compare/{'a' * 40}...{'b' * 40}"
+COMPARE_WARNING = (
+    "GitHub PR diff for acme/api#42: the compare diff was not used (it answered "
+    "HTTP 404); rebuilding it from the changed-file listing"
+)
 
 # GitHub's verbatim 406 body for a diff past its 20,000-line limit.
 TOO_LARGE = {
@@ -57,18 +63,21 @@ def _file(name, status="modified", patch="@@ -1 +1 @@\n-old\n+new", **extra):
 
 
 def _pr_json(changed_files):
+    """The listings here carry no line counts, so the PR's totals are zero."""
     return {
         "title": "t", "body": "", "user": {"login": "dev"},
         "head": {"ref": "feat", "sha": "b" * 40},
         "base": {"ref": "main", "sha": "a" * 40},
         "changed_files": changed_files,
+        "additions": 0,
+        "deletions": 0,
     }
 
 
 def _session(listing, *, changed_files=None, diff_status=406, diff_text=""):
-    """Route the diff GET, the paged files listing, and the PR-metadata GET
-    from one session double -- the real end-to-end path, not a stand-in for
-    any one leg of it.
+    """Route the diff GET, the compare GET (404), the paged files listing, and
+    the PR-metadata GET from one session double -- the real end-to-end path,
+    not a stand-in for any one leg of it.
 
     Routes on URL and the diff Accept header, never on call order, so the
     order asserted below is the adapter's, not the double's.
@@ -78,6 +87,8 @@ def _session(listing, *, changed_files=None, diff_status=406, diff_text=""):
 
     def get(url, headers=None, params=None, **kwargs):
         accept = (headers or {}).get("Accept", "")
+        if url == COMPARE_URL:
+            return _mock_response(404, json_data={"message": "Not Found"})
         if url == PR_API_URL and "diff" in accept:
             if diff_status == 200:
                 return _mock_response(text=diff_text)
@@ -110,20 +121,22 @@ def test_a_real_406_rebuilds_a_diff_the_parser_can_read(caplog):
     assert [f.path for f in files] == [f["filename"] for f in listing]
     assert len(files) == 120
     assert [
-        r for r in caplog.records if r.name == "prxref.forges.github"
-    ] == []
+        r.getMessage() for r in caplog.records if r.name == "prxref.forges.github"
+    ] == [COMPARE_WARNING]
 
     calls = session.get.call_args_list
-    assert [c[0][0] for c in calls] == [PR_API_URL, FILES_URL, FILES_URL, PR_API_URL]
+    assert [c[0][0] for c in calls] == [
+        PR_API_URL, PR_API_URL, COMPARE_URL, FILES_URL, FILES_URL,
+    ]
     assert "diff" in calls[0][1]["headers"]["Accept"]
-    assert [c[1]["params"]["page"] for c in calls[1:3]] == [1, 2]
-    assert "diff" not in calls[3][1]["headers"]["Accept"]
+    assert "diff" not in calls[1][1]["headers"]["Accept"]
+    assert [c[1]["params"]["page"] for c in calls[3:5]] == [1, 2]
 
 
-# --- case 2: a listed file with no patch is header-only, one warning ------------
+# --- case 2: a listed file with no patch and no changed lines is header-only ------
 
 
-def test_a_patchless_listed_file_is_header_only_with_one_warning(caplog):
+def test_a_patchless_listed_file_is_header_only_with_no_warning_of_its_own(caplog):
     listing = [_file("src/app.py"), _file("assets/logo.png", patch=None)]
     session = _session(listing)
     forge = ForgeImpl(session=session)
@@ -137,11 +150,10 @@ def test_a_patchless_listed_file_is_header_only_with_one_warning(caplog):
     assert logo.hunks == []
 
     warnings = [
-        r for r in caplog.records
+        r.getMessage() for r in caplog.records
         if r.name == "prxref.forges.github" and r.levelno == logging.WARNING
     ]
-    assert len(warnings) == 1
-    assert "assets/logo.png" in warnings[0].getMessage()
+    assert warnings == [COMPARE_WARNING]
 
 
 # --- case 3: a short listing raises, and returns nothing -------------------------
@@ -175,8 +187,8 @@ def test_a_200_diff_makes_exactly_one_request_and_never_touches_files():
 
 def _cli_session(listing, *, changed_files=None):
     """``_routed_session`` (list_threads, get_file_content, ...) plus a real
-    406 diff refusal and a real files listing, so ``get_diff`` runs for real
-    inside a full ``prxref review`` invocation.
+    406 diff refusal, a compare 404 and a real files listing, so ``get_diff``
+    runs for real inside a full ``prxref review`` invocation.
     """
     base = _routed_session(summary_feed=[])
     routed = base.get.side_effect
@@ -185,6 +197,8 @@ def _cli_session(listing, *, changed_files=None):
 
     def get(url, headers=None, params=None, **kwargs):
         accept = (headers or {}).get("Accept", "")
+        if url == COMPARE_URL:
+            return _mock_response(404, json_data={"message": "Not Found"})
         if url == PR_API_URL and "diff" in accept:
             return _mock_response(406, json_data=TOO_LARGE)
         if url == FILES_URL:
