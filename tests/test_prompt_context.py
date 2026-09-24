@@ -164,6 +164,7 @@ class TestUnsetRunIsByteStable:
     @staticmethod
     def _old_user(name: str, values: list[tuple[str, str]]) -> str:
         template = load_prompt(name).replace("{ticket_context}", "", 1)
+        template = template.replace("{scope_example}", "", 1)
         _, marker, tail = template.partition(_CONTEXT_MARKER)
         user = marker + tail
         for key, value in values:

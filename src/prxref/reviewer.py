@@ -26,11 +26,15 @@ Inputs an operator or a ticket supplies for the whole run ride one frozen
 :class:`PromptContext` through every hop, in one fixed order: team rules and
 the ticket-scope instructions are appended to the SYSTEM half (policy), while
 the ticket context and the spec digest are filled into the USER half ahead of
-the diff (per-PR data). Each template is filled in one pass by
-:func:`fill_template`, so a value that contains another placeholder (a PR
-description quoting ``{diff}``) renders literally. With
-:data:`NO_PROMPT_CONTEXT` the system prompt is the template head unchanged and
-the user prompt gains nothing.
+the diff (per-PR data). While the ticket-scope instructions are in force, the
+``## Output Format`` JSON example that ends the USER half also shows a
+``"scope": "in"`` key on its finding, because a model copies the example it
+read last; the key is filled into the template's ``{scope_example}`` slot. Each
+template is filled in one pass by :func:`fill_template`, so a value that
+contains another placeholder (a PR description quoting ``{diff}``) renders
+literally. With :data:`NO_PROMPT_CONTEXT` the system prompt is the template
+head unchanged and the user prompt gains nothing: the ``{scope_example}`` slot
+renders empty, so the example is the pre-ticket one byte for byte.
 
 Both ``prompts/worker.md`` and
 ``prompts/systemic.md`` require a throw/panic/crash/unhandled-rejection
@@ -60,7 +64,7 @@ from .costs import valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
-from .triage import SCOPE_UNKNOWN, FileDiff, Finding, normalize_scope, trim_hunk_context
+from .triage import SCOPE_IN, SCOPE_UNKNOWN, FileDiff, Finding, normalize_scope, trim_hunk_context
 
 logger = logging.getLogger("prxref")
 
@@ -70,6 +74,11 @@ DEFAULT_CONFIDENCE = 0.5
 _CONTEXT_MARKER = "## Review Context"
 
 _NO_SPECS_TEXT = "(no specs provided for this review)"
+
+# Fills the ``{scope_example}`` slot glued to the example finding's last value
+# in both templates' ``## Output Format``: the comma travels with the key, so
+# the empty value a no-ticket run gets leaves the example valid and unchanged.
+_SCOPE_EXAMPLE = f',\n      "scope": "{SCOPE_IN}"'
 
 _MAX_TOKENS_ENV = "PRXREF_LLM_MAX_TOKENS"
 
@@ -156,7 +165,9 @@ class PromptContext:
     Every field defaults to ``""``, which injects nothing; ``spec_digest``
     empty renders ``(no specs provided for this review)`` as before.
     :attr:`scope_active` is true only when the scope instructions are in the
-    prompt, and it alone decides whether a model-supplied ``scope`` is read.
+    prompt, and it alone decides whether a model-supplied ``scope`` is read
+    and whether the ``## Output Format`` example finding shows a ``"scope"``
+    key.
     """
 
     rules_worker: str = ""
@@ -182,6 +193,10 @@ def _append_block(system: str, block: str) -> str:
 def _ticket_context_value(prompt_context: PromptContext) -> str:
     block = prompt_context.ticket_context.strip()
     return f"{block}\n\n" if block else ""
+
+
+def _scope_example_value(prompt_context: PromptContext) -> str:
+    return _SCOPE_EXAMPLE if prompt_context.scope_active else ""
 
 
 def _render_file(f: FileDiff, context_lines: int | None = None) -> str:
@@ -246,6 +261,7 @@ def _render_prompt(
         "spec_digest": prompt_context.spec_digest.strip() or _NO_SPECS_TEXT,
         "context_blocks": blocks,
         "diff": render_chunk(chunk, context_lines) or "(empty chunk)",
+        "scope_example": _scope_example_value(prompt_context),
     })
     system = _append_block(head.strip(), prompt_context.rules_worker)
     system = _append_block(system, prompt_context.ticket_scope)
@@ -305,6 +321,7 @@ def _render_systemic_prompt(
         "ticket_context": _ticket_context_value(prompt_context),
         "spec_digest": prompt_context.spec_digest.strip() or _NO_SPECS_TEXT,
         "digest": digest.strip() or "(empty digest)",
+        "scope_example": _scope_example_value(prompt_context),
     })
     discussion = _render_discussion_block(threads)
     user = user.strip()
