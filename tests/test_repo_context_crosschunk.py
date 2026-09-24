@@ -247,7 +247,7 @@ class TestChangeEntries:
         outer = _file(
             "p/Outer.java",
             (1, [
-                " package p;", " ", " public class Outer {", "     public record Inner(int a) {",
+                " package p;", " ", " public class Outer {", "+    public record Inner(int a) {",
                 "     }", "     void go() {", "         run();", "+        check();", "+        log();",
                 "     }", " }",
             ]),
@@ -258,6 +258,7 @@ class TestChangeEntries:
             (4, "Inner", "cross-chunk"),
             (8, "Outer", "cross-chunk"),
         ]
+        assert entries[1].text == "    public record Inner(int a) {\n    }"
         assert entries[2].text == "        check();\n        log();"
 
     def test_python_windows_follow_indentation(self):
