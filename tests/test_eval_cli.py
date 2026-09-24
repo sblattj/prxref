@@ -159,7 +159,7 @@ def recorders(monkeypatch):
     codes = {"run": 0, "score": 3, "compare": 5}
 
     def _recorder(name: str):
-        def _record(args: argparse.Namespace) -> int:
+        def _record(args: argparse.Namespace, **_injected: object) -> int:
             calls[name].append(args)
             return codes[name]
 
@@ -208,7 +208,7 @@ class TestDispatch:
         ],
     )
     def test_a_config_error_exits_2_printed_as_review_prints_one(self, action, argv, monkeypatch, capsys):
-        def _refuse(args: argparse.Namespace) -> int:
+        def _refuse(args: argparse.Namespace, **_injected: object) -> int:
             raise ConfigError("--judge-model: required because 2 labels have no must_match")
 
         monkeypatch.setattr(evals, f"eval_{action}", _refuse)
@@ -217,7 +217,7 @@ class TestDispatch:
         assert "configuration error: --judge-model: required because 2 labels have no must_match" in err
 
     def test_an_error_that_is_not_a_config_error_is_not_turned_into_exit_2(self, monkeypatch):
-        def _crash(args: argparse.Namespace) -> int:
+        def _crash(args: argparse.Namespace, **_injected: object) -> int:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(evals, "eval_run", _crash)
@@ -228,8 +228,11 @@ class TestDispatch:
 class TestEvalsModule:
     @pytest.mark.parametrize("name", [f"eval_{action}" for action in EVAL_ACTIONS])
     def test_each_action_takes_only_the_namespace(self, name):
-        params = list(inspect.signature(getattr(evals, name)).parameters)
-        assert params == ["args"]
+        params = inspect.signature(getattr(evals, name)).parameters.values()
+        positional = [p.name for p in params if p.kind is not inspect.Parameter.KEYWORD_ONLY]
+        keyword_only = [p.name for p in params if p.kind is inspect.Parameter.KEYWORD_ONLY]
+        assert positional == ["args"]
+        assert keyword_only == (["run_review", "build_record"] if name == "eval_run" else [])
 
     @pytest.mark.parametrize("name", [f"eval_{action}" for action in EVAL_ACTIONS])
     def test_each_action_documents_its_contract(self, name):
