@@ -9,9 +9,10 @@ one of them, null when their feature is off, and ``replay`` rides a replay run
 only. Each exit is driven below, not just the happy one, the way
 ``TestRunTrace`` in tests/test_orchestrator.py walks them.
 
-The cost and size hooks are inert in this build (their bodies land with the
-#67 and #68 feature seats), so these tests prove the hooks are WIRED by
-monkeypatching them, and pin only the facts that survive their bodies.
+The cost and size hooks' bodies (``_stamp_run_cost``, ``_size_advisory``) are
+driven for real in tests/test_issue_67_cost.py and tests/test_size_advisory.py,
+so these tests prove the hooks are WIRED by monkeypatching them, and pin only
+the facts that hold whatever the bodies compute.
 """
 from __future__ import annotations
 
