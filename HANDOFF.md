@@ -85,8 +85,8 @@ release. The v0.14.0 handoff is in git history.
     30k tokens".
   - The GitHub adapter's `get_file_content` took GitHub's raw media type,
     `application/vnd.github.raw+json`, for a JSON envelope and dropped every
-    file it read. So GitHub reviews had no full-file context in any earlier
-    release. `_is_json_envelope` now decides by the media type.
+    file it read, so GitHub reviews got no full-file context. Earlier releases
+    are affected too. `_is_json_envelope` now decides by the media type.
 - **Config went from 55 to 62 keys.** The seven new keys are:
   - `PRXREF_DEDUP_SIMILARITY` (#10)
   - `PRXREF_PROMPTS_DIR` (#11)
@@ -140,7 +140,7 @@ Written down because each one cost real time.
    Route a new orchestrator read through `load_prompt` instead, and 248 tests
    fail with a misleading `'worker.md' == 'summary'`.
 7. **Mock the headers the server really sends.** The GitHub file-content bug
-   survived every earlier release because the tests' success mocks answered
+   went unnoticed because the tests' success mocks answered
    `text/plain`. github.com answers `application/vnd.github.raw+json`, and
    only a live check showed it. Copy content types from a recorded response.
 8. **An unverified API shape may add evidence, never veto verified evidence.**
