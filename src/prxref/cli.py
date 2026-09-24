@@ -81,7 +81,7 @@ import prxref
 from prxref.config import load_config, make_forge
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
-from prxref.forges.replay import LocalDiffForge, ReplayForge
+from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
 from prxref.llm import ConfigError
 from prxref.prompt_templates import export_prompt_templates
 from prxref.rules import load_review_rules
@@ -761,17 +761,39 @@ def _read_description_file(path: str) -> str:
     return text
 
 
+_CURRENT_DESCRIPTION = "replay shows the PR's CURRENT title and description"
+
+
 def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
     """Wrap the ``--pr-url`` forge in a :class:`ReplayForge` for this replay.
 
     A pinned range that has to be fetched (no ``--diff-file``) needs the
     forge's optional ``get_compare_diff``; without it this raises the
     ``ConfigError`` naming ``--base-sha/--head-sha`` (exit 2) before any
-    network call. Two combinations are allowed but logged as a WARNING,
-    because each leaks the PR's present into a replay: pinned SHAs without
-    ``--no-threads`` still show the PR's current threads, and a
-    ``--diff-file`` without ``--head-sha`` reads file context at the PR's
-    current head.
+    network call. An explicit ``--as-of`` needs the forge's optional
+    ``get_pr_history`` the same way, and without it raises the
+    ``ConfigError`` naming ``--as-of``. Two combinations are allowed but
+    logged as a WARNING, because each leaks the PR's present into a replay:
+    pinned SHAs without ``--no-threads`` still show the PR's current
+    threads, and a ``--diff-file`` without ``--head-sha`` reads file context
+    at the PR's current head.
+
+    Then the PR's title and description are resolved (issue #16), and the
+    returned forge's ``description_pin`` records the outcome
+    (:class:`prxref.forges.replay.DescriptionPin`). ``--description-file``
+    and ``--no-description`` fix the description (``file``, ``none``) and
+    read no history. Otherwise pinning is on: this reads the forge's
+    ``get_pr_history`` once, at ``--head-sha`` when one is given, and picks
+    the cutoff: ``--as-of``, else the first human review, else the head
+    commit's date. When the history holds the description in force at the
+    cutoff, the forge shows that title and description (``pinned``), with
+    no further network call. Every other outcome shows the PR's current
+    title and description (``live``) and logs a WARNING saying why: a forge
+    with no ``get_pr_history``, a history read that raises (401/403,
+    transport), a history with no cutoff to offer, or one that does not
+    reach the cutoff (incomplete, or that version deleted). The pin carries
+    the cutoff and its source whenever one was chosen, a ``live`` one
+    included.
     """
     if (
         replay.head_sha is not None
@@ -781,6 +803,11 @@ def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
         raise ConfigError(
             f"--base-sha/--head-sha: the {ref.forge} forge cannot fetch a "
             "pinned commit range"
+        )
+    if replay.as_of is not None and getattr(forge, "get_pr_history", None) is None:
+        raise ConfigError(
+            f"--as-of: the {ref.forge} forge cannot read a pull request's "
+            "description history"
         )
     if replay.head_sha is not None and not replay.no_threads:
         logger.warning(
@@ -792,10 +819,65 @@ def _replay_forge(forge: Any, ref: Any, replay: _ReplayRequest) -> ReplayForge:
             "--diff-file with --pr-url and no --head-sha: file context is read "
             "at the PR's current head, which may not match the file"
         )
+    pin_kwargs, pin = _resolve_description(forge, ref, replay)
     return ReplayForge(
         forge, base_sha=replay.base_sha, head_sha=replay.head_sha,
         hide_threads=replay.no_threads, diff_text=replay.diff_text,
+        description_pin=pin, **pin_kwargs,
     )
+
+
+def _resolve_description(
+    forge: Any, ref: Any, replay: _ReplayRequest,
+) -> tuple[dict[str, Any], DescriptionPin]:
+    """Resolve a ``--pr-url`` replay's title and description for :func:`_replay_forge`.
+
+    Returns the ``ReplayForge`` keyword arguments that apply it (a fixed
+    ``description``, or the ``history`` and ``cutoff`` to pin with, which
+    are passed only when the status is ``pinned``, so a ``live`` resolution
+    leaves ``get_pr`` untouched) and the :class:`DescriptionPin`. The
+    ``--as-of`` configuration error is raised by the caller, before its
+    warnings.
+    """
+    if replay.description_file is not None:
+        return {"description": replay.description_text}, DescriptionPin("file", None, None)
+    if replay.no_description:
+        return {"description": ""}, DescriptionPin("none", None, None)
+    getter = getattr(forge, "get_pr_history", None)
+    if getter is None:
+        logger.warning(
+            "%s: the %s forge cannot read a pull request's description history",
+            _CURRENT_DESCRIPTION, ref.forge,
+        )
+        return {}, DescriptionPin("live", None, None)
+    history = None
+    try:
+        history = getter(ref, head_sha=replay.head_sha)
+    except Exception as exc:  # noqa: BLE001 - a failed history read falls back to the live text
+        logger.warning(
+            "%s: reading its description history failed (%s: %s)",
+            _CURRENT_DESCRIPTION, type(exc).__name__, exc,
+        )
+    chosen = choose_cutoff(replay.as_of, history)
+    if chosen is None:
+        if history is not None:
+            logger.warning(
+                "%s: its history has no first human review and no head commit "
+                "date to pin them to (give --as-of to choose the time)",
+                _CURRENT_DESCRIPTION,
+            )
+        return {}, DescriptionPin("live", None, None)
+    cutoff, source = chosen
+    if history is None:
+        return {}, DescriptionPin("live", cutoff, source)
+    if pin_status(history, cutoff) == "live":
+        logger.warning(
+            "%s: its description history does not reach the %s cutoff %s "
+            "(it is incomplete, or the version then in force was deleted)",
+            _CURRENT_DESCRIPTION, source, cutoff.isoformat(),
+        )
+        return {}, DescriptionPin("live", cutoff, source)
+    return {"history": history, "cutoff": cutoff}, DescriptionPin("pinned", cutoff, source)
 
 
 def _load_text_input(loader: Any, path: str, *, max_chars: int, source: str) -> Any:
@@ -913,7 +995,13 @@ def _run_review(
         logger.info("replay run: posting to the forge is disabled")
         post = False
     if url is None:
-        forge = LocalDiffForge(replay.diff_text, path=replay.diff_file)
+        forge = LocalDiffForge(
+            replay.diff_text, path=replay.diff_file,
+            description=(
+                replay.description_text if replay.description_file is not None
+                else "" if replay.no_description else None
+            ),
+        )
     else:
         forge = make_forge(ref)
         if replay is not None:

@@ -8,7 +8,8 @@ like now, and it never writes to a forge. Two forges serve it:
 - :class:`ReplayForge` wraps a real forge and pins what the orchestrator sees:
   the diff of a commit range (``base_sha``/``head_sha``, through the inner
   forge's optional ``get_compare_diff``) or a diff text, file reads at the
-  pinned head, and optionally no existing threads.
+  pinned head, optionally no existing threads, and the PR's title and
+  description as they stood at a cutoff (issue #16).
 
 Both raise on every write method, as defence in depth: the CLI already forces
 ``post=False`` on a replay. Neither is registered in ``detect_forge`` or
@@ -97,13 +98,17 @@ class LocalDiffForge:
     so the orchestrator skips context injection. ``get_diff`` raises on a
     blank diff, which the orchestrator turns into an ``Error`` run: an empty
     replay input almost always means the wrong file, never a clean PR.
+    ``description``, when given (``--description-file`` or
+    ``--no-description``), is the PR description instead of the patch
+    mail's; the title is still the mail's or the file name's.
     """
 
     name = "local"
 
-    def __init__(self, diff_text: str, *, path: str):
+    def __init__(self, diff_text: str, *, path: str, description: str | None = None):
         self._diff_text = diff_text
         self._path = path
+        self._description = description
 
     @staticmethod
     def parse_pr_url(url: str) -> PRRef | None:
@@ -122,9 +127,12 @@ class LocalDiffForge:
         """PR metadata from the patch mail headers, or a title from the file name.
 
         Both shas are empty and ``raw`` is ``{"diff_file": path}``, with the
-        path as the caller gave it.
+        path as the caller gave it. A ``description`` given to the
+        constructor replaces the mail's.
         """
         title, description, author = _patch_metadata(self._diff_text, self._path)
+        if self._description is not None:
+            description = self._description
         return PRData(
             title=title, description=description, author=author,
             source_branch="", target_branch="", source_sha="", target_sha="",
@@ -161,15 +169,25 @@ class ReplayForge:
     range: ``get_diff`` returns the inner forge's ``get_compare_diff`` of it,
     and ``get_pr`` reports ``head_sha``/``base_sha`` as the PR's
     ``source_sha``/``target_sha``, so every file read happens at the pinned
-    head. The PR's title and description stay the current ones. ``diff_text``,
+    head. ``history`` and ``cutoff`` (given together) pin the PR's title and
+    description: ``get_pr`` replaces them with :func:`pin_pr_metadata`'s,
+    taking the inner PR's as the live ones, so pinning adds no network call.
+    ``description``, when given (``--description-file`` or
+    ``--no-description``), replaces the description alone, after any pin;
+    the title stays the current one. With none of the three, the title and
+    description are the PR's current ones. ``description_pin`` is not read
+    here: it is the caller's resolved :class:`DescriptionPin`, kept as the
+    public attribute ``description_pin`` for the run's stamp. ``diff_text``,
     when given, is the diff instead of any fetched one. A blank pinned or
     ``diff_text`` diff raises ``ValueError``, which the orchestrator turns into
     an ``Error`` run. With neither, ``get_diff`` is the inner forge's own, so
     that run differs from a normal one only in its threads. ``hide_threads``
     makes ``list_threads`` return ``[]`` without asking the inner forge.
 
-    Raises ``ValueError`` when only one of the two shas is given, or when a
-    pinned range must be fetched from a forge with no ``get_compare_diff``.
+    Raises ``ValueError`` when only one of the two shas is given, when a
+    pinned range must be fetched from a forge with no ``get_compare_diff``,
+    when only one of ``history`` and ``cutoff`` is given, or when ``cutoff``
+    is naive.
     """
 
     name = "replay"
@@ -182,9 +200,17 @@ class ReplayForge:
         head_sha: str | None = None,
         hide_threads: bool = False,
         diff_text: str | None = None,
+        history: PRHistory | None = None,
+        cutoff: datetime | None = None,
+        description: str | None = None,
+        description_pin: DescriptionPin | None = None,
     ):
         if bool(base_sha) != bool(head_sha):
             raise ValueError("ReplayForge: base_sha and head_sha must be given together")
+        if (history is None) != (cutoff is None):
+            raise ValueError("ReplayForge: history and cutoff must be given together")
+        if cutoff is not None:
+            _require_aware(cutoff, "cutoff")
         if head_sha and diff_text is None and getattr(inner, "get_compare_diff", None) is None:
             forge_name = getattr(inner, "name", type(inner).__name__)
             raise ValueError(
@@ -195,6 +221,10 @@ class ReplayForge:
         self._head_sha = head_sha or None
         self._hide_threads = hide_threads
         self._diff_text = diff_text
+        self._history = history
+        self._cutoff = cutoff
+        self._description = description
+        self.description_pin = description_pin
 
     @staticmethod
     def parse_pr_url(url: str) -> PRRef | None:
@@ -202,12 +232,26 @@ class ReplayForge:
         return None
 
     def get_pr(self, ref: PRRef) -> PRData:
-        """The inner PR, with its shas replaced by the pinned range when one is set."""
+        """The inner PR, with its shas, title and description replaced as the replay pins them.
+
+        The shas become the pinned range when one is set; the title and
+        description become the ones in force at ``cutoff`` when a history is
+        set; and the description becomes the fixed ``description`` when one
+        is set.
+        """
         pr = self._inner.get_pr(ref)
         if self._head_sha:
             pr = dataclasses.replace(
                 pr, source_sha=self._head_sha, target_sha=self._base_sha,
             )
+        if self._history is not None and self._cutoff is not None:
+            pinned = pin_pr_metadata(
+                self._history, live_title=pr.title, live_description=pr.description,
+                cutoff=self._cutoff,
+            )
+            pr = dataclasses.replace(pr, title=pinned.title, description=pinned.description)
+        if self._description is not None:
+            pr = dataclasses.replace(pr, description=self._description)
         return pr
 
     def get_diff(self, ref: PRRef) -> str:
@@ -276,6 +320,65 @@ class PinnedMetadata:
     status: PinStatus
 
 
+DescriptionStatus = Literal["pinned", "live", "file", "none"]
+
+
+@dataclasses.dataclass(frozen=True)
+class DescriptionPin:
+    """Which title and description a replay shows, and the cutoff it was pinned to.
+
+    ``status`` is ``"pinned"`` when the title and description are the ones in
+    force at the cutoff, ``"live"`` when they are the PR's current ones,
+    ``"file"`` when the description is the ``--description-file`` text and
+    ``"none"`` under ``--no-description``; under ``"file"`` and ``"none"``
+    the title is the PR's current one. ``as_of`` is the cutoff and
+    ``as_of_source`` where it came from (``"flag"`` for ``--as-of``, else
+    ``"first-review"`` or ``"head-commit"``). Both are set whenever a cutoff
+    was chosen, including a ``"live"`` pin whose history did not reach it,
+    and both are ``None`` otherwise.
+    """
+
+    status: DescriptionStatus
+    as_of: datetime | None
+    as_of_source: CutoffSource | None
+
+
+def _resolve_pin(history: PRHistory, cutoff: datetime) -> tuple[PinStatus, str | None]:
+    """Return the pin status at ``cutoff`` and the pinned description text.
+
+    The text is ``None`` when the status is ``"live"``, and when a complete
+    history holds no versions: the description was never edited, so the
+    PR's live description is the one in force. Raises ``ValueError`` when
+    ``cutoff`` is naive.
+    """
+    _require_aware(cutoff, "cutoff")
+    versions = sorted(history.description_versions, key=lambda version: version.edited_at)
+    if not versions:
+        return ("pinned" if history.complete else "live"), None
+    reached = [version for version in versions if version.edited_at <= cutoff]
+    if reached:
+        in_force = reached[-1]
+    elif history.complete:
+        in_force = versions[0]
+    else:
+        return "live", None
+    if in_force.text is None:
+        return "live", None
+    return "pinned", in_force.text
+
+
+def pin_status(history: PRHistory, cutoff: datetime) -> PinStatus:
+    """Return whether ``history`` pins the description at ``cutoff``, without the texts.
+
+    The status is exactly the one :func:`pin_pr_metadata` returns for the same
+    history and cutoff, which depends on neither the live title nor the live
+    description, so a caller can decide before the PR itself is read.
+
+    Raises ``ValueError`` when ``cutoff`` is naive.
+    """
+    return _resolve_pin(history, cutoff)[0]
+
+
 def pin_pr_metadata(
     history: PRHistory, *, live_title: str, live_description: str, cutoff: datetime,
 ) -> PinnedMetadata:
@@ -292,28 +395,15 @@ def pin_pr_metadata(
     history holds no version at or before the cutoff and so does not reach
     it. When the description is pinned, the title is the ``previous_title``
     of the first rename, ordered by ``created_at``, made strictly after the
-    cutoff, else ``live_title``.
+    cutoff, else ``live_title``. The status is the one :func:`pin_status`
+    gives.
 
     Raises ``ValueError`` when ``cutoff`` is naive.
     """
-    _require_aware(cutoff, "cutoff")
-    live = PinnedMetadata(title=live_title, description=live_description, status="live")
-    versions = sorted(history.description_versions, key=lambda version: version.edited_at)
-    if versions:
-        reached = [version for version in versions if version.edited_at <= cutoff]
-        if reached:
-            in_force = reached[-1]
-        elif history.complete:
-            in_force = versions[0]
-        else:
-            return live
-        if in_force.text is None:
-            return live
-        description = in_force.text
-    elif history.complete:
-        description = live_description
-    else:
-        return live
+    status, text = _resolve_pin(history, cutoff)
+    if status == "live":
+        return PinnedMetadata(title=live_title, description=live_description, status="live")
+    description = live_description if text is None else text
     renames = sorted(history.title_renames, key=lambda rename: rename.created_at)
     title = next((rename.previous_title for rename in renames if rename.created_at > cutoff), live_title)
     return PinnedMetadata(title=title, description=description, status="pinned")
