@@ -179,6 +179,7 @@ from .triage import (
     Finding,
     added_lines_by_file,
     build_chunks,
+    count_size_relevant_changes,
     normalize_scope,
     parse_unified_diff,
 )
@@ -1775,11 +1776,47 @@ def _size_advisory(
     """The PR-size advisory's stats, or ``None`` when both limits are unset.
 
     The stats are ``{changed_lines, changed_files, lines_limit, files_limit,
-    triggered, message}``, where ``message`` is plain text and is ``None``
-    unless a configured limit is exceeded. Inert in this build: it always
-    returns ``None``, so no run carries a size advisory yet.
+    triggered, message}``, computed whenever either limit is set, whether or
+    not it is exceeded. The counts come from
+    :func:`prxref.triage.count_size_relevant_changes`, which skips lockfiles
+    (:data:`prxref.heuristics.LOCKFILE_BASENAMES`), generated files and
+    ``ignore_globs``. A limit is exceeded strictly (``>``), so 0 is a real
+    threshold rather than "off". ``message`` is ``None`` unless a limit is
+    exceeded, and otherwise plain text naming only the exceeded limits, e.g.
+    ``This PR changes 812 lines in 24 files, above the team guideline of 500
+    lines and 20 files. Consider splitting it.`` The advisory never touches
+    the findings, so it cannot move the verdict or the exit code.
     """
-    return None
+    if lines_limit is None and files_limit is None:
+        return None
+    changed_lines, changed_files = count_size_relevant_changes(
+        files, lockfile_basenames=heuristics.LOCKFILE_BASENAMES, ignore_globs=ignore_globs,
+    )
+    exceeded = []
+    if lines_limit is not None and changed_lines > lines_limit:
+        exceeded.append(f"{lines_limit} {_plural(lines_limit, 'line')}")
+    if files_limit is not None and changed_files > files_limit:
+        exceeded.append(f"{files_limit} {_plural(files_limit, 'file')}")
+    message = None
+    if exceeded:
+        message = (
+            f"This PR changes {changed_lines} {_plural(changed_lines, 'line')} "
+            f"in {changed_files} {_plural(changed_files, 'file')}, above the team "
+            f"guideline of {' and '.join(exceeded)}. Consider splitting it."
+        )
+    return {
+        "changed_lines": changed_lines,
+        "changed_files": changed_files,
+        "lines_limit": lines_limit,
+        "files_limit": files_limit,
+        "triggered": message is not None,
+        "message": message,
+    }
+
+
+def _plural(n: int, unit: str) -> str:
+    """``unit`` for exactly one, else ``unit + "s"`` (0 lines, 1 line, 2 lines)."""
+    return unit if n == 1 else f"{unit}s"
 
 
 def _size_advisory_line(stats: Mapping[str, Any] | None) -> str:
