@@ -85,7 +85,7 @@ The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`,
 
 ## Bad Configuration Is the Only Thing That Fails a Build
 
-`prxref review` exits **0** on every review error — a network failure, an LLM timeout, bad forge credentials, even a review in which every chunk failed — and on an empty diff, which is not an error at all. prxref is an advisor, not a merge gate.
+Under the default `PRXREF_FAIL_ON=never`, `prxref review` exits **0** on every review error — a network failure, an LLM timeout, bad forge credentials, even a review in which every chunk failed — and on an empty PR diff, which is not an error at all. prxref is an advisor, not a merge gate.
 
 It exits **2** on exactly one class of problem: a **configuration error**. That is a required value missing, a value that will not parse, a value outside its valid range, or one outside its key's allowed vocabulary (`PRXREF_FAIL_ON` accepts only `never`, `error`, or `any`). The check runs after the environment *and* any programmatic override, so no path into the config can smuggle a degenerate value through to the wire.
 

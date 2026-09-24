@@ -161,7 +161,7 @@ publisher still names owner `sblattj`, repository `prxref`, workflow
 ## Verified at release
 
 ```
-4219 passed                                   uv run pytest -q
+4222 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.14.0                                        uv run prxref --version
 ```
