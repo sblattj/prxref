@@ -26,8 +26,11 @@ export PRXREF_REVIEW_RULES=/etc/prxref/rules.md
   default: the model is asked to name the rule each finding applies, and at
   most `PRXREF_MAX_FINDINGS_PER_RULE` findings per rule (default `2`) stay
   active across the review, the rest folded into the best one; `0` turns the
-  cap off. See [docs/env-vars.md](env-vars.md) and
-  [docs/quality.md](quality.md).
+  cap off. A rules input counts as loaded even when it injects no rules: an
+  empty rules file (logged as `is empty; no rules injected`), a scoped directory
+  with no `*.md` file, and a scoped set whose globs reach no file in the diff
+  each still turn the cap on, so every review unit is asked for a rule. See
+  [docs/env-vars.md](env-vars.md) and [docs/quality.md](quality.md).
 
 **Read the rules from a trusted checkout, never from the pull request under
 review.** See [CI safety](#ci-safety-read-the-rules-from-something-the-pr-cannot-change).
@@ -205,7 +208,7 @@ It appears in these places:
 
 | Where | What |
 |---|---|
-| `--format json` | the `review_rules` key, always present, `null` when off |
+| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run) |
 | `-v` text output | `rules: .prxref/rules.md sha256=<first 12 hex> chars=18344 (truncated at 12000)` |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `rules ok` event whose meta is the record, right after `run start`; a `rules remap` event with `findings=<n>` when the map rewrote any finding |
 | `--trace-dir` | the rules block itself, in every `<unit>.system.md` |
@@ -453,7 +456,7 @@ rules are configured:
 
 | Where | What |
 |---|---|
-| `--format json` | the `scoped_rules` key, right after `prompt_templates`, always present, `null` when off |
+| `--format json` | the `scoped_rules` key, right after `prompt_templates`, always present, `null` when off; the per-rule cap's `rule_counts` key follows it (`null` when the cap did not run) |
 | `-v` text output | `scoped rules: 2 file(s) .prxref/scoped/helm.md=<first 12 hex> .prxref/scoped/java.md=<first 12 hex> cap=24000`, after the `rules:` line when there is one |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `scoped_rules ok` event whose meta is the record without `units`, right after `rules ok` (after `run start` with no always-on file); each `chunk start` and `sweep start` event carries its unit's rows as `rules` |
 | `--trace-dir` | each unit's own block, in its `<unit>.system.md`; chunk files count from 0, so the `chunk start` event with `index` N is `chunk{N-1}.system.md` |

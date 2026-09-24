@@ -12,10 +12,12 @@ tracker.
 
 The tuning release. A team can now replace the review prompts, scope its review
 rules to paths, fold findings that break the same rule into one comment, cap
-warnings and minor findings, and measure a configuration against labelled human
-findings with `prxref eval`. A `--pr-url` replay shows the title and description
-the PR had at review time, and GitHub pull requests past GitHub's diff size
-limit are reviewed. Each new option is off until you configure it.
+warnings and minor findings, cap how many findings one rule may produce, and
+measure a configuration against labelled human findings with `prxref eval`. A
+`--pr-url` replay shows the title and description the PR had at review time,
+and GitHub pull requests past GitHub's diff size limit are reviewed. Each new
+option is off until you configure it, except the per-rule cap, which loading a
+review rules file turns on.
 
 ### Added
 
@@ -111,9 +113,10 @@ limit are reviewed. Each new option is off until you configure it.
   runs before the finding caps, so every cap, `PRXREF_MAX_ERROR_FINDINGS`
   included, counts a group once. Whole-PR sweep findings are never grouped,
   and a sweep finding that restates a grouped finding is still dropped as
-  `duplicate of chunk finding`. Off by default: the model is not asked for a
-  rule, and output is unchanged apart from the `rule` and `locations` JSON keys
-  being `null`.
+  `duplicate of chunk finding`. Off by default: unless a review rules file
+  turns on the per-rule cap (#18), the model is not asked for a rule, and
+  output is unchanged apart from the `rule` and `locations` JSON keys being
+  `null`.
 - **Per-severity finding caps (#13).** `PRXREF_MAX_WARNING_FINDINGS` and
   `PRXREF_MAX_OUTOFSCOPE_FINDINGS` cap how many `warning` and how many
   `outofscope` findings one review posts, ranked like
@@ -130,10 +133,11 @@ limit are reviewed. Each new option is off until you configure it.
   finding row carries two more keys after `scope`: `rule`, the rule the finding
   names (`null` when it names none), and `locations`, which on a grouped
   finding lists the other places its `Also at:` paragraph names as `{"file",
-  "line"}` objects, in that order, and is `null` on every other row, including
-  each member dropped as `grouped into <file>:<line>`. In text output, a
-  finding that names a rule ends its line with ` [rule: <rule>]`, after any
-  scope tag.
+  "line"}` objects, in that order. The per-rule cap (#18) sets it too, on the
+  best finding of each rule it folds, and it is `null` on every other row,
+  including each member dropped as `grouped into <file>:<line>`. In text
+  output, a finding that names a rule ends its line with ` [rule: <rule>]`,
+  after any scope tag.
 - **`prxref eval run` (#14).** `prxref eval run --cases PATH --label NAME
   [--out DIR] [--resume]` replays every labelled case in process, never
   posting, and writes the run to `DIR/NAME/` (default `--out` is
@@ -220,6 +224,32 @@ limit are reviewed. Each new option is off until you configure it.
   the replay keeps the live text. A custom forge can take part by implementing
   the optional `get_pr_history` method, which returns a `PRHistory`. See
   `docs/forges.md`.
+- **Per-rule cap (#18).** `PRXREF_MAX_FINDINGS_PER_RULE` (default `2`, `0` turns
+  it off) caps how many findings one rule may produce in a review, across files.
+  It applies only while a review rules file is loaded (`PRXREF_REVIEW_RULES` /
+  `--rules-file` or `PRXREF_SCOPED_RULES` / `--scoped-rules`) and does nothing
+  without one. While it applies, every review unit is asked to name the rule
+  each finding applies, as under `PRXREF_GROUP_FINDINGS`, including that
+  feature's WARNING for a prompt override without the `{rule_example}` slot.
+  Active chunk findings at or above the confidence floor count together when
+  they name the same rule, compared without regard to case, or, when they name
+  none, share a normalized title; the two never mix. Of each rule, only as many
+  as the cap allows stay active: the best, ranked by severity, then confidence,
+  each keeping its own severity and confidence, so an error is never folded
+  under a warning. The rest fold onto the best one: its body ends with `Also
+  at:`, naming at most 5 locations, then `(+k more)`, and its `--format json`
+  `locations` lists every one, across files. Each folded finding is kept for
+  audit with the drop reason `rule cap exceeded (max N): listed at
+  <file>:<line>`. A group from `PRXREF_GROUP_FINDINGS` counts once, and the cap
+  runs after grouping and before the severity caps, so
+  `PRXREF_MAX_ERROR_FINDINGS` and the per-severity caps count what it kept.
+  Whole-PR sweep findings are never counted or capped. The run record and
+  `--format json` gain `rule_counts`, right after `scoped_rules`: one `{"rule",
+  "kind", "total", "kept"}` row for each rule or title that two or more findings
+  share, `[]` when none does, and `null` when the cap did not run. One INFO line
+  and one `rulecap ok` trace event report each pass. It is an environment
+  variable only, with no CLI flag; a negative or non-integer value exits 2
+  naming it, and `prxref eval run` records it in `run.json`.
 
 ### Changed
 
@@ -238,6 +268,15 @@ limit are reviewed. Each new option is off until you configure it.
   `applies_to:` or `applyTo:` key and still reaches every unit, but it now
   names that key in a WARNING instead of the INFO line for ignored keys. Its
   prompts are unchanged.
+- **A review rules file now turns on the per-rule cap (#18).** With a review
+  rules file loaded (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`), every
+  review unit is asked to name the rule each finding applies, and each rule's
+  findings past the second fold into its best one by default, so the worker and
+  sweep prompt hashes and the finding counts of such runs change.
+  `PRXREF_MAX_FINDINGS_PER_RULE=0` turns both off: the prompts, findings and
+  comments are then what they were without the cap, and the run record and
+  `--format json` carry `rule_counts` as `null`. With `PRXREF_GROUP_FINDINGS=1`
+  the model is still asked for a rule, since grouping asks for one itself.
 
 ### Fixed
 
@@ -306,6 +345,8 @@ limit are reviewed. Each new option is off until you configure it.
 - **A capped group loses all its locations.** The finding caps rank by
   confidence, then file and line, not by group size, so when a cap drops a
   group's comment, every location folded into it leaves the posted review too.
+  The same holds for the finding the per-rule cap folded a rule's other
+  findings into.
 - **A finding on a file outside its chunk has a guessed line.** A chunk worker
   also sees the PR's other files, as short excerpts without line numbers under
   `### Other files changed in this PR`, and can report on them. Line alignment

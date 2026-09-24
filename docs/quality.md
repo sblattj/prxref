@@ -230,7 +230,10 @@ other member.
   reads those `locations` exactly as it reads a group's. With grouping off
   and the per-rule cap inactive (no review rules file, or
   `PRXREF_MAX_FINDINGS_PER_RULE` set to `0`), `rule` and `locations` are
-  `null` on every row.
+  `null` on every row. The run record and `--format json` also carry
+  `rule_counts`, the per-rule cap's tally (its rows are described in
+  [the README's `--format json` list](../README.md#cli-flags)): `[]` when
+  nothing repeated, and `null` when the cap did not run.
 - **Text output** (`--no-post` or `-v`). Every active finding that names a
   rule, a representative included, ends its line in ` [rule: <rule>]`, after
   any ` [scope: in]` or ` [scope: out]` tag. A representative's body carries
