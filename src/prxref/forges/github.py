@@ -13,6 +13,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from prxref.retry_logging import LoggingRetry
+from prxref.triage import parse_unified_diff
 
 from ._diff_render import render_diff_entries
 from .base import (
@@ -54,6 +55,78 @@ _ERROR_DETAIL_CHARS = 400
 # this size (or one that looks binary) is worth skipping rather than shipping
 # hundreds of KB into a worker prompt.
 _MAX_FILE_CONTENT_BYTES = 512 * 1024
+
+
+def _is_count(value: object) -> bool:
+    """True for an int that is not a bool, the only shape a GitHub count takes."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _listed_count(entry: dict, key: str) -> int:
+    """A files-listing entry's ``additions`` or ``deletions``, 0 when it is not a count."""
+    value = entry.get(key)
+    return value if _is_count(value) else 0
+
+
+def _compare_mismatch(text: str, pr_raw: dict[str, Any]) -> str | None:
+    """Why a compare diff cannot stand in for the PR's diff, or None when it can.
+
+    The diff is parsed with the review pipeline's own parser and its file
+    count and ``+``/``-`` line sums are held against the PR's
+    ``changed_files``, ``additions`` and ``deletions``. The parser counts a
+    binary file, a pure rename, a mode change and an empty file as one file of
+    zero lines each, and a submodule bump as ``+1``/``-1``, as GitHub does.
+    """
+    expected = {key: pr_raw.get(key) for key in ("changed_files", "additions", "deletions")}
+    missing = [key for key, value in expected.items() if not _is_count(value)]
+    if missing:
+        return f"the PR metadata carries no integer {', '.join(missing)} to check it against"
+    files = parse_unified_diff(text)
+    if len(files) != expected["changed_files"]:
+        return (
+            f"its file count {len(files)} differs from the PR's changed_files "
+            f"{expected['changed_files']}"
+        )
+    added = sum(f.lines_added for f in files)
+    removed = sum(f.lines_removed for f in files)
+    if (added, removed) != (expected["additions"], expected["deletions"]):
+        return (
+            f"its line counts +{added}/-{removed} differ from the PR's "
+            f"additions/deletions +{expected['additions']}/-{expected['deletions']}"
+        )
+    return None
+
+
+def _too_large_message(body: dict) -> str:
+    """GitHub's own ``message`` from a 406 ``too_large`` body, on one bounded line."""
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return "no message"
+    return " ".join(message.split())[:_ERROR_DETAIL_CHARS]
+
+
+def _refuse_short_totals(where: str, listed: list[dict], pr_raw: dict[str, Any]) -> None:
+    """Raise ``ValueError`` when the listing's line totals differ from the PR's.
+
+    The listing's ``additions`` and ``deletions`` are summed and held against
+    the PR's own; PR metadata without integer totals raises too.
+    """
+    pr_additions, pr_deletions = pr_raw.get("additions"), pr_raw.get("deletions")
+    if not (_is_count(pr_additions) and _is_count(pr_deletions)):
+        raise ValueError(
+            f"GitHub PR diff for {where} cannot be checked for completeness: "
+            "the PR metadata carries no integer additions and deletions; "
+            "refusing to review a diff that may be partial"
+        )
+    additions = sum(_listed_count(f, "additions") for f in listed)
+    deletions = sum(_listed_count(f, "deletions") for f in listed)
+    if (additions, deletions) != (pr_additions, pr_deletions):
+        raise ValueError(
+            f"GitHub PR diff for {where} cannot be rebuilt whole: the "
+            f"changed-file listing totals +{additions}/-{deletions} lines but "
+            f"the PR has +{pr_additions}/-{pr_deletions}; refusing to review a "
+            "partial diff"
+        )
 
 
 def _response_detail(resp: requests.Response) -> str:
@@ -177,15 +250,17 @@ class ForgeImpl:
     def get_diff(self, ref: PRRef) -> str:
         """Fetch the raw unified diff of the PR (all files).
 
-        Under GitHub's diff limit this is one GET with the diff media type,
-        and its body is returned as-is. Past 20,000 lines GitHub refuses that
-        request with HTTP 406 and a JSON ``errors`` entry whose ``code`` is
-        ``too_large``. Exactly that answer is logged at DEBUG and the diff is
-        rebuilt from the changed-file listing by ``_get_diff_from_files``,
-        whose ``ValueError`` (a listing cut short by GitHub's 3,000-file cap)
-        or ``FeedReadError`` propagates. Any other 406, including one whose
-        body is not JSON, and every other non-OK status raise ``HTTPError``
-        as before.
+        Under GitHub's diff limits this is one GET with the diff media type,
+        and its body is returned as-is. Past 20,000 lines or 300 files GitHub
+        refuses that request with HTTP 406 and a JSON ``errors`` entry whose
+        ``code`` is ``too_large``. Exactly that answer is logged at DEBUG with
+        GitHub's own ``message``, which names the limit hit, and the diff is
+        read by ``_get_diff_past_the_limit``: the compare diff of the PR's
+        base and head, else the changed-file listing. Its ``ValueError`` (a
+        diff that cannot be read whole), ``FeedReadError`` (a listing page
+        that cannot be read) or failed PR metadata read propagates. Any other
+        406, including one whose body is not JSON, and every other non-OK
+        status raise ``HTTPError`` as before.
         """
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}"
         headers = self._headers(
@@ -203,13 +278,57 @@ class ForgeImpl:
                 isinstance(e, dict) and e.get("code") == "too_large" for e in errors
             ):
                 logger.debug(
-                    "diff for %s/%s#%s exceeded GitHub's line limit (406 too_large); "
-                    "rebuilding it from the files listing",
-                    ref.owner, ref.repo, ref.number,
+                    "diff for %s/%s#%s was refused by GitHub as too large "
+                    "(406 too_large: %s); reading it from the compare endpoint",
+                    ref.owner, ref.repo, ref.number, _too_large_message(body),
                 )
-                return self._get_diff_from_files(ref)
+                return self._get_diff_past_the_limit(ref)
         resp.raise_for_status()
         return resp.text
+
+    def _get_diff_past_the_limit(self, ref: PRRef) -> str:
+        """Read the diff of a PR past GitHub's diff limits (20,000 lines or 300 files).
+
+        The PR is fetched once, and a failed read raises as ``get_pr`` does.
+        Its ``base.sha`` and ``head.sha`` then name the compare diff
+        (``get_compare_diff``), which applies neither limit. That text is
+        returned as-is, logged at DEBUG only, when its file count and line
+        sums equal the PR's ``changed_files``, ``additions`` and
+        ``deletions``. Otherwise, and on any HTTP or transport failure of the
+        compare read, one WARNING names the reason and the diff is rebuilt
+        from the changed-file listing by ``_get_diff_from_files`` with the
+        same PR metadata; nothing the compare read raises propagates.
+        """
+        pr = self.get_pr(ref)
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        if not (pr.target_sha and pr.source_sha):
+            reason = "the PR metadata carries no base.sha and head.sha"
+        else:
+            try:
+                text = self.get_compare_diff(
+                    ref, base_sha=pr.target_sha, head_sha=pr.source_sha,
+                )
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else "error"
+                reason = f"it answered HTTP {status}"
+            except requests.RequestException as e:
+                reason = f"it could not be read: {type(e).__name__}: {e}"
+            else:
+                mismatch = _compare_mismatch(text, pr.raw)
+                if mismatch is None:
+                    logger.debug(
+                        "diff for %s read from compare %s...%s; its file and "
+                        "line counts match the PR's",
+                        where, pr.target_sha[:12], pr.source_sha[:12],
+                    )
+                    return text
+                reason = mismatch
+        logger.warning(
+            "GitHub PR diff for %s: the compare diff was not used (%s); "
+            "rebuilding it from the changed-file listing",
+            where, reason,
+        )
+        return self._get_diff_from_files(ref, pr)
 
     def get_compare_diff(self, ref: PRRef, *, base_sha: str, head_sha: str) -> str:
         """Return the unified diff of ``head_sha`` against its merge-base with ``base_sha``.
@@ -230,24 +349,31 @@ class ForgeImpl:
         resp.raise_for_status()
         return resp.text
 
-    def _get_diff_from_files(self, ref: PRRef) -> str:
+    def _get_diff_from_files(self, ref: PRRef, pr: PRData) -> str:
         """Rebuild the PR's unified diff from its ``/pulls/{n}/files`` listing.
 
-        The fallback for a diff too large for the diff media type. Each listed
-        file is mapped into the renderer's per-file entry: ``filename`` is the
-        new path, ``previous_filename`` (else ``filename``) the old path, and
-        the ``added``, ``removed`` and ``renamed`` statuses pick the new, deleted
-        and rename headers; every other status renders plain ``---``/``+++``.
-        ``patch`` supplies the hunks. A file listed without a ``patch`` (a
-        binary, a patch GitHub withheld as too large, a pure rename) renders
-        header-only, with one WARNING naming it.
+        The fallback for a diff past the diff media type's limit whose compare
+        diff could not be used; ``pr`` is the PR metadata already read for
+        it. Each listed file is mapped into the renderer's per-file entry:
+        ``filename`` is the new path, ``previous_filename`` (else
+        ``filename``) the old path, and the ``added``, ``removed`` and
+        ``renamed`` statuses pick the new, deleted and rename headers; every
+        other status renders plain ``---``/``+++``. ``patch`` supplies the
+        hunks. A file listed without a ``patch`` renders header-only: with no
+        changed lines (an empty file, a pure rename, a binary, a mode change)
+        that is logged at DEBUG, and with changed lines, where GitHub withheld
+        the patch but kept the file's true counts (seen on whole-file lockfile
+        adds and removes), one WARNING names the file and those counts.
 
-        Completeness is checked, not assumed: the listing is compared with the
-        PR's ``changed_files``, and a shorter listing (GitHub caps it at 3,000
-        files) raises ``ValueError`` instead of returning a partial diff, as
-        does PR metadata carrying no integer ``changed_files``. A failed
-        listing read raises ``FeedReadError``; a failed PR metadata read raises
-        as ``get_pr`` does.
+        Completeness is checked, not assumed, and every miss raises
+        ``ValueError`` instead of returning a partial diff: a listing shorter
+        than the PR's ``changed_files`` (GitHub caps it at 3,000 files), PR
+        metadata carrying no integer ``changed_files``, and listing
+        ``additions`` or ``deletions`` totals that differ from the PR's, or PR
+        metadata carrying no integer totals. The totals are what catch a large
+        listing page: GitHub has been seen to drop the ``patch`` of ordinary
+        text files from such a page and list them with zero changed lines. A
+        failed listing read raises ``FeedReadError``.
         """
         url = (
             f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
@@ -260,7 +386,7 @@ class ForgeImpl:
             listed.extend(page)
 
         where = f"{ref.owner}/{ref.repo}#{ref.number}"
-        changed_files = self.get_pr(ref).raw.get("changed_files")
+        changed_files = pr.raw.get("changed_files")
         if not isinstance(changed_files, int) or isinstance(changed_files, bool):
             raise ValueError(
                 f"GitHub PR diff for {where} cannot be checked for completeness: "
@@ -274,16 +400,24 @@ class ForgeImpl:
                 f"returned {len(listed)} (GitHub caps the listing at 3,000 "
                 "files); refusing to review a partial diff"
             )
+        _refuse_short_totals(where, listed, pr.raw)
 
         entries: list[dict] = []
         for f in listed:
             filename = f.get("filename") or ""
             status = f.get("status")
             patch = f.get("patch")
-            if not patch:
+            added, removed = _listed_count(f, "additions"), _listed_count(f, "deletions")
+            if not patch and (added or removed):
                 logger.warning(
-                    "GitHub PR diff: %s has no inline diff (no patch in the "
-                    "files listing); it is reviewed as header-only",
+                    "GitHub PR diff for %s: GitHub withheld the patch of %s "
+                    "(+%d/-%d); it is reviewed as header-only",
+                    where, filename, added, removed,
+                )
+            elif not patch:
+                logger.debug(
+                    "GitHub PR diff: %s is listed with no patch and no changed "
+                    "lines; it is reviewed as header-only",
                     filename,
                 )
             entries.append({

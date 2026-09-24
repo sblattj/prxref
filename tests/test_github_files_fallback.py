@@ -1,7 +1,8 @@
 """Tests for GitHub's PR diff rebuilt from the ``/pulls/{n}/files`` listing.
 
 ``ForgeImpl._get_diff_from_files`` is the fallback for a PR whose diff GitHub
-refuses to serve through the diff media type. It pages the changed-file
+refuses to serve through the diff media type and whose compare diff could not
+be used (tests/test_github_compare_fallback.py). It pages the changed-file
 listing, maps each entry into the shared renderer's GitLab-shaped entry, and
 refuses to return a diff the listing may have cut short.
 """
@@ -54,11 +55,15 @@ _LISTED = object()
 _ABSENT = object()
 
 
-def _pr(changed_files):
+def _pr(changed_files, listing):
+    """The PR metadata; its ``additions``/``deletions`` are the listing's own
+    totals, as GitHub's are, so the totals check passes unless a test says so."""
     pr = {
         "title": "t", "body": "", "user": {"login": "dev"},
         "head": {"ref": "feat", "sha": "b" * 40},
         "base": {"ref": "main", "sha": "a" * 40},
+        "additions": sum(f.get("additions", 0) for f in listing),
+        "deletions": sum(f.get("deletions", 0) for f in listing),
     }
     if changed_files is not _ABSENT:
         pr["changed_files"] = changed_files
@@ -84,7 +89,7 @@ def _session(listing, changed_files=_LISTED, *, listing_status=200, pr_status=20
         if url.endswith("/pulls/42"):
             if pr_status != 200:
                 return _mock_response(pr_status, json_data={"message": "Not Found"})
-            return _mock_response(json_data=_pr(changed_files))
+            return _mock_response(json_data=_pr(changed_files, listing))
         raise AssertionError(f"unrouted GET {url}")
 
     session = MagicMock(spec=requests.Session)
@@ -100,7 +105,9 @@ def _file(name, status="modified", patch="@@ -1 +1 @@\n-old\n+new", **extra):
 
 
 def _rebuild(session, ref=None):
-    return ForgeImpl(session=session)._get_diff_from_files(ref or _ref())
+    """Read the PR metadata, then rebuild from the listing, as ``get_diff`` does."""
+    forge, ref = ForgeImpl(session=session), ref or _ref()
+    return forge._get_diff_from_files(ref, forge.get_pr(ref))
 
 
 def _gets_to(session, url):
@@ -248,7 +255,7 @@ def test_mixed_statuses_render_in_listing_order():
 
 
 @pytest.mark.parametrize("patch_form", ["absent", "none", "empty"])
-def test_a_patchless_file_is_header_only_with_one_warning(caplog, patch_form):
+def test_a_patchless_file_with_no_changed_lines_is_header_only_at_debug(caplog, patch_form):
     binary = {"filename": "assets/logo.png", "status": "modified"}
     if patch_form == "none":
         binary["patch"] = None
@@ -268,11 +275,11 @@ def test_a_patchless_file_is_header_only_with_one_warning(caplog, patch_form):
         _gitlab_entry("assets/logo.png", "assets/logo.png", diff=""),
         _gitlab_entry("src/app.py", "src/app.py", diff="@@ -1 +1 @@\n-old\n+new\n"),
     ])
-    (warning,) = _warnings(caplog)
-    assert warning.getMessage() == (
-        "GitHub PR diff: assets/logo.png has no inline diff (no patch in the "
-        "files listing); it is reviewed as header-only"
-    )
+    assert _warnings(caplog) == []
+    assert [r.getMessage() for r in caplog.records if "header-only" in r.getMessage()] == [
+        "GitHub PR diff: assets/logo.png is listed with no patch and no changed "
+        "lines; it is reviewed as header-only"
+    ]
     assert [f.path for f in parse_unified_diff(diff)] == ["assets/logo.png", "src/app.py"]
 
 
