@@ -69,7 +69,7 @@ Return exactly one JSON object, no prose, no fences:
       "severity": "error",
       "confidence": 0.9,
       "title": "Divide by zero when size is unset",
-      "body": "size defaults to None and is used as a divisor on line 42; the diff adds no guard."{scope_example}
+      "body": "size defaults to None and is used as a divisor on line 42; the diff adds no guard."{scope_example}{rule_example}
     }
   ],
   "escalations": []
