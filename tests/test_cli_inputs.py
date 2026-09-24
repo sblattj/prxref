@@ -4,9 +4,10 @@
 ``PRXREF_TICKET_CONTEXT_FILE`` ride the ``load_config`` override path (``""``
 blanks the variable for one run) and are loaded after config and before the
 forge and the LLM client exist. The replay flags are validated before the URL
-is even parsed. In this build all three fail closed: a configured path or any
-replay flag exits 2 naming the input that asked for it, so nothing configured
-is ever silently ignored.
+is even parsed. A rules file that cannot be read exits 2 naming the input that
+supplied it. In this build the ticket loader and replay fail closed: a
+configured ticket path or any replay flag exits 2 naming the input that asked
+for it, so nothing configured is ever silently ignored.
 
 The daemon never reads a ticket file and says so once at startup. ``--spec``
 is proven end to end here: through the real orchestrator and the real
@@ -43,7 +44,7 @@ from tests.test_orchestrator import REF, FakeForge, _added_file_diff
 
 CLI_URL = "https://github.com/org/repo/pull/7"
 
-RULES_WIRED = "loading a team review-rules file is not wired in this build"
+RULES_MISSING = "cannot read rules file 'team.md': No such file or directory"
 TICKET_WIRED = "loading a ticket-context file is not wired in this build"
 REPLAY_WIRED = "replay mode is not wired in this build"
 
@@ -110,8 +111,6 @@ class TestStubLoaders:
     """``rules`` and ``ticket`` fail closed in this build."""
 
     LOADERS = [
-        (load_review_rules, "--rules-file", RULES_WIRED),
-        (load_review_rules, "PRXREF_REVIEW_RULES", RULES_WIRED),
         (load_ticket_context, "--context-file", TICKET_WIRED),
         (load_ticket_context, "PRXREF_TICKET_CONTEXT_FILE", TICKET_WIRED),
     ]
@@ -131,9 +130,20 @@ class TestStubLoaders:
             loader(str(real), max_chars=100, source=source)
         assert str(exc.value) == f"{source}: {phrase}"
 
-    def test_the_front_matter_splitter_fails_closed(self):
-        with pytest.raises(ConfigError, match=r"^--rules-file: .*is not wired in this build"):
-            split_front_matter("---\n---\nbody\n", source="--rules-file", path="r.md")
+    @pytest.mark.parametrize("source", ["--rules-file", "PRXREF_REVIEW_RULES"])
+    def test_a_missing_rules_file_fails_naming_its_source(self, source, tmp_path):
+        missing = tmp_path / "absent.md"
+        with pytest.raises(ConfigError) as exc:
+            load_review_rules(str(missing), max_chars=100, source=source)
+        assert str(exc.value) == (
+            f"{source}: cannot read rules file {str(missing)!r}: No such file or directory"
+        )
+
+    def test_the_front_matter_splitter_rejects_a_malformed_map_naming_its_source(self):
+        with pytest.raises(ConfigError, match=r"^--rules-file: r\.md:3: unknown severity 'eror'"):
+            split_front_matter(
+                "---\nseverity:\n  blocker: eror\n---\nbody\n", source="--rules-file", path="r.md",
+            )
 
     def test_spec_is_the_one_severity_rules_cannot_map_onto(self):
         assert RESERVED_SEVERITIES == frozenset({"spec"})
@@ -230,7 +240,7 @@ class TestStubSurfaceRidesTheRealPipeline:
     objects run the real pipeline, are recorded, and change no prompt."""
 
     def test_loaded_objects_are_recorded_and_change_no_prompt(self, tmp_path):
-        rules = ReviewRules(path="r.md", body=cap_text("rules", 100), severity_map={})
+        rules = ReviewRules(path="r.md", body=cap_text("", 100), severity_map={})
         ticket = TicketContext(
             path="t.md", capped=cap_text("ticket", 100), text="ticket",
             has_acceptance_criteria=False,
@@ -276,7 +286,7 @@ class TestParser:
 
 class TestRulesAndContextFailClosed:
     CASES = [
-        ("--rules-file", "PRXREF_REVIEW_RULES", RULES_WIRED),
+        ("--rules-file", "PRXREF_REVIEW_RULES", RULES_MISSING),
         ("--context-file", "PRXREF_TICKET_CONTEXT_FILE", TICKET_WIRED),
     ]
 
@@ -445,7 +455,7 @@ class TestWebhookDaemon:
             cli._webhook_handler(CLI_URL)
         assert runtime.orchestrate == []
         errors = [r.exc_info[1] for r in caplog.records if r.exc_info]
-        assert [str(e) for e in errors] == [f"PRXREF_REVIEW_RULES: {RULES_WIRED}"]
+        assert [str(e) for e in errors] == [f"PRXREF_REVIEW_RULES: {RULES_MISSING}"]
 
 
 class TestServeWarnsAboutTheTicketFile:
