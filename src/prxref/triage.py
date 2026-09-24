@@ -52,6 +52,31 @@ def normalize_scope(raw: object) -> str:
     return value if value in SCOPES else SCOPE_UNKNOWN
 
 
+# Longest ``rule`` label a finding may carry, counted after whitespace is
+# collapsed. A longer value is dropped, never truncated: a clipped label could
+# merge two different rules into one group.
+RULE_MAX_CHARS: int = 120
+
+
+def normalize_rule(raw: object) -> str | None:
+    """Map a model-supplied ``rule`` value onto a short label, or ``None``.
+
+    Only a string survives. Every whitespace run, newlines included, collapses
+    to one space and the ends are stripped. ``None`` is returned for anything
+    else: a non-string (``None``, a number, a bool, a list), a value that is
+    empty after collapsing, one longer than :data:`RULE_MAX_CHARS`, or one
+    that still holds a non-printable character (a control or bidi-override
+    code point). Case is kept as given; a grouping key casefolds it itself.
+    Never raises.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = " ".join(raw.split())
+    if not value or len(value) > RULE_MAX_CHARS or not value.isprintable():
+        return None
+    return value
+
+
 @dataclass
 class Finding:
     """One review finding, the unit every downstream seat shares.
@@ -62,7 +87,10 @@ class Finding:
     silently discarded, so run records can explain every drop.
     ``scope`` is one of :data:`SCOPES`: where the finding sits relative to
     the ticket the PR implements, ``unknown`` whenever no ticket is active.
-    It is the last field, so every positional construction keeps working.
+    ``rule`` is the rule or standard the reviewer applied, as normalized by
+    :func:`normalize_rule`; ``None`` whenever the prompt did not ask for one
+    or the answer was not usable. The new fields trail the old ones, so every
+    positional construction keeps working.
     """
 
     file: str
@@ -73,6 +101,7 @@ class Finding:
     body: str
     drop_reason: str | None = None
     scope: str = SCOPE_UNKNOWN
+    rule: str | None = None
 
 
 @dataclass
