@@ -5,8 +5,8 @@
 blanks the variable for one run) and are loaded after config and before the
 forge and the LLM client exist. The replay flags are validated before the URL
 is even parsed. A rules or ticket-context file that cannot be read exits 2
-naming the input that supplied it. In this build replay fails closed: any replay
-flag exits 2 naming the flag, so nothing configured is ever silently ignored.
+naming the input that supplied it, and so does a bad set of replay flags;
+tests/test_cli_replay.py pins the rest of replay mode.
 
 The daemon never reads a ticket file and says so once at startup. ``--spec``
 is proven end to end here: through the real orchestrator and the real
@@ -45,7 +45,7 @@ CLI_URL = "https://github.com/org/repo/pull/7"
 
 RULES_MISSING = "cannot read rules file 'team.md': No such file or directory"
 TICKET_MISSING = "cannot read ticket-context file 'team.md': No such file or directory"
-REPLAY_WIRED = "replay mode is not wired in this build"
+SHORT_SHA = "--base-sha: must be a full 40- or 64-character hex commit SHA, got 'abc123'"
 
 NEW_KWARGS = (
     "rules", "ticket", "replay", "price_table", "post_cost",
@@ -275,11 +275,12 @@ class TestParser:
         assert args.rules_file == ""
         assert args.context_file == ""
 
-    def test_the_pr_url_is_still_required(self, capsys):
-        with pytest.raises(SystemExit) as exc:
-            cli._build_parser().parse_args(["review"])
-        assert exc.value.code == 2
-        assert "--pr-url" in capsys.readouterr().err
+    def test_the_pr_url_is_required_unless_a_diff_file_is_given(self, capsys):
+        assert cli._build_parser().parse_args(["review"]).pr_url is None
+        assert main(["review"]) == 2
+        assert capsys.readouterr().err == (
+            "configuration error: --pr-url: required unless --diff-file is given\n"
+        )
 
 
 class TestRulesAndContextFailClosed:
@@ -398,35 +399,46 @@ class TestLoaderWiring:
         _assert_nothing_ran(runtime)
 
 
-class TestReplayFailsClosed:
-    @pytest.mark.parametrize(("extra", "named"), [
-        (["--base-sha", "abc123"], "--base-sha"),
-        (["--head-sha", "def456"], "--head-sha"),
-        (["--no-threads"], "--no-threads"),
-        (["--diff-file", "pr.diff"], "--diff-file"),
-        (["--base-sha", ""], "--base-sha"),
-        (["--diff-file", "pr.diff", "--base-sha", "a", "--head-sha", "b"],
-         "--base-sha/--head-sha/--diff-file"),
+class TestReplayFlagsAreValidatedFirst:
+    """A bad set of replay flags exits 2 naming the flag, before the URL is
+    parsed and before the forge or the LLM client exist."""
+
+    @pytest.mark.parametrize(("extra", "message"), [
+        (["--base-sha", "abc123"],
+         "--base-sha/--head-sha: must be given together (got only --base-sha)"),
+        (["--head-sha", "def456"],
+         "--base-sha/--head-sha: must be given together (got only --head-sha)"),
+        (["--base-sha", "abc123", "--head-sha", "b" * 40],
+         f"{SHORT_SHA} (resolve it with git rev-parse)"),
+        (["--base-sha", "", "--head-sha", ""],
+         "--base-sha: must be a full 40- or 64-character hex commit SHA, got '' "
+         "(resolve it with git rev-parse)"),
+        (["--diff-file", "no-such-dir/pr.diff"],
+         "--diff-file: cannot read 'no-such-dir/pr.diff': No such file or directory"),
     ])
-    def test_any_replay_flag_exits_2_naming_it(self, runtime, capsys, extra, named):
+    def test_a_bad_replay_flag_exits_2_naming_it(self, runtime, capsys, extra, message):
         assert _review(*extra) == 2
-        assert capsys.readouterr().err == f"configuration error: {named}: {REPLAY_WIRED}\n"
+        assert capsys.readouterr().err == f"configuration error: {message}\n"
         assert runtime.detect == []
         _assert_nothing_ran(runtime)
 
     def test_it_is_checked_before_the_url_is_parsed(self, runtime, capsys):
         url = "https://example.com/not/a/pr"
         assert detect_forge(url) is None
-        assert main(["review", "--pr-url", url, "--no-threads"]) == 2
-        assert REPLAY_WIRED in capsys.readouterr().err
+        assert main([
+            "review", "--pr-url", url, "--base-sha", "abc123", "--head-sha", "b" * 40,
+        ]) == 2
+        assert SHORT_SHA in capsys.readouterr().err
+        assert runtime.detect == []
 
     def test_no_replay_flag_passes_no_replay_stamp(self, runtime):
         assert _review() == 0
         assert runtime.orchestrate[0]["replay"] is None
 
-    def test_the_resolver_is_pure_and_returns_none_without_flags(self):
+    def test_the_resolver_returns_none_without_a_replay_flag(self):
         assert cli._resolve_replay(CLI_URL) is None
-        assert cli._resolve_replay(None) is None
+        with pytest.raises(ConfigError, match=r"^--pr-url: required unless --diff-file"):
+            cli._resolve_replay(None)
 
 
 class TestWebhookDaemon:

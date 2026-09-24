@@ -7,8 +7,43 @@ just generic bugs. Every planted spec violation is detectable ONLY by reading
 the case's `docs/` corpus; from the diff alone it looks like correct code.
 
 `test_evals.py` here is a STRUCTURAL scorer only: it proves the dataset is
-well-formed and self-consistent. It runs NO LLM. A later pass will run the
-real pipeline per case and score its findings against `expected.json`.
+well-formed and self-consistent. It runs NO LLM. Each case also runs through
+the real pipeline with one replay-mode CLI call (see "Running a case" below);
+scoring the resulting findings against `expected.json` is still a manual,
+offline step.
+
+## Running a case
+
+Replay mode reviews a case's diff with no pull request and no forge:
+`--diff-file` feeds it the diff, `--context-file` the ticket and `--spec` the
+docs corpus.
+
+```bash
+uv run prxref review \
+  --diff-file tests/evals/<case>/diff.patch \
+  --context-file tests/evals/<case>/ticket.md \
+  --spec tests/evals/<case>/docs \
+  --no-post --format json
+```
+
+Such a run never posts anywhere, and its JSON record carries a `replay` stamp
+(`"threads": "hidden"`, `diff_file` as passed). It needs a configured LLM
+(`PRXREF_LLM_MODELS` and the backend's credentials, see `docs/llm.md`). Add
+`--trace-dir DIR` to keep every prompt and raw model answer.
+
+Nothing scores the findings automatically. Checking them against the case's
+`expected.json` (each `must_match` on a finding in `file` near `line_hint`)
+stays a manual, offline step. `test_eval_replay.py` runs that same one call
+per case offline, with a stub LLM that finds nothing, and proves only the
+wiring: exit 0, the replay stamp, every chunk and the sweep reviewed, and
+the case's ticket and one of its spec rules present in every prompt.
+
+**Known label question (case-002):** planted violation V2 (`S2`, the
+`VITE_SESSION_SECRET` read) keeps its `spec` severity. In the 0.14.0 live
+runs, models reviewing WITHOUT the spec corpus flagged it as `error` in 6 of
+6 runs, because a secret under a client-exposed prefix is a security hole
+without any doc. The label stays as it is by owner decision, so a scorer that
+compares severities will count those runs as a severity mismatch on `S2`.
 
 ## Case layout
 
