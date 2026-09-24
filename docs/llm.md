@@ -109,6 +109,74 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
   title), never by the order the workers happened to return in. The same
   findings in any arrival order therefore produce the same review.
 
+## Cost accounting
+
+Every run record carries `cost_usd` (USD) and `cost_estimated` (bool), on every exit, and `--format json` prints both. A run's cost is in exactly one of three states:
+
+- **Reported.** The backend returned a dollar figure for each call. A reported figure always wins, even over a price-table entry for the same model.
+- **Estimated.** No figure came back, but `PRXREF_PRICE_TABLE` prices the model. `cost_estimated` is `true`.
+- **Unknown.** Neither. `cost_usd` is `null`: never `0`, and never a partial sum of the calls that were priced.
+
+### Where a reported figure comes from
+
+| Backend | Source | `cost_source` |
+|---|---|---|
+| `openai-compat` (`ferry`, `http`) | The response body's `usage.cost` (OpenRouter returns it on every completion without being asked), else the `x-litellm-response-cost` response header that a LiteLLM gateway or `llm-ferry` sets. The body value must be a JSON number. LiteLLM omits the header when it cannot price the call **and** when the cost is zero, so a free model behind a gateway reports nothing. | `usage.cost` / `x-litellm-response-cost` |
+| `litellm` | `response_cost`, which litellm computes from its own price map. prxref never calls `litellm.completion_cost()`. | `litellm` |
+| `claude-cli` | The CLI's `total_cost_usd`. On a subscription this is the **API-equivalent cost at list price, not your subscription bill**. | `claude-cli` |
+| `kiro-cli` | None. Kiro reports credits, not dollars, and no token counts, so a price-table entry cannot estimate it either: a run on `kiro-cli` always reads "cost unknown". | — |
+
+prxref sends nothing extra to get a figure: the request never carries `usage: {"include": true}`. A figure that is not a finite number `>= 0` (a negative, `NaN`, a string in the body, an empty or `None` header) counts as no figure.
+
+### The price table
+
+`PRXREF_PRICE_TABLE` is inline JSON (the first non-space character is `{`) or a path to a JSON file. It maps a model name to USD per **million** tokens:
+
+```bash
+PRXREF_PRICE_TABLE='{"openai/gpt-4o-mini": {"input": 0.15, "output": 0.60}}'
+PRXREF_PRICE_TABLE=./prxref-prices.json
+```
+
+- The lookup is on the **exact** model name the call reported, which is the name shown as `model=` in the attribution. It can differ from the name in `PRXREF_LLM_MODELS`, because the endpoint's answer names the model. There is no prefix or pattern matching.
+- The table is only consulted for a call with no reported figure, and only when that call counted input tokens. Zero input tokens means the backend reported no usage, and an estimate would be a fake `$0`.
+- Give a free or local model a zero entry (`{"input": 0, "output": 0}`). Without one, a run on it reads "cost unknown", never `$0`.
+- An estimate prices every input token at the list rate, so it ignores prompt-cache discounts that a provider's own figure reflects. That is one more reason a reported figure always wins.
+- The schema is strict. Invalid JSON, an unreadable file, a missing or unknown field (`"ouput"`), a duplicate model, or a price that is not a finite number `>= 0` raises `ConfigError` naming `PRXREF_PRICE_TABLE`, and `prxref review` exits `2`.
+
+When a run ends up unknown because some model had neither a reported figure nor a usable table entry, prxref logs one INFO line naming the model(s), in the exact spelling to key the table on:
+
+```
+cost unknown: no reported cost and no usable PRXREF_PRICE_TABLE estimate for model(s) 'openai/gpt-4o-mini'
+```
+
+### Which calls count
+
+A review is its chunk workers plus the systemic sweep, and the total covers the same calls as the run's token counts:
+
+- A call whose response **arrived** is counted, including one that was then truncated or failed to parse. It was billed.
+- A call that raised (a timeout, a connection error, an HTTP error) returned nothing and adds nothing. A provider that bills abandoned generations may charge more than `cost_usd` says.
+- A run that sent requests and got no response back at all is unknown (`null`).
+- A run that made no LLM request (an empty diff, or a forge or diff error before the review) costs a known `0.0`.
+- Inside one `openai-compat` call, truncated completions that the fallback chain moved past were billed too, so they are added to that call's figure. Its token counts still cover only the answering model. If any of those completions came back without a figure, the call's figure is unknown.
+- The timeout retry (the one re-run with `context_lines=0`) replaces the first attempt's result, cost included, exactly as it replaces its tokens.
+- If the total cannot be computed at all, for example because a library caller passed a malformed table object, the run logs a WARNING and its cost is unknown. Cost accounting never fails a review.
+
+### Where the cost shows
+
+- The run record and `--format json`: `cost_usd` and `cost_estimated`.
+- `prxref review -v`: `cost: $0.0007`, `~$0.0007 (est.)` or `cost unknown` after the token count.
+- The JSONL trace (`PRXREF_TRACE_FILE`): the `run ok` and `run fail` events carry `cost_usd` and `cost_estimated`. Each `chunk ok` and `sweep ok` event carries that unit's reported `cost_usd`; estimates are computed for the run only, so a unit priced from the table shows `null` there.
+- The per-unit trace files (`PRXREF_TRACE_DIR`): each `<unit>.meta.json` carries `cost_usd` and `cost_source`.
+- The posted comment, only with `PRXREF_POST_COST=1`. The cost is appended as the **last** field of the summary's attribution line and of the error notice's:
+
+  ```
+  Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · $0.0007
+  Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · ~$0.0007 (est.)
+  Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · cost unknown
+  ```
+
+  A notice posted before any LLM request says `$0.00`, and a cost below $0.0001 reads `<$0.0001`, never `$0.00`. Inline comments never carry a cost. With the flag off, which is the default, the attribution line is byte-identical to a build without cost accounting.
+
 ## Worker Prompt Context
 
 Each worker sees one chunk's unified diff, trimmed to `PRXREF_CHUNK_CONTEXT_LINES` lines around every change. Two optional blocks are appended after the diff to answer the questions the diff alone cannot.
