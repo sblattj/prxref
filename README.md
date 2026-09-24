@@ -304,7 +304,36 @@ The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook se
 
 ## Replay Mode (Evaluation)
 
-<!-- 0.14 placeholder: W65C -->
+A replay reviews a pinned, reproducible input instead of a PR as it stands, so one change can be reviewed again later, by another model or another prxref build, and compared. Three invocations cover it:
+
+```bash
+# A blind replay of a PR at two pinned commits, without its existing discussion
+prxref review --pr-url https://github.com/acme/widgets/pull/42 \
+  --base-sha 0123456789abcdef0123456789abcdef01234567 \
+  --head-sha 89abcdef0123456789abcdef0123456789abcdef \
+  --no-threads --format json
+
+# A diff on disk with its ticket and spec corpus; no PR and no forge at all
+prxref review --diff-file change.diff --context-file TICKET.md --spec docs/specs --format json
+
+# One eval case (see tests/evals/README.md)
+prxref review --diff-file tests/evals/<case>/diff.patch --context-file tests/evals/<case>/ticket.md \
+  --spec tests/evals/<case>/docs --no-post --format json
+```
+
+- **A replay never posts.** Any replay flag turns posting off for the run, with or without `--no-post`; when nothing else had already turned it off, the run logs `replay run: posting to the forge is disabled`. The replay forges also refuse every write, and a replay never prunes older comments.
+- **Pinned SHAs:** `--base-sha` and `--head-sha` come as a pair, must be full 40- or 64-character hex commit SHAs (resolve a short one with `git rev-parse`), are lowercased, must name two different commits, and need `--pr-url`. The review reads the merge-base diff `BASE...HEAD` and file context at `HEAD`; the endpoint each forge uses is under "Pinned Commit Range (Replay)" in [docs/forges.md](docs/forges.md).
+- **`--diff-file PATH`** reviews that file (`git diff` or `git format-patch` output) instead of fetching a diff. Without `--pr-url` nothing is contacted: there are no threads and no file context, and a `git format-patch` file supplies the title, description and author. With `--pr-url` the file replaces the PR's diff, and without `--head-sha` a warning says that file context is still read at the PR's current head.
+- **What a pinned replay does not pin.** The PR's *current* title and description still reach the prompt, and so do its current threads unless you add `--no-threads`; a replay at pinned SHAs without `--no-threads` logs a warning saying so.
+- **The record.** A replay's JSON record gains a `replay` stamp, always with all four keys, and the text summary prints it as a `replay:` line. A normal run's record has no `replay` key.
+
+  ```json
+  "replay": {"base_sha": null, "head_sha": null, "threads": "hidden", "diff_file": "change.diff"}
+  ```
+
+  `threads` is `"hidden"` under `--no-threads` or with no `--pr-url`, else `"shown"`; `diff_file` is the path as you typed it.
+- **Exit codes.** A bad set of replay flags exits `2` naming the flag, and it is checked before the PR URL is parsed. A review error inside a replay still exits `0`: an empty pinned range (a head already merged into the base) or a blank diff file ends the run as an `Error` run. See [Exit Codes](#exit-codes).
+- The replay flags have no environment variable, on purpose, and the [webhook server](#webhook-server) never replays.
 
 ## Exit Codes
 
@@ -320,5 +349,7 @@ The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook se
 $ prxref review --pr-url https://github.com/org/repo/pull/1 --max-chunks 0
 configuration error: --max-chunks: must be a finite number greater than 0, got 0
 ```
+
+[Replay mode](#replay-mode-evaluation) keeps the same split. A bad set of replay flags exits `2` naming the flag: neither `--pr-url` nor `--diff-file`, a lone `--base-sha` or `--head-sha`, a SHA that is not full 40- or 64-character hex, two equal SHAs, SHAs without `--pr-url`, or an unreadable `--diff-file`. These are checked before the PR URL is parsed, so they exit `2` even next to an unrecognized URL; pinned SHAs on a forge that cannot fetch a commit range also exit `2`, once the forge is known. An empty pinned range or a blank diff file is a review error: the run ends as an `Error` run and exits `0`.
 
 `PRXREF_FAIL_ON` is the one opt-out of the advisory contract, and its default `never` is the doctrine above, unchanged. Setting it to `error` or `any` turns the reviewer into a merge gate — failing a build on a finding turns a probabilistic reviewer into a gate, and the first false positive teaches a team to bypass the gate, so think hard before you set it. Read the verdict from the posted summary, which also carries a partial-review banner when some chunks did not make it. Do not build a security control on the exit code. The webhook daemon has no exit code and is unaffected.
