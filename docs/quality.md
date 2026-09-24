@@ -25,7 +25,9 @@ is validated, aligned, deduplicated and gated exactly like a model finding.
 It is spliced in at the chunk/sweep boundary — before the systemic sweep's
 own findings, never after — so `apply_sweep_dedup` always treats it as a
 CHUNK-side finding and can never drop it as a duplicate of a chunk worker's
-own restatement of the same file and title. It also runs on a diff that
+own restatement of the same file and title. Being file-level (line 0), it is
+also out of reach of the reworded-duplicate tier (`PRXREF_DEDUP_SIMILARITY`),
+which never compares line 0. It also runs on a diff that
 yields zero chunks (every file binary, or an empty diff): the heuristic
 needs no chunk to fire on, so it is computed and gated on that path too,
 not only when at least one chunk survives `build_chunks`.
@@ -46,7 +48,7 @@ it (noted in the table).
 | 7 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
 | 8 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
 | 9 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap. Returns its findings in content order. |
-| 10 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate. |
+| 10 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line (never line 0) whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. |
 | 11 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
 
 Threads are fetched once per review, **before** the workers run and **after**
@@ -137,8 +139,9 @@ gains a `drop_reason` for its scope.
   synonym table, because a lenient mapping would turn a malformed answer into
   a confident one.
 - **Sweep dedup ignores it.** `apply_sweep_dedup` matches on file and
-  normalized title, so a sweep finding that restates a surviving chunk finding
-  is still dropped when the two copies disagree on scope. The identity used to
+  normalized title, and its reworded tier (`PRXREF_DEDUP_SIMILARITY`) on file,
+  line and title similarity, so a restatement is still dropped when the two
+  copies disagree on scope, and the kept copy keeps its own. The identity used to
   re-derive the chunk/sweep boundary across the gate includes `scope`, so
   neither copy's scope ends up on the other.
 - **It orders the inline batch within a severity.** When
@@ -177,7 +180,11 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 | `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `spec`, `outofscope`}. |
 | `confidence <x> below floor <y>` | `apply_quality_gate` | Below `PRXREF_CONFIDENCE_FLOOR`. |
 | `error cap exceeded (max <n>)` | `apply_quality_gate` | Beyond `PRXREF_MAX_ERROR_FINDINGS`. Ties break on finding content, not arrival order, so the cap is reproducible. |
+| `warning cap exceeded (max <n>)` | `apply_quality_gate` | Beyond `PRXREF_MAX_WARNING_FINDINGS`, ranked like the error cap. Unset caps nothing; `0` drops every warning. |
+| `outofscope cap exceeded (max <n>)` | `apply_quality_gate` | Beyond `PRXREF_MAX_OUTOFSCOPE_FINDINGS`, ranked like the error cap. This caps the minor **severity** `outofscope`; it is **not** ticket scope `out`, so a finding the ticket marks `out` counts against its own severity's cap, not this one. Unset caps nothing. `spec` findings are never capped. |
 | `duplicate of chunk finding` | `apply_sweep_dedup` | A whole-diff sweep finding restates a chunk finding that already survived the gate. |
+| `duplicate of chunk finding (reworded, similarity <s>)` | `apply_sweep_dedup` | Only with `PRXREF_DEDUP_SIMILARITY` set. A reworded restatement of a kept chunk finding in the same file and on the same line: a sweep copy no more severe than the chunk copy, or the less severe, then less confident, of two chunk copies. `<s>` is the Jaccard title score to two decimals. |
+| `duplicate of sweep finding (reworded, similarity <s>)` | `apply_sweep_dedup` | Only with `PRXREF_DEDUP_SIMILARITY` set. The same between two sweep findings. A chunk finding never carries it: a chunk copy is never dropped for a sweep copy. |
 
 One more marker is **not** a drop reason. `apply_containment_note` appends
 `" [containment boundary not stated]"` to the body of a finding that asserts a
@@ -189,8 +196,13 @@ text.
 
 ## What is and is not tunable
 
-- `PRXREF_CONFIDENCE_FLOOR` and `PRXREF_MAX_ERROR_FINDINGS` are the only knobs
-  here, and they only move `apply_quality_gate`. See
+- `PRXREF_CONFIDENCE_FLOOR` and `PRXREF_MAX_ERROR_FINDINGS` move
+  `apply_quality_gate`. The four opt-in levers added in 0.15.0 are all off by
+  default: `PRXREF_MAX_WARNING_FINDINGS` and `PRXREF_MAX_OUTOFSCOPE_FINDINGS`
+  add per-severity caps to the same pass, `PRXREF_GROUP_FINDINGS` folds chunk
+  findings that break the same rule in one file into one comment, and
+  `PRXREF_DEDUP_SIMILARITY` turns on the reworded tier of `apply_sweep_dedup`.
+  These six are the only knobs here. See
   [Tuning for Your Team](env-vars.md#tuning-for-your-team).
 - The hedge gate, the manifest checks, and the removal-claim check have **no
   knob**. They are correctness checks against the diff itself, not noise

@@ -48,8 +48,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    folded in BEFORE the passes so it is filtered like any other finding,
    and spliced in at the chunk/sweep boundary — before the sweep's own
    findings, never after — so it is always a CHUNK-side finding to
-   ``apply_sweep_dedup`` and can never be dropped as a duplicate of a
-   chunk worker's own restatement:
+   ``apply_sweep_dedup``, whose exact tier drops only sweep findings, and
+   being file-level (line 0) it is never compared by that pass's reworded
+   tier either. It can never be dropped as a duplicate of a chunk worker's
+   own restatement:
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
@@ -81,7 +83,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    restates a chunk finding that SURVIVED the gate, on file + normalized
    title; running it after the gate is what keeps a sub-floor chunk
    finding from suppressing its higher-confidence sweep duplicate and
-   then dying at the gate itself) → ``apply_containment_note`` (a throw
+   then dying at the gate itself. With ``dedup_similarity`` set, a
+   reworded tier also compares findings in the same file on the same
+   line: a sweep copy no more severe than a chunk copy is dropped, and of
+   two copies on one side the less severe, then less confident, one is;
+   a chunk copy is never dropped for a sweep copy, and line 0 is never
+   compared) → ``apply_containment_note`` (a throw
    / panic / crash / unhandled-rejection finding that never names its
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
@@ -363,6 +370,7 @@ def orchestrate_review(
     max_inline_comments: int = MAX_INLINE_COMMENTS,
     confidence_floor: float | None = None,
     max_errors: int | None = None,
+    dedup_similarity: float | None = None,
     post_mode: str = "summary+inline",
     post_verdict: bool = True,
     trace_file: str | None = None,
@@ -417,6 +425,11 @@ def orchestrate_review(
     batch. ``confidence_floor`` and ``max_errors`` are forwarded to
     ``apply_quality_gate``; ``None`` leaves that pass reading the environment
     itself, which is what a library caller with no config dict wants.
+    ``dedup_similarity`` is forwarded to ``apply_sweep_dedup`` as its
+    ``similarity``. ``None`` (the default) runs its exact-title tier alone
+    and reads no environment variable, so the run is byte-identical to one
+    without it; a threshold also drops a reworded restatement in the same
+    file and on the same line (:func:`quality.titles_similar`).
 
     ``post_mode`` selects what is written to the forge: ``"summary+inline"``
     (default) keeps today's behaviour — the summary first, then the inline
@@ -832,12 +845,15 @@ def orchestrate_review(
     # #10): file-level (line=0) survives apply_line_align untouched, and
     # warning/1.0 clears apply_quality_gate trivially. Folded in AT the
     # chunk/sweep boundary — before the sweep's own findings, not after —
-    # and sweep_start moves with it: apply_sweep_dedup only ever drops a
-    # SWEEP-side finding, so appending this after the sweep's findings would
-    # put it on the sweep side of that boundary, where a chunk worker's own
-    # finding sharing its file and normalized title could drop the
-    # deterministic finding as "duplicate of chunk finding" and keep the
-    # model's restatement instead.
+    # and sweep_start moves with it: apply_sweep_dedup never drops a
+    # CHUNK-side finding for a sweep-side one (its exact tier drops only
+    # sweep findings; its reworded tier, on with dedup_similarity, can drop
+    # one chunk copy for another on the same line, but never compares line
+    # 0, which this finding always sits on). Appending this after the
+    # sweep's findings would put it on the sweep side of that boundary,
+    # where a chunk worker's own finding sharing its file and normalized
+    # title could drop the deterministic finding as "duplicate of chunk
+    # finding" and keep the model's restatement instead.
     release_shape = heuristics.release_shape_findings(files)
     findings = findings[:sweep_start] + release_shape + findings[sweep_start:]
     sweep_start += len(release_shape)
@@ -927,7 +943,8 @@ def orchestrate_review(
     # its higher-confidence sweep duplicate and then die at the gate itself —
     # that would lose the recall the sweep exists to add.
     findings = apply_sweep_dedup(
-        chunk_part + sweep_part, sweep_start=len(chunk_part)
+        chunk_part + sweep_part, sweep_start=len(chunk_part),
+        similarity=dedup_similarity,
     )
     # Last, deliberately: it only decorates body text (never drop_reason or
     # severity), so it must run after every pass that keys off title/body
