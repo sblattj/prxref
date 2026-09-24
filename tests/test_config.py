@@ -1857,6 +1857,32 @@ class TestKeys015AreDocumented:
     def test_each_surface_has_one_entry_that_names_the_release(self, key, env, surface):
         assert "0.15.0" in _doc_entry(surface, env)
 
+
+_KEYS_0_16 = [
+    ("repo_context", "PRXREF_REPO_CONTEXT"),
+    ("repo_context_max_chars", "PRXREF_REPO_CONTEXT_MAX_CHARS"),
+    ("context_contract_globs", "PRXREF_CONTEXT_CONTRACT_GLOBS"),
+    ("context_exclude_globs", "PRXREF_CONTEXT_EXCLUDE_GLOBS"),
+]
+
+
+class TestKeys016AreDocumented:
+    """The four-surface rule, tightened for the 0.16 keys.
+
+    ``test_docs_consistency`` checks a SUBSTRING, so ``PRXREF_REPO_CONTEXT``
+    would pass on the strength of ``PRXREF_REPO_CONTEXT_MAX_CHARS`` alone.
+    """
+
+    @pytest.mark.parametrize("key,env", _KEYS_0_16)
+    def test_the_env_name_is_derived_for_the_suite_wide_clear(self, key, env):
+        assert config._ENV_PREFIX + key.upper() == env
+        assert env in prxref_env_names()
+
+    @pytest.mark.parametrize("surface", sorted(SURFACES))
+    @pytest.mark.parametrize("key,env", _KEYS_0_16)
+    def test_each_surface_has_one_entry_that_names_the_release(self, key, env, surface):
+        assert "0.16.0" in _doc_entry(surface, env)
+
     @pytest.mark.parametrize("surface", sorted(SURFACES))
     def test_the_outofscope_cap_says_it_is_not_ticket_scope_out(self, surface):
         entry = _doc_entry(surface, "PRXREF_MAX_OUTOFSCOPE_FINDINGS")

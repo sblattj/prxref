@@ -248,6 +248,45 @@ LLM / pipeline:
                                 Characters of ticket text kept in the
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
+  PRXREF_REPO_CONTEXT           Repository context (0.16.0): "off" (default) |
+                                "diff" | "repo". "off" leaves every prompt,
+                                post, trace and default-verbosity log
+                                byte-identical to 0.15.0. "diff" adds
+                                cross-chunk definitions from other files
+                                already in the diff, plus diff-file entries,
+                                all read from the diff itself; no repository
+                                reader is needed. "repo" also reads files
+                                outside the diff — import, path-convention and
+                                name-search definitions, plus contract excerpts
+                                — through the forge's repository reader when
+                                one is available, or --repo-dir. Matching is
+                                exact and case-sensitive, like PRXREF_FAIL_ON;
+                                any other value is a configuration error
+  PRXREF_REPO_CONTEXT_MAX_CHARS Repository context (0.16.0): per-chunk
+                                character budget shared by the cross-chunk,
+                                contract and other repository-context entries;
+                                positive int (default 12000)
+  PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
+                                like PRXREF_SIZE_IGNORE_GLOBS) selecting the
+                                contract files — OpenAPI, JSON Schema,
+                                Liquibase/SQL migrations — excerpted under
+                                "repo". A set value REPLACES the built-in set
+                                below rather than adding to it, and an empty
+                                value reads as unset (the built-in set stays);
+                                there is no way to turn contract excerpts off
+                                on their own in 0.16.0 short of setting
+                                PRXREF_REPO_CONTEXT to "off" or "diff".
+                                Built-in set: **/openapi*.y*ml,
+                                **/openapi*.json, **/openapi/**, **/swagger*,
+                                **/*.schema.json, **/db/changelog/**,
+                                **/db/migration/**, **/migrations/**
+  PRXREF_CONTEXT_EXCLUDE_GLOBS  Repository context (0.16.0): globs (matched
+                                like PRXREF_SIZE_IGNORE_GLOBS) whose paths are
+                                never read for repository context, not even a
+                                diff file. ADDED to a floor that is always on:
+                                **/expected.json, **/cases.json, **/case.json,
+                                **/prxref-eval/**, **/.env*, **/*.pem,
+                                **/*.key. Empty (the default) adds nothing
 
 Spec sources / Jira:
   PRXREF_JIRA_BASE_URL          Jira base URL (scheme://host plus any
@@ -298,8 +337,9 @@ Webhooks:
                                   webhooks (default off; insecure)
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
-PRXREF_SIZE_IGNORE_GLOBS and PRXREF_SCOPED_RULES) split on any run of commas
-and/or whitespace, so no item can contain either; a glob that must match a
+PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS
+and PRXREF_CONTEXT_EXCLUDE_GLOBS) split on any run of commas and/or
+whitespace, so no item can contain either; a glob that must match a
 literal space writes it as ``?``.
 
 Precedence: built-in defaults < environment < ``overrides`` kwargs.
@@ -396,6 +436,26 @@ _DEFAULTS: dict[str, object] = {
     "prompts_dir": None,
     "ticket_context_file": "",
     "ticket_context_max_chars": 6000,
+    "repo_context": "off",
+    "repo_context_max_chars": 12000,
+    # The OQ5 built-in contract-glob set (map-17, decisions.md). Unlike the
+    # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
+    # it rather than adding to it, and an empty value reads as unset (the
+    # normal "empty or whitespace-only reads as unset" rule), so this set
+    # stays in place. A ``set`` literal would work too -- the _LIST_KEYS
+    # coercion branch always returns a ``list`` -- but the default is typed
+    # as a ``list`` from the start so both paths give callers the same type.
+    "context_contract_globs": [
+        "**/openapi*.y*ml",
+        "**/openapi*.json",
+        "**/openapi/**",
+        "**/swagger*",
+        "**/*.schema.json",
+        "**/db/changelog/**",
+        "**/db/migration/**",
+        "**/migrations/**",
+    ],
+    "context_exclude_globs": [],
     "jira_base_url": "",
     "jira_email": "",
     "jira_api_token": "",
@@ -424,7 +484,7 @@ _INT_KEYS = frozenset({
     "llm_cli_concurrency", "review_rules_max_chars",
     "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
-    "max_findings_per_rule",
+    "max_findings_per_rule", "repo_context_max_chars",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
 _BOOL_KEYS = frozenset({
@@ -432,6 +492,7 @@ _BOOL_KEYS = frozenset({
 })
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
+    "context_contract_globs", "context_exclude_globs",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -441,6 +502,7 @@ _LIST_KEYS = frozenset({
 # PRXREF_FAIL_ON=eror into an undetected "never".
 _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
+    "repo_context": frozenset({"off", "diff", "repo"}),
 }
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
@@ -522,6 +584,7 @@ _RANGES: dict[str, _Range] = {
     "max_outofscope_findings": _Range(0, low_inclusive=True),
     "max_findings_per_rule": _Range(0, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
+    "repo_context_max_chars": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
