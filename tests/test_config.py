@@ -1477,6 +1477,7 @@ _KEYS_0_15 = [
     ("group_findings", "PRXREF_GROUP_FINDINGS"),
     ("max_warning_findings", "PRXREF_MAX_WARNING_FINDINGS"),
     ("max_outofscope_findings", "PRXREF_MAX_OUTOFSCOPE_FINDINGS"),
+    ("max_findings_per_rule", "PRXREF_MAX_FINDINGS_PER_RULE"),
 ]
 
 
@@ -1785,6 +1786,7 @@ class TestKeys015ReachTheEntryPoint:
         ("PRXREF_SCOPED_RULES_MAX_CHARS", "0"),
         ("PRXREF_MAX_WARNING_FINDINGS", "-1"),
         ("PRXREF_MAX_OUTOFSCOPE_FINDINGS", "few"),
+        ("PRXREF_MAX_FINDINGS_PER_RULE", "-1"),
     ])
     def test_a_bad_value_exits_2_before_the_review_runs(
         self, monkeypatch, capsys, env, raw
@@ -1813,6 +1815,7 @@ class TestKeys015ReachTheEntryPoint:
         monkeypatch.setenv("PRXREF_MAX_WARNING_FINDINGS", "0")
         monkeypatch.setenv("PRXREF_MAX_OUTOFSCOPE_FINDINGS", "3")
         monkeypatch.setenv("PRXREF_GROUP_FINDINGS", "1")
+        monkeypatch.setenv("PRXREF_MAX_FINDINGS_PER_RULE", "0")
 
         cli.main(["review", "--pr-url", "https://github.com/org/repo/pull/7"])
 
