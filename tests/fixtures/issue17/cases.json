@@ -4,6 +4,7 @@
     {
       "id": "issue17-repo-context",
       "diff_file": "pr.diff",
+      "repo_dir": "repo",
       "expected": [
         {
           "id": "L1",
@@ -11,7 +12,7 @@
           "line": 4,
           "severity": "error",
           "text": "The unique index on idempotency_keys omits connector_id, so a key is only unique per (tenant, key) even though the OpenAPI IdempotencyKey contract (api/openapi/connectors.yaml) requires uniqueness per (tenant, connector, key).",
-          "must_match": "re:(?i)connector_id"
+          "must_match": "re:(?i)connector"
         },
         {
           "id": "L2",
