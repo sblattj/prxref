@@ -324,10 +324,24 @@ updated this file.
   `PRXREF_GITHUB_TOKEN`. On Bitbucket Cloud, 4 of 4 cutoffs matched a hand
   derivation, a 25-PR scan found live `changes.title` renames, a PR renamed
   twice pinned at 6 of 6 cutoffs, and a two-page feed at 10 of 10. USD 0.0034.
+- **This release's own pull request, sblattj/prxref#19.** GitHub refused its
+  unified diff with HTTP 406 (105 files, 33,096 changed lines), and a
+  `--no-post` review read the compare diff instead and reviewed all 105 files
+  in 8 chunks and the sweep. Every chunk prompt carried the full-file context
+  blocks (dependency versions, referenced definitions) that the GitHub
+  file-content fix restores. The example-echo pass dropped 1 sweep finding.
+  One chunk failed: gpt-4o-mini returned an empty reply with `finish=stop`
+  after 518 billed output tokens, and the review went on with
+  `chunks_failed: 1`. Verdict `Approved`, 38 s, USD 0.080.
 
 ## Still open — not part of this release
 
 - **#17 Repository context outside the diff.** Mapped and planned for 0.16.0.
+- **An empty model reply is not retried.** A reply with no text and
+  `finish=stop` fails its unit at parse time (`parser.py`, `no parseable
+  content`) and is not re-asked, though the provider billed it. The review of
+  this release's own pull request lost 1 of 8 chunks this way. 0.14.0 behaves
+  the same.
 
 The known limitations, in full in the CHANGELOG:
 
