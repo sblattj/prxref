@@ -179,7 +179,7 @@ def fill_template(template: str, values: Mapping[str, str]) -> str:
 
 @dataclass(frozen=True)
 class PromptContext:
-    """Run-wide inputs injected into every review unit's prompt, in one fixed order.
+    """Inputs injected into every review unit's prompt, in one fixed order.
 
     SYSTEM half, appended to the template head in this order:
     ``rules_worker`` for chunk units or ``rules_sweep`` for the sweep (the
@@ -189,6 +189,14 @@ class PromptContext:
     when finding grouping is on). USER half, after the Review Context
     lines: ``ticket_context`` (the fenced ticket text), then ``spec_digest``
     (the Spec constraints block), then the diff or digest.
+
+    Every field is run-wide except ``rules_worker`` when path-scoped rules
+    are set (``PRXREF_SCOPED_RULES``): the orchestrator then gives each chunk
+    its own copy of the context, made with :func:`dataclasses.replace`, whose
+    ``rules_worker`` is that chunk's block (the always-on rules plus the
+    scoped files its paths select), and ``rules_sweep`` holds the sweep's
+    block, whose scoped files are the union of the chunks'. Without scoped
+    rules both hold the always-on file's block for every unit.
 
     TEMPLATES: ``worker_template`` replaces ``prompts/worker.md`` for chunk
     units and ``systemic_template`` replaces ``prompts/systemic.md`` for the
