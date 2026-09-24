@@ -108,6 +108,12 @@ handoff is in git history.
     `application/vnd.github.raw+json`, for a JSON envelope and dropped every
     file it read, so GitHub reviews got no full-file context. Earlier releases
     are affected too. `_is_json_envelope` now decides by the media type.
+  - `orchestrator._split_at_sweep` re-derives the chunk/sweep boundary across
+    the quality gate by counting the chunk side. The old walk counted the sweep
+    side, and because the gate's stable sort puts a chunk copy ahead of its
+    identical sweep twin, it swapped every twin pair: a sweep finding repeating
+    a grouped or rule-capped chunk finding was posted twice.
+    `tests/test_sweep_boundary_drops.py` pins the gate's tie order it relies on.
 - **Config went from 55 to 63 keys.** The eight new keys are:
   - `PRXREF_DEDUP_SIMILARITY` (#10)
   - `PRXREF_PROMPTS_DIR` (#11)
@@ -223,9 +229,9 @@ How 0.15.0 was built:
      test file.
    - 45 tasks merged in eight waves before the release documents were written:
      the foundation, 5 forge, 9 quality, 11 prompts, 12 eval and 6 replay
-     tasks, and the example-echo fix. #18 joined the release after that, as 3
-     more tasks in two waves: the pass and its config surfaces in parallel,
-     then the wiring.
+     tasks, and the example-echo fix. #18 joined the release after that, as 4
+     more tasks in three waves: the pass and its config surfaces in parallel,
+     then the wiring, then the sweep-boundary fix its wiring turned up.
 4. **One integration gate per merge.** Each branch merged into `release/X.Y.Z`
    on its own. A merge stayed only if the full `uv run pytest` and
    `uv run ruff check src tests` passed on the merged tree.
@@ -261,7 +267,7 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-6776 passed                                   uv run pytest -q
+6797 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.15.0                                        uv run prxref --version
 ```
