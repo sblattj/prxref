@@ -799,6 +799,7 @@ def orchestrate_review(
             forge, ref, post, len(chunks) + 1, reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
             post_mode=post_mode, sampling=sampling, cost_label=cost_label,
+            chunks_reviewed=sum(1 for r in results if not r["error"]),
         ), run_inputs)
 
     chunks_failed = sum(1 for r in results if r["error"])
@@ -2112,6 +2113,7 @@ def _error_run(
     sampling: dict | None = None,
     *,
     cost_label: str = "",
+    chunks_reviewed: int = 0,
 ) -> dict:
     """The error exit: post the failure notice when asked, return an Error run.
 
@@ -2119,6 +2121,12 @@ def _error_run(
     (:func:`_attribution`); ``""`` leaves it as before. The notice never
     carries a ticket note or a size advisory, and the run-record keys are
     added by the caller's :func:`_run_record`, not here.
+
+    ``chunks_reviewed`` is how many of the ``chunk_count`` review units
+    succeeded; the rest are reported as failed. The default ``0`` fits every
+    exit taken before a review unit ran. The total-failure exit passes the
+    units that did succeed, so a sweep that answered over a dead worker pool
+    is counted as reviewed while the verdict stays ``Error``.
     """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -2153,8 +2161,8 @@ def _error_run(
         "findings_active": [],
         "findings_dropped": [],
         "chunk_count": chunk_count,
-        "chunks_reviewed": 0,
-        "chunks_failed": chunk_count,
+        "chunks_reviewed": chunks_reviewed,
+        "chunks_failed": chunk_count - chunks_reviewed,
         "elapsed_ms": elapsed_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
