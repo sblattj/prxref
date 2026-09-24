@@ -15,11 +15,13 @@ reads ``prompt_block("worker")`` / ``prompt_block("sweep")``, ``record()``
 
 The front matter is optional and only its ``severity:`` key is read: a block
 of indented ``<team word>: <tier>`` lines, where the tier is one of
-:data:`MAPPABLE_SEVERITIES`. Every other key is ignored and reported at INFO,
-so a Claude-style skill file (``name:``, ``description: |``) can be pointed
-at unmodified. ``spec`` is never a legal target: it means "violates a quoted
-spec constraint", and a team word mapped onto it would mint spec findings on
-runs with no spec at all.
+:data:`MAPPABLE_SEVERITIES`. An ``applies_to:`` key (alias ``applyTo``)
+scopes a scoped rules file to paths (:func:`parse_applies_to`); the always-on
+file does not read it and says so in a WARNING. Every other key is ignored
+and reported at INFO, so a Claude-style skill file (``name:``,
+``description: |``) can be pointed at unmodified. ``spec`` is never a legal
+target: it means "violates a quoted spec constraint", and a team word mapped
+onto it would mint spec findings on runs with no spec at all.
 
 The rules steer the model, and whoever controls the file controls that
 steering, so the path must never come from the pull request under review.
@@ -35,6 +37,7 @@ from __future__ import annotations
 import codecs
 import errno
 import hashlib
+import json
 import logging
 import os
 import re
@@ -91,13 +94,18 @@ class ReviewRules:
     fingerprinted by the raw file bytes (front matter included);
     ``severity_map`` maps a casefolded team word to one of
     :data:`MAPPABLE_SEVERITIES`, in file order; ``ignored_keys`` names the
-    other front-matter keys, which are not used.
+    other front-matter keys, which are not used. ``applies_to`` holds the
+    file's path globs in file order, as :func:`parse_applies_to` returns
+    them, or ``None`` when the file applies to every unit;
+    :func:`load_review_rules` always leaves it ``None``, and neither
+    :meth:`prompt_block` nor :meth:`record` reads it.
     """
 
     path: str
     body: CappedText
     severity_map: Mapping[str, str]
     ignored_keys: tuple[str, ...] = ()
+    applies_to: tuple[str, ...] | None = None
 
     def prompt_block(self, unit: str) -> str:
         """The system-prompt block for one review unit (``"worker"`` or ``"sweep"``).
@@ -242,6 +250,191 @@ def split_front_matter(
     return severity_map, tuple(ignored), "\n".join(lines[close + 1:])
 
 
+APPLIES_TO_KEYS: frozenset[str] = frozenset({"applies_to", "applyto"})
+
+_ITEM_RE = re.compile(r"^[ \t]+-(?:[ \t]+(.*))?$")
+_SINGLE_QUOTED_RE = re.compile(r"^'((?:[^']|'')*)'$")
+_COLLECTION_RE = re.compile(r"^(?:[\[{]|-(?:[ \t]|$))|:(?:[ \t]|$)")
+_YAML_NULL_RE = re.compile(r"^(?:~|null|Null|NULL)$")
+_YAML_NON_STRING_RE = re.compile(
+    r"^(?:~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+    r"|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+    r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"
+)
+
+
+def _glob_scalar(value: str, name: str) -> str:
+    if value.startswith('"'):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            raise ValueError(f"'{name}' has a malformed quoted string, got {value!r}") from None
+    if value.startswith("'"):
+        quoted = _SINGLE_QUOTED_RE.match(value)
+        if quoted is None:
+            raise ValueError(f"'{name}' has a malformed quoted string, got {value!r}")
+        return quoted.group(1).replace("''", "'")
+    if _COLLECTION_RE.search(value) or _YAML_NON_STRING_RE.match(value):
+        raise ValueError(
+            f"'{name}' entries must be glob strings, got {value!r}; "
+            "quote a glob that YAML reads as another type"
+        )
+    return value
+
+
+def _inline_globs(value: str, name: str) -> list[str]:
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            raise ValueError(
+                f"'{name}' flow list must be JSON-style, with double-quoted globs such as "
+                f'["**/*.java"], got {value!r}'
+            ) from None
+        for entry in parsed:
+            if not isinstance(entry, str):
+                raise ValueError(f"'{name}' entries must be glob strings, got {json.dumps(entry)}")
+        return parsed
+    if _YAML_NULL_RE.match(value):
+        return []
+    scalar = _glob_scalar(value, name)
+    return scalar.split(",") if scalar.strip() else []
+
+
+def _glob_problem(glob: str) -> str | None:
+    if not glob:
+        return "has an empty entry; every entry must be a glob"
+    pattern = glob[1:] if glob[0] == "!" else glob
+    if not pattern or pattern[0].isspace():
+        return f"entry {glob!r} must put its glob right after '!', as in '!**/test/**'"
+    if pattern[0] == "/":
+        return (
+            f"entry {glob!r} starts with '/', but diff paths are relative to the "
+            "repository root; drop the leading '/'"
+        )
+    return None
+
+
+def parse_applies_to(text: str, *, source: str, path: str) -> tuple[str, ...] | None:
+    """Return the path globs of ``text``'s ``applies_to`` front-matter key.
+
+    ``text`` is decoded, newline-normalised file text, and the fence, the
+    comments and the line numbers are those of :func:`split_front_matter`,
+    which still lists the key in its ``ignored_keys``. The key is matched
+    casefolded against :data:`APPLIES_TO_KEYS`, so ``applies_to`` and its
+    alias ``applyTo`` (the ``.github/instructions`` spelling) both work.
+    ``None`` means the file has no such key, or no closed front matter, and
+    so applies to every unit; this never logs, since
+    :func:`split_front_matter` already warns about an unclosed fence.
+
+    The value takes one of three forms, and the result is a tuple of globs,
+    each stripped, in file order:
+
+    - a scalar, bare or quoted, split on commas:
+      ``applies_to: "**/*.ts, **/*.tsx"``;
+    - a one-line JSON-style flow list of double-quoted globs, never split:
+      ``applies_to: ["**/*.java", "!**/src/test/**"]``;
+    - nothing after the colon, then indented ``- <glob>`` lines, bare or
+      quoted, never split.
+
+    A glob starting with ``!`` excludes paths. The globs are validated here
+    but not matched. Every problem is a :class:`~prxref.llm.ConfigError` of
+    the form ``"<source>: <path>:<line>: <problem>"``, where the line is
+    1-based over the whole file: the entry's own line in a block list, the
+    key's line otherwise. The problems are a second ``applies_to`` or
+    ``applyTo`` key; an empty value (``[]``, ``""``, ``~`` or no entries); an
+    empty entry; an entry that is not a string (``[1]``, ``- 42``,
+    ``- true``, ``- a: b``, a nested list or mapping); a malformed flow list
+    or quoted string (single-quoted flow items included); a flow list that
+    does not close on its own line; an inline value followed by indented
+    lines; an indented line that is not ``- <glob>``; a block scalar
+    (``|`` or ``>``); a ``!`` not followed directly by a glob; a glob
+    starting with ``/``, since diff paths are relative; and a list with
+    only ``!`` globs, which can match no path.
+    """
+    lines = text.split("\n")
+    if not _FENCE_RE.match(lines[0]):
+        return None
+    close = next((k for k in range(1, len(lines)) if _FENCE_RE.match(lines[k])), None)
+    if close is None:
+        return None
+
+    def fail(lineno: int, problem: str) -> ConfigError:
+        return ConfigError(f"{source}: {path}:{lineno}: {problem}")
+
+    name = ""
+    key_line = 0
+    inline = ""
+    in_key = False
+    entries: list[tuple[int, str]] = []
+    for index in range(1, close):
+        lineno = index + 1
+        raw = lines[index]
+        line = _COMMENT_RE.sub(r"\1", raw)
+        if not line.strip():
+            continue
+        if line[0] not in " \t":
+            key = _KEY_RE.match(line)
+            in_key = key is not None and key.group(1).casefold() in APPLIES_TO_KEYS
+            if key is None or not in_key:
+                continue
+            if key_line:
+                raise fail(lineno, f"duplicate '{key.group(1)}' key ('{name}' is already set on line {key_line})")
+            name, key_line, inline = key.group(1), lineno, key.group(2).strip()
+            if inline[:1] in ("|", ">"):
+                raise fail(
+                    lineno,
+                    f"'{name}' cannot be a block scalar ('|' or '>'); give a glob, a "
+                    "comma-separated string of globs, or a list",
+                )
+            continue
+        if not in_key:
+            continue
+        if inline.startswith("["):
+            raise fail(
+                lineno,
+                f"'{name}' flow list must close on the line that opens it; write a long "
+                "list as indented '- <glob>' lines",
+            )
+        if inline:
+            raise fail(lineno, f"'{name}' has a value after the colon, so it cannot continue on an indented line")
+        item = _ITEM_RE.match(line)
+        if item is None:
+            raise fail(lineno, f"'{name}' list entries must be '- <glob>' lines, got {raw.strip()!r}")
+        try:
+            entries.append((lineno, _glob_scalar((item.group(1) or "").strip(), name)))
+        except ValueError as exc:
+            raise fail(lineno, str(exc)) from None
+    if not key_line:
+        return None
+    if inline:
+        try:
+            entries = [(key_line, glob) for glob in _inline_globs(inline, name)]
+        except ValueError as exc:
+            raise fail(key_line, str(exc)) from None
+    if not entries:
+        raise fail(
+            key_line,
+            f"'{name}' is empty; list at least one glob, or omit the key to apply the "
+            "file to every unit",
+        )
+    globs: list[str] = []
+    for lineno, entry in entries:
+        glob = entry.strip()
+        problem = _glob_problem(glob)
+        if problem is not None:
+            raise fail(lineno, f"'{name}' {problem}")
+        globs.append(glob)
+    if all(glob.startswith("!") for glob in globs):
+        raise fail(
+            key_line,
+            f"'{name}' has only negated ('!') globs, so it matches no path; add a glob "
+            "the file applies to",
+        )
+    return tuple(globs)
+
+
 def load_review_rules(path: str | None, *, max_chars: int, source: str) -> ReviewRules | None:
     """Load the team review-rules file at ``path``, capped at ``max_chars``.
 
@@ -262,7 +455,11 @@ def load_review_rules(path: str | None, *, max_chars: int, source: str) -> Revie
     A truncated body is logged once as a WARNING naming
     ``PRXREF_REVIEW_RULES_MAX_CHARS``, an empty body with no map as a
     WARNING, and ignored front-matter keys at INFO; each still returns the
-    loaded rules, since the file was configured.
+    loaded rules, since the file was configured. An ``applies_to`` or
+    ``applyTo`` key is neither parsed nor validated here, stays in
+    ``ignored_keys`` and leaves ``applies_to`` ``None``; it is logged as a
+    WARNING instead of at INFO, because this file reaches every unit
+    whatever it says.
     """
     if path is None or not path.strip():
         return None
@@ -291,8 +488,16 @@ def load_review_rules(path: str | None, *, max_chars: int, source: str) -> Revie
         raise ConfigError(f"{source}: rules file {path!r} contains NUL bytes; expected Markdown or plain text")
     severity_map, ignored, body = split_front_matter(text, source=source, path=path)
     capped = cap_text(body.strip(), max_chars, sha256=sha256)
-    if ignored:
-        logger.info("%s: ignoring front-matter keys other than 'severity': %s", source, ", ".join(ignored))
+    scoping = [key for key in ignored if key.casefold() in APPLIES_TO_KEYS]
+    unused = [key for key in ignored if key not in scoping]
+    if unused:
+        logger.info("%s: ignoring front-matter keys other than 'severity': %s", source, ", ".join(unused))
+    if scoping:
+        logger.warning(
+            "%s: rules file %r sets %s, which only a scoped rules file (PRXREF_SCOPED_RULES / "
+            "--scoped-rules) reads; this file still reaches every unit",
+            source, path, ", ".join(f"'{key}'" for key in scoping),
+        )
     if capped.truncated:
         logger.warning(
             "%s: rules file %r has %d characters (after front matter); only the first %d "
