@@ -170,13 +170,39 @@ class ForgeImpl:
         )
 
     def get_diff(self, ref: PRRef) -> str:
-        """Fetch the raw unified diff of the PR (all files)."""
+        """Fetch the raw unified diff of the PR (all files).
+
+        Under GitHub's diff limit this is one GET with the diff media type,
+        and its body is returned as-is. Past 20,000 lines GitHub refuses that
+        request with HTTP 406 and a JSON ``errors`` entry whose ``code`` is
+        ``too_large``. Exactly that answer is logged at DEBUG and the diff is
+        rebuilt from the changed-file listing by ``_get_diff_from_files``,
+        whose ``ValueError`` (a listing cut short by GitHub's 3,000-file cap)
+        or ``FeedReadError`` propagates. Any other 406, including one whose
+        body is not JSON, and every other non-OK status raise ``HTTPError``
+        as before.
+        """
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}"
         headers = self._headers(
             ref.host,
             {"Accept": "application/vnd.github.v3.diff, application/vnd.diff"},
         )
         resp = self.session.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
+        if resp.status_code == 406:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+            errors = body.get("errors") if isinstance(body, dict) else None
+            if isinstance(errors, list) and any(
+                isinstance(e, dict) and e.get("code") == "too_large" for e in errors
+            ):
+                logger.debug(
+                    "diff for %s/%s#%s exceeded GitHub's line limit (406 too_large); "
+                    "rebuilding it from the files listing",
+                    ref.owner, ref.repo, ref.number,
+                )
+                return self._get_diff_from_files(ref)
         resp.raise_for_status()
         return resp.text
 
