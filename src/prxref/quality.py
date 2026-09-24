@@ -1,9 +1,11 @@
 """Deterministic quality passes over worker findings.
 
-Fifteen passes run before posting, in the order ``orchestrate_review``
+Sixteen passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, and pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on. A sixteenth deterministic check, the release-shaped-PR
+severity map, pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 13 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A seventeenth
+deterministic check, the release-shaped-PR
 heuristic, is not a pass at all: ``heuristics.release_shape_findings``
 ADDS a finding before pass 1 and it then flows through every pass below
 exactly like a model finding. Every ``drop_reason`` prefix these passes
@@ -95,7 +97,18 @@ emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-13. ``apply_quality_gate``: drop findings below the confidence floor
+13. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+    chunk findings per ``rule`` (casefolded), or per normalized title for
+    findings that name none, across every file of the review. The kept
+    findings are the most severe, then the most confident; the rest are
+    folded onto the first of them, whose ``locations`` and ``Also at:``
+    paragraph list theirs (at most five named, then ``(+N more)``), and
+    are dropped as ``rule cap exceeded (max N): listed at <file>:<line>``.
+    Sweep findings are never capped. It runs only when the caller turns
+    it on: a team rules file is loaded and the cap is above 0. It runs
+    after grouping, so a group counts once, and before the gate, so the
+    severity caps count what it kept.
+14. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -104,7 +117,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-14. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+15. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -118,7 +131,7 @@ emit is tabulated for operators in ``docs/quality.md``.
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-15. ``apply_containment_note``: a finding that asserts a throw, panic,
+16. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -1173,7 +1186,10 @@ def apply_sweep_dedup(
     location is listed on the group's representative, so a sweep copy that
     restates it adds no recall either, and the key set is the same whether
     grouping ran before this pass or not. A member adds its key even when a
-    cap later drops its representative.
+    cap later drops its representative. So does a chunk finding
+    :func:`apply_rule_cap` folded (``drop_reason`` ``rule cap exceeded (max
+    <n>): listed at <file>:<line>``), whose location the best kept finding
+    of its rule now lists.
 
     ``similarity`` switches on a second, reworded tier that runs after the
     exact tier; ``None`` (the default) skips it entirely, so the pass is
@@ -1213,7 +1229,9 @@ def apply_sweep_dedup(
     chunk_keys = {
         (f.file, normalize_title(f.title))
         for f in findings[:start]
-        if f.drop_reason is None or f.drop_reason.startswith(GROUPED_INTO_PREFIX)
+        if f.drop_reason is None
+        or f.drop_reason.startswith(GROUPED_INTO_PREFIX)
+        or f.drop_reason.startswith(RULE_CAP_PREFIX)
     }
     result: list[Finding] = []
     for i, f in enumerate(findings):
@@ -1876,6 +1894,22 @@ The full reason is ``grouped into <file>:<line>``, naming the location of
 the representative that now lists the finding's own location.
 """
 
+RULE_CAP_PREFIX: str = "rule cap exceeded "
+"""``drop_reason`` prefix of a finding :func:`apply_rule_cap` folded away.
+
+The full reason is ``rule cap exceeded (max <n>): listed at <file>:<line>``,
+naming the per-rule cap and the location of the best kept finding of the
+rule, whose ``locations`` and ``Also at:`` paragraph now list the folded
+finding's own location.
+"""
+
+RULE_CAP_LISTED_LOCATIONS: int = 5
+"""Most locations the ``Also at:`` paragraph of :func:`apply_rule_cap` names.
+
+Any further ones are counted in a `` (+<k> more)`` suffix; the kept
+finding's ``locations`` carries every one of them.
+"""
+
 
 def _grouping_line(finding: Finding) -> int | None:
     line = finding.line
@@ -2042,6 +2076,212 @@ def apply_rule_grouping(
         if len(members) >= 2:
             _fold_group(findings, members, result)
     return result
+
+
+def _rule_cap_active(cap: object) -> bool:
+    return isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
+
+
+def _rule_cap_rank_key(
+    findings: Sequence[Finding], index: int
+) -> tuple[int, tuple[float, str, int, str], int]:
+    finding = findings[index]
+    return (
+        _SEVERITY_RANK[finding.severity.strip().lower()],
+        finding_rank_key(finding),
+        index,
+    )
+
+
+def _rule_cap_groups(
+    findings: Sequence[Finding], floor: float, sweep_start: int
+) -> dict[tuple[str, str], list[int]]:
+    groups: dict[tuple[str, str], list[int]] = {}
+    for i, f in enumerate(findings[:max(0, sweep_start)]):
+        key = _grouping_candidate_key(f, floor)
+        if key is not None:
+            groups.setdefault((key[1], key[2]), []).append(i)
+    for members in groups.values():
+        members.sort(key=lambda i: _rule_cap_rank_key(findings, i))
+    return groups
+
+
+def _own_locations(finding: Finding) -> list[tuple[str, int]]:
+    raw = finding.locations
+    if not isinstance(raw, tuple | list):
+        return []
+    return [
+        (entry[0], entry[1])
+        for entry in raw
+        if isinstance(entry, tuple | list)
+        and len(entry) == 2
+        and isinstance(entry[0], str)
+        and isinstance(entry[1], int)
+        and not isinstance(entry[1], bool)
+    ]
+
+
+def _rule_cap_body(
+    best: Finding, merged: Sequence[tuple[str, int]]
+) -> str:
+    body = best.body or ""
+    own = _own_locations(best)
+    if own:
+        grouped = "Also at: " + ", ".join(f"`{file}:{line}`" for file, line in own)
+        if body == grouped:
+            body = ""
+        elif body.endswith("\n\n" + grouped):
+            body = body[: -len("\n\n" + grouped)]
+    listed = ", ".join(
+        f"`{file}`" if line == 0 else f"`{file}:{line}`"
+        for file, line in merged[:RULE_CAP_LISTED_LOCATIONS]
+    )
+    unlisted = len(merged) - RULE_CAP_LISTED_LOCATIONS
+    also_at = f"Also at: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
+    return f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
+
+
+def _fold_over_cap(
+    findings: Sequence[Finding],
+    members: Sequence[int],
+    cap: int,
+    result: list[Finding],
+) -> None:
+    best = findings[members[0]]
+    best_line = _grouping_line(best) or 0
+    folded = members[cap:]
+    merged = set(_own_locations(best))
+    for i in folded:
+        member = findings[i]
+        merged.add((member.file, _grouping_line(member) or 0))
+        merged.update(_own_locations(member))
+    merged.discard((best.file, best_line))
+    ordered = tuple(sorted(merged))
+    body = _rule_cap_body(best, ordered) if ordered else best.body
+    result[members[0]] = replace(best, locations=ordered, body=body)
+    reason = f"{RULE_CAP_PREFIX}(max {cap}): listed at {best.file}:{best_line}"
+    for i in folded:
+        result[i] = replace(findings[i], drop_reason=reason)
+
+
+def apply_rule_cap(
+    findings: Sequence[Finding],
+    *,
+    cap: int,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[Finding]:
+    """Fold the findings of one rule beyond ``cap`` onto the best one kept.
+
+    Issue #18. The caller runs this pass only when a team rules file is
+    loaded and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A ``cap`` below
+    1, or one that is not an ``int`` (a ``bool`` included), returns
+    ``list(findings)`` unchanged without reading the environment.
+
+    A finding is a candidate on exactly the terms of
+    :func:`apply_rule_grouping`: it has no ``drop_reason``, its severity is
+    in :data:`SEVERITIES` after trimming and lower-casing, its confidence is
+    at or above the floor :func:`apply_quality_gate` would apply
+    (``confidence_floor``, else ``PRXREF_CONFIDENCE_FLOOR``, else
+    :data:`DEFAULT_CONFIDENCE_FLOOR`), and it sits on the chunk side of the
+    list, before ``sweep_start``. Whole-PR sweep findings are never counted,
+    capped or folded, and never absorb a folded finding. ``sweep_start``
+    below zero is treated as zero (everything is sweep output); past the
+    end, every finding is on the chunk side.
+
+    Candidates count together when they name the same ``rule``, compared
+    after whitespace collapsing and ``casefold()``, in ANY file: unlike
+    :func:`apply_rule_grouping`, the file is not part of the key. A finding
+    without a rule counts on its :func:`normalize_title` title instead, and
+    never with a finding that has one. Scope is not part of the key.
+
+    Only a key with more than ``cap`` candidates changes anything. Its
+    candidates are ranked by severity (``error`` > ``warning`` > ``spec`` >
+    ``outofscope``), then by :func:`finding_rank_key` (higher confidence,
+    then file, line and normalized title), then by position. The first
+    ``cap`` are kept with their own severity, confidence, title, rule and
+    scope: nothing is promoted, and because severity ranks first an error
+    is never folded under a warning. The rest are folded onto the
+    first-ranked finding, the best, which gains:
+
+    - ``locations``: its own ``locations``, plus each folded finding's
+      ``(file, line)`` (``(file, 0)`` for a file-level one) and every entry
+      of that finding's own ``locations``, once each, without the best's
+      own ``(file, line)``, sorted by file then line.
+    - a last body paragraph, after a blank line, that reads ``Also at:``
+      followed by the first :data:`RULE_CAP_LISTED_LOCATIONS` of those
+      locations as a backticked ``<file>:<line>`` (``<file>`` alone for
+      line 0), comma-separated, then `` (+<k> more)`` when ``k`` of them
+      are not named. The ``Also at:`` paragraph
+      :func:`apply_rule_grouping` wrote for the best's own ``locations`` is
+      replaced by it, never repeated. When no location is left, the body
+      is unchanged.
+
+    Every folded finding keeps its identity and gains ``drop_reason``
+    ``rule cap exceeded (max <cap>): listed at <file>:<line>``
+    (:data:`RULE_CAP_PREFIX`), naming the best's location. A folded group
+    representative hands its group's lines to the best; its own
+    ``grouped into <file>:<line>`` members keep their reason.
+
+    Runs after :func:`apply_rule_grouping`, so a within-file group counts
+    once, and before :func:`apply_quality_gate`, so the severity caps count
+    what this cap kept. Pure apart from reading ``PRXREF_CONFIDENCE_FLOOR``
+    when ``confidence_floor`` is ``None``; the result has the input's
+    length and order, and a finding whose fields are not the documented
+    types is passed through untouched rather than raising. The best of
+    every key over the cap is a new object, even when no location was left
+    to list; every other finding the pass does not fold is returned as the
+    SAME object, so a caller can count rewrites by identity.
+    """
+    if not _rule_cap_active(cap):
+        return list(findings)
+    floor = _resolve_confidence_floor(confidence_floor)
+    result = list(findings)
+    for members in _rule_cap_groups(findings, floor, sweep_start).values():
+        if len(members) > cap:
+            _fold_over_cap(findings, members, cap, result)
+    return result
+
+
+def rule_cap_counts(
+    findings: Sequence[Finding],
+    *,
+    cap: int,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[dict]:
+    """Tally, per cap key, how many findings :func:`apply_rule_cap` counts and keeps.
+
+    Computed on the findings BEFORE the pass, over exactly the candidates
+    and keys :func:`apply_rule_cap` uses (the same private helper groups and
+    ranks both), so the two never disagree. One dict per key with at least
+    two candidates, with keys in this order: ``rule`` (the first-ranked
+    candidate's ``rule`` with its whitespace collapsed and its case kept,
+    or, for a title key, its title with the whitespace collapsed), ``kind``
+    (``"rule"`` or ``"title"``), ``total`` (the candidates) and ``kept``
+    (``min(total, cap)``, or ``total`` when ``cap`` is below 1 or not an
+    ``int``). Sorted by ``total`` descending, then ``kind`` (``"rule"``
+    first), then the casefolded name, then the name. ``[]`` when no key
+    reaches two. Pure apart from reading ``PRXREF_CONFIDENCE_FLOOR`` when
+    ``confidence_floor`` is ``None``.
+    """
+    floor = _resolve_confidence_floor(confidence_floor)
+    limited = _rule_cap_active(cap)
+    rows: list[dict] = []
+    for (kind, _label), members in _rule_cap_groups(findings, floor, sweep_start).items():
+        total = len(members)
+        if total < 2:
+            continue
+        first = findings[members[0]]
+        name = " ".join((first.rule if kind == "rule" else first.title).split())
+        rows.append({
+            "rule": name,
+            "kind": kind,
+            "total": total,
+            "kept": min(total, cap) if limited else total,
+        })
+    rows.sort(key=lambda row: (-row["total"], row["kind"], row["rule"].casefold(), row["rule"]))
+    return rows
 
 
 def apply_quality_gate(
