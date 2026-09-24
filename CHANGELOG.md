@@ -49,10 +49,10 @@ limit are reviewed. Each new option is off until you configure it.
   each log a warning. The flag wins over the variable, `--prompts-dir ""` turns
   it off, and the webhook server re-reads the variable on every webhook. The
   run record and `--format json` gain `prompt_templates` (always present,
-  `null` when unset), holding each overridden template's path, SHA-256 of the
-  raw bytes and character count; the trace gains a `prompts ok` event, and `-v`
-  prints a `prompts:` line with the first 12 characters of each hash. See
-  `docs/prompt-templates.md`.
+  `null` when unset), holding the path, raw-byte SHA-256 and character count of
+  each template file the directory holds, edited or not; the trace gains a
+  `prompts ok` event, and `-v` prints a `prompts:` line with the first 12
+  characters of each hash. See `docs/prompt-templates.md`.
 - **`prxref prompts export DIR [--force]` (#11).** It writes the packaged
   `worker.md`, `systemic.md` and `summary.md` into `DIR` byte for byte, as the
   starting point for an override directory, creating `DIR` when missing and
