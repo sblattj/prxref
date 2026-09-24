@@ -62,6 +62,7 @@ RUN_CONFIG_KEYS = (
     "group_findings",
     "max_warning_findings",
     "max_outofscope_findings",
+    "max_findings_per_rule",
     "scoped_rules_max_chars",
 )
 SCORE_VERSION = 1
