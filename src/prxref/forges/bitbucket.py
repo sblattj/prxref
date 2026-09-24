@@ -548,9 +548,12 @@ class ForgeImpl:
         unread pages would be missing; a ``changes`` entry is not a pair of
         texts; the edits do not chain from each one's ``new`` to the next
         one's ``old`` and end at the live text; or an ``update`` entry's
-        ``title`` or ``description`` snapshot is not the text in force at its
-        date, which is how an edit missing from ``changes`` shows. At an
-        edit's own date the snapshot may be either side of that edit.
+        ``title`` or ``description`` snapshot is neither the text in force at
+        its date nor the live text, which is how an edit missing from
+        ``changes`` shows. At an edit's own date the snapshot may be either
+        side of that edit. The live text is always accepted, so a snapshot
+        that records the PR's current state rather than its state at the
+        time can never veto the history ``changes`` records.
 
         ``first_review_at`` is the earliest approval, request for changes or
         comment by a ``user`` account other than the PR author, identified
@@ -682,7 +685,7 @@ class ForgeImpl:
     def _snapshots_agree(
         cls, entries: list[dict], field: str, changes: list[tuple[datetime, str, str]], live: str,
     ) -> bool:
-        """Whether each ``update.<field>`` snapshot is the text in force at its date, or either side of an edit then."""
+        """Whether each ``update.<field>`` snapshot is the live text, the text in force then, or an edit's old side."""
         original = changes[0][1] if changes else live
         for entry in entries:
             update = entry.get("update")
@@ -693,7 +696,7 @@ class ForgeImpl:
                 return False
             at = cls._history_date(update.get("date"), "activity update date")
             reached = [change for change in changes if change[0] <= at]
-            allowed = {reached[-1][2] if reached else original}
+            allowed = {reached[-1][2] if reached else original, live}
             allowed.update(old for when, old, _ in changes if when == at)
             if snapshot not in allowed:
                 return False

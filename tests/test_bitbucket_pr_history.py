@@ -502,6 +502,31 @@ def test_a_snapshot_taken_before_its_own_edit_is_accepted():
     assert [text for text, _ in _by_time(history)] == [ORIGINAL, V1]
 
 
+def test_snapshots_that_show_the_current_state_never_veto_the_recorded_changes():
+    def current_state(entry):
+        entry["update"]["title"] = TITLE
+        entry["update"]["description"] = V2
+        return entry
+
+    fake = _FakeBitbucket(
+        pr=_pr(title=TITLE, description=V2),
+        pages=[[
+            current_state(_edit(_at(8), V1, V2)),
+            current_state(_rename(_at(7), "WIP cache", TITLE)),
+            current_state(_edit(_at(6), ORIGINAL, V1)),
+            current_state(_update(CREATED)),
+        ]],
+    )
+
+    history = fake.history()
+
+    assert history.complete is True
+    assert _by_time(history) == [(ORIGINAL, _dt(CREATED)), (V1, _dt(_at(6))), (V2, _dt(_at(8)))]
+    assert history.title_renames == (
+        TitleRename(previous_title="WIP cache", current_title=TITLE, created_at=_dt(_at(7))),
+    )
+
+
 # --- first human review -------------------------------------------------------
 
 
