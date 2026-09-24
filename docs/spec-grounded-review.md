@@ -694,8 +694,9 @@ was.
 
 ## 7. Golden eval dataset: `tests/evals/`
 
-> **As built (0.14.0):** the dataset shipped; the runner and the scoring did
-> not. **[`tests/evals/README.md`](../tests/evals/README.md) is the dataset
+> **As built (0.14.0):** the dataset shipped, and so did an offline replay
+> run of every case (§7.1); the designed runner and the scoring did not.
+> **[`tests/evals/README.md`](../tests/evals/README.md) is the dataset
 > contract**, and it replaces the layout and `expected.json` schema this
 > section first proposed. In short:
 >
@@ -716,7 +717,7 @@ was.
 > the unguided reviewer should also catch, so a later scoring pass can check
 > that grounding costs no generic recall.
 
-### 7.1 Runner (planned, not built)
+### 7.1 Runner (design not built; a replay run shipped instead)
 
 > **Planned, not built.** Nothing in §7.1 or §7.2 exists in 0.14.0: there is
 > no `harness.py`, no plumbing or recorded stub-LLM mode, and no P/R/F1
