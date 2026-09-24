@@ -17,7 +17,9 @@ prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, and Azure D
                              ▼
                   ┌──────────────────────┐
                   │    Forge Adapter     │
-                  │ (BB / GitHub / GL)   │
+                  │ (GitHub / GitLab /   │
+                  │  Bitbucket Cloud /   │
+                  │  BB Server / ADO)    │
                   └──────────┬───────────┘
                              │
                              ▼
