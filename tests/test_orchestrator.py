@@ -2184,13 +2184,14 @@ class TestSpecGrounding:
         assert forge.summaries == []
         warnings = [
             r.getMessage() for r in caplog.records
-            if r.levelno == logging.WARNING and "spec source failed" in r.getMessage()
+            if r.levelno == logging.WARNING and r.getMessage().startswith("spec source ")
         ]
         assert len(warnings) == 1
+        assert warnings[0].startswith("spec source 2/2 (url, x/other.md) failed (best-effort): ")
         assert "HTTP 404" in warnings[0]
         assert "secret.example.invalid" not in warnings[0]
         assert any(
-            "spec grounding: 1/2 source(s) fetched, 1 constraint(s) injected"
+            "spec grounding: 1/2 source(s) ok, 1 constraint(s) injected"
             in r.getMessage() for r in caplog.records
         )
 
@@ -2251,11 +2252,7 @@ class TestSpecGrounding:
         specs_events = [e for e in events if e["node"] == "specs"]
         assert len(specs_events) == 1
         assert specs_events[0]["phase"] == "ok"
-        meta = specs_events[0]["meta"]
-        assert meta["sources"] == 1
-        assert meta["ok"] == 1
-        assert meta["fail"] == 0
-        assert meta["digest_chars"] > 0
+        assert specs_events[0]["meta"] == {"sources": 1, "ok": 1, "constraints": 1}
 
     def test_a_specs_crash_never_fails_the_run(self, monkeypatch):
         def boom(*a, **kw):
