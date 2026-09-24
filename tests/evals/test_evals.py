@@ -1,7 +1,7 @@
 """Golden offline eval dataset: loader, schema validation, structural scorer.
 
 Each ``case-*`` directory under ``tests/evals/`` is a self-contained eval case
-for the future spec-grounded review pipeline: a Jira-style ticket
+for the spec-grounded review pipeline (``--spec``): a Jira-style ticket
 (``ticket.md``), a small normative spec corpus (``docs/``), a unified diff
 implementing the ticket with at least one planted spec violation
 (``diff.patch``), machine-checkable expected findings (``expected.json``), and

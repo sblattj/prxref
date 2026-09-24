@@ -1175,8 +1175,10 @@ def _stamp_run_cost(
     Called once, after the sweep, with every review unit's result (the chunk
     workers plus the sweep) and the parsed price table (``{}`` when unset).
     The total is :func:`prxref.costs.run_cost`: each received unit's reported
-    cost, else a price-table estimate for its exact model name, else the whole
-    run is unknown (``None``, never ``0`` and never a partial sum). A run
+    cost, else a price-table estimate for its exact model name when the unit
+    counted input tokens (a unit reporting 0, as every kiro-cli unit does, is
+    never estimated), else the whole run is unknown (``None``, never ``0``
+    and never a partial sum). A run
     left unknown by models with neither figure logs one INFO line naming
     them, so a table keyed on the wrong model name diagnoses itself. A table
     that is not a valid parsed table raises, and the caller records the cost
