@@ -56,7 +56,9 @@ prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, and Azure D
 Not every finding comes from a model, and no finding posts unfiltered. prxref
 computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
-through eleven deterministic passes: location validation, `package.json` claim
+through the team severity map (only when the review rules declare one) and
+spec grounding, two passes that relabel a severity and drop nothing, and then
+through eleven more deterministic passes: location validation, `package.json` claim
 checks, line alignment, thread dedup, settled-thread suppression, severity
 consistency, the removal-claim check, the hedge gate, the quality gate, sweep
 dedup, and the containment note. A filtered finding is never discarded
@@ -350,8 +352,8 @@ prxref review --diff-file tests/evals/<case>/diff.patch --context-file tests/eva
 
 | Code | Meaning |
 |---|---|
-| `0` | The run finished — **including every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. With `PRXREF_FAIL_ON` set (see below) a finding or a failed review can turn this into `1`. |
-| `1` | **Gated review outcome** — only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that fails to complete also exits `1`. The reason is printed to stderr. |
+| `0` | The run finished — **including every review error**: an empty diff, a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. With `PRXREF_FAIL_ON` set (see below), only two outcomes turn this into `1`: a completed review whose active findings trip the policy, and a review that fails to complete (an exception ends the run before it returns a result). A review that ends with verdict `Error` — every chunk failed, or the forge could not be read — still returns a result, with no active finding, so it stays `0`. |
+| `1` | **Gated review outcome** — only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that fails to complete (an exception ends the run before it returns a result) also exits `1`. The reason is printed to stderr. |
 | `2` | **Usage or configuration error** — no subcommand, invalid command-line arguments, or a required value missing, malformed, outside its valid range, or outside its key's allowed vocabulary (`PRXREF_FAIL_ON` accepts only `never`, `error`, `any`). The message names the source that supplied it: the environment variable, or the CLI flag when a flag is what you typed. |
 
 ```

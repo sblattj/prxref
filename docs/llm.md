@@ -208,7 +208,7 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
 ## Determinism: what is pinned, and what still varies
 
 - `PRXREF_LLM_TEMPERATURE` defaults to `0.0`, and `0.0` is **sent** on the wire
-  rather than omitted.
+  by the two API backends, `openai-compat` and `litellm`, rather than omitted.
 - `PRXREF_LLM_SEED` is sent on every call by the two API backends,
   `openai-compat` and `litellm`: the configured
   value when set, else one random seed derived per process and shared by every
