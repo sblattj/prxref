@@ -1,7 +1,8 @@
 """Direct tests of ``github.ForgeImpl.get_diff``: the diff request and its 406 fallback.
 
 GitHub refuses the diff media type for a pull request whose diff runs past
-20,000 lines, with HTTP 406 and an ``errors`` entry coded ``too_large``. Exactly
+20,000 lines or 300 files, with HTTP 406 and an ``errors`` entry coded
+``too_large``. Exactly
 that answer hands the read to ``_get_diff_past_the_limit``, which reads the
 compare diff and else the changed-file listing; every other answer is the
 single GET it always was. ``_get_diff_past_the_limit`` is a double set on the
@@ -38,8 +39,9 @@ TOO_LARGE = {
     "errors": [{"resource": "PullRequest", "field": "diff", "code": "too_large"}],
 }
 DEBUG_LINE = (
-    "diff for acme/api#42 exceeded GitHub's line limit (406 too_large); "
-    "reading it from the compare endpoint"
+    "diff for acme/api#42 was refused by GitHub as too large (406 too_large: "
+    "Sorry, the diff exceeded the maximum number of lines (20000)); reading it "
+    "from the compare endpoint"
 )
 CAP_ERROR = (
     "acme/api#42: changed_files=3200 but the files listing returned 3000 "

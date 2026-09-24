@@ -1,12 +1,14 @@
-"""GitHub's read of a pull request past the 20,000-line diff limit (issue #15).
+"""GitHub's read of a pull request past its diff limits (issue #15).
 
-On a 406 ``too_large`` refusal ``get_diff`` reads the pull request once as
-JSON and takes the compare diff of its ``base.sha...head.sha`` when that diff's
-file count and line sums equal the PR's ``changed_files``, ``additions`` and
+GitHub refuses the PR diff past 20,000 lines or 300 files. On that 406
+``too_large`` refusal ``get_diff`` reads the pull request once as JSON and
+takes the compare diff of its ``base.sha...head.sha`` when that diff's file
+count and line sums equal the PR's ``changed_files``, ``additions`` and
 ``deletions``. Every other outcome of the compare read degrades, with one
-WARNING naming the reason, to the changed-file listing, which refuses to
-return a diff when an entry with changed lines lacks its ``patch`` or when the
-listing's line totals differ from the PR's.
+WARNING naming the reason, to the changed-file listing. The listing refuses to
+return a diff when its line totals differ from the PR's; an entry whose
+``patch`` GitHub withheld with its counts intact is reviewed header-only with
+one WARNING naming it.
 
 Every test drives the real adapter; only the HTTP session (and, through the
 CLI, the model) is a double. The recorded fixtures under ``fixtures/github/``
@@ -61,11 +63,24 @@ TOO_LARGE = {
     "message": "Sorry, the diff exceeded the maximum number of lines (20000)",
     "errors": [{"resource": "PullRequest", "field": "diff", "code": "too_large"}],
 }
-
-DEBUG_406 = (
-    "diff for acme/api#42 exceeded GitHub's line limit (406 too_large); "
-    "reading it from the compare endpoint"
+TOO_MANY_FILES_MESSAGE = (
+    "Sorry, the diff exceeded the maximum number of files (300). Consider using "
+    "'List pull requests files' API or locally cloning the repository instead."
 )
+TOO_MANY_FILES = {
+    "message": TOO_MANY_FILES_MESSAGE,
+    "errors": [{"resource": "PullRequest", "field": "diff", "code": "too_large"}],
+}
+
+
+def _debug_406(message):
+    return (
+        f"diff for acme/api#42 was refused by GitHub as too large (406 too_large: "
+        f"{message}); reading it from the compare endpoint"
+    )
+
+
+DEBUG_406 = _debug_406(TOO_LARGE["message"])
 DEBUG_COMPARE_USED = (
     "diff for acme/api#42 read from compare aaaaaaaaaaaa...bbbbbbbbbbbb; "
     "its file and line counts match the PR's"
@@ -128,12 +143,13 @@ LISTING_DIFF = gitlab._render_diff_entries([
 ])
 
 
-def _session(*, pr, listing, compare, diff_status=406, diff_text=""):
+def _session(*, pr, listing, compare, diff_status=406, diff_text="", refusal=TOO_LARGE):
     """A Session double for the whole past-the-limit read.
 
     ``compare`` answers the compare GET: a ``str`` is a 200 diff, an ``int`` an
-    error status, an exception instance is raised. Routes on URL and Accept
-    header, never on call order, so the order asserted is the adapter's.
+    error status, an exception instance is raised. ``refusal`` is the body of
+    the PR diff's non-200 answer. Routes on URL and Accept header, never on
+    call order, so the order asserted is the adapter's.
     """
 
     def get(url, headers=None, params=None, **kwargs):
@@ -147,7 +163,7 @@ def _session(*, pr, listing, compare, diff_status=406, diff_text=""):
         if url.endswith("/pulls/42") and "diff" in accept:
             if diff_status == 200:
                 return _mock_response(text=diff_text)
-            return _mock_response(diff_status, json_data=TOO_LARGE)
+            return _mock_response(diff_status, json_data=refusal)
         if url.endswith("/pulls/42/files"):
             start = (params["page"] - 1) * params["per_page"]
             return _mock_response(json_data=listing[start:start + params["per_page"]])
@@ -213,6 +229,36 @@ def test_a_406_reads_the_pr_then_the_compare_diff_and_returns_it_as_is(
         else:
             assert call.kwargs["headers"]["Authorization"] == "Bearer placeholder-token"
     assert _ours(caplog) == [(logging.DEBUG, DEBUG_406), (logging.DEBUG, DEBUG_COMPARE_USED)]
+
+
+@pytest.mark.parametrize(
+    ("refusal", "message"),
+    [
+        (TOO_MANY_FILES, TOO_MANY_FILES_MESSAGE),
+        ({"errors": [{"code": "too_large"}]}, "no message"),
+        ({"message": "  \n", "errors": [{"code": "too_large"}]}, "no message"),
+    ],
+    ids=["300-files", "no-message", "blank-message"],
+)
+def test_every_too_large_406_takes_the_same_compare_path_and_logs_githubs_message(
+    caplog, refusal, message
+):
+    """GitHub also answers 406 ``too_large`` past 300 files, under the line
+    limit: a public 438-file, 18,542-line PR drew this message, verbatim."""
+    session = _session(pr=PR, listing=LISTING, compare=COMPARE_TEXT, refusal=refusal)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        diff = ForgeImpl(session=session).get_diff(_ref())
+
+    assert diff == COMPARE_TEXT
+    assert _calls(session) == [
+        (PR_API_URL, DIFF_ACCEPT, None),
+        (PR_API_URL, JSON_ACCEPT, None),
+        (COMPARE_URL, COMPARE_ACCEPT, None),
+    ]
+    assert _ours(caplog) == [
+        (logging.DEBUG, _debug_406(message)), (logging.DEBUG, DEBUG_COMPARE_USED),
+    ]
 
 
 # --- (2) every compare failure degrades to the listing with one WARNING -------------
@@ -314,46 +360,69 @@ def test_a_failed_pr_metadata_read_propagates_before_any_other_read():
     assert [url for url, _, _ in _calls(session)] == [PR_API_URL, PR_API_URL]
 
 
-# --- (3) a listed file with changed lines but no patch fails the read ---------------
+# --- (3) a patch withheld with its counts intact: header-only, one WARNING each ------
+
+
+def _withheld_warning(name, additions, deletions):
+    return (
+        f"GitHub PR diff for acme/api#42: GitHub withheld the patch of {name} "
+        f"(+{additions}/-{deletions}); it is reviewed as header-only"
+    )
 
 
 @pytest.mark.parametrize(
     "withheld",
     [
         _file("src/big.py", additions=1200, deletions=3),
-        _file("src/gone.py", "removed", deletions=40),
-        _file("src/fresh.py", "added", additions=7),
+        _file("package-lock.json", "removed", deletions=40),
+        _file("bun.lock", "added", additions=7),
     ],
     ids=["modified", "removed", "added"],
 )
-def test_a_patchless_entry_with_changed_lines_raises_naming_the_file(caplog, withheld):
+def test_a_patchless_entry_with_changed_lines_is_header_only_with_one_warning(
+    caplog, withheld
+):
     listing = [APP, withheld]
     pr = _pr(2, 1 + withheld["additions"], 1 + withheld["deletions"])
     session = _session(pr=pr, listing=listing, compare=404)
 
-    with pytest.raises(ValueError) as info:
-        ForgeImpl(session=session).get_diff(_ref())
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        diff = ForgeImpl(session=session).get_diff(_ref())
 
-    assert str(info.value) == (
-        "GitHub PR diff for acme/api#42 cannot be rebuilt whole: the changed-file "
-        f"listing withheld the patch of 1 changed file(s) ({withheld['filename']}); "
-        "refusing to review a partial diff"
-    )
+    files = parse_unified_diff(diff)
+    assert [(f.path, len(f.hunks)) for f in files] == [
+        ("src/app.py", 1), (withheld["filename"], 0),
+    ]
+    assert _ours(caplog, logging.WARNING) == [
+        (logging.WARNING, _warning_text("it answered HTTP 404")),
+        (logging.WARNING, _withheld_warning(
+            withheld["filename"], withheld["additions"], withheld["deletions"],
+        )),
+    ]
+    assert not any("no patch and no changed lines" in msg for _, msg in _ours(caplog))
 
 
-def test_many_withheld_patches_are_named_up_to_five():
-    withheld = [_file(f"src/mod_{i}.py", additions=10) for i in range(7)]
-    session = _session(pr=_pr(7, 70, 0), listing=withheld, compare=404)
+def test_each_withheld_patch_gets_its_own_warning_in_listing_order(caplog):
+    """The shape seen live on a 438-file PR that drew the 300-file 406: two
+    whole-file lockfile changes listed with their true counts and no patch."""
+    listing = [
+        APP,
+        _file("bun.lock", "added", additions=2128),
+        _file("pnpm-lock.yaml", "removed", deletions=8700),
+    ]
+    session = _session(pr=_pr(3, 2129, 8701), listing=listing, compare=404)
 
-    with pytest.raises(ValueError) as info:
-        ForgeImpl(session=session).get_diff(_ref())
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        diff = ForgeImpl(session=session).get_diff(_ref())
 
-    assert str(info.value) == (
-        "GitHub PR diff for acme/api#42 cannot be rebuilt whole: the changed-file "
-        "listing withheld the patch of 7 changed file(s) (src/mod_0.py, "
-        "src/mod_1.py, src/mod_2.py, src/mod_3.py, src/mod_4.py and 2 more); "
-        "refusing to review a partial diff"
-    )
+    assert [(f.path, len(f.hunks)) for f in parse_unified_diff(diff)] == [
+        ("src/app.py", 1), ("bun.lock", 0), ("pnpm-lock.yaml", 0),
+    ]
+    assert [msg for _, msg in _ours(caplog, logging.WARNING)] == [
+        _warning_text("it answered HTTP 404"),
+        _withheld_warning("bun.lock", 2128, 0),
+        _withheld_warning("pnpm-lock.yaml", 0, 8700),
+    ]
 
 
 def test_listing_totals_that_differ_from_the_pr_raise_naming_both(caplog):
