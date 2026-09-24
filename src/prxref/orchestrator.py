@@ -93,7 +93,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    temperature, seed, and model chain actually in force, and the run-record
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
-   ``spec_grounding``, ``size_advisory``; ``replay`` on replays only).
+   ``spec_grounding``, ``size_advisory``; ``replay`` on replays only, and
+   ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
    iff any active error-severity finding survives;
@@ -392,6 +393,12 @@ def orchestrate_review(
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
+    ``cost_api_equivalent`` (always ``True``) is added only when every
+    reported unit cost came from claude-cli
+    (:func:`prxref.costs.api_equivalent_run`), so the CLI's ``-v`` line can
+    label the figure; ``--format json`` never emits it, because each unit's
+    ``cost_source`` (in the ``PRXREF_TRACE_DIR`` meta files) is already the
+    machine-readable label.
     Never raises on ANY stage failure — forge, diff parsing,
     chunking, or LLM — the run degrades to verdict ``"Error"`` with a posted
     notice when ``post`` is true. Degenerate arguments are part of that: a
@@ -502,6 +509,7 @@ def orchestrate_review(
     run_inputs: dict[str, Any] = {
         "cost_usd": 0.0,
         "cost_estimated": False,
+        "cost_api_equivalent": False,
         "review_rules": None,
         "ticket_context": None,
         "spec_grounding": None,
@@ -772,6 +780,7 @@ def orchestrate_review(
         logger.warning("cost accounting failed (continuing): %s", e)
         run_inputs["cost_usd"] = None
         run_inputs["cost_estimated"] = False
+        run_inputs["cost_api_equivalent"] = False
     cost_label = _cost_label(run_inputs, post_cost)
 
     input_tokens = sum(r["input_tokens"] for r in results)
@@ -1131,12 +1140,17 @@ def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
     semantics — a key the exit's own dict already carries wins — except
     ``replay``, which is written only when it is not ``None``: a normal run's
     record has no ``replay`` key at all, and a replay's is a copy of the
-    stamp, never the caller's mapping. Returns ``result`` itself.
+    stamp, never the caller's mapping. ``cost_api_equivalent`` is written
+    only when it is ``True``, so a run not priced by claude-cli has the same
+    record it had before the label existed. Returns ``result`` itself.
     """
     for key, value in run_inputs.items():
         if key == "replay":
             if value is not None:
                 result.setdefault(key, dict(value))
+        elif key == "cost_api_equivalent":
+            if value is True:
+                result.setdefault(key, True)
         else:
             result.setdefault(key, value)
     return result
@@ -1156,12 +1170,14 @@ def _cost_label(run_inputs: Mapping[str, Any], post_cost: bool) -> str:
     ``""`` keeps every attribution byte-identical to a run without cost
     posting; otherwise it is :func:`prxref.costs.cost_label` of the cost in
     force at this exit (``$0.00`` before any LLM request, ``cost unknown``
-    when the run's cost could not be established).
+    when the run's cost could not be established, and ``$0.0007
+    (API-equivalent)`` when ``cost_api_equivalent`` is set).
     """
     if not post_cost:
         return ""
     return costs.cost_label(
         run_inputs.get("cost_usd"), run_inputs.get("cost_estimated") is True,
+        api_equivalent=run_inputs.get("cost_api_equivalent") is True,
     )
 
 
@@ -1170,7 +1186,7 @@ def _stamp_run_cost(
     units: Sequence[Mapping[str, Any]],
     price_table: Mapping[str, Any],
 ) -> None:
-    """Set ``run_inputs["cost_usd"]`` and ``["cost_estimated"]`` from the units.
+    """Set ``run_inputs["cost_usd"]``, ``["cost_estimated"]`` and ``["cost_api_equivalent"]``.
 
     Called once, after the sweep, with every review unit's result (the chunk
     workers plus the sweep) and the parsed price table (``{}`` when unset).
@@ -1182,7 +1198,9 @@ def _stamp_run_cost(
     left unknown by models with neither figure logs one INFO line naming
     them, so a table keyed on the wrong model name diagnoses itself. A table
     that is not a valid parsed table raises, and the caller records the cost
-    as unknown.
+    as unknown. ``cost_api_equivalent`` is
+    :func:`prxref.costs.api_equivalent_run` over the same units, derived here
+    once so the attribution and the CLI's ``-v`` line cannot disagree.
     """
     cost_usd, cost_estimated, unpriced = costs.run_cost(units, price_table)
     if unpriced:
@@ -1193,6 +1211,7 @@ def _stamp_run_cost(
         )
     run_inputs["cost_usd"] = cost_usd
     run_inputs["cost_estimated"] = cost_estimated
+    run_inputs["cost_api_equivalent"] = costs.api_equivalent_run(units)
 
 
 def _attribution(
@@ -1200,7 +1219,8 @@ def _attribution(
 ) -> str:
     """The attribution line every posted comment carries.
 
-    ``cost_label`` (``"$0.0007"``, ``"~$0.0007 (est.)"``, ``"cost unknown"``)
+    ``cost_label`` (``"$0.0007"``, ``"$0.0007 (API-equivalent)"``,
+    ``"~$0.0007 (est.)"``, ``"cost unknown"``)
     is appended as the LAST field, and only when non-empty: the existing
     fields keep their order, so a consumer that parses ``model=`` or the
     token count, and the prune pass that matches ``ATTRIBUTION_MARKER`` as a

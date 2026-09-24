@@ -7,7 +7,10 @@ What is pinned here is the orchestrator's half: every review unit dict carries
 the reviewer's meta has no figure), and ``_stamp_run_cost`` totals them with
 :func:`prxref.costs.run_cost` into the record's ``cost_usd`` and
 ``cost_estimated``: reported, else estimated from the price table, else
-unknown (``None``, never ``0``).
+unknown (``None``, never ``0``). A run whose every reported figure came from
+claude-cli is labelled ``(API-equivalent)`` on the attribution and the ``-v``
+line, through ``_stamp_run_cost``'s ``cost_api_equivalent``; the JSON payload
+gains no key.
 
 ``_cost_review_chunk`` / ``_cost_review_systemic`` stand in for the reviewer
 contract that carries the invoke result's cost into the meta, so the tests
@@ -21,11 +24,12 @@ import dataclasses
 import json
 import logging
 import re
+import sys
 
 import pytest
 
 from prxref import costs, orchestrator
-from prxref.cli import _build_json_result
+from prxref.cli import _build_json_result, _fmt_cost, main
 from prxref.forges.base import ATTRIBUTION_MARKER
 from prxref.orchestrator import orchestrate_review
 from prxref.triage import Finding
@@ -163,11 +167,12 @@ def _last_line(body: str) -> str:
     return body.rstrip("\n").splitlines()[-1]
 
 
-def _failing_chunks(outcomes: dict[str, tuple[str, float | None]]):
+def _failing_chunks(outcomes: dict[str, tuple[str, float | None]], source: str = "usage.cost"):
     """A ``review_chunk`` double: per first path, ``(error, cost)`` of a received answer.
 
     The response ARRIVED (model and tokens are set) whatever the error, the
-    way a truncated or unparseable completion does.
+    way a truncated or unparseable completion does. ``source`` is every
+    priced answer's ``cost_source``.
     """
     def _rc(llm, files, **kwargs):
         error, cost = outcomes[files[0].path]
@@ -180,7 +185,7 @@ def _failing_chunks(outcomes: dict[str, tuple[str, float | None]]):
         return findings, {
             "escalations": [], "input_tokens": 100, "output_tokens": 50,
             "model": MODEL, "elapsed_ms": 1, "error": error,
-            "cost_usd": cost, "cost_source": "usage.cost" if cost is not None else "",
+            "cost_usd": cost, "cost_source": source if cost is not None else "",
         }
     return _rc
 
@@ -484,3 +489,229 @@ class TestTraceEvents:
         (sweep,) = _events(tmp_path, "sweep", "ok")
         assert chunk["meta"]["cost_usd"] is None
         assert sweep["meta"]["cost_usd"] is None
+
+
+# --------------------------------------------------------------------------- API-equivalent label
+# claude-cli reports ``total_cost_usd``, the call's price at API list rates,
+# which is not what a subscription is invoiced. The label says so wherever a
+# person reads the figure (the -v line and the posted attribution); the JSON
+# record gains no key, because each unit's ``cost_source`` already says it.
+
+CLAUDE = "claude-cli"
+LABELLED = "$0.0020 (API-equivalent)"
+
+
+def _unit(source: str, cost: float | None = 0.001, **overrides) -> dict:
+    unit = {
+        "model": MODEL, "input_tokens": 100, "output_tokens": 50, "error": "",
+        "cost_usd": cost, "cost_source": source,
+    }
+    unit.update(overrides)
+    return unit
+
+
+def _claude_llm(findings_by_path=None, **kwargs) -> CostLLM:
+    """A ``CostLLM`` shaped like the claude-cli backend: source ``"claude-cli"``."""
+    kwargs.setdefault("cost_usd", 0.001)
+    return CostLLM(findings_by_path, cost_source=CLAUDE, **kwargs)
+
+
+class TestCostLabelForms:
+    def test_reported(self):
+        assert costs.cost_label(0.0202, False) == "$0.0202"
+
+    def test_reported_and_api_equivalent(self):
+        assert costs.cost_label(0.0202, False, api_equivalent=True) == "$0.0202 (API-equivalent)"
+
+    def test_an_estimate_keeps_est_even_when_api_equivalent(self):
+        assert costs.cost_label(0.0202, True, api_equivalent=True) == "~$0.0202 (est.)"
+
+    @pytest.mark.parametrize("estimated", [False, True])
+    def test_unknown_stays_words_when_api_equivalent(self, estimated):
+        assert costs.cost_label(None, estimated, api_equivalent=True) == "cost unknown"
+
+    def test_the_flag_is_keyword_only(self):
+        with pytest.raises(TypeError):
+            costs.cost_label(0.0202, False, True)  # type: ignore[misc]
+
+
+class TestTheApiEquivalentRule:
+    def test_every_costed_unit_from_claude_cli_is_true(self):
+        assert costs.api_equivalent_run([_unit(CLAUDE), _unit(CLAUDE, 0.004)]) is True
+
+    @pytest.mark.parametrize("other", ["usage.cost", "x-litellm-response-cost", "litellm", ""])
+    def test_one_costed_unit_from_another_source_is_false(self, other):
+        assert costs.api_equivalent_run([_unit(CLAUDE), _unit(other)]) is False
+
+    def test_a_claude_cli_unit_without_a_cost_does_not_count(self):
+        assert costs.api_equivalent_run([_unit(CLAUDE), _unit("usage.cost", None)]) is True
+        assert costs.api_equivalent_run([_unit(CLAUDE, None)]) is False
+
+    def test_an_unusable_figure_does_not_count(self):
+        assert costs.api_equivalent_run([_unit(CLAUDE), _unit("usage.cost", -1.0)]) is True
+
+    def test_a_unit_that_was_never_received_does_not_count(self):
+        raised = _unit("usage.cost", 0.5, model="", input_tokens=0, output_tokens=0)
+        assert costs.api_equivalent_run([_unit(CLAUDE), raised]) is True
+
+    def test_no_costed_unit_is_false(self):
+        assert costs.api_equivalent_run([]) is False
+        assert costs.api_equivalent_run([_unit("", None), _unit("", None)]) is False
+
+    def test_a_generator_is_read_once(self):
+        assert costs.api_equivalent_run(u for u in [_unit(CLAUDE)]) is True
+
+
+class TestFmtCostLabel:
+    def test_the_verbose_label_of_a_claude_cli_record(self):
+        record = {"cost_usd": 0.0202, "cost_estimated": False, "cost_api_equivalent": True}
+        assert _fmt_cost(record) == "$0.0202 (API-equivalent)"
+
+    def test_an_estimated_record_keeps_est(self):
+        record = {"cost_usd": 0.0202, "cost_estimated": True, "cost_api_equivalent": True}
+        assert _fmt_cost(record) == "~$0.0202 (est.)"
+
+    @pytest.mark.parametrize("flag", [False, None, "true", 1])
+    def test_only_a_true_flag_labels(self, flag):
+        record = {"cost_usd": 0.0202, "cost_estimated": False, "cost_api_equivalent": flag}
+        assert _fmt_cost(record) == "$0.0202"
+
+
+class TestTheRecordCarriesTheFlagOnlyWhenTrue:
+    def test_false_is_never_written(self):
+        out = orchestrator._run_record({}, {"cost_api_equivalent": False, "cost_usd": 0.0})
+        assert out == {"cost_usd": 0.0}
+
+    def test_true_is_written(self):
+        out = orchestrator._run_record({}, {"cost_api_equivalent": True})
+        assert out == {"cost_api_equivalent": True}
+
+
+@pytest.mark.usefixtures("cost_reviewer")
+class TestApiEquivalentEndToEnd:
+    def test_the_posted_attribution_labels_a_claude_cli_run(self):
+        res, forge = _run(_claude_llm(), post=True, post_cost=True)
+        assert res["cost_usd"] == pytest.approx(0.002)
+        assert res["cost_api_equivalent"] is True
+        line = _last_line(forge.summaries[0])
+        assert line.endswith(f" · {LABELLED}")
+        assert PLAIN_ATTRIBUTION.fullmatch(line.removesuffix(f" · {LABELLED}")), line
+
+    def test_another_source_is_not_labelled(self):
+        res, forge = _run(CostLLM(cost_usd=0.001), post=True, post_cost=True)
+        assert "cost_api_equivalent" not in res
+        assert _last_line(forge.summaries[0]).endswith(" · $0.0020")
+        assert all("API-equivalent" not in body for body in forge.summaries)
+
+    def test_a_mixed_run_is_not_labelled(self, monkeypatch):
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _failing_chunks({"src/app.py": ("", 0.003)}, source=CLAUDE),
+        )
+        res, forge = _run(CostLLM(cost_usd=0.001), post=True, post_cost=True)
+        assert res["cost_usd"] == pytest.approx(0.004)
+        assert "cost_api_equivalent" not in res
+        assert _last_line(forge.summaries[0]).endswith(" · $0.0040")
+
+    def test_a_claude_cli_run_with_an_estimated_unit_keeps_est(self):
+        res, forge = _run(
+            _claude_llm(sweep_cost_usd=None), post=True, post_cost=True, price_table=TABLE,
+        )
+        assert res["cost_estimated"] is True
+        assert _last_line(forge.summaries[0]).endswith(" · ~$0.0012 (est.)")
+        assert all("API-equivalent" not in body for body in forge.summaries)
+
+    def test_the_error_notice_is_labelled_too(self, monkeypatch):
+        monkeypatch.setattr(
+            orchestrator.reviewer, "review_chunk",
+            _failing_chunks({
+                "src/one.py": (TRUNCATED_REASON, 0.003),
+                "other/two.py": (TRUNCATED_REASON, 0.001),
+            }, source=CLAUDE),
+        )
+        res, forge = _run(
+            _claude_llm(cost_usd=0.002), diff=TWO_FILE_DIFF, max_chunks=2,
+            token_budget=1000, post=True, post_cost=True,
+        )
+        assert res["verdict"] == "Error"
+        assert len(forge.summaries) == 1
+        assert _last_line(forge.summaries[0]).endswith(" · $0.0060 (API-equivalent)")
+
+    def test_without_post_cost_the_attribution_is_byte_identical(self):
+        _, forge = _run(_claude_llm(HAPPY_FINDINGS), post=True)
+        assert forge.summaries
+        for body in forge.summaries:
+            line = _last_line(body)
+            assert PLAIN_ATTRIBUTION.fullmatch(line), line
+
+    def test_inline_comments_never_carry_the_label(self):
+        _, forge = _run(_claude_llm(HAPPY_FINDINGS), post=True, post_cost=True)
+        comments = [c for batch in forge.inline_batches for c in batch]
+        assert comments
+        for comment in comments:
+            assert "API-equivalent" not in comment.body
+
+    def test_a_cost_accounting_crash_leaves_no_label(self, monkeypatch):
+        def crash(run_inputs, units, price_table):
+            run_inputs["cost_api_equivalent"] = True
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(orchestrator, "_stamp_run_cost", crash)
+        res, forge = _run(_claude_llm(), post=True, post_cost=True)
+        assert "cost_api_equivalent" not in res
+        assert _last_line(forge.summaries[0]).endswith(" · cost unknown")
+
+    def test_the_json_key_set_is_unchanged(self):
+        claude, _ = _run(_claude_llm())
+        other, _ = _run(CostLLM(cost_usd=0.001))
+        assert set(claude) == set(other) | {"cost_api_equivalent"}
+        claude_payload = _build_json_result(claude)
+        assert list(claude_payload) == list(_build_json_result(other))
+        assert "cost_api_equivalent" not in claude_payload
+        assert "API-equivalent" not in json.dumps(claude_payload)
+        assert claude_payload["cost_usd"] == pytest.approx(0.002)
+
+    def test_the_trace_events_are_unchanged(self, tmp_path):
+        (tmp_path / "claude").mkdir()
+        (tmp_path / "other").mkdir()
+        _run(_claude_llm(), tmp_path=tmp_path / "claude")
+        _run(CostLLM(cost_usd=0.001), tmp_path=tmp_path / "other")
+        (claude,) = _events(tmp_path / "claude", "run", "ok")
+        (other,) = _events(tmp_path / "other", "run", "ok")
+        assert claude["meta"] == other["meta"]
+
+
+@pytest.mark.usefixtures("cost_reviewer")
+class TestApiEquivalentThroughMain:
+    @pytest.fixture
+    def review(self, monkeypatch, capsys):
+        """Run ``prxref review`` with the real CLI, loader and orchestrator."""
+        assert sys.modules["prxref.orchestrator"] is orchestrator
+
+        def run(llm, *flags):
+            forge = FakeForge(diff=ONE_FILE_DIFF)
+            monkeypatch.setattr("prxref.cli.detect_forge", lambda url: REF)
+            monkeypatch.setattr("prxref.cli.make_forge", lambda ref: forge)
+            monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: llm)
+            assert main(["review", "--pr-url", REF.url, "--no-post", *flags]) == 0
+            return capsys.readouterr().out
+
+        return run
+
+    def test_the_verbose_line_is_labelled(self, review):
+        out = review(_claude_llm(), "-v")
+        assert re.search(
+            r"^elapsed: \d+\.\ds tokens: \d+\+\d+ cost: \$0\.0020 \(API-equivalent\)$", out, re.M,
+        ), out
+
+    def test_another_source_prints_the_bare_figure(self, review):
+        out = review(CostLLM(cost_usd=0.001), "-v")
+        assert re.search(r"^elapsed: \d+\.\ds tokens: \d+\+\d+ cost: \$0\.0020$", out, re.M), out
+        assert "API-equivalent" not in out
+
+    def test_format_json_gains_no_key(self, review):
+        claude = json.loads(review(_claude_llm(), "--format", "json"))
+        other = json.loads(review(CostLLM(cost_usd=0.001), "--format", "json"))
+        assert list(claude) == list(other)
+        assert "cost_api_equivalent" not in claude
+        assert claude["cost_usd"] == pytest.approx(0.002)
