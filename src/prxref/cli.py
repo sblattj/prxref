@@ -1553,7 +1553,8 @@ def _cmd_prompts_export(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point dispatching ``review``, ``serve``, or ``--version``."""
+    """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare``,
+    ``trace render``, ``prompts export``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
