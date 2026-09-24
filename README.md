@@ -349,11 +349,14 @@ The other subcommands: `prxref serve [--port N] [--host H]` runs the [webhook se
 
 `prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its three actions:
 
-- `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--resume]` replays every case and writes the run to `DIR/NAME/`:
+- `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume]` replays every case and writes the run to `DIR/NAME/`:
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
   - `--label NAME` — the run's name and its directory under `--out`. Required. An existing label exits `2` unless `--resume` is given.
   - `--out DIR` — the directory that holds the runs (default `./prxref-eval/`). `score` and `compare` take it too.
-  - `--rules-file PATH` — team review rules for every case, as for `review`: it overrides `PRXREF_REVIEW_RULES`, and `--rules-file ""` turns it off. It is read for each case, so an unusable file fails every case rather than exiting `2`.
+  - `--rules-file PATH` — team review rules for every case, as for `review`: it overrides `PRXREF_REVIEW_RULES`, and `--rules-file ""` turns it off.
+  - `--scoped-rules PATH` — path-scoped rules for every case, as for `review`: it overrides `PRXREF_SCOPED_RULES`, and `--scoped-rules ""` turns it off. Repeatable.
+  - `--prompts-dir DIR` — prompt templates for every case, as for `review`: it overrides `PRXREF_PROMPTS_DIR`, and `--prompts-dir ""` turns it off.
+  - Each of the three is checked once, before the first case runs: a file or directory that fails its checks exits `2`, naming the flag, or the variable when the flag is not given. The run's `run.json` and `score.json` record the scoped rules in force, as `review` records them.
   - `--resume` — continue an existing `--label` run instead of refusing it.
 - `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
   - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.

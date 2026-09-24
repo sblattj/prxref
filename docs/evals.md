@@ -45,7 +45,8 @@ reads the same `PRXREF_*` settings `prxref review` does (see
   never exits `1`.
 - `2`: a configuration error, printed to standard error as
   `configuration error: <message>`. The message names what supplied the bad
-  value: a flag (`--cases`, `--label`, `--out`, `--judge-model`), the
+  value: a flag (`--cases`, `--label`, `--out`, `--rules-file`,
+  `--scoped-rules`, `--prompts-dir`, `--judge-model`), the
   argument `A` or `B` of `compare`, or an environment variable. Every
   exit-`2` check of `eval run` happens before any case runs and before
   anything is written. `prxref eval` with no action prints the help to
@@ -186,7 +187,7 @@ For example:
 ## `prxref eval run`
 
 ```bash
-prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--resume]
+prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume]
 ```
 
 | Flag | Meaning |
@@ -194,14 +195,18 @@ prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--res
 | `--cases PATH` | The labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. |
 | `--label NAME` | The run's name, and its directory under `--out`. Required. Letters, digits, `.`, `_` and `-`, starting with a letter or digit. |
 | `--out DIR` | The directory that holds the runs. Default `./prxref-eval/`. |
-| `--rules-file PATH` | Team review rules for every case, as `prxref review --rules-file`. |
+| `--rules-file PATH` | Team review rules for every case, as `prxref review --rules-file`. Overrides `PRXREF_REVIEW_RULES`; `--rules-file ""` turns it off. |
+| `--scoped-rules PATH` | Path-scoped review rules for every case, as `prxref review --scoped-rules`. Repeatable. Replaces `PRXREF_SCOPED_RULES`; `--scoped-rules ""` turns it off. |
+| `--prompts-dir DIR` | Prompt templates for every case, as `prxref review --prompts-dir`. Overrides `PRXREF_PROMPTS_DIR`; `--prompts-dir ""` turns it off. |
 | `--resume` | Continue an existing run instead of refusing it. |
 
 It exits `2`, before any case runs and before anything is written, on a
 `--label` that is not a safe name, a bad dataset (naming `--cases`), a
-malformed environment (naming the variable), an existing run directory
-without `--resume` (naming `--label`), or a run directory that cannot be
-created (naming `--out`).
+malformed environment (naming the variable), an unusable rules file,
+scoped rules entry or prompts directory (naming `--rules-file`,
+`--scoped-rules` or `--prompts-dir`, or the variable when the flag is not
+given), an existing run directory without `--resume` (naming `--label`), or
+a run directory that cannot be created (naming `--out`).
 
 ### How a case is reviewed
 
@@ -243,18 +248,31 @@ LLM backend and model chain, the chunking, the quality passes,
 matter for a comparison are recorded in `run.json`. In particular:
 
 - `PRXREF_REVIEW_RULES` reaches every case unless `--rules-file` is given.
-  `--rules-file ""` turns it off for the run.
-- `PRXREF_PROMPTS_DIR` reaches every case. The run records the templates in
-  force under `prompts.prompt_templates`.
+  `--rules-file ""` turns it off for the run. The run records the file in
+  force under `review_rules`.
+- `PRXREF_SCOPED_RULES` reaches every case unless `--scoped-rules` is given.
+  The flags replace the whole list, and `--scoped-rules ""` turns it off
+  for the run. The run records the scoped rules in force under
+  `scoped_rules`.
+- `PRXREF_PROMPTS_DIR` reaches every case unless `--prompts-dir` is given.
+  `--prompts-dir ""` turns it off for the run. The run records the
+  templates in force under `prompts.prompt_templates`.
 - `PRXREF_TRACE_DIR` is replaced: each case's trace goes to its own
   `trace/` directory.
 - `PRXREF_TRACE_FILE` is inherited, so every case appends to the same JSONL
   trace.
 
+So two arms that differ only in their scoped rules or prompt templates are
+set with these flags, and `run.json` and the `run` block of `score.json`
+tell them apart.
+
 An environment that cannot load at all (a malformed number, a value out of
-range) exits `2` before any case runs. A file named by the environment is
-read per case, like a `--rules-file`, so an unusable one fails every case
-instead.
+range) exits `2` before any case runs. The rules file, the scoped rules and
+the prompts directory every case shares are loaded once, before the first
+case, as `prxref review` loads them, the scoped rules checked against the
+rules file. An unusable one exits `2`, naming the flag, or the variable
+when the flag is not given, and no case runs. Each case then loads them
+again for its own review.
 
 ### The run directory
 
@@ -285,7 +303,7 @@ prxref-eval/                        --out
 - **`cases/<id>/error.json`** replaces it when the review raised:
   `{"case_id": "<id>", "error": "<ExceptionType>: <message>"}`. That covers
   a configuration error the review raised for this case alone, such as an
-  unusable `--rules-file`.
+  unreadable `diff_file`.
 - **`cases/<id>/trace/`** holds what `--trace-dir` writes for the review:
   each unit's `.system.md`, `.user.md`, `.response.json` and `.meta.json`
   files (`chunk0`, ..., `sweep`). `eval score` adds the judge's `judge.*`
@@ -303,12 +321,15 @@ prxref-eval/                        --out
 | `prompts` | `sha256`: the SHA-256 of the packaged `worker`, `systemic` and `summary` templates; `prompt_templates`: the record's stamp of a `PRXREF_PROMPTS_DIR` override, or `null` |
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
+| `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
 | `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `scoped_rules_max_chars` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
-only under `prompts.prompt_templates`. `prompt_templates`, `sampling` and
-`review_rules` are copied from the first case, in dataset order, whose
-record's verdict is not `Error`. They are `null` when there is none.
+only under `prompts.prompt_templates`. `prompt_templates`, `sampling`,
+`review_rules` and `scoped_rules` are copied from the first case, in dataset
+order, whose record's verdict is not `Error`. They are `null` when there is
+none, and `review_rules`, `scoped_rules` and `prompt_templates` are `null`
+when their input is off.
 
 **No credential is ever written.** `config` is an allowlist of the eleven
 settings above, and a record carries no credential. The traces do hold the
@@ -328,7 +349,7 @@ directory:
 
 ```text
 case-001-mcp-protocol-upgrade: Request-Changes (3 active findings)
-case-002-session-token-logging: failed: ConfigError: --rules-file: ...
+case-002-session-token-logging: failed: ConfigError: --diff-file: ...
 case-003-config-schema-pin: Approved (1 active finding)
 run directory: prxref-eval/base
 ```
@@ -464,8 +485,8 @@ The keys, in order:
 
 - `version`: `1`.
 - `label`: `--label`.
-- `run`: the run's `prompts`, `sampling`, `review_rules` and `config`,
-  copied from `run.json`.
+- `run`: the run's `prompts`, `sampling`, `review_rules`, `scoped_rules`
+  and `config`, copied from `run.json`.
 - `judge`: `null` when no judge was built. Otherwise:
   - `model`: `--judge-model`;
   - `sampling`: the judge's `temperature`, `seed` and `models`;

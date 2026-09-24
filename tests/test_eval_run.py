@@ -182,12 +182,17 @@ class TestLayout:
                 "head_sha": HEAD_SHA, "expected": [],
             },
         ])
+        rules_file = str(data / "RULES.md")
+        (data / "RULES.md").write_text("Prefer early returns.\n", encoding="utf-8")
         review = FakeReview()
 
-        _run(_args(cases, tmp_path / "out", "--rules-file", "RULES.md"), review)
+        _run(_args(cases, tmp_path / "out", "--rules-file", rules_file), review)
 
         cases_dir = tmp_path / "out" / "L" / "cases"
-        common = {"post": False, "no_threads": True, "rules_file": "RULES.md"}
+        common = {
+            "post": False, "no_threads": True, "rules_file": rules_file,
+            "scoped_rules": None, "prompts_dir": None,
+        }
         assert review.calls == [
             {
                 "url": None, **common, "diff_file": str(data / "change.patch"),
@@ -459,7 +464,7 @@ class TestRunJson:
         run = _read(tmp_path / "out" / "L" / "run.json")
         assert list(run) == [
             "version", "label", "cases_path", "created_at", "case_ids", "prompts",
-            "sampling", "review_rules", "config",
+            "sampling", "review_rules", "scoped_rules", "config",
         ]
         assert run["version"] == evals.RUN_VERSION == 1
         assert run["label"] == "L"
