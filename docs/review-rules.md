@@ -120,7 +120,9 @@ being dropped as `invalid severity: 'blocker'`. See
 - **Only `severity:` is read.** Every other top-level key (`name:`,
   `description:`, …) is ignored and named once in an INFO log line, and any
   indented lines under it are skipped. So a Claude-style skill file,
-  multi-line `description: |` included, works unmodified.
+  multi-line `description: |` included, works unmodified. An `applies_to:`
+  or `applyTo:` key is skipped the same way but named in a WARNING instead,
+  because this file reaches every unit whatever the key says.
 - **The map.** `severity:` has nothing after the colon, and each indented line
   under it is `<word>: <tier>`. Either side may be quoted, and a word may
   contain spaces (`Must Fix`). Words are case-insensitive, and runs of
