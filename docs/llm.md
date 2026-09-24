@@ -171,7 +171,7 @@ Neither CLI takes a temperature or a seed either, so a review on a CLI backend i
 ### Concurrency and timeouts
 
 - `PRXREF_LLM_CLI_CONCURRENCY` (default `2`) caps the CLI processes one client runs at once. The review's workers queue for a free slot, and the wait does not count against the timeout. A subscription's rate window belongs to your account, so a higher cap spends it faster.
-- `PRXREF_LLM_TIMEOUT` is each model's wall-clock deadline, and it includes the CLI's own start-up: about 2.3 s for `claude` on a tiny prompt whose model time was 1.4 s, and 3.6–6.7 s for `kiro-cli`, as observed while designing these backends. The 45 s default is sized for HTTP; use `120` or more. A model that misses its deadline has its whole process group killed, the chain moves on, and the review's zero-context retry applies exactly as it does over HTTP.
+- `PRXREF_LLM_TIMEOUT` is each model's wall-clock deadline, and it includes the CLI's own start-up: about 2.3 s for `claude` on a tiny prompt whose model time was 1.4 s, and 3.6–6.7 s for `kiro-cli`, as observed while designing these backends. Live `kiro-cli` calls on 2026-09-23 were much slower, 24–27 s for a one-line prompt and 28–37 s for a review call, so for `kiro-cli` `120` is the floor, not a comfortable margin. The 45 s default is sized for HTTP; use `120` or more. A model that misses its deadline has its whole process group killed, the chain moves on, and the review's zero-context retry applies exactly as it does over HTTP.
 
 ### Tokens, cost and credits
 
@@ -246,7 +246,7 @@ Every run record carries `cost_usd` (USD) and `cost_estimated` (bool), on every 
 |---|---|---|
 | `openai-compat` (`ferry`, `http`) | The response body's `usage.cost` (OpenRouter returns it on every completion without being asked), else the `x-litellm-response-cost` response header that a LiteLLM gateway or `llm-ferry` sets. The body value must be a JSON number. LiteLLM omits the header when it cannot price the call **and** when the cost is zero, so a free model behind a gateway reports nothing. | `usage.cost` / `x-litellm-response-cost` |
 | `litellm` | `response_cost`, which litellm computes from its own price map. prxref never calls `litellm.completion_cost()`. | `litellm` |
-| `claude-cli` | The CLI's `total_cost_usd`. On a subscription this is the **API-equivalent cost at list price, not your subscription bill**. | `claude-cli` |
+| `claude-cli` | The CLI's `total_cost_usd`. On a subscription this is the **API-equivalent cost at list price, not your subscription bill**, so the `-v` line and the posted attribution label it `(API-equivalent)` (see [Where the cost shows](#where-the-cost-shows)). | `claude-cli` |
 | `kiro-cli` | None. Kiro reports credits, not dollars, and no token counts, so a price-table entry cannot estimate it either: a run on `kiro-cli` always reads "cost unknown". | — |
 
 prxref sends nothing extra to get a figure: the request never carries `usage: {"include": true}`. A figure that is not a finite number `>= 0` (a negative, `NaN`, a string in the body, an empty or `None` header) counts as no figure.
@@ -287,7 +287,7 @@ A review is its chunk workers plus the systemic sweep, and the total covers the 
 ### Where the cost shows
 
 - The run record and `--format json`: `cost_usd` and `cost_estimated`.
-- `prxref review -v`: `cost: $0.0007`, `~$0.0007 (est.)` or `cost unknown` after the token count.
+- `prxref review -v`: `cost: $0.0007`, `$0.0007 (API-equivalent)`, `~$0.0007 (est.)` or `cost unknown` after the token count.
 - The JSONL trace (`PRXREF_TRACE_FILE`): the `run ok` and `run fail` events carry `cost_usd` and `cost_estimated`. Each `chunk ok` and `sweep ok` event carries that unit's reported `cost_usd`; estimates are computed for the run only, so a unit priced from the table shows `null` there.
 - The per-unit trace files (`PRXREF_TRACE_DIR`): each `<unit>.meta.json` carries `cost_usd` and `cost_source`.
 - The posted comment, only with `PRXREF_POST_COST=1`. The cost is appended as the **last** field of the summary's attribution line and of the error notice's:
@@ -296,9 +296,10 @@ A review is its chunk workers plus the systemic sweep, and the total covers the 
   Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · $0.0007
   Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · ~$0.0007 (est.)
   Reviewed by prxref · model=openai/gpt-4o-mini · 4619 tok · 3.1s · cost unknown
+  Reviewed by prxref · model=claude-sonnet-5 · 7564 tok · 13.4s · $0.0202 (API-equivalent)
   ```
 
-  A notice posted before any LLM request says `$0.00`, and a cost below $0.0001 reads `<$0.0001`, never `$0.00`. Inline comments never carry a cost. With the flag off, which is the default, the attribution line is byte-identical to a build without cost accounting.
+  `(API-equivalent)` appears on the `-v` line and in the attribution when every reported figure in the run came from `claude-cli`; an estimated run keeps `~… (est.)`, and `--format json` adds no label (each unit's `cost_source` in the `PRXREF_TRACE_DIR` meta files names the source). A notice posted before any LLM request says `$0.00`, and a cost below $0.0001 reads `<$0.0001`, never `$0.00`. Inline comments never carry a cost. With the flag off, which is the default, the attribution line is byte-identical to a build without cost accounting.
 
 ## Worker Prompt Context
 

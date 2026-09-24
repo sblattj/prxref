@@ -16,6 +16,11 @@ Backends only report (:func:`valid_usd`, :func:`combine_reported`); nothing
 below the orchestrator ever sees the price table. Estimation happens once,
 over the finished run, in :func:`run_cost`. A run that made no LLM request at
 all never calls it: its cost is a known ``0.0``.
+
+claude-cli's figure is what the call would cost at API list price, not what
+a subscription is invoiced, so a run whose every reported figure came from
+it (:func:`api_equivalent_run`) is labelled ``(API-equivalent)`` wherever a
+person reads the cost (:func:`cost_label`).
 """
 from __future__ import annotations
 
@@ -33,6 +38,7 @@ _TABLE_SHAPE = 'a JSON object mapping model name to {"input": USD, "output": USD
 _ENTRY_EXAMPLE = '{"input": 0.15, "output": 0.60}'
 _UNKNOWN_MODEL = "<unknown model>"
 _SMALLEST_SHOWN = 0.0001
+_API_EQUIVALENT_SOURCES = frozenset({"claude-cli"})
 
 
 class ModelPrice(NamedTuple):
@@ -231,6 +237,26 @@ def run_cost(
     return round(math.fsum(parts), 10), estimated, []
 
 
+def api_equivalent_run(units: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether a run's reported cost is claude-cli's API-equivalent figure.
+
+    ``units`` are the same review units :func:`run_cost` totals. True when at
+    least one unit was received with a reported cost and EVERY such unit's
+    ``cost_source`` is ``"claude-cli"``; one reported unit from any other
+    source makes it false, because the total is then not an API-equivalent
+    figure. Only reported costs vote (read through :func:`unit_cost`): a unit
+    that raised, or one with no figure, has no source, so a claude-cli unit
+    whose cost is ``None`` does not count. An estimated run keeps its
+    ``(est.)`` label whatever this returns (:func:`cost_label`).
+    """
+    sources = [
+        source
+        for received, reported, source in (unit_cost(unit) for unit in units)
+        if received and reported is not None
+    ]
+    return bool(sources) and all(source in _API_EQUIVALENT_SOURCES for source in sources)
+
+
 def format_usd(value: float) -> str:
     """Render a dollar amount for people.
 
@@ -258,18 +284,29 @@ def format_usd(value: float) -> str:
     return f"${number:.2f}"
 
 
-def cost_label(cost_usd: float | None, estimated: bool) -> str:
+def cost_label(cost_usd: float | None, estimated: bool, *, api_equivalent: bool = False) -> str:
     """Return the label a run's cost is shown with.
 
-    ``"cost unknown"`` when there is no usable figure; ``"~$0.0007 (est.)"``
-    when it was estimated; ``"$0.0007"`` when it was reported (or a known
-    zero). The same label goes on the attribution line and the CLI.
+    Four forms:
+
+    - ``"cost unknown"`` when there is no usable figure;
+    - ``"~$0.0007 (est.)"`` when it was estimated, whatever ``api_equivalent``
+      says, because an estimate is the price table's figure, not the CLI's;
+    - ``"$0.0007 (API-equivalent)"`` when it was reported and
+      ``api_equivalent`` is true (:func:`api_equivalent_run`): claude-cli's
+      list-price figure, not a subscription bill;
+    - ``"$0.0007"`` when it was reported by any other source (or is a known
+      zero).
+
+    The same label goes on the attribution line and the CLI's ``-v`` line.
     """
     value = valid_usd(cost_usd)
     if value is None:
         return "cost unknown"
     text = format_usd(value)
-    return f"~{text} (est.)" if estimated else text
+    if estimated:
+        return f"~{text} (est.)"
+    return f"{text} (API-equivalent)" if api_equivalent else text
 
 
 def _count(value: object) -> int:
