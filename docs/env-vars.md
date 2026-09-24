@@ -155,7 +155,7 @@ Neither knob affects the exit code — `PRXREF_FAIL_ON` is the only one that can
 
 ## Quality Passes and Drop Reasons
 
-The two knobs above, plus the four opt-in levers added in 0.15.0 (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`, `PRXREF_GROUP_FINDINGS` and `PRXREF_DEDUP_SIMILARITY`, all off by default), are the only configuration that touches the filtering. The eleven deterministic passes themselves, the team severity map and spec grounding that run before them, the release-shaped-PR check, and every `drop_reason` string they emit are documented in one place: **[docs/quality.md](quality.md)**. Everything on that page other than the confidence floor, the per-severity caps, finding grouping and reworded-duplicate dedup is a correctness check against the diff itself, not a noise lever, and has no environment variable.
+The two knobs above, plus the four opt-in levers added in 0.15.0 (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`, `PRXREF_GROUP_FINDINGS` and `PRXREF_DEDUP_SIMILARITY`, all off by default), are the only configuration that touches the filtering. The twelve deterministic passes themselves, the team severity map and spec grounding that run before them, the release-shaped-PR check, and every `drop_reason` string they emit are documented in one place: **[docs/quality.md](quality.md)**. Everything on that page other than the confidence floor, the per-severity caps, finding grouping and reworded-duplicate dedup is a correctness check against the diff itself, not a noise lever, and has no environment variable.
 
 ## Environment Cross-Check & Defaults
 
