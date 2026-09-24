@@ -50,7 +50,7 @@ RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory",
 }
-NULL_WHEN_OFF = ("review_rules", "ticket_context", "spec_grounding", "size_advisory")
+NULL_WHEN_OFF = ("review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates")
 
 REPLAY = {
     "base_sha": "b" * 40,
@@ -195,7 +195,7 @@ class TestTheRecordKeys:
     def test_every_exit_carries_the_always_present_keys(self, monkeypatch, tmp_path, path):
         res, _, _ = _run(monkeypatch, path, tmp_path)
         assert res["verdict"] == VERDICT[path]
-        assert set(res) == BASE_KEYS | RECORD_KEYS
+        assert set(res) == BASE_KEYS | RECORD_KEYS | {"prompt_templates"}
         for key in NULL_WHEN_OFF:
             assert res[key] is None, key
         assert res["cost_estimated"] is False
@@ -223,7 +223,7 @@ class TestTheRecordKeys:
     @pytest.mark.parametrize("path", PATHS)
     def test_the_replay_stamp_rides_every_exit(self, monkeypatch, tmp_path, path):
         res, _, _ = _run(monkeypatch, path, tmp_path, replay=dict(REPLAY))
-        assert set(res) == BASE_KEYS | RECORD_KEYS | {"replay"}
+        assert set(res) == BASE_KEYS | RECORD_KEYS | {"prompt_templates", "replay"}
         assert res["replay"] == REPLAY
         assert list(res["replay"]) == ["base_sha", "head_sha", "threads", "diff_file"]
 

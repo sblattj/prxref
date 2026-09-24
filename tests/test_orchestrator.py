@@ -277,7 +277,7 @@ class TestHappyPath:
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
-            "spec_grounding", "size_advisory",
+            "spec_grounding", "size_advisory", "prompt_templates",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -745,7 +745,7 @@ class TestMaxTokensThreading:
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
-            "spec_grounding", "size_advisory",
+            "spec_grounding", "size_advisory", "prompt_templates",
         }
 
 
@@ -1059,7 +1059,7 @@ class TestQualityGateKnobsAreThreaded:
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
-            "spec_grounding", "size_advisory",
+            "spec_grounding", "size_advisory", "prompt_templates",
         }
 
 
@@ -1068,7 +1068,7 @@ RESULT_KEYS = {
     "chunks_reviewed", "chunks_failed",
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
-    "spec_grounding", "size_advisory",
+    "spec_grounding", "size_advisory", "prompt_templates",
 }
 
 
