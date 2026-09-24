@@ -55,7 +55,27 @@ its own findings against prxref's own stale comments and then delete them.
 
 ## Severity map from team review rules
 
-<!-- 0.14 placeholder: W63 -->
+When the team review-rules file declares a severity map
+(`PRXREF_REVIEW_RULES` / `--rules-file`; see
+[docs/review-rules.md](review-rules.md)), `apply_severity_map` runs **before
+pass 1**. It rewrites a team severity word the model wrote (`blocker`) to the
+prxref tier the map gives it (`error`), matching case-insensitively and with
+runs of whitespace collapsed. It runs first because every later pass reads the
+severity: consistency groups by it, the sweep boundary is re-derived from it,
+and the quality gate would drop `blocker` as `invalid severity: 'blocker'`.
+
+- It **drops nothing**, so it has no row in the drop-reason table below. A
+  word the map does not name passes through and still dies at the gate as
+  `invalid severity`.
+- It never rewrites a finding that already carries one of prxref's own
+  severities or a `drop_reason`. It keeps every other field, `scope`
+  included, and the list's length and order.
+- Without rules, or with rules that map nothing, the pass is not called.
+- When it rewrites any finding, prxref logs `severity map: rewrote N
+  finding(s) from team severity words` at INFO and the JSONL trace gets a
+  `rules remap` event with `findings=N`.
+
+The map never targets `spec`, so the pass never mints a spec finding.
 
 ## Spec grounding
 
