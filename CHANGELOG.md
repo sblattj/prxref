@@ -8,7 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
-## [0.17.0] — YYYY-MM-DD
+## [0.17.0] — 2026-09-25
 
 Java and Kotlin chunk context (#20), a bounded retry for unusable model replies
 (#21), and code that reads the state a change writes (#22, parts 2 and 3). A
@@ -1949,7 +1949,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/sblattj/prxref/releases/tag/v0.17.0
 [0.16.0]: https://github.com/sblattj/prxref/releases/tag/v0.16.0
 [0.15.0]: https://github.com/sblattj/prxref/releases/tag/v0.15.0
 [0.14.0]: https://github.com/sblattj/prxref/releases/tag/v0.14.0
