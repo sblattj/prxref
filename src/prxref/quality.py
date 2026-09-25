@@ -5,11 +5,13 @@ applies them; pass 1 runs only when the team review rules declare a
 severity map, pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
 finding grouping on, and pass 13 only when a team rules file is loaded
 and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A seventeenth
-deterministic check, the release-shaped-PR
-heuristic, is not a pass at all: ``heuristics.release_shape_findings``
-ADDS a finding before pass 1 and it then flows through every pass below
-exactly like a model finding. Every ``drop_reason`` prefix these passes
-emit is tabulated for operators in ``docs/quality.md``.
+deterministic check, the release-shaped-PR heuristic, and an eighteenth,
+the pinned-toggle heuristic, are not passes at all:
+``heuristics.release_shape_findings`` and
+``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
+before pass 1, and each then flows through every pass below exactly like
+a model finding. Every ``drop_reason`` prefix these passes emit is
+tabulated for operators in ``docs/quality.md``.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the
