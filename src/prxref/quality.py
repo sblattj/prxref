@@ -5,11 +5,13 @@ applies them; pass 1 runs only when the team review rules declare a
 severity map, pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
 finding grouping on, and pass 13 only when a team rules file is loaded
 and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A seventeenth
-deterministic check, the release-shaped-PR
-heuristic, is not a pass at all: ``heuristics.release_shape_findings``
-ADDS a finding before pass 1 and it then flows through every pass below
-exactly like a model finding. Every ``drop_reason`` prefix these passes
-emit is tabulated for operators in ``docs/quality.md``.
+deterministic check, the release-shaped-PR heuristic, and an eighteenth,
+the pinned-toggle heuristic, are not passes at all:
+``heuristics.release_shape_findings`` and
+``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
+before pass 1, and each then flows through every pass below like a model
+finding, except that pass 9 leaves it out. Every ``drop_reason`` prefix
+these passes emit is tabulated for operators in ``docs/quality.md``.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the
@@ -76,7 +78,8 @@ emit is tabulated for operators in ``docs/quality.md``.
    maximum severity, so per-chunk workers cannot disagree about how
    serious the same pattern is. Findings phrased differently but bound
    by a shared rare code token, with a shared problem class or file,
-   join the same group (issue #30).
+   join the same group (issue #30). A deterministic finding joins no
+   group, so it keeps the severity its check gave it.
 10. ``apply_removal_claim_check``: drop findings whose removal verb governs
     a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
     path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
@@ -153,6 +156,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
+from . import heuristics
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
 
@@ -1499,14 +1503,20 @@ def apply_severity_consistency(findings: Sequence[Finding]) -> list[Finding]:
     (error > warning > spec > outofscope). A rewritten finding keeps
     its own file, line, body, and confidence; only severity changes.
     Findings carrying a ``drop_reason`` or a severity outside the
-    vocabulary pass through untouched. One summary line is logged when
-    token-driven rewrites happen, naming the count and the binding
-    tokens; silent otherwise.
+    vocabulary pass through untouched. So does a deterministic finding
+    (:func:`prxref.heuristics.is_deterministic`: its body ends with
+    " (deterministic check, no model)"), whose severity is the check's
+    own rather than a model's call: it joins no group under either rule,
+    so it is never raised and never raises another finding, and its
+    claim does not count toward a token's rarity. One summary line is
+    logged when token-driven rewrites happen, naming the count and the
+    binding tokens; silent otherwise.
     """
     idx = [
         i for i, f in enumerate(findings)
         if f.drop_reason is None
         and (f.severity or "").strip().lower() in _SEVERITY_RANK
+        and not heuristics.is_deterministic(f)
     ]
     if not idx:
         return list(findings)

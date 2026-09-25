@@ -124,6 +124,21 @@ These only warn, and the run goes on:
 - a directory that holds none of the three, which reviews with the packaged
   templates.
 
+Nothing checks the reply format a worker or systemic template asks for. The
+only content rule beyond the marker and the placeholders is that
+`summary.md` keeps `{findings}`; no check reads the `"findings"` key of the
+example reply under `## Output Format`. That key matters since 0.17.0: with
+`PRXREF_LLM_PARSE_RETRIES` at `1` or more (the default is `1`), a reply
+that is a JSON object without a `findings` list is sent again, and when the
+retries run out the unit fails with `worker review JSON has no findings
+list`. So a template whose reply format drops or renames `findings` fails
+every chunk and the sweep, each after its retries, and the review ends as an
+`Error` review, which exits `0` under the default `PRXREF_FAIL_ON=never`.
+At `0`, such a reply counts as a review
+with no findings, as it did in 0.16.0, so the template silently reports
+nothing. Keep the `findings` list in the reply format. See
+[Parse Retries](llm.md#parse-retries).
+
 ## What is recorded
 
 The run record's `prompt_templates` names the directory and fingerprints each

@@ -24,6 +24,8 @@ import tomllib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
+from . import jvm_deps, jvm_lang
+
 # Caps are constants, not configuration: they bound prompt growth, and an
 # operator who wants a different prompt shape has no lever here worth exposing.
 MAX_DEFINITION_ENTRIES = 40
@@ -40,6 +42,7 @@ DEPENDENCY_HEADER = "### Dependency versions"
 DEFINITIONS_HEADER = "### Definitions referenced by this chunk"
 SIBLING_HEADER = "### Other files changed in this PR"
 CONTRACT_HEADER = "### Contract excerpts"
+READER_HEADER = "### Code elsewhere that reads state this chunk writes"
 
 _JS_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
 
@@ -93,6 +96,9 @@ _MANIFESTS = {
     "rust": "Cargo.toml",
 }
 
+_JVM_LANGUAGES = frozenset({"java", "kotlin"})
+_GRADLE_SCRIPTS = frozenset({"build.gradle.kts", "settings.gradle.kts"})
+
 
 @dataclass(frozen=True)
 class ChunkFile:
@@ -144,7 +150,7 @@ def _language(path: str) -> str:
         return "go"
     if lower.endswith(".rs"):
         return "rust"
-    return ""
+    return jvm_lang.jvm_language(path)
 
 
 def _js_package(specifier: str) -> str:
@@ -319,13 +325,27 @@ def dependency_versions(
     For each changed file the nearest manifest — ``package.json``,
     ``pyproject.toml``, ``go.mod`` or ``Cargo.toml`` — is located by walking up
     from the file's directory to the repository root via ``read``. Only
-    packages actually imported on the chunk's added lines are reported. The
-    result is sorted and deduplicated; an unreadable or unparseable manifest
-    contributes nothing.
+    packages actually imported on the chunk's added lines are reported.
+
+    A Java or Kotlin file (``.java``, ``.kt``, ``.kts``) is handed to
+    :func:`prxref.jvm_deps.dependency_lines` instead, which finds the nearest
+    ``pom.xml``, ``build.gradle.kts`` or ``build.gradle`` and reports
+    ``groupId:artifactId@version`` lines, or ``groupId:artifactId@(managed by
+    ...)`` when a BOM or platform owns the version, for the imports on the
+    added lines. The Gradle scripts ``build.gradle.kts`` and
+    ``settings.gradle.kts`` are skipped without a read, because their imports
+    name the Gradle API rather than a declared dependency.
+
+    The result is every language's lines together, sorted and deduplicated; an
+    unreadable or unparseable manifest contributes nothing.
     """
     lines: set[str] = set()
     for entry in files:
         language = _language(entry.path)
+        if language in _JVM_LANGUAGES:
+            if entry.path.rsplit("/", 1)[-1] not in _GRADLE_SCRIPTS:
+                lines.update(jvm_deps.dependency_lines(entry.path, entry.added, read))
+            continue
         manifest = _MANIFESTS.get(language)
         if not manifest:
             continue
@@ -352,12 +372,14 @@ def _definition_regexes(language: str) -> tuple[re.Pattern[str], ...]:
         return (_JS_DEF_RE,)
     if language == "python":
         return (_PY_DEF_RE, _PY_ASSIGN_RE)
-    return ()
+    return jvm_lang.definition_regexes(language)
 
 
 def _keywords(language: str) -> frozenset[str]:
     if language == "python":
         return _PY_KEYWORDS
+    if language in _JVM_LANGUAGES:
+        return jvm_lang.keywords(language)
     return _JS_KEYWORDS
 
 
@@ -390,13 +412,25 @@ def referenced_definitions(
     ``max_lines_per_entry``. Order is deterministic (path, then line). Files
     larger than 512 KiB are skipped. When the entry or character cap trims the
     list, a final ``… N more definitions omitted`` line says so.
+
+    Languages with definition regexes are js, python, Java and Kotlin. Java
+    matches types, methods, fields and constants, and enum constants; Kotlin
+    matches types, ``fun`` and ``val``/``var``. The first regex that matches a
+    line decides it. A Java or Kotlin entry also starts at the annotation lines
+    directly above the definition (at most
+    :data:`prxref.jvm_lang.MAX_ANNOTATION_LINES`, and never so many that the
+    definition line itself would not fit in ``max_lines_per_entry``), and its
+    ``<line>`` is the first annotation's; those lines count toward
+    ``max_lines_per_entry``.
     """
     collected: list[tuple[str, int, str]] = []
+    max_annotations = max(0, min(jvm_lang.MAX_ANNOTATION_LINES, max_lines_per_entry - 1))
     for entry in chunk_files:
         language = _language(entry.path)
         regexes = _definition_regexes(language)
         if not regexes:
             continue
+        jvm = language in _JVM_LANGUAGES
         content = read(entry.path)
         if not content or len(content.encode("utf-8", "ignore")) > MAX_FILE_BYTES:
             continue
@@ -427,9 +461,13 @@ def referenced_definitions(
                 name = match.group(1)
                 if name in referenced and name not in seen:
                     seen.add(name)
-                    collected.append(
-                        (entry.path, number, _entry_text(lines, idx, max_lines_per_entry))
+                    start = (
+                        jvm_lang.annotation_start(lines, idx, max_annotations=max_annotations)
+                        if jvm else idx
                     )
+                    body = [above.rstrip() for above in lines[start:idx]]
+                    body.append(_entry_text(lines, idx, max_lines_per_entry - (idx - start)))
+                    collected.append((entry.path, start + 1, "\n".join(body)))
                 break
 
     collected.sort(key=lambda item: (item[0], item[1]))
@@ -450,6 +488,7 @@ def render_context_blocks(
     def_lines: Sequence[str],
     extra_def_lines: Sequence[str] = (),
     contract_lines: Sequence[str] = (),
+    reader_lines: Sequence[str] = (),
 ) -> str:
     """Render the prompt blocks, omitting each when it has no lines.
 
@@ -457,10 +496,13 @@ def render_context_blocks(
     ``def_lines`` followed by ``extra_def_lines`` (repository-context
     definitions) under one :data:`DEFINITIONS_HEADER`, and is present when
     either is non-empty. The contracts block, ``contract_lines`` under
-    :data:`CONTRACT_HEADER`, comes last. With the two optional arguments
-    empty, the output is exactly the two-block rendering repository context
-    predates. Returns the empty string when every list is empty, so the
-    prompt slot leaves no stray header behind.
+    :data:`CONTRACT_HEADER`, comes next, and the readers block,
+    ``reader_lines`` (code outside the diff that reads state the chunk
+    writes) under :data:`READER_HEADER`, comes last. With the three optional
+    arguments empty, the output is exactly the two-block rendering repository
+    context predates, and with ``reader_lines`` empty it is exactly the
+    rendering without a readers block. Returns the empty string when every
+    list is empty, so the prompt slot leaves no stray header behind.
     """
     blocks: list[str] = []
     if dep_lines:
@@ -470,6 +512,8 @@ def render_context_blocks(
         blocks.append(DEFINITIONS_HEADER + "\n\n" + "\n".join(definitions))
     if contract_lines:
         blocks.append(CONTRACT_HEADER + "\n\n" + "\n".join(contract_lines))
+    if reader_lines:
+        blocks.append(READER_HEADER + "\n\n" + "\n".join(reader_lines))
     return "\n\n".join(blocks)
 
 

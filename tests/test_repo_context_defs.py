@@ -40,11 +40,11 @@ def _java_match(line: str) -> str | None:
 class TestVocabulary:
     def test_reasons_order_is_the_admission_rank(self):
         assert REASONS == (
-            "cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search",
+            "cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search", "shared-state",
         )
 
     def test_kinds(self):
-        assert KINDS == ("definition", "contract")
+        assert KINDS == ("definition", "contract", "reader")
 
 
 class TestLanguageOf:
@@ -80,8 +80,9 @@ class TestDefinitionRegexes:
     def test_languages_without_regexes_get_none(self, language):
         assert definition_regexes(language) == ()
 
-    def test_java_is_not_added_to_chunk_context(self):
-        assert chunk_context._definition_regexes("java") == ()
+    def test_java_is_added_to_chunk_context(self):
+        assert chunk_context._definition_regexes("java") is chunk_context.jvm_lang.JAVA_DEFINITION_REGEXES
+        assert len(chunk_context._definition_regexes("java")) == 4
         assert len(definition_regexes("java")) == 1
 
 

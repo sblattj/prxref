@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from prxref import repo_crosschunk
+from prxref import chunk_context, repo_crosschunk
 from prxref.repo_context import REASONS, ContextEntry
 from prxref.repo_crosschunk import MAX_CHANGE_LINES, diff_definitions
 from prxref.triage import build_chunks, parse_unified_diff
@@ -126,7 +126,7 @@ class TestFixture:
         files, chunks = _fixture()
         read = _RepoReader()
         diff_definitions(_chunk_holding(chunks, CONNECTOR_SERVICE), files, read)
-        assert read.calls == [TRANSPORT_CONFIG, CONNECTOR_SERVICE]
+        assert read.calls == [TRANSPORT_CONFIG]
 
     @pytest.mark.parametrize("read", [None, lambda path: None], ids=["no-reader", "reader-returns-none"])
     def test_without_file_text_the_entries_come_from_hunks(self, read):
@@ -170,17 +170,29 @@ class TestReasons:
         entries = diff_definitions([CALLER], [CALLER, limits], read)
         assert _keys(entries) == [("app/Limits.java", 3, "Limits", "definition", "cross-chunk")]
 
-    def test_java_definition_in_the_chunks_own_file_outside_its_hunks_is_diff_file(self):
-        widget = _file(
+    @pytest.mark.parametrize(("path", "hunk", "text"), [
+        (
             "p/Widget.java",
-            (7, ["     Widget copy() {", "+        return new Widget();", "     }"]),
-        )
-        text = (
+            ["     Widget copy() {", "+        return new Widget();", "     }"],
             "package p;\n\npublic class Widget {\n\n    private int size;\n\n"
-            "    Widget copy() {\n        return new Widget();\n    }\n}\n"
-        )
-        entries = diff_definitions([widget], [widget], _Reader({"p/Widget.java": text}))
-        assert _keys(entries) == [("p/Widget.java", 3, "Widget", "definition", "diff-file")]
+            "    Widget copy() {\n        return new Widget();\n    }\n}\n",
+        ),
+        (
+            "p/Widget.kt",
+            ["     fun copy(): Widget {", "+        return Widget()", "     }"],
+            "package p\n\nclass Widget {\n\n    private val size = 0\n\n"
+            "    fun copy(): Widget {\n        return Widget()\n    }\n}\n",
+        ),
+    ], ids=["java", "kotlin"])
+    def test_a_jvm_definition_in_the_chunks_own_file_is_left_to_chunk_context(self, path, hunk, text):
+        widget = _file(path, (7, hunk))
+        read = _Reader({path: text})
+        assert diff_definitions([widget], [widget], read) == []
+        assert read.calls == []
+        lines = text.splitlines()
+        assert chunk_context.referenced_definitions(chunk_context.chunk_files([widget]), read) == [
+            f"{path}:3: " + "\n".join(lines[2:8]),
+        ]
 
 
 class TestSkips:
@@ -189,10 +201,17 @@ class TestSkips:
             "p/Widget.java",
             (3, [" public class Widget {", "+    Widget copy() { return new Widget(); }", " }"]),
         )
-        text = "package p;\n\npublic class Widget {\n    Widget copy() { return new Widget(); }\n}\n"
-        read = _Reader({"p/Widget.java": text})
+        assert diff_definitions([widget], [widget], None) == []
+
+    @pytest.mark.parametrize(("path", "line"), [
+        ("p/Widget.java", "+    Widget copy() { return new Widget(); }"),
+        ("p/Widget.kt", "+    fun copy(): Widget = Widget()"),
+    ], ids=["java", "kotlin"])
+    def test_a_jvm_file_in_the_chunk_is_skipped_when_a_reader_is_given(self, path, line):
+        widget = _file(path, (3, [" class Widget {", line, " }"]))
+        read = _Reader({path: "package p\n\nclass Widget {\n" + line[1:] + "\n}\n"})
         assert diff_definitions([widget], [widget], read) == []
-        assert read.calls == ["p/Widget.java"]
+        assert read.calls == []
 
     def test_a_python_file_in_the_chunk_is_skipped_when_a_reader_is_given(self):
         service = _file("app/service.py", (20, [" def handle(req):", "+    return build_reply(req)"]))
@@ -224,6 +243,107 @@ class TestSkips:
         read = _Reader({"app/Legacy.java": "public class Legacy {}\n"})
         assert diff_definitions([deletion], [deletion, other], read) == []
         assert read.calls == []
+
+
+INTRA_CHUNK = {
+    "java": {
+        "caller": ("p/A.java", (6, ["     void run() {", "+        Helper h = new Helper(new Own());", "     }"]),
+                   "package p;\n\nclass Own {\n}\n\npublic class A {\n    void run() {\n"
+                   "        Helper h = new Helper(new Own());\n    }\n}\n"),
+        "helper": ("p/Helper.java", (7, ["     int size() {", "+        return 2;", "     }"]),
+                   "package p;\n\npublic class Helper {\n    Helper(Own own) {\n    }\n\n"
+                   "    int size() {\n        return 2;\n    }\n}\n"),
+        "self_reference": "+        return new Helper(null).size();",
+        "name": "Helper", "name_line": 3, "own_line": 3,
+    },
+    "kotlin": {
+        "caller": ("p/A.kt", (6, ["     fun run() {", "+        val h = Helper(Own())", "     }"]),
+                   "package p\n\nclass Own\n\nclass A {\n    fun run() {\n        val h = Helper(Own())\n    }\n}\n"),
+        "helper": ("p/Helper.kt", (5, ["     fun size(): Int {", "+        return 2", "     }"]),
+                   "package p\n\nclass Helper(val own: Own) {\n\n    fun size(): Int {\n        return 2\n    }\n}\n"),
+        "self_reference": "+        return Helper(Own()).size()",
+        "name": "Helper", "name_line": 3, "own_line": 3,
+    },
+    "python": {
+        "caller": ("app/a.py", (5, [" def run():", "+    return load_helper(own())"]),
+                   "def own():\n    return 1\n\n\ndef run():\n    return load_helper(own())\n"),
+        "helper": ("app/helper.py", (5, [" def size():", "+    return 2"]),
+                   "def load_helper(value):\n    return value\n\n\ndef size():\n    return 2\n"),
+        "self_reference": "+    return load_helper(2)",
+        "name": "load_helper", "name_line": 1, "own_line": 1,
+    },
+    "js": {
+        "caller": ("web/a.ts", (5, [" export function run() {", "+  return renderCard(own());", " }"]),
+                   "function own() {\n  return 1;\n}\n\nexport function run() {\n  return renderCard(own());\n}\n"),
+        "helper": ("web/card.ts", (5, [" export function size() {", "+  return 2;", " }"]),
+                   "export function renderCard(value) {\n  return value;\n}\n\n"
+                   "export function size() {\n  return 2;\n}\n"),
+        "self_reference": "+  return renderCard(2);",
+        "name": "renderCard", "name_line": 1, "own_line": 1,
+    },
+}
+
+
+def _intra_chunk(language: str, *, helper_references_the_name: bool = False):
+    """The caller/helper pair for ``language``; line 1 of each helper hunk body is its one ``+`` line."""
+    case = INTRA_CHUNK[language]
+    caller_path, caller_hunk, caller_text = case["caller"]
+    helper_path, (start, body), helper_text = case["helper"]
+    if helper_references_the_name:
+        assert helper_text.count(body[1][1:]) == 1
+        helper_text = helper_text.replace(body[1][1:], case["self_reference"][1:])
+        body = [body[0], case["self_reference"], *body[2:]]
+    caller = _file(caller_path, caller_hunk)
+    helper = _file(helper_path, (start, body))
+    read = _Reader({caller_path: caller_text, helper_path: helper_text})
+    return case, caller, helper, read
+
+
+class TestTheChunksOwnFiles:
+    """With a reader, a chunk file is searched only for names its own added lines do not mention.
+
+    ``referenced_definitions`` shows a file's own out-of-hunk definitions for the
+    names on that file's added lines, so those are left to it; a name another
+    file of the same chunk references is still searched for, and so still found.
+    """
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_name_another_file_of_the_chunk_references_is_found_outside_the_hunk(self, language):
+        case, caller, helper, read = _intra_chunk(language)
+        entries = diff_definitions([caller, helper], [caller, helper], read)
+        assert _keys(entries) == [(helper.path, case["name_line"], case["name"], "definition", "diff-file")]
+        assert read.calls == [helper.path]
+        shown = chunk_context.referenced_definitions(chunk_context.chunk_files([caller, helper]), _Reader(read.texts))
+        assert [entry for entry in shown if entry.startswith(f"{helper.path}:")] == []
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_files_own_reference_is_left_to_chunk_context_and_that_file_is_not_read(self, language):
+        case, caller, helper, read = _intra_chunk(language)
+        entries = diff_definitions([caller, helper], [caller, helper], read)
+        assert [entry for entry in entries if entry.path == caller.path] == []
+        assert caller.path not in read.calls
+        lines = read.texts[caller.path].splitlines()
+        shown = chunk_context.referenced_definitions(chunk_context.chunk_files([caller, helper]), _Reader(read.texts))
+        assert [entry for entry in shown if entry.startswith(f"{caller.path}:")] == [
+            f"{caller.path}:{case['own_line']}: "
+            + chunk_context._entry_text(lines, case["own_line"] - 1, chunk_context.MAX_LINES_PER_DEFINITION),
+        ]
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_one_file_chunk_reads_nothing(self, language):
+        _, caller, _, read = _intra_chunk(language)
+        assert diff_definitions([caller], [caller], read) == []
+        assert read.calls == []
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_name_both_files_reference_is_shown_once_by_chunk_context(self, language):
+        case, caller, helper, read = _intra_chunk(language, helper_references_the_name=True)
+        assert diff_definitions([caller, helper], [caller, helper], read) == []
+        assert caller.path not in read.calls
+        shown = chunk_context.referenced_definitions(chunk_context.chunk_files([caller, helper]), _Reader(read.texts))
+        assert [entry.split(":", 2)[1] for entry in shown if entry.startswith(f"{helper.path}:")] == [
+            str(case["name_line"]),
+        ]
 
 
 class TestChangeEntries:

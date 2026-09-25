@@ -1,0 +1,47 @@
+{
+ "_about": "Canned worker and sweep replies for tests/test_issue_21_acceptance.py. A string is the reply text verbatim; any other value is sent as its JSON encoding. The findings cite added lines of pr.diff, so location validation keeps them.",
+ "ledger_finding": {
+  "findings": [
+   {
+    "file": "billing/ledger.py",
+    "line": 7,
+    "severity": "error",
+    "confidence": 0.95,
+    "title": "Amount is added without validation",
+    "body": "post_entry adds amount to the balance without checking its type or sign, so a negative or string amount corrupts the ledger."
+   }
+  ],
+  "escalations": []
+ },
+ "export_finding": {
+  "findings": [
+   {
+    "file": "billing/export.py",
+    "line": 7,
+    "severity": "error",
+    "confidence": 0.95,
+    "title": "Export file is written without an encoding",
+    "body": "open(path, \"w\") uses the platform default encoding, so the same ledger exports different bytes on different hosts."
+   }
+  ],
+  "escalations": []
+ },
+ "clean": {
+  "findings": [],
+  "escalations": []
+ },
+ "stray_quote": "{\"findings\":[{\"file\":\"billing/ledger.py\",\"line\":7\",\"severity\":\"error\",\"confidence\":0.95,\"title\":\"Amount is added without validation\",\"body\":\"post_entry adds amount without a check.\"}],\"escalations\":[]}",
+ "prose": "I reviewed the chunk and found nothing worth reporting.",
+ "list": [
+  {
+   "file": "billing/ledger.py",
+   "line": 7
+  }
+ ],
+ "no_findings": {},
+ "escalations_only": {
+  "escalations": []
+ },
+ "empty": "",
+ "truncated": "{\"findings\": [{\"file\": \"billing/ledger.py\", \"line\": 7, \"sev"
+}

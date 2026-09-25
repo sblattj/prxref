@@ -44,6 +44,13 @@ LLM / pipeline:
   PRXREF_LLM_CLI_CONCURRENCY    claude-cli / kiro-cli only: max CLI
                                 processes one client runs at once; positive
                                 int (default 2)
+  PRXREF_LLM_PARSE_RETRIES      Times a reply that is empty, does not parse, or
+                                lacks a ``findings`` list is re-sent up to N
+                                times; >= 0, where 0 keeps only the single
+                                empty-reply retry (default 1). Each discarded
+                                attempt is written as
+                                ``<label>.attempt<K>.response.json`` when
+                                ``--trace-dir`` is set.
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped;
                                 a probability in [0.0, 1.0] (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -249,17 +256,24 @@ LLM / pipeline:
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
   PRXREF_REPO_CONTEXT           Repository context (0.16.0): "off" (default) |
-                                "diff" | "repo". "off" leaves every prompt,
-                                post, trace and default-verbosity log
-                                byte-identical to 0.15.0. "diff" adds
+                                "diff" | "repo". "off" adds no repository
+                                context entry, read, trace event or log line;
+                                the same-file definitions and dependency
+                                versions, Java and Kotlin ones included since
+                                0.17.0, do not depend on it. "diff" adds
                                 cross-chunk definitions from other files
                                 already in the diff, plus diff-file entries,
                                 all read from the diff itself; no repository
                                 reader is needed. "repo" also reads files
                                 outside the diff — import, path-convention and
                                 name-search definitions, plus contract excerpts
-                                — through the forge's repository reader when
-                                one is available, or --repo-dir. Matching is
+                                and, with a file listing, readers (since
+                                0.17.0: excerpts of unchanged code that reads
+                                state the chunk's added lines write, in a last
+                                "Code elsewhere that reads state this chunk
+                                writes" block) — through the forge's
+                                repository reader when one is available, or
+                                --repo-dir. Matching is
                                 exact and case-sensitive, like PRXREF_FAIL_ON;
                                 any other value is a configuration error
   PRXREF_REPO_CONTEXT_MAX_CHARS Repository context (0.16.0): per-chunk
@@ -393,6 +407,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_seed": None,
     "llm_cli_path": "",
     "llm_cli_concurrency": 2,
+    "llm_parse_retries": 1,
     "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_warning_findings": None,
@@ -484,7 +499,7 @@ _INT_KEYS = frozenset({
     "llm_cli_concurrency", "review_rules_max_chars",
     "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
-    "max_findings_per_rule", "repo_context_max_chars",
+    "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
 _BOOL_KEYS = frozenset({
@@ -576,6 +591,7 @@ _RANGES: dict[str, _Range] = {
     "spec_max_chars": _Range(0),
     "spec_digest_tokens": _Range(0),
     "llm_cli_concurrency": _Range(0),
+    "llm_parse_retries": _Range(0, low_inclusive=True),
     "review_rules_max_chars": _Range(0),
     "ticket_context_max_chars": _Range(0),
     "size_warn_lines": _Range(0, low_inclusive=True),

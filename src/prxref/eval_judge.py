@@ -8,11 +8,12 @@ per-ref cap, cache key). This module runs it against a live client:
    ``prxref.llm_backends.create_llm_client`` factory the CLI looks up at call
    time. The judge therefore shares the review's backend, base URL and key
    path, and one test stub keyed on ``cfg["llm_models"]`` serves both.
-2. :func:`judge_case` grades one case with at most one single-shot
-   ``json_mode`` call. A cached grading makes no call. A response that
-   :func:`prxref.judge.parse_judge_response` rejects, and any exception the
-   client raises, make the case a judge error (:attr:`JudgeOutcome.error`),
-   never a score of 0.
+2. :func:`judge_case` grades one case with one single-shot ``json_mode``
+   call, sent again unchanged up to ``parse_retries`` times while
+   :func:`prxref.judge.parse_judge_response` rejects the reply (#21). A
+   cached grading makes no call. A response still rejected when the retries
+   run out, and any exception the client raises, make the case a judge
+   error (:attr:`JudgeOutcome.error`), never a score of 0.
 3. The cache is one JSON file per :func:`prxref.judge.judge_cache_key` under
    a directory the caller chooses; :func:`judge_cache_dir` names the
    conventional one, ``<out>/<label>/judge-cache/``. An entry holds the raw
@@ -62,7 +63,7 @@ from .judge import (
 )
 from .llm import ConfigError, LLMClient
 from .orchestrator import _sampling
-from .reviewer import _write_trace_files
+from .reviewer import _fold_retry_usage, _write_trace_files
 
 logger = logging.getLogger("prxref")
 
@@ -83,8 +84,8 @@ class JudgeOutcome:
     carries no grades, so it can never be read as a score of 0. ``error`` is
     ``None`` on success, otherwise a one-line reason. ``cached`` is true when
     the grades came from the cache, and ``llm_calls`` is the number of judge
-    requests this call made (0 for a cache hit or a case with no labels, 1
-    otherwise).
+    requests this call made (0 for a cache hit or a case with no labels,
+    otherwise 1 plus ``parse_retries``).
 
     ``ref_index`` maps each judge ref (``A1``, ``A2``, ...) to the index of
     its row in the run record's ``findings`` list as written, dropped rows
@@ -92,13 +93,20 @@ class JudgeOutcome:
     finding.
 
     ``model``, ``input_tokens``, ``output_tokens`` and ``elapsed_ms`` describe
-    the live call (``model`` is the name the backend reported; a cache hit
-    keeps the stored one, with zero tokens and time). ``cost_usd`` is this
-    call's cost: ``0.0`` when no request was made, ``None`` when it is unknown
+    the live calls: tokens and time cover every request, and ``model`` is the
+    name the backend reported for the last one (a cache hit keeps the stored
+    one, with zero tokens and time). ``cost_usd`` is the cost of every
+    request: ``0.0`` when no request was made, ``None`` when it is unknown
     (never ``0``), and ``cost_estimated`` is true when the price table
     supplied it. ``cost_source`` is the backend's reported source, ``""``
     unless a reported figure was used. ``unit`` is the cost unit
-    :func:`judge_cost` totals, or ``None`` when no request was made.
+    :func:`judge_cost` totals, with every request's usage folded in, or
+    ``None`` when no request was made.
+
+    ``parse_retries`` is the number of times :func:`judge_case` sent the same
+    request again because :func:`prxref.judge.parse_judge_response` rejected
+    the reply (#21): 0 for a cache hit, a case with no labels, a first reply
+    that parsed, and any call made with ``parse_retries=0``.
     """
 
     case_id: str
@@ -116,6 +124,7 @@ class JudgeOutcome:
     cost_estimated: bool = False
     cost_source: str = ""
     unit: dict[str, Any] | None = None
+    parse_retries: int = 0
 
     @property
     def ok(self) -> bool:
@@ -208,6 +217,7 @@ def judge_case(
     max_tokens: int = 4096,
     timeout_s: float | None = None,
     trace_dir: str = "",
+    parse_retries: int = 0,
 ) -> JudgeOutcome:
     """Grade one case's human findings against its run record's AI findings.
 
@@ -220,16 +230,32 @@ def judge_case(
     - A case with no labels has nothing to grade: empty grades, no call.
     - With ``cache_dir`` set, a valid entry for this case's cache key is used
       without a call; a corrupt one is a miss with a WARNING.
-    - Otherwise one ``client.invoke(system, user, json_mode=True)`` call is
-      made with ``max_tokens`` and ``timeout_s``. Any exception it raises,
-      and a response :func:`prxref.judge.parse_judge_response` rejects, is a
-      judge error with a WARNING; neither is cached. A graded response is
-      written to the cache atomically; a failed write is a WARNING and keeps
-      the grades.
+    - Otherwise ``client.invoke(system, user, json_mode=True)`` is called
+      with ``max_tokens`` and ``timeout_s``. A response
+      :func:`prxref.judge.parse_judge_response` rejects, for any reason, is
+      asked for again with the same request while fewer than
+      ``parse_retries`` (N, default 0) retries have run, so a case makes at
+      most ``1 + N`` calls; each retry logs one WARNING ending ``parse retry
+      <k> of <N>``. An exception the client raises is never retried. A
+      response still rejected when the retries run out, and any exception,
+      is a judge error with a WARNING, whose reason is the last call's;
+      neither is cached. Only the graded response is written to the cache,
+      atomically; a failed write is a WARNING and keeps the grades.
+    - Every call counts. Its tokens, time and reported cost are folded into
+      the outcome's ``unit`` (through
+      :func:`prxref.reviewer._fold_retry_usage`) before
+      :func:`prxref.costs.run_cost` prices it, ``model`` is the last call's,
+      ``llm_calls`` is ``1`` plus the retries made, and
+      :attr:`JudgeOutcome.parse_retries` counts them. At N=0 nothing is
+      retried, exactly as in 0.16.0.
     - ``price_table`` is the parsed ``PRXREF_PRICE_TABLE``; ``None`` or
       ``{}`` estimates nothing.
-    - A non-empty ``trace_dir`` receives the live call's prompt, response and
-      meta as ``judge.*`` files, as a review unit's trace does.
+    - A non-empty ``trace_dir`` receives the prompt, the last response and
+      the meta as ``judge.*`` files, as a review unit's trace does. At N of 1
+      or more, each rejected response that was retried is kept as
+      ``judge.attempt<K>.response.json`` (K from 1), and once a retry ran the
+      meta adds ``parse_retries`` and ``first_error``, the reason the first
+      response was rejected.
 
     A label without an id, or a repeated id, raises ``ValueError`` from
     :func:`prxref.judge.human_files`; the case loader refuses both first.
@@ -252,50 +278,52 @@ def judge_case(
             return JudgeOutcome(**base, grades=grades, error=None, cached=True, llm_calls=0, model=stored_model)
     system, user = split_judge_prompt(build_judge_prompt(case, ai))
     t0 = time.perf_counter()
-    try:
-        result = client.invoke(system, user, max_tokens=max_tokens, json_mode=True, timeout_s=timeout_s)
-    except Exception as exc:  # noqa: BLE001 - a failed judge call is a judge error, never a failed run
+    unit: dict[str, Any] = {"model": "", "input_tokens": 0, "output_tokens": 0, "cost_usd": None, "cost_source": ""}
+    attempts: list[str | None] | None = [] if parse_retries >= 1 else None
+    retries = 0
+    first_error = ""
+    while True:
+        try:
+            result = client.invoke(system, user, max_tokens=max_tokens, json_mode=True, timeout_s=timeout_s)
+        except Exception as exc:  # noqa: BLE001 - a failed judge call is a judge error, never a failed run
+            elapsed = _elapsed_ms(t0)
+            reason = f"judge call failed: {type(exc).__name__}: {exc}"
+            logger.warning("judge error for case %r: %s", case_id, reason)
+            trace_meta = {**_trace_meta(unit, elapsed, retries, first_error), "error": reason}
+            _write_trace_files(trace_dir, JUDGE_TRACE_LABEL, system, user, None, trace_meta, attempts=attempts)
+            return JudgeOutcome(**_live(base, unit, elapsed, retries, price_table), grades=None, error=reason)
         elapsed = _elapsed_ms(t0)
-        reason = f"judge call failed: {type(exc).__name__}: {exc}"
-        logger.warning("judge error for case %r: %s", case_id, reason)
-        unit = {"model": "", "input_tokens": 0, "output_tokens": 0, "cost_usd": None, "cost_source": ""}
-        trace_meta = {**unit, "elapsed_ms": elapsed, "error": reason}
-        _write_trace_files(trace_dir, JUDGE_TRACE_LABEL, system, user, None, trace_meta)
-        return JudgeOutcome(
-            **base, grades=None, error=reason, cached=False, llm_calls=1, elapsed_ms=elapsed,
-            cost_usd=None, unit=unit,
-        )
-    elapsed = _elapsed_ms(t0)
-    unit = {
-        "model": result.model,
-        "input_tokens": result.input_tokens,
-        "output_tokens": result.output_tokens,
-        "cost_usd": result.cost_usd,
-        "cost_source": result.cost_source,
-    }
-    cost_usd, cost_estimated, _unpriced = costs.run_cost([unit], price_table)
-    live = {
-        **base,
-        "cached": False,
-        "llm_calls": 1,
-        "model": result.model,
-        "input_tokens": result.input_tokens,
-        "output_tokens": result.output_tokens,
-        "elapsed_ms": elapsed,
-        "cost_usd": cost_usd,
-        "cost_estimated": cost_estimated,
-        "cost_source": result.cost_source if costs.valid_usd(result.cost_usd) is not None else "",
-        "unit": unit,
-    }
-    trace_meta = {**unit, "elapsed_ms": elapsed}
-    try:
-        grades = tuple(parse_judge_response(result.text, humans, ai_ref_files(ai)))
-    except JudgeParseError as exc:
-        reason = f"judge response rejected: {exc}"
-        logger.warning("judge error for case %r: %s", case_id, reason)
-        _write_trace_files(trace_dir, JUDGE_TRACE_LABEL, system, user, result.text, {**trace_meta, "error": reason})
-        return JudgeOutcome(**live, grades=None, error=reason)
-    _write_trace_files(trace_dir, JUDGE_TRACE_LABEL, system, user, result.text, trace_meta)
+        if retries:
+            _fold_retry_usage(unit, result)
+        else:
+            unit = {
+                "model": result.model,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "cost_usd": result.cost_usd,
+                "cost_source": result.cost_source,
+            }
+        try:
+            grades = tuple(parse_judge_response(result.text, humans, ai_ref_files(ai)))
+        except JudgeParseError as exc:
+            reason = f"judge response rejected: {exc}"
+            if attempts is not None and retries < parse_retries:
+                retries += 1
+                attempts.append(result.text)
+                first_error = first_error or reason
+                logger.warning(
+                    "judge for case %r: unusable reply (%s); parse retry %d of %d",
+                    case_id, exc, retries, parse_retries,
+                )
+                continue
+            logger.warning("judge error for case %r: %s", case_id, reason)
+            trace_meta = {**_trace_meta(unit, elapsed, retries, first_error), "error": reason}
+            _write_trace_files(trace_dir, JUDGE_TRACE_LABEL, system, user, result.text, trace_meta, attempts=attempts)
+            return JudgeOutcome(**_live(base, unit, elapsed, retries, price_table), grades=None, error=reason)
+        break
+    live = _live(base, unit, elapsed, retries, price_table)
+    trace_meta = _trace_meta(unit, elapsed, retries, first_error)
+    _write_trace_files(trace_dir, JUDGE_TRACE_LABEL, system, user, result.text, trace_meta, attempts=attempts)
     if entry_path is not None:
         _write_entry(entry_path, {
             "version": JUDGE_CACHE_VERSION,
@@ -314,11 +342,13 @@ def judge_cost(outcomes: Iterable[JudgeOutcome], price_table: Mapping[str, Any] 
     """Total a scoring run's judge cost: ``(cost_usd, cost_estimated)``.
 
     Totals the :attr:`JudgeOutcome.unit` of every outcome that made a request
-    with :func:`prxref.costs.run_cost`, the rule a review's cost follows: a
-    request that raised is skipped, and any received call without a reported
-    or estimated figure makes the whole total ``None``, never ``0`` and never
-    a partial sum. A run that made no request (every case cached or
-    unlabelled) costs a known ``0.0``.
+    with :func:`prxref.costs.run_cost`, the rule a review's cost follows. A
+    case's unit sums every attempt it made, parse retries included, so a case
+    is skipped only when none of its calls received a reply; a case whose
+    retry raised after a rejected reply still counts that reply. Any received
+    case without a reported or estimated figure makes the whole total
+    ``None``, never ``0`` and never a partial sum. A run that made no request
+    (every case cached or unlabelled) costs a known ``0.0``.
     """
     units = [outcome.unit for outcome in outcomes if outcome.unit is not None]
     if not units:
@@ -345,6 +375,34 @@ def _drop_reason(row: Any) -> Any:
 
 def _elapsed_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
+
+
+def _live(
+    base: Mapping[str, Any], unit: dict[str, Any], elapsed: int, retries: int, price_table: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    cost_usd, cost_estimated, _unpriced = costs.run_cost([unit], price_table)
+    return {
+        **base,
+        "cached": False,
+        "llm_calls": 1 + retries,
+        "model": unit["model"],
+        "input_tokens": unit["input_tokens"],
+        "output_tokens": unit["output_tokens"],
+        "elapsed_ms": elapsed,
+        "cost_usd": cost_usd,
+        "cost_estimated": cost_estimated,
+        "cost_source": unit["cost_source"] if costs.valid_usd(unit["cost_usd"]) is not None else "",
+        "unit": unit,
+        "parse_retries": retries,
+    }
+
+
+def _trace_meta(unit: Mapping[str, Any], elapsed: int, retries: int, first_error: str) -> dict[str, Any]:
+    meta = {**unit, "elapsed_ms": elapsed}
+    if retries:
+        meta["parse_retries"] = retries
+        meta["first_error"] = first_error
+    return meta
 
 
 def _cached_grades(

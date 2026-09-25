@@ -8,6 +8,227 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.17.0] — 2026-09-25
+
+Java and Kotlin chunk context (#20), a bounded retry for unusable model replies
+(#21), and code that reads the state a change writes (#22, parts 2 and 3). A
+chunk worker now sees, for a changed Java or Kotlin file, the definitions its
+added lines reference from the rest of that file and the Maven or Gradle
+versions of what they import, as it already did for JavaScript, TypeScript and
+Python. A reply that cannot be used as a review is sent again, up to
+`PRXREF_LLM_PARSE_RETRIES` times (default `1`). At `PRXREF_REPO_CONTEXT=repo`,
+a chunk also sees excerpts of unchanged code that reads state its added lines
+write. A new deterministic check, always on, flags a toggle that ships on
+while the pull request's own test setup turns it off. Repository context
+at `off` still adds nothing, but Java and Kotlin chunk context does not depend
+on it, so a pull request that changes a `.java`, `.kt` or `.kts` file can get
+new prompt blocks and forge reads with every setting at its default.
+`PRXREF_LLM_PARSE_RETRIES=0` handles replies exactly as 0.16.0 did. The run
+record and `--format json` gain one key, `parse_retries`.
+
+### Added
+
+- **Java and Kotlin definitions in chunk context (#20).** The `### Definitions
+  referenced by this chunk` block now covers `.java`, `.kt` and `.kts` files
+  at every `PRXREF_REPO_CONTEXT` level. Java definitions are types, methods,
+  fields and constants, and enum constants; Kotlin definitions are types
+  (`class` in every flavour, `interface`, `fun interface`, `object` and
+  `typealias`), `fun`, extension functions included, and `val` and `var`. An
+  entry starts at up to 2 annotation lines directly above the definition, its
+  line number is the first annotation's, and those lines count toward the
+  6-line entry cap. The block's other caps are unchanged: 40 entries, 8000
+  characters, and files over 512 KiB skipped.
+- **Maven and Gradle dependency versions (#20).** The `### Dependency
+  versions` block now lists `groupId:artifactId@version` for the imports on a
+  changed Java or Kotlin file's added lines. The build file is found by
+  walking up from the file's directory to the repository root, trying
+  `pom.xml`, then `build.gradle.kts`, then `build.gradle` at each level; the
+  first non-empty one wins. A `pom.xml` is resolved through its
+  `<properties>`, its parent chain inside the repository (at most 5 parents),
+  `<dependencyManagement>` and imported BOMs. A Gradle build file is read in
+  string notation (`"g:a:v"` and `"g:a"`), with `platform`,
+  `enforcedPlatform` and `mavenBom` as BOM owners and the version catalog
+  `libs.versions.toml`, which is read only when the build file mentions
+  `libs.`. A version that a BOM, a parent outside the repository or a Gradle
+  platform supplies reads `groupId:artifactId@(managed by <owner>)`. Imports
+  under `java`, `jdk`, `sun` and `kotlin` are skipped (`javax` is kept), and
+  so are imports under the project's own groupId or Gradle `group`. A
+  dependency matches an import when its groupId, of at least 2 segments, is a
+  package prefix of the import or shares at least 3 leading segments with it.
+  Among several matches, the artifactId that names a segment of the import
+  wins, so `com.fasterxml.jackson.databind` gives `jackson-databind`, and a
+  tie lists every tied artifact. A build file that cannot be parsed
+  contributes nothing and never fails a review, and a `pom.xml` that holds a
+  `<!DOCTYPE` or `<!ENTITY` declaration, or is larger than 512 KiB, is
+  refused before the XML parser runs.
+- **Kotlin in repository context (#20).** At `diff` and `repo`, `.kt` and
+  `.kts` files are searched for Kotlin type declarations (`class` in every
+  flavour, `interface`, a named `object` and `typealias`), as Java files are
+  for Java types. Neither language gets a method, function or property here.
+- **`PRXREF_LLM_PARSE_RETRIES` (#21).** A chunk or whole-PR sweep reply that
+  cannot be used as a review is sent again, as the same request with the same
+  prompt and budget, up to `PRXREF_LLM_PARSE_RETRIES` times: default `1`, at
+  least `0`, with no upper bound. One budget covers every kind of unusable
+  reply: an empty one, one that does not parse, one that parses to something
+  other than a JSON object and, at `1` or more, an object without a `findings`
+  list. An empty reply keeps the one retry 0.16.0 gave it, even at `0`. A
+  reply the provider stopped at the budget (`finish_reason` `length` or
+  `max_tokens`) is never retried, because its error already names
+  `PRXREF_LLM_MAX_TOKENS`, and neither is a call that raised. Each retry is a
+  new call that walks the model fallback chain again and logs one WARNING
+  ending `parse retry <k> of <N>`. Token counts and elapsed time cover every
+  call, and the unit's reported cost is their sum, or unknown when any call
+  reported none. Once the retries are spent, the unit fails with the last
+  reply's error, worded as in 0.16.0. `prxref review`, and so the webhook
+  server and `prxref eval run`, reads the variable; `orchestrate_review`,
+  `review_chunk` and `review_systemic` default to `0` for library callers.
+- **`parse_retries` in the run record and the trace (#21).** The run record
+  and `--format json` gain `parse_retries`, right after `repo_context`: the
+  retries summed over every chunk and the sweep. It is `0` when nothing was
+  sent again, including an exit before any review unit ran, and `null` when
+  `PRXREF_LLM_PARSE_RETRIES` is `0`. With `PRXREF_TRACE_DIR` set and the
+  variable at `1` or more, a unit that retried keeps each discarded reply as
+  `<unit>.attempt<K>.response.json` (K from 1) beside its four trace files,
+  which still show the reply that was used, and its `<unit>.meta.json` gains
+  `parse_retries` and `first_error`, the error the first reply would have
+  failed the unit with.
+- **A parse retry for the `prxref eval` judge (#21).** `prxref eval score`
+  reads `PRXREF_LLM_PARSE_RETRIES` (default `1`) from its own environment. A
+  judge reply the parser rejects for any reason (empty, not JSON, not an
+  object, no `grades` list, or a grades row that is not an object, has no
+  `human_id` or has an unknown grade) is sent again, the same request, up to
+  that many times. Unlike a review unit's, a truncated judge reply is
+  retried, and an empty one gets no retry at `0`. A call that raised and a
+  cache hit are never retried, and only the graded reply is cached.
+  `score.json`'s `judge` block gains `parse_retries` after `llm_calls`, which
+  counts every attempt, and `score.md`'s judge cost line adds `(1 parse
+  retry)` or `(<n> parse retries)` only when there were any. The judge's
+  `cost_usd` and the `judge_cost` metric count every attempt, and a case
+  whose retry raised after a rejected reply is priced by that reply. A traced
+  judge keeps each rejected reply as `judge.attempt<K>.response.json`, and
+  `judge.meta.json` gains `parse_retries` and `first_error`. `prxref eval
+  run` records `llm_parse_retries` in `run.json`'s `config`, which now holds
+  17 settings.
+- **Code elsewhere that reads state this chunk writes (#22).** At
+  `PRXREF_REPO_CONTEXT=repo`, with a repository reader and a file listing, a
+  chunk worker also gets excerpts of unchanged code that reads state the
+  chunk's added lines write, such as a map the change stores a new object in,
+  or a table it appends rows to. The keys come from subscript stores
+  (`recv[k] = v`, key `recv`) and from calls of `append`, `add`, `insert`,
+  `save`, `put`, `push`, `store`, `write`, `extend`, `update` or `setdefault`
+  (key: the receiver's last segment); a local alias such as `data =
+  run.root().data` resolves to its attribute, and a key the added lines
+  assign a new value is skipped. A read is `.key` or `["key"]` used other
+  than as a store, or `key.<method>(` with a method that is not one of those
+  verbs, in a listed file of the same language that the pull request does not
+  change; files sharing the most leading directories with the change come
+  first. Each excerpt runs from the enclosing definition to the read, at most
+  8 lines. A chunk gets at most 6 such entries and tries at most 24 files,
+  within the same 16-read chunk cap and 200-read run cap, and only after the
+  other sources have made their reads. The entries form a new last prompt
+  block, `### Code elsewhere that reads state this chunk writes`, share the
+  chunk's `PRXREF_REPO_CONTEXT_MAX_CHARS` budget, and rank last, so the
+  budget cuts them first. An excluded path is never read. In the run record
+  their kind is `reader` and their reason `shared-state`. `off` and `diff`
+  get no such block.
+- **Default-on toggles pinned off in tests (#22).** A new deterministic check,
+  always on, posts one `warning` at confidence 1.0 when the pull request adds
+  a toggle whose default is on and also adds a line to a suite-wide test
+  setup file (`conftest.py`, `setupTests.*`, `jest.setup.*` or
+  `vitest.setup.*`) that turns it off: the passing suite then never runs the
+  shipped default. The finding sits on the toggle's line, names every file
+  that pins it, and ends with `(deterministic check, no model)`. See
+  `docs/quality.md`.
+
+### Changed
+
+- **An object without `findings` is no longer a clean review (#21).** At the
+  default `PRXREF_LLM_PARSE_RETRIES=1`, a reply such as `{}` costs a second
+  call, and if that reply has no `findings` list either, the unit fails with
+  `worker review JSON has no findings list`, where 0.16.0 counted it as a
+  review with no findings. A reply that does not parse, or is not a JSON
+  object, also gets a second call, and the unit fails only when that reply
+  cannot be used either. A custom worker or systemic template whose reply
+  format drops `findings` fails every unit this way, and no template check
+  catches it (see `docs/prompt-templates.md`). `0` restores the 0.16.0
+  handling.
+- **Java and Kotlin files are read at every level (#20).** Chunk context can
+  read each changed Java or Kotlin file, and the build files its dependency
+  walk tries, through the forge at the PR head whenever the forge can read
+  files and the pull request has a head sha, with `PRXREF_REPO_CONTEXT` at
+  `off` too. These reads are cached per run and are not counted against the
+  repository-context read caps.
+- **A Java file's own definitions are shown once (#20).** With a repository
+  reader, the definitions a Java file of the chunk holds for the names its own
+  added lines mention now come from chunk context only, and are no longer
+  repeated as `diff-file` repository-context entries; Kotlin files work the
+  same way. A Java or Kotlin file of the chunk whose own added lines mention
+  every name the cross-chunk search wants is no longer read by that search.
+- **`read_cap_hit` can be true in more runs (#22).** At `repo`, the
+  shared-state search spends the reads the other sources leave, and a read the
+  cap refuses counts, so `read_cap_hit` in the run record, the `repo_context`
+  trace event and `cap_hit=yes` on the `-v` line can be true in a run where
+  the definitions and contract excerpts alone fit the cap.
+
+### Fixed
+
+- **A definition from another file of the same chunk.** With a
+  repository reader, repository context at `diff` and `repo` now finds a
+  definition that one Python or JavaScript/TypeScript file of a chunk
+  references and another file of the same chunk defines outside its hunks.
+  0.16.0 left the chunk's own Python and JavaScript/TypeScript files out of
+  that search entirely.
+- **A deterministic check's finding keeps its own severity.** Severity
+  consistency could raise the release-shape or pinned-off toggle finding to
+  the severity of a model finding in the same file that shared a rare code
+  token with it, or of a model finding with the same normalized title, so a
+  finding that ends `(deterministic check, no model)` could post at a
+  severity a model chose. The toggle finding was seen posted as an `error`
+  that way. Both checks' findings now take no part in severity consistency:
+  they are never raised, never raise another finding, and their text no
+  longer counts toward a code token's rarity.
+
+### Known limitations
+
+- **The follow-up lookup of #22 is not built.** Part 1 of #22, one bounded
+  extra call that looks up the symbol a below-floor finding says it could not
+  see, is deferred, and #22 stays open.
+- **A Java or Kotlin file can be fetched twice.** Chunk context and
+  repository context keep separate readers with no shared cache, so a file
+  both of them read costs two requests per run, as 0.16.0's dependency and
+  same-file blocks already did for other languages.
+- **Kotlin standard-library names cost lookups.** Names such as `Int`, `Unit`
+  or `Pair` are not in the built-in list of platform names repository context
+  ignores, so at `repo` each one a chunk mentions is looked for by the
+  file-name search, as a project type would be. Repository context has no
+  Kotlin import or path rules: outside the diff, a Kotlin type is found by the
+  file-name search alone.
+- **Precompiled Gradle script plugins are treated as Kotlin.** Only
+  `build.gradle.kts` and `settings.gradle.kts` are skipped by the dependency
+  lookup; another `*.gradle.kts` file is handled like any Kotlin source, so its
+  Gradle API imports cost a walk for the nearest build file.
+- **Some dependencies are not matched or not resolved.** An artifact whose
+  groupId is not a prefix of its packages gets no line: Guava, Lombok, JUnit 4,
+  Spring Boot starters and kotlinx among them. Gradle map notation
+  (`group: 'g', name: 'a'`) is not read, and a version set through a variable
+  or `gradle.properties` is not resolved.
+- **A truncated review reply is not retried.** A reply stopped at
+  `PRXREF_LLM_MAX_TOKENS` that cannot be used fails the unit on the first
+  call, with the budget named, whatever `PRXREF_LLM_PARSE_RETRIES` says.
+- **The timeout retry records its own parse retries only.** When a chunk is
+  run again after a timeout, only the second run's `parse_retries` is
+  counted, the same gap its token counts and cost have.
+- **`score.json` does not total the reviews' parse retries.** It counts the
+  judge's; each case's own run record carries its review's `parse_retries`.
+- **The shared-state search matches names, not types.** A reader is any line
+  that reads a key of the same name in a file of the same language, so an
+  unrelated `.data` or `table` elsewhere can fill an entry, and a reader in
+  another language is never found.
+- **The toggle check needs both lines in the pull request.** A new pin on a
+  toggle that already existed, or a new toggle that an existing setup line
+  pins, is not reported, and neither is a pin outside the four suite-wide
+  setup file names.
+
 ## [0.16.0] — 2026-09-25
 
 The repository-context release (#17). A chunk worker can now see code outside
@@ -1737,7 +1958,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/sblattj/prxref/releases/tag/v0.17.0
 [0.16.0]: https://github.com/sblattj/prxref/releases/tag/v0.16.0
 [0.15.0]: https://github.com/sblattj/prxref/releases/tag/v0.15.0
 [0.14.0]: https://github.com/sblattj/prxref/releases/tag/v0.14.0
