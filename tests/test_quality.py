@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import itertools
 import logging
+from dataclasses import replace
 
 import pytest
 
+from prxref import heuristics
 from prxref.forges.base import Thread
 from prxref.quality import (
     CONTAINMENT_NOTE_SUFFIX,
@@ -570,6 +572,130 @@ class TestSeverityTokenGrouping:
         with caplog.at_level(logging.INFO, logger=quality_logger.name):
             apply_severity_consistency([f1, f2])
         assert not [r for r in caplog.records if r.name == quality_logger.name]
+
+
+TOGGLE_DIFF = """\
+diff --git a/assistant/progress.py b/assistant/progress.py
+new file mode 100644
+--- /dev/null
++++ b/assistant/progress.py
+@@ -0,0 +1,2 @@
++class ProgressAnnouncer:
++    active = enabled("progress_notes", default=True)
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,2 @@
++def _off(monkeypatch):
++    monkeypatch.setenv("ASSISTANT_PROGRESS_NOTES", "false")
+"""
+
+
+def _toggle_finding() -> Finding:
+    """The pinned-off toggle check's own finding over ``TOGGLE_DIFF``.
+
+    Its claim carries the code tokens ``enabled``, ``progress_notes``,
+    ``true`` and ``assistant_progress_notes``.
+    """
+    (finding,) = heuristics.toggle_pinned_off_findings(parse_unified_diff(TOGGLE_DIFF))
+    assert heuristics.is_deterministic(finding)
+    assert (finding.file, finding.severity, finding.confidence) == (
+        "assistant/progress.py", "warning", 1.0,
+    )
+    return finding
+
+
+class TestDeterministicFindingsKeepTheirSeverity:
+    """A deterministic finding takes no part in severity consistency.
+
+    The live shape: the pinned-off toggle finding and a model ``error`` in
+    the same file shared the rare token ``assistant_progress_notes``, and
+    the toggle was posted as an ``error``.
+    """
+
+    def test_a_shared_rare_token_in_the_same_file_raises_neither(self, caplog):
+        from prxref.quality import logger as quality_logger
+
+        toggle = _toggle_finding()
+        model = _f(
+            file="assistant/progress.py", line=2, severity="error", confidence=0.9,
+            title="Progress notes vanish when the notes flag is off",
+            body="`announce` returns early whenever `ASSISTANT_PROGRESS_NOTES` is false, so no note is stored.",
+        )
+        with caplog.at_level(logging.INFO, logger=quality_logger.name):
+            result = apply_severity_consistency([toggle, model])
+        assert result[0] is toggle
+        assert result[0].severity == "warning"
+        assert result[1].severity == "error"
+        assert not [r for r in caplog.records if r.name == quality_logger.name]
+
+    def test_control_the_same_pair_without_the_mark_is_raised(self):
+        toggle = _toggle_finding()
+        unmarked = replace(toggle, body=toggle.body.removesuffix(heuristics._BODY_SUFFIX))
+        assert not heuristics.is_deterministic(unmarked)
+        model = _f(
+            file="assistant/progress.py", line=2, severity="error", confidence=0.9,
+            title="Progress notes vanish when the notes flag is off",
+            body="`announce` returns early whenever `ASSISTANT_PROGRESS_NOTES` is false, so no note is stored.",
+        )
+        result = apply_severity_consistency([unmarked, model])
+        assert [f.severity for f in result] == ["error", "error"]
+
+    def test_a_shared_normalized_title_raises_neither(self):
+        toggle = _toggle_finding()
+        model = _f(
+            file="assistant/engine.py", line=5, severity="error", confidence=0.9,
+            title="toggle `progress_notes` defaults on but the test setup pins it off.",
+            body="The suite never runs the default.",
+        )
+        assert normalize_title(model.title) == normalize_title(toggle.title)
+        result = apply_severity_consistency([toggle, model])
+        assert result[0] is toggle
+        assert [f.severity for f in result] == ["warning", "error"]
+
+    def test_a_deterministic_warning_never_raises_a_model_finding(self):
+        toggle = _toggle_finding()
+        spec = _f(
+            file="assistant/progress.py", line=2, severity="spec", confidence=0.8,
+            title="Notes stay off for the whole session",
+            body="The `ASSISTANT_PROGRESS_NOTES` value is read at import time.",
+        )
+        result = apply_severity_consistency([toggle, spec])
+        assert result[1] is spec
+        assert [f.severity for f in result] == ["warning", "spec"]
+
+    def test_two_model_findings_linked_only_through_it_stay_apart(self):
+        toggle = _toggle_finding()
+        a = _f(
+            file="assistant/progress.py", line=2, severity="error", confidence=0.9,
+            title="Announcer reads the flag once",
+            body="`enabled` is called only in the constructor, so a later change is never seen.",
+        )
+        b = _f(
+            file="assistant/progress.py", line=1, severity="warning", confidence=0.8,
+            title="Notes stay off for the whole session",
+            body="The `ASSISTANT_PROGRESS_NOTES` value is read at import time.",
+        )
+        result = apply_severity_consistency([a, toggle, b])
+        assert result[1] is toggle
+        assert result[2] is b
+        assert [f.severity for f in result] == ["error", "warning", "warning"]
+
+    def test_its_claim_does_not_count_toward_a_tokens_rarity(self):
+        toggle = _toggle_finding()
+        a = _f(
+            file="assistant/progress.py", line=2, severity="error", confidence=0.9,
+            title="Progress notes vanish when the notes flag is off",
+            body="`announce` returns early whenever `ASSISTANT_PROGRESS_NOTES` is false.",
+        )
+        b = _f(
+            file="assistant/progress.py", line=1, severity="warning", confidence=0.8,
+            title="Notes stay off for the whole session",
+            body="The `ASSISTANT_PROGRESS_NOTES` value is read at import time.",
+        )
+        result = apply_severity_consistency([a, toggle, b])
+        assert [f.severity for f in result] == ["error", "warning", "error"]
 
 
 class TestSpecSeverity:

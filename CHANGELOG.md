@@ -178,6 +178,15 @@ record and `--format json` gain one key, `parse_retries`.
   references and another file of the same chunk defines outside its hunks.
   0.16.0 left the chunk's own Python and JavaScript/TypeScript files out of
   that search entirely.
+- **A deterministic check's finding keeps its own severity.** Severity
+  consistency could raise the release-shape or pinned-off toggle finding to
+  the severity of a model finding in the same file that shared a rare code
+  token with it, or of a model finding with the same normalized title, so a
+  finding that ends `(deterministic check, no model)` could post at a
+  severity a model chose. The toggle finding was seen posted as an `error`
+  that way. Both checks' findings now take no part in severity consistency:
+  they are never raised, never raise another finding, and their text no
+  longer counts toward a code token's rarity.
 
 ### Known limitations
 
