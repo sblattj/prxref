@@ -51,11 +51,11 @@ BASE_KEYS = {
 RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context", "parse_retries",
+    "rule_counts", "repo_context", "parse_retries", "context_followup",
 }
 NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
-    "scoped_rules", "rule_counts", "repo_context", "parse_retries",
+    "scoped_rules", "rule_counts", "repo_context", "parse_retries", "context_followup",
 )
 
 REPLAY = {

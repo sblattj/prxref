@@ -42,11 +42,12 @@ JSON_KEYS = [
     "verdict", "findings", "chunk_count", "chunks_reviewed", "chunks_failed", "elapsed_ms",
     "input_tokens", "output_tokens", "cost_usd", "cost_estimated", "posted",
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context", "parse_retries",
+    "rule_counts", "repo_context", "parse_retries", "context_followup",
 ]
 NEW_RECORD_KEYS = [
     "cost_usd", "cost_estimated", "review_rules", "ticket_context", "spec_grounding", "size_advisory",
     "prompt_templates", "scoped_rules", "rule_counts", "repo_context", "parse_retries",
+    "context_followup",
 ]
 FINDING_KEYS = [
     "file", "line", "severity", "confidence", "scope", "rule", "locations", "title", "body", "drop_reason",
