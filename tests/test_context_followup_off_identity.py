@@ -154,7 +154,7 @@ class TestOffIdentity:
             _messages_sha(r) for r in requests_off
         )
 
-    def test_the_key_is_absent_at_this_base(self, review):
-        """At 43ec560, before the config key lands, the run.json config has no such key at all."""
+    def test_the_key_is_absent_or_none(self, review):
+        """At 43ec560 the run.json config has no such key at all; once it lands it is None when off."""
         payload, _ = review({"PRXREF_CONTEXT_FOLLOWUP": None})
-        assert "context_followup" not in payload
+        assert payload.get("context_followup") is None
