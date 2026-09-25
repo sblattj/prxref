@@ -759,8 +759,8 @@ def _build_json_result(result: Any) -> dict:
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
-    ``repo_context``, ``parse_retries``, then ``sampling`` and ``replay``
-    when present.
+    ``repo_context``, ``parse_retries``, ``context_followup``, then
+    ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -772,7 +772,10 @@ def _build_json_result(result: Any) -> dict:
     per-rule cap did not run, ``repo_context`` whenever
     ``PRXREF_REPO_CONTEXT`` is ``off``, ``parse_retries`` whenever
     ``PRXREF_LLM_PARSE_RETRIES`` is ``0``; otherwise it is the run's total
-    of parse retries over every chunk and the sweep, ``0`` when none ran);
+    of parse retries over every chunk and the sweep, ``0`` when none ran),
+    and so is 0.18's ``context_followup`` (``null`` whenever
+    ``PRXREF_CONTEXT_FOLLOWUP`` is ``off``; otherwise the follow-up record
+    of :func:`prxref.orchestrator.orchestrate_review`);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -810,6 +813,7 @@ def _build_json_result(result: Any) -> dict:
         "rule_counts": result.get("rule_counts"),
         "repo_context": result.get("repo_context"),
         "parse_retries": result.get("parse_retries"),
+        "context_followup": result.get("context_followup"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1436,6 +1440,7 @@ def _run_review(
         context_exclude_globs=cfg["context_exclude_globs"],
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
+        context_followup=cfg["context_followup"],
     )
 
 
