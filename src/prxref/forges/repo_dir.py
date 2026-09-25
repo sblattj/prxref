@@ -4,8 +4,8 @@
 local working tree, with no network access. ``read`` matches the shape of
 the forge adapters' ``get_file_content`` contract (see
 ``forges/github.py``); ``list_files`` gives a bounded, confined directory
-listing. The CLI flag and its wiring into the review pipeline belong to a
-later seat; this module only reads a confined filesystem tree.
+listing. The CLI flag and its wiring into the review pipeline live in
+``prxref.cli``; this module only reads a confined filesystem tree.
 """
 
 from __future__ import annotations

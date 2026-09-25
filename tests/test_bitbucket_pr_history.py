@@ -1,4 +1,4 @@
-"""Bitbucket Cloud ``get_pr_history``: description versions and cutoff inputs from ``/activity`` (#16, T7).
+"""Bitbucket Cloud ``get_pr_history``: description versions and cutoff inputs from ``/activity`` (#16).
 
 Fixture provenance, stated plainly. The ``/activity`` entries follow the shape
 map-16 records as verified anonymously on a public pull request:

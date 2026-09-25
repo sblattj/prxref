@@ -1,10 +1,9 @@
 """PRXREF_REPO_CONTEXT / _MAX_CHARS / CONTEXT_CONTRACT_GLOBS / _EXCLUDE_GLOBS.
 
-The four 0.16.0 config keys (#17, seat T1). Nothing reads them yet -- wiring
-is a later task -- so this module pins ``load_config`` behaviour only:
-defaults, coercion, range/choice enforcement, and the OQ5 "a set value
-REPLACES the built-in default, empty reads as unset" contract for
-``PRXREF_CONTEXT_CONTRACT_GLOBS``.
+The four 0.16.0 config keys (#17). This module pins ``load_config``
+behaviour only: defaults, coercion, range/choice enforcement, and the
+"a set value REPLACES the built-in default, empty reads as unset" contract
+for ``PRXREF_CONTEXT_CONTRACT_GLOBS``.
 """
 from __future__ import annotations
 

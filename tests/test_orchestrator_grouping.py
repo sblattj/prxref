@@ -160,7 +160,7 @@ BARE_EXCEPT_RAW = [
 
 
 class TestGroupingOnEndToEnd:
-    """Scripted LLM, real reviewer, real passes: the map-13 T6 acceptance run."""
+    """Scripted LLM, real reviewer, real passes: the issue #13 acceptance run."""
 
     def _run(self, *, group_findings=True, post=True, **kw):
         forge = FakeForge(diff=ONE_FILE_DIFF)
@@ -700,15 +700,15 @@ class TestCliWiring:
 
 
 # ---------------------------------------------------------------------------
-# Off-path identity. The capture below is the seat's BASE probe
-# (build-0.15/seats/Q13-E/capture_off.py) ported verbatim; the goldens are the
-# sha256 of its output at BASE cdb3e9e, before any #13 T6 edit. Record and JSON
-# keys are projected onto the BASE key sets, so a key another 0.15 feature adds
-# (always present, null when off) does not read as an off-path change here.
-# "main" and "override" were re-derived when worker.md dropped its "roughly
-# 30k tokens" promise (0.15, seat Q-ECHO): the only fields that moved are the
-# worker prompt and unit-file hashes and, for "override", the override
-# worker.md's sha256 and chars (42 fewer); "summary_only" renders no prompt.
+# Off-path identity. The capture below is a probe script's output, ported
+# verbatim; the goldens are the sha256 of its output at BASE cdb3e9e, before
+# any #13 edit. Record and JSON keys are projected onto the BASE key sets, so
+# a key another 0.15 feature adds (always present, null when off) does not
+# read as an off-path change here. "main" and "override" were re-derived
+# when worker.md dropped its "roughly 30k tokens" promise (0.15): the only
+# fields that moved are the worker prompt and unit-file hashes and, for
+# "override", the override worker.md's sha256 and chars (42 fewer);
+# "summary_only" renders no prompt.
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {

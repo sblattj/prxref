@@ -1,6 +1,6 @@
-"""The finding-grouping pass ``apply_rule_grouping`` (issue #13, T3).
+"""The finding-grouping pass ``apply_rule_grouping`` (issue #13).
 
-Also covers the one ``apply_sweep_dedup`` change T3 makes: a chunk finding
+Also covers the one ``apply_sweep_dedup`` change this issue makes: a chunk finding
 the grouping pass folded away still adds its key to the sweep dedup, so a
 sweep copy that restates it is dropped whichever pass runs first.
 """

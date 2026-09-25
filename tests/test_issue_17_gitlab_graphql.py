@@ -1,12 +1,13 @@
-"""Tests for GitLab's GraphQL-first ``list_paths`` (issue #17, task T19).
+"""Tests for GitLab's GraphQL-first ``list_paths`` (issue #17).
 
 The REST ``repository/tree?recursive=true`` listing returns every directory
 before any file, across the whole recursive walk, so under the page cap a large
-project loses files: the live check V1 saw gitlab-org/gitlab's first 21 pages
-come back 100% ``tree`` and ``list_paths`` return zero paths. The adapter now
-walks GraphQL's files-only ``tree.blobs`` connection first and falls back to the
-unchanged REST walk when the first GraphQL page is unusable. The response
-shapes below are the ones V1 observed live on gitlab.com.
+project loses files: a live check against gitlab.com saw gitlab-org/gitlab's
+first 21 pages come back 100% ``tree`` and ``list_paths`` return zero paths.
+The adapter now walks GraphQL's files-only ``tree.blobs`` connection first and
+falls back to the unchanged REST walk when the first GraphQL page is unusable.
+The response shapes below are the ones that live check against gitlab.com
+observed.
 """
 from __future__ import annotations
 
@@ -487,11 +488,11 @@ class TestFallbackToRest:
         assert session.verbs() == ["POST", "GET"]
 
 
-# --- the defect V1 observed live ---------------------------------------------------
+# --- the defect a live check against gitlab.com observed ---------------------------
 
 
 def _directories_first_rest_listing():
-    """REST as V1 saw it: every page up to the cap is directories, the files come after."""
+    """REST as the live gitlab.com check saw it: every page up to the cap is directories, the files come after."""
     cap = gitlab.MAX_LISTING_PAGES
     pages = [
         _rest_page(

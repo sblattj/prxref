@@ -1,4 +1,4 @@
-"""Tests for the per-chunk repository-context unit (issue #17, task T7).
+"""Tests for the per-chunk repository-context unit (issue #17).
 
 Covers :func:`prxref.repo_unit.build_unit_context` (sources, order, budget,
 the omitted line, exclusion and the guard), :func:`prxref.repo_context.exclude_predicate`

@@ -1,4 +1,4 @@
-"""Tests for the optional ``Forge.list_paths`` listing (issue #17, task T8).
+"""Tests for the optional ``Forge.list_paths`` listing (issue #17).
 
 ``PathListing`` and the Protocol method live in ``forges/base.py``;
 ``ReplayForge`` delegates the listing to the forge it wraps, ``LocalDiffForge``

@@ -1,4 +1,4 @@
-"""``review --scoped-rules PATH`` and ``PRXREF_SCOPED_RULES`` at the CLI (#12 T6).
+"""``review --scoped-rules PATH`` and ``PRXREF_SCOPED_RULES`` at the CLI (#12).
 
 ``_run_review`` loads the path-scoped rules right after the always-on rules
 file, through the same ``_load_text_input`` fence: after config, before

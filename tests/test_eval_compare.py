@@ -1,4 +1,4 @@
-"""``prxref eval compare``: two scored runs side by side, label by label (#14 T8).
+"""``prxref eval compare``: two scored runs side by side, label by label (#14).
 
 Most tests build each run's ``score.json`` from graded cases through
 :func:`prxref.eval_metrics.score_cases` and :func:`prxref.evals._score_json`,
