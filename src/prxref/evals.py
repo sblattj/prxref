@@ -55,6 +55,7 @@ RUN_CONFIG_KEYS = (
     "llm_backend",
     "llm_models",
     "llm_max_tokens",
+    "llm_parse_retries",
     "max_chunks",
     "chunk_token_budget",
     "chunk_max_files",
@@ -382,10 +383,14 @@ def eval_score(args: argparse.Namespace) -> int:
       the line of the location credited. The code checks that
       the ref is real and in the label's file, and the judge's replies are
       cached under ``<out>/<label>/judge-cache/``; a live call's prompt and
-      reply are traced as ``judge.*`` in the case's ``trace/``. A judge call
-      that fails or whose reply is rejected makes every judge-tier label of
-      that case ``judge_error``, which is left out of every denominator and
-      never read as ``none``.
+      reply are traced as ``judge.*`` in the case's ``trace/``. A reply the
+      judge parser rejects, for any reason, is asked for again with the same
+      request up to ``llm_parse_retries`` times (``PRXREF_LLM_PARSE_RETRIES``,
+      passed to :func:`~prxref.eval_judge.judge_case` as ``parse_retries``;
+      #21). A judge call that fails, or a reply still rejected when the
+      retries run out, makes every judge-tier label of that case
+      ``judge_error``, which is left out of every denominator and never read
+      as ``none``.
     - One AI finding credits at most two labels, across both tiers: when the
       deterministic tier has already used a finding's slots, a judge credit
       to it becomes ``none`` with a WARNING (``full`` keeps its slot before
@@ -429,8 +434,11 @@ def eval_score(args: argparse.Namespace) -> int:
       :func:`prxref.eval_judge.judge_stamp` (``model``, ``sampling``,
       ``prompt_version``, ``prompt_sha256``, ``self_judged``) followed by
       ``cost_usd`` and ``cost_estimated`` (:func:`prxref.eval_judge.judge_cost`
-      over every judge request), ``llm_calls``, ``cached`` (cases served from
-      the cache) and ``errors`` (``[{"case_id", "error"}]``, by case id);
+      over every judge request), ``llm_calls``, ``parse_retries`` (the
+      calls that re-sent a request whose reply the judge parser rejected,
+      summed over the cases; ``PRXREF_LLM_PARSE_RETRIES`` bounds them per
+      case, #21), ``cached`` (cases served from the cache) and ``errors``
+      (``[{"case_id", "error"}]``, by case id);
     - ``failed``: ``[{"case_id", "error"}]`` for each case whose review
       failed, by case id;
     - ``metrics`` and ``cases``: :func:`prxref.eval_metrics.score_cases`.
@@ -443,7 +451,8 @@ def eval_score(args: argparse.Namespace) -> int:
     severity``, ``Recall by category``, ``Accepted labels``, ``Unmatched AI
     findings``, ``Severity agreement`` (a human ``minor`` counts as
     ``warning``), ``Chunks failed``, ``Elapsed``, ``Cost`` and ``Judge``. A
-    ``None`` cost is written as ``unknown`` and never summed. It holds no
+    ``None`` cost is written as ``unknown`` and never summed. The judge's
+    cost line names its parse retries only when there were any. It holds no
     wall-clock time of the scoring run.
 
     Standard output gets the headline line, then ``score: <path of
@@ -606,6 +615,7 @@ def _grade_case(
             price_table=cfg["price_table"],
             max_tokens=cfg["llm_max_tokens"],
             trace_dir=str(run_case.case_dir / "trace"),
+            parse_retries=cfg["llm_parse_retries"],
         )
         grades.update(_judge_grades(outcome, judged, judge_record["findings"], origin))
     else:
@@ -711,14 +721,15 @@ def _judge_block(
     outcomes: Sequence[eval_judge.JudgeOutcome],
     price_table: Any,
 ) -> dict[str, Any]:
-    """The ``judge`` stamp of ``score.json``: the judge stamp plus the run's judge cost and calls."""
+    """The ``judge`` stamp of ``score.json``: the judge stamp plus the run's judge cost, calls and retries."""
     cost_usd, cost_estimated = eval_judge.judge_cost(outcomes, price_table)
     return {
         **eval_judge.judge_stamp(client, judge_model, self_judged=self_judged),
         "cost_usd": cost_usd,
         "cost_estimated": cost_estimated,
         "llm_calls": sum(outcome.llm_calls for outcome in outcomes),
-        "cached": sum(1 for outcome in outcomes if outcome.cached),
+        "parse_retries": sum(outcome.parse_retries for outcome in outcomes),
+        "cached":sum(1 for outcome in outcomes if outcome.cached),
         "errors": [
             {"case_id": outcome.case_id, "error": outcome.error}
             for outcome in sorted(outcomes, key=lambda item: item.case_id)
@@ -864,7 +875,11 @@ def _judge_cost_line(judge: Mapping[str, Any] | None) -> str:
     text = f"- Judge: {_usd(judge['cost_usd'])}"
     if judge["cost_usd"] is not None and judge["cost_estimated"]:
         text += " (estimated)"
-    return text + f", {judge['llm_calls']} call(s), {judge['cached']} case(s) from the cache"
+    text += f", {judge['llm_calls']} call(s)"
+    retries = judge["parse_retries"]
+    if retries:
+        text += f" ({retries} parse {'retry' if retries == 1 else 'retries'})"
+    return text + f", {judge['cached']} case(s) from the cache"
 
 
 def _judge_lines(judge: Mapping[str, Any] | None) -> list[str]:
