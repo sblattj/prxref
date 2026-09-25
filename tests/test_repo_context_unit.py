@@ -439,6 +439,7 @@ class TestOrder:
         canned.sources["diff"] = [_entry("a/x.java", 1, "diff-file"), _entry("z/y.java", 1, "cross-chunk")]
         canned.sources["contract"] = [_entry("y/spec.yaml", 1, "contract", kind="contract")]
         canned.sources["resolver"] = [
+            _entry("d/r.java", 1, "shared-state", kind="reader"),
             _entry("a/n.java", 1, "name-search"),
             _entry("b/p.java", 1, "path-convention"),
             _entry("c/i.java", 1, "import"),
@@ -448,7 +449,7 @@ class TestOrder:
 
         assert [e.reason for e in unit.entries] == list(REASONS)
         assert [e.path for e in unit.entries] == [
-            "z/y.java", "y/spec.yaml", "a/x.java", "c/i.java", "b/p.java", "a/n.java",
+            "z/y.java", "y/spec.yaml", "a/x.java", "c/i.java", "b/p.java", "a/n.java", "d/r.java",
         ]
 
     def test_within_a_reason_path_then_line(self, canned):
