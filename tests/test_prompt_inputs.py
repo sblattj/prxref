@@ -141,7 +141,8 @@ def _meta():
 def _chunk_double(findings, calls=None):
     def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, context_lines=None, context_blocks="",
-            sibling_files=(), trace_label="", trace_dir="", prompt_context=None):
+            sibling_files=(), trace_label="", trace_dir="", prompt_context=None,
+            parse_retries=0):
         if calls is not None:
             calls.append(prompt_context)
         return list(findings), _meta()
@@ -152,7 +153,7 @@ def _chunk_double(findings, calls=None):
 def _sweep_double(findings, calls=None):
     def _rs(llm, digest, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, threads=(), trace_label="", trace_dir="",
-            prompt_context=None):
+            prompt_context=None, parse_retries=0):
         if calls is not None:
             calls.append(prompt_context)
         return list(findings), _meta()
