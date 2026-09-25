@@ -1,0 +1,167 @@
+From c2cea0de750cb4eb5f82cc43b9077c0ea74e2525 Mon Sep 17 00:00:00 2001
+From: Example <dev@example.com>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH] feat: progress notes before each engine step
+
+---
+ .gitignore             |  2 ++
+ README.md              |  4 ++++
+ assistant/engine.py    |  9 ++++++++
+ assistant/progress.py  | 48 ++++++++++++++++++++++++++++++++++++++++++
+ tests/conftest.py      |  7 ++++++
+ tests/test_progress.py | 19 +++++++++++++++++
+ 6 files changed, 89 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 assistant/progress.py
+ create mode 100644 tests/conftest.py
+ create mode 100644 tests/test_progress.py
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..6c56ff1
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,2 @@
++__pycache__/
++.pytest_cache/
+diff --git a/README.md b/README.md
+index 7a5fe57..5825cd4 100644
+--- a/README.md
++++ b/README.md
+@@ -2,3 +2,7 @@
+ 
+ A tiny chat assistant engine: a user message runs a loop of steps (model calls and tool calls).
+ A run that needs a human hands off: its state is saved to the state store and resumed later.
++
++Progress notes (`ASSISTANT_PROGRESS_NOTES`, default on): before each step the user sees a short
++line such as "Running find order...". Notes are saved as `progress` messages and never sent
++to the model.
+diff --git a/assistant/engine.py b/assistant/engine.py
+index 3906b9f..473fac8 100644
+--- a/assistant/engine.py
++++ b/assistant/engine.py
+@@ -3,6 +3,7 @@ from dataclasses import dataclass
+ from typing import Callable
+ 
+ from assistant.messages import Message, MessageTable
++from assistant.progress import ProgressAnnouncer
+ from assistant.session import Run
+ from assistant.state_store import StateStore
+ 
+@@ -18,6 +19,7 @@ class Engine:
+     def __init__(self, table: MessageTable, store: StateStore) -> None:
+         self.table = table
+         self.store = store
++        self.progress = ProgressAnnouncer(table)
+ 
+     def run_turn(self, run: Run, steps: list[Step]) -> str | None:
+         answer = None
+@@ -26,6 +28,13 @@ class Engine:
+                 # A human takes over: park the run so it can resume later.
+                 self.store.save(run)
+                 return None
++            self.progress.announce(run, _note_for(step))
+             answer = step.execute(run)
+             self.table.append(Message(run.session_id, "tool" if step.kind == "tool" else "assistant", answer))
+         return answer
++
++
++def _note_for(step: Step) -> str:
++    if step.kind == "tool":
++        return f"Running {step.name.replace('_', ' ')}..."
++    return "Thinking about your request..."
+diff --git a/assistant/progress.py b/assistant/progress.py
+new file mode 100644
+index 0000000..3de8e25
+--- /dev/null
++++ b/assistant/progress.py
+@@ -0,0 +1,48 @@
++"""Progress notes: a short user-facing line announced before each step runs.
++
++Each note is saved as a message (role "progress") so the transcript holds exactly what the
++user saw. A per-turn ledger on the root frame drops a note that repeats one already shown.
++"""
++from assistant.features import enabled
++from assistant.messages import Message, MessageTable
++from assistant.session import Run
++
++LEDGER_KEY = "progress.ledger"
++
++
++class ProgressLedger:
++    """Notes shown to the user during one turn."""
++
++    def __init__(self, turn_id: str) -> None:
++        self._turn_id = turn_id
++        self._lines: list[str] = []
++
++    def turn_id(self) -> str:
++        return self._turn_id
++
++    def record(self, line: str) -> bool:
++        key = line.strip().lower()
++        if any(shown.strip().lower() == key for shown in self._lines):
++            return False
++        self._lines.append(line)
++        return True
++
++
++class ProgressAnnouncer:
++    def __init__(self, table: MessageTable) -> None:
++        self.table = table
++        self.active = enabled("progress_notes", default=True)
++
++    def announce(self, run: Run, text: str) -> None:
++        if not self.active:
++            return
++        if self._ledger(run).record(text):
++            self.table.append(Message(run.session_id, "progress", text))
++
++    def _ledger(self, run: Run) -> ProgressLedger:
++        data = run.root().data
++        ledger = data.get(LEDGER_KEY)
++        if not isinstance(ledger, ProgressLedger) or ledger.turn_id() != run.turn_id:
++            ledger = ProgressLedger(run.turn_id)
++            data[LEDGER_KEY] = ledger
++        return ledger
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..e67d65d
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,7 @@
++import pytest
++
++
++@pytest.fixture(autouse=True)
++def _progress_notes_off(monkeypatch):
++    # Keep exact message-table assertions deterministic; progress tests opt in.
++    monkeypatch.setenv("ASSISTANT_PROGRESS_NOTES", "false")
+diff --git a/tests/test_progress.py b/tests/test_progress.py
+new file mode 100644
+index 0000000..e0a446c
+--- /dev/null
++++ b/tests/test_progress.py
+@@ -0,0 +1,19 @@
++from assistant.engine import Engine, Step
++from assistant.messages import MessageTable
++from assistant.session import Frame, Run
++from assistant.state_store import StateStore
++
++
++def test_each_step_is_announced_once(monkeypatch):
++    monkeypatch.setenv("ASSISTANT_PROGRESS_NOTES", "true")
++    table = MessageTable()
++    engine = Engine(table, StateStore())
++    run = Run("s1", "t1", [Frame("root")])
++    steps = [
++        Step("tool", "find_order", lambda r: "order 7"),
++        Step("model", "reply", lambda r: "thinking"),
++        Step("model", "reply", lambda r: "your order shipped"),
++    ]
++    assert engine.run_turn(run, steps) == "your order shipped"
++    notes = [m.text for m in table.recent("s1", 50) if m.role == "progress"]
++    assert notes == ["Running find order...", "Thinking about your request..."]
+-- 
+2.50.1 (Apple Git-155)
+
