@@ -1,4 +1,4 @@
-"""The chunk/sweep boundary survives the quality gate (0.15.0, seat R18-D).
+"""The chunk/sweep boundary survives the quality gate (0.15.0).
 
 ``orchestrate_review`` hands :func:`quality.apply_sweep_dedup` the gate's
 output split back into chunk findings and sweep findings. The gate returns
@@ -270,7 +270,7 @@ class TestNoTriggerMatchesBase:
 
 
 def _base_split(gated, before, sweep_start):
-    """The walk this seat replaced, verbatim: the first copies of a SWEEP key go to the sweep side."""
+    """The walk this fix replaced, verbatim: the first copies of a SWEEP key go to the sweep side."""
     sweep_left: dict = {}
     for f in before[sweep_start:]:
         key = _origin_key(f)

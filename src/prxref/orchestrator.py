@@ -125,7 +125,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
    ``spec_grounding``, ``size_advisory``, ``prompt_templates``,
-   ``scoped_rules``, ``rule_counts``; ``replay`` on replays only, and
+   ``scoped_rules``, ``rule_counts``, ``repo_context``; ``replay`` on replays only, and
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
@@ -166,13 +166,13 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 
-from . import chunk_context, costs, heuristics, reviewer, specs, systemic
+from . import chunk_context, costs, heuristics, repo_contracts, repo_reader, repo_unit, reviewer, specs, systemic
 from .forges.base import (
     ATTRIBUTION_MARKER,
     Forge,
@@ -181,6 +181,7 @@ from .forges.base import (
     PRRef,
     Thread,
 )
+from .forges.repo_dir import RepoDir
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
 from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
@@ -209,6 +210,7 @@ from .quality import (
     prompt_example_titles,
     rule_cap_counts,
 )
+from .repo_context import exclude_predicate
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .trace import Tracer, get_tracer
 from .triage import (
@@ -431,6 +433,11 @@ def orchestrate_review(
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
     max_findings_per_rule: int = 2,
+    repo_context: str = "off",
+    repo_context_max_chars: int = 12000,
+    context_contract_globs: Sequence[str] = (),
+    context_exclude_globs: Sequence[str] = (),
+    repo_dir: RepoDir | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -438,9 +445,9 @@ def orchestrate_review(
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
-    rule_counts}``, plus ``replay`` on a replay run only.
+    rule_counts, repo_context}``, plus ``replay`` on a replay run only.
     Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last nine keys are always present and are
+    :func:`_run_record`, so the last ten keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
@@ -454,6 +461,8 @@ def orchestrate_review(
     chunking, or LLM — the run degrades to verdict ``"Error"`` with a posted
     notice when ``post`` is true. Degenerate arguments are part of that: a
     caller passing ``max_chunks=0`` gets an error run, not a ``ValueError``.
+    The one exception is an unknown ``repo_context`` level, which raises
+    ``ValueError`` before any forge call (see below).
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists (an
@@ -655,7 +664,69 @@ def orchestrate_review(
     unlimited and reads no environment variable; ``0`` drops every finding
     of that severity. ``outofscope`` is the minor severity, not the ticket
     scope ``out``.
+
+    ``repo_context`` is the repository-context level
+    (``PRXREF_REPO_CONTEXT``): ``"off"`` (the default), ``"diff"`` or
+    ``"repo"`` (:data:`prxref.repo_unit.MODES`). Any other value raises
+    ``ValueError`` before any forge call; config rejects it long before, so
+    this guards a library caller only. ``repo_context_max_chars``
+    (``PRXREF_REPO_CONTEXT_MAX_CHARS``) is each chunk's budget for it,
+    ``context_contract_globs`` (``PRXREF_CONTEXT_CONTRACT_GLOBS``) selects
+    the contract files, where ``()`` means none (the built-in set is
+    config's default, which the CLI passes), and ``context_exclude_globs``
+    (``PRXREF_CONTEXT_EXCLUDE_GLOBS``) adds to the exclude floor of
+    :func:`prxref.repo_context.exclude_predicate`: an excluded path is
+    never read, listed or shown. ``repo_dir`` is a
+    :class:`prxref.forges.repo_dir.RepoDir` to read the repository from in
+    place of the forge; this function does not validate it (``RepoDir``
+    does, when it is built). Off, nothing new is built or called: the
+    prompts, posts, trace and logs are exactly a run without these
+    arguments, and the record's ``repo_context`` key is ``None``.
+
+    On, the run has ONE reader (:class:`prxref.repo_reader.RepoReader`):
+    over ``repo_dir`` when given, else over the forge's optional
+    ``get_file_content`` and ``list_paths`` at ``pr.source_sha``, and none
+    when the forge cannot read or the PR has no head sha. At ``"repo"`` with
+    a reader, the path listing is taken once and the contract files are
+    selected once, before the chunk workers run. ``"repo"`` with no reader
+    (only diff-only entries from hunk lines are left), or with a reader but
+    no listing (no name search and no glob-matched contract files), logs one
+    WARNING naming ``PRXREF_REPO_CONTEXT``; ``"diff"`` with no reader
+    builds its entries from hunk lines and logs nothing. Each chunk's worker
+    builds its context once, before its first attempt, with
+    :func:`prxref.repo_unit.build_unit_context`. It reads a PR diff file
+    through the reader's shared, uncapped ``read`` and every other path
+    through a fresh ``chunk_reader()``, so the per-chunk read cap is spent
+    on the paths outside the diff alone, and the entries do not depend on
+    which chunk reads a shared diff file first. The context's definition
+    lines extend the definitions block and its contract lines form a
+    ``### Contract excerpts`` block, on the first attempt only: the timeout
+    retry carries neither. A build that raises gives that chunk no context
+    and one WARNING naming the chunk; the review goes on. The dependency and
+    same-file definition blocks keep their own reader in every mode, so a
+    diff file can be fetched once by each reader.
+
+    The ``repo_context`` key of every exit, when on, is ``{"mode",
+    "max_chars", "contract_globs", "exclude_globs", "reader", "listing",
+    "reads", "read_cap_hit", "units"}``. Until the chunk workers finish,
+    ``reader`` and ``listing`` are ``None``, ``reads`` is 0,
+    ``read_cap_hit`` is false and ``units`` is ``None``. After them,
+    ``reader`` is the reader's ``kind`` (``"forge"`` or ``"repo-dir"``) or
+    ``None``; ``listing`` (``{"paths", "complete"}`` or ``None``),
+    ``reads`` and ``read_cap_hit`` come from one
+    :meth:`~prxref.repo_reader.RepoReader.stats` snapshot, so ``reads``
+    counts repository-context fetches only; and ``units`` is ``{"chunks":
+    [{"entries", "omitted", "retry_dropped"}, ...]}``, one row per chunk in
+    chunk order, where ``retry_dropped`` is true when the timeout retry ran
+    (and so ran without the chunk's repository context). The sweep has no
+    row. One ``chunk context`` trace event per chunk (``index``, ``total``,
+    ``entries``, ``omitted``, ``chars``) and one ``repo_context ok`` event
+    per run carry the same figures, only when on.
     """
+    if repo_context not in repo_unit.MODES:
+        raise ValueError(
+            f"repo_context must be one of {repo_unit.MODES}, got {repo_context!r}"
+        )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
     sampling = _sampling(llm)
@@ -675,6 +746,7 @@ def orchestrate_review(
         "prompt_templates": None,
         "scoped_rules": None,
         "rule_counts": None,
+        "repo_context": None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -689,6 +761,18 @@ def orchestrate_review(
     if scoped_rules is not None:
         scoped_meta = {**scoped_rules.record(), "max_chars": scoped_rules_max_chars}
         run_inputs["scoped_rules"] = {**scoped_meta, "units": None}
+    if repo_context != "off":
+        run_inputs["repo_context"] = {
+            "mode": repo_context,
+            "max_chars": repo_context_max_chars,
+            "contract_globs": list(context_contract_globs),
+            "exclude_globs": list(context_exclude_globs),
+            "reader": None,
+            "listing": None,
+            "reads": 0,
+            "read_cap_hit": False,
+            "units": None,
+        }
     summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
     ticket_note = ticket.note() if ticket is not None else ""
@@ -961,12 +1045,30 @@ def orchestrate_review(
             prompts, feature="finding grouping" if group_findings else "the per-rule cap",
         )
     reader = _make_file_reader(forge, ref, pr)
+    repo_plan: _RepoPlan | None = None
+    unit_records: list[dict[str, Any] | None] | None = None
+    if repo_context != "off":
+        repo_plan = _plan_repo_context(
+            repo_context, forge, ref, pr, files, run_inputs["repo_context"], repo_dir=repo_dir,
+        )
+        unit_records = [None] * len(chunks)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
         reader=reader, all_files=files, trace_dir=trace_dir,
         prompt_context=prompt_context, scoped_blocks=scoped_blocks,
+        repo_plan=repo_plan, unit_records=unit_records,
     )
+    if repo_plan is not None and unit_records is not None:
+        run_inputs["repo_context"] = _repo_context_record(
+            run_inputs["repo_context"], repo_plan, unit_records,
+        )
+        record = run_inputs["repo_context"]
+        tracer.event(
+            "repo_context", "ok", mode=record["mode"], reader=record["reader"],
+            listing=record["listing"], reads=record["reads"],
+            read_cap_hit=record["read_cap_hit"],
+        )
 
     # One more worker-style unit, not inside the pool: the sweep digests the
     # WHOLE diff, so it only has something to say once every chunk result —
@@ -1773,21 +1875,189 @@ def _make_file_reader(forge: Forge, ref: PRRef, pr: PRData):
     return read
 
 
-def _context_blocks(chunk, reader, *, include_definitions: bool) -> str:
-    """Render the chunk's dependency and definition blocks; never raises."""
-    if reader is None:
+def _context_blocks(
+    chunk, reader, *, include_definitions: bool, unit: repo_unit.UnitContext | None = None,
+) -> str:
+    """Render the chunk's dependency, definition and contract blocks; never raises.
+
+    ``unit`` is the chunk's repository context. Its definition lines follow
+    the same-file definitions under one header and its contract lines form
+    the contracts block; they render with no ``reader`` too, over empty
+    dependency and same-file lists. ``None``, or a unit with no lines, is
+    exactly the rendering without repository context.
+    """
+    extra = unit.definition_lines if unit is not None else ()
+    contracts = unit.contract_lines if unit is not None else ()
+    if reader is None and not (extra or contracts):
         return ""
+    deps: list[str] = []
+    defs: list[str] = []
+    if reader is not None:
+        try:
+            files = chunk_context.chunk_files(chunk)
+            deps = chunk_context.dependency_versions(files, reader)
+            defs = (
+                chunk_context.referenced_definitions(files, reader)
+                if include_definitions else []
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("chunk context unavailable: %s", e)
+            if not (extra or contracts):
+                return ""
+            deps, defs = [], []
     try:
-        files = chunk_context.chunk_files(chunk)
-        deps = chunk_context.dependency_versions(files, reader)
-        defs = (
-            chunk_context.referenced_definitions(files, reader)
-            if include_definitions else []
+        return chunk_context.render_context_blocks(
+            deps, defs, extra_def_lines=extra, contract_lines=contracts,
         )
-        return chunk_context.render_context_blocks(deps, defs)
     except Exception as e:  # noqa: BLE001
         logger.debug("chunk context unavailable: %s", e)
         return ""
+
+
+@dataclass(frozen=True)
+class _RepoPlan:
+    """One run's repository-context inputs, fixed before the chunk workers start.
+
+    ``reader`` is the run's one :class:`prxref.repo_reader.RepoReader`, or
+    ``None``. ``diff_paths`` holds every PR diff file's path: a read of one
+    goes to the shared, uncapped ``reader.read``. The listing and contract
+    fields are the ``"repo"`` level's once-per-run inputs, and stay empty at
+    ``"diff"`` or without a reader.
+    """
+
+    mode: str
+    reader: repo_reader.RepoReader | None
+    max_chars: int
+    exclude: Callable[[str], bool]
+    diff_paths: frozenset[str]
+    listing_paths: frozenset[str] | None = None
+    listing_complete: bool = False
+    contract_paths: tuple[str, ...] = ()
+    contract_priority: tuple[str, ...] = ()
+
+
+def _plan_repo_context(
+    mode: str, forge: Forge, ref: PRRef, pr: PRData, files: Sequence[Any],
+    initial: Mapping[str, Any], *, repo_dir: RepoDir | None,
+) -> _RepoPlan:
+    """Build the run's reader and its once-per-run inputs, for a level other than ``"off"``.
+
+    ``initial`` is the run's initial ``repo_context`` record, whose
+    ``max_chars`` and glob lists are the inputs. The reader reads
+    ``repo_dir`` when it is given, else the forge at the PR's head sha. At
+    ``"repo"`` with a reader, the listing is taken here, once, and the
+    contract files are selected here, once. At ``"repo"``, a missing reader
+    or a missing listing logs the run's one WARNING naming
+    ``PRXREF_REPO_CONTEXT``.
+    """
+    exclude = exclude_predicate(initial["exclude_globs"])
+    if repo_dir is not None:
+        reader = repo_reader.repo_dir_reader(repo_dir, exclude=exclude)
+    else:
+        reader = repo_reader.forge_reader(
+            forge, ref, getattr(pr, "source_sha", "") or "", exclude=exclude,
+        )
+    diff_paths = frozenset(f.path for f in files)
+    if mode != "repo":
+        return _RepoPlan(mode, reader, initial["max_chars"], exclude, diff_paths)
+    if reader is None:
+        logger.warning(
+            "PRXREF_REPO_CONTEXT=repo, but there is no repository reader (the forge cannot "
+            "read files at the PR head and no repository directory was given); repository "
+            "context is limited to diff-only entries from hunk lines",
+        )
+        return _RepoPlan(mode, None, initial["max_chars"], exclude, diff_paths)
+    listing = reader.listing()
+    if listing is None:
+        logger.warning(
+            "PRXREF_REPO_CONTEXT=repo, but the repository path listing is unavailable; "
+            "repository context runs with no name search and no glob-matched contract files "
+            "outside the PR's own files",
+        )
+    globs = list(initial["contract_globs"])
+    return _RepoPlan(
+        mode, reader, initial["max_chars"], exclude, diff_paths,
+        listing_paths=frozenset(listing.paths) if listing is not None else None,
+        listing_complete=listing.complete if listing is not None else False,
+        contract_paths=tuple(repo_contracts.select_contract_files(
+            globs, listing=listing.paths if listing is not None else None,
+            diff_paths=[f.path for f in files if f.status != "removed"],
+        )),
+        contract_priority=tuple(repo_contracts.literal_contract_paths(globs)),
+    )
+
+
+def _routed_read(reader: repo_reader.RepoReader, diff_paths: frozenset[str]) -> Callable[[str], str | None]:
+    """One chunk's ``read``: a PR diff file through the shared ``reader.read``, any other path capped.
+
+    The capped half is a fresh :meth:`~prxref.repo_reader.RepoReader.chunk_reader`,
+    so the per-chunk cap is spent on paths outside the diff alone. Both
+    halves refuse an excluded path.
+    """
+    capped = reader.chunk_reader()
+    shared = reader.read
+
+    def read(path: str) -> str | None:
+        return shared(path) if path in diff_paths else capped(path)
+
+    return read
+
+
+def _chunk_unit(
+    plan: _RepoPlan, chunk, all_files, *, index: int, total: int,
+) -> repo_unit.UnitContext:
+    """Build one chunk's repository context in its worker; never raises.
+
+    A build that raises gives :data:`prxref.repo_unit.EMPTY_UNIT` and one
+    WARNING naming the chunk.
+    """
+    read = _routed_read(plan.reader, plan.diff_paths) if plan.reader is not None else None
+    try:
+        return repo_unit.build_unit_context(
+            chunk, all_files if all_files is not None else chunk,
+            mode=plan.mode, read=read, max_chars=plan.max_chars,
+            listing_paths=plan.listing_paths, listing_complete=plan.listing_complete,
+            contract_paths=plan.contract_paths, contract_priority=plan.contract_priority,
+            exclude=plan.exclude,
+        )
+    except Exception as e:  # noqa: BLE001 - context is never worth a failed review
+        logger.warning(
+            "[chunk %d/%d] repository context failed (continuing without it): %s",
+            index, total, e,
+        )
+        return repo_unit.EMPTY_UNIT
+
+
+def _unit_row(unit: repo_unit.UnitContext, *, retry_dropped: bool = False) -> dict[str, Any]:
+    """One chunk's ``repo_context`` units row: the unit's record plus ``retry_dropped``."""
+    return {**unit.record(), "retry_dropped": retry_dropped}
+
+
+def _repo_context_record(
+    initial: Mapping[str, Any], plan: _RepoPlan, unit_records: Sequence[dict[str, Any] | None],
+) -> dict[str, Any]:
+    """The ``repo_context`` record once the chunk workers are done.
+
+    ``reader`` is the reader's ``kind`` or ``None``; ``listing``, ``reads``
+    and ``read_cap_hit`` come from one ``stats()`` snapshot (``None``, 0
+    and false without a reader); ``units`` lists the rows in chunk order,
+    where a chunk whose worker left no row gets the empty unit's.
+    """
+    reader = plan.reader
+    stats = reader.stats() if reader is not None else {"reads": 0, "read_cap_hit": False, "listing": None}
+    return {
+        **initial,
+        "reader": reader.kind if reader is not None else None,
+        "listing": stats["listing"],
+        "reads": stats["reads"],
+        "read_cap_hit": stats["read_cap_hit"],
+        "units": {
+            "chunks": [
+                row if row is not None else _unit_row(repo_unit.EMPTY_UNIT)
+                for row in unit_records
+            ],
+        },
+    }
 
 
 def _scoped_unit_blocks(
@@ -1856,6 +2126,8 @@ def _run_workers(
     trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     scoped_blocks: Sequence[Any] | None = None,
+    repo_plan: _RepoPlan | None = None,
+    unit_records: list[dict[str, Any] | None] | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -1893,6 +2165,7 @@ def _run_workers(
                 trace_label=f"chunk{i}", trace_dir=trace_dir,
                 prompt_context=prompt_context,
                 scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
+                repo_plan=repo_plan, unit_records=unit_records,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -1941,6 +2214,7 @@ def _invoke_chunk(
     reader=None, *, include_definitions: bool = True, all_files=None,
     trace_label: str = "", trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
+    unit: repo_unit.UnitContext | None = None,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -1960,14 +2234,16 @@ def _invoke_chunk(
     unchanged on both attempts: it is intent, not bulk context, and a
     dict-shaped finding keeps its ``scope`` only when
     :attr:`reviewer.PromptContext.scope_active`, and its ``rule`` only when
-    :attr:`reviewer.PromptContext.rule_active`.
+    :attr:`reviewer.PromptContext.rule_active`. ``unit`` is the chunk's
+    repository context (:func:`_context_blocks`); :func:`_run_worker` passes
+    it on the first attempt only, and ``None`` renders exactly as before.
 
     The shape carries the reviewer's reported ``cost_usd`` and
     ``cost_source`` beside the token counts; a call that raised, or a stub
     whose meta lacks them, gives ``None`` and ``""``. Pricing is left to
     :func:`_stamp_run_cost`, over the whole run.
     """
-    blocks = _context_blocks(chunk, reader, include_definitions=include_definitions)
+    blocks = _context_blocks(chunk, reader, include_definitions=include_definitions, unit=unit)
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
@@ -2025,6 +2301,8 @@ def _run_worker(
     trace_label: str = "", trace_dir: str | None = None,
     *, prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     scoped_block: Any = None,
+    repo_plan: _RepoPlan | None = None,
+    unit_records: list[dict[str, Any] | None] | None = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -2046,9 +2324,20 @@ def _run_worker(
         files=[f.path for f in chunk],
         **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
     )
+    unit: repo_unit.UnitContext | None = None
+    if repo_plan is not None:
+        unit = _chunk_unit(repo_plan, chunk, all_files, index=index, total=total)
+        if unit_records is not None:
+            unit_records[index - 1] = _unit_row(unit)
+        tracer.event(
+            "chunk", "context", index=index, total=total,
+            entries=len(unit.entries), omitted=unit.omitted,
+            chars=sum(len(entry.rendered()) for entry in unit.entries),
+        )
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
         trace_label=trace_label, trace_dir=trace_dir, prompt_context=unit_context,
+        unit=unit,
     )
     if (
         res["error"]
@@ -2070,6 +2359,8 @@ def _run_worker(
         # The dependency block is a handful of tokens and survives; the
         # definitions block is the bulky one and is dropped, because shrinking
         # the prompt is the entire point of this retry.
+        if unit is not None and unit_records is not None:
+            unit_records[index - 1] = _unit_row(unit, retry_dropped=True)
         res = _invoke_chunk(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,

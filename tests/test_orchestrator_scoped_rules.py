@@ -1,4 +1,4 @@
-"""Path-scoped review rules in the orchestrator (#12 T5): ``orchestrate_review(scoped_rules=...)``.
+"""Path-scoped review rules in the orchestrator (#12): ``orchestrate_review(scoped_rules=...)``.
 
 The orchestrator takes one loaded :class:`prxref.rules.ScopedRules` and the
 per-unit cap, and wires them five ways: each chunk's own block replaces

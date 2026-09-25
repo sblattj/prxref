@@ -13,9 +13,11 @@ from requests.adapters import HTTPAdapter
 from prxref.forges._diff_render import render_diff_entries as _render_diff_entries
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
+    MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     FeedReadError,
     InlineComment,
+    PathListing,
     PRData,
     PRRef,
     Thread,
@@ -46,6 +48,12 @@ _MAX_FILE_CONTENT_BYTES = 512 * 1024
 # it is still bounded: GitLab's validation errors run long enough to bury the
 # log line that carries them.
 _ERROR_DETAIL_CHARS = 400
+_TREE_BLOBS_QUERY = (
+    "query($p: ID!, $ref: String!, $after: String) { project(fullPath: $p) { repository { "
+    "tree(ref: $ref, recursive: true) { blobs(first: 100, after: $after) { "
+    "pageInfo { hasNextPage endCursor } nodes { path type mode } } } } } }"
+)
+_TREE_BLOBS_PATH = ("data", "project", "repository", "tree", "blobs")
 
 
 def _response_detail(resp: requests.Response) -> str:
@@ -567,6 +575,208 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``, best-effort.
+
+        Two walks, GraphQL first. The REST ``repository/tree?recursive=true``
+        listing returns every directory before any file, across the whole
+        recursive walk, so on a project with more entries than the page cap
+        holds, the capped REST walk loses files, and returns none at all once
+        the directories alone fill the cap. GraphQL's ``tree.blobs``
+        connection lists files only, so its whole page budget goes to paths.
+
+        The GraphQL walk POSTs ``_TREE_BLOBS_QUERY`` (a read: the text begins
+        with ``query``) to ``https://{host}/api/graphql``, the host the REST
+        API is on, with the variables ``p`` (the project's full path), ``ref``
+        (``sha``) and ``after`` (the previous page's ``endCursor``, ``None``
+        on the first page), the same auth header as every other request, and
+        the request timeout. It follows ``endCursor`` while ``hasNextPage`` is
+        true and reads at most ``MAX_LISTING_PAGES`` pages of 100 nodes. Node
+        paths that are non-empty strings are kept, sorted and deduplicated. A
+        page with ``hasNextPage`` false ends the walk with ``complete=True``.
+        When the cap stops the walk while ``hasNextPage`` is still true, or a
+        later page fails, the paths read so far come back with
+        ``complete=False``.
+
+        The REST walk answers instead when the FIRST GraphQL page is unusable:
+        a transport failure, a non-2xx status, a body that is not JSON, a
+        non-empty ``errors`` array, a null ``data.project``, any other wrong
+        shape (``hasNextPage`` true with no ``endCursor`` included), or a first
+        page with no usable path and ``hasNextPage`` false. GraphQL answers a
+        sha it cannot resolve with exactly that empty page, which it does not
+        distinguish from an empty tree, so REST decides between them. The
+        fallback reason is logged at DEBUG.
+
+        The REST walk requests pages 1, 2, 3 and so on of
+        ``repository/tree?recursive=true``, ``_PAGE_SIZE`` entries a page.
+        Only ``blob`` entries are kept, so directories (``tree``) and
+        submodules (``commit``) are dropped, and the paths are sorted and
+        deduplicated. The walk ends when a page's ``X-Next-Page`` header is
+        absent or empty, never on a short page. It reads at most
+        ``MAX_LISTING_PAGES`` pages; when the last page it reads still names
+        a next page, the paths read so far come back with ``complete=False``.
+        A failure on the first page (a transport failure, a non-2xx status, a
+        body that is not JSON, or one that is not a list) gives ``None``; the
+        same failure on a later page gives the paths read so far with
+        ``complete=False``. An empty ``sha`` gives ``None`` with no request.
+        Never raises.
+        """
+        if not sha:
+            return None
+        where = f"{self._project_path(ref)}@{sha}"
+        listing = self._list_paths_graphql(ref, sha=sha, where=where)
+        if listing is not None:
+            return listing
+        return self._list_paths_rest(ref, sha=sha, where=where)
+
+    def _list_paths_graphql(self, ref: PRRef, *, sha: str, where: str) -> PathListing | None:
+        """Walk GraphQL's ``tree.blobs`` connection; ``None`` hands the listing to REST."""
+        headers = self._get_auth_headers()
+        url = f"https://{ref.host}/api/graphql"
+        project_path = self._project_path(ref)
+        paths: set[str] = set()
+        after: str | None = None
+        for page_number in range(1, MAX_LISTING_PAGES + 1):
+            variables = {"p": project_path, "ref": sha, "after": after}
+            try:
+                resp = self._session.post(
+                    url,
+                    json={"query": _TREE_BLOBS_QUERY, "variables": variables},
+                    headers=headers,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                return self._graphql_stopped(paths, page_number, where, f"a transport failure ({e})")
+            try:
+                page_paths, has_next, after = self._read_blob_page(resp, first_page=page_number == 1)
+            except ValueError as e:
+                return self._graphql_stopped(paths, page_number, where, str(e))
+            paths.update(page_paths)
+            if not has_next:
+                return PathListing(paths=tuple(sorted(paths)), complete=True)
+        logger.debug(
+            "list_paths stopped at the %d-page cap of the GraphQL listing for %s with %d paths",
+            MAX_LISTING_PAGES, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
+
+    @staticmethod
+    def _read_blob_page(
+        resp: requests.Response, *, first_page: bool
+    ) -> tuple[list[str], bool, str | None]:
+        """Parse one ``tree.blobs`` page into (paths, hasNextPage, endCursor).
+
+        Raises ``ValueError`` naming what makes the page unusable. A first
+        page with no usable path and ``hasNextPage`` false is unusable too,
+        because GraphQL gives that same page for a sha it cannot resolve.
+        """
+        if not resp.ok:
+            raise ValueError(f"HTTP {resp.status_code}")
+        try:
+            body = resp.json()
+        except ValueError as e:
+            raise ValueError(f"a non-JSON body ({e})") from e
+        if not isinstance(body, dict):
+            raise ValueError(f"a {type(body).__name__} body, not an object")
+        if body.get("errors"):
+            raise ValueError(f"GraphQL errors ({_response_detail(resp)})")
+        node = body
+        for key in _TREE_BLOBS_PATH:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                raise ValueError(f"no {key} object (a {type(child).__name__})")
+            node = child
+        page_info = node.get("pageInfo")
+        nodes = node.get("nodes")
+        if not isinstance(page_info, dict) or not isinstance(nodes, list):
+            raise ValueError("a blobs connection without a pageInfo object and a nodes list")
+        has_next = page_info.get("hasNextPage")
+        cursor = page_info.get("endCursor")
+        if not isinstance(has_next, bool):
+            raise ValueError(f"a {type(has_next).__name__} hasNextPage, not a bool")
+        if has_next and not (isinstance(cursor, str) and cursor):
+            raise ValueError("hasNextPage true with no endCursor")
+        paths = [
+            entry["path"] for entry in nodes
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]
+        ]
+        if first_page and not paths and not has_next:
+            raise ValueError("an empty first page, which is also the answer for a sha GitLab cannot resolve")
+        return paths, has_next, cursor if has_next else None
+
+    def _graphql_stopped(
+        self, paths: set[str], page_number: int, where: str, reason: str
+    ) -> PathListing | None:
+        """Log why the GraphQL walk stopped; ``None`` on the first page falls back to REST."""
+        if page_number == 1:
+            logger.debug(
+                "list_paths falls back to the REST tree walk for %s: the GraphQL listing gave %s",
+                where, reason,
+            )
+            return None
+        return self._listing_stopped(paths, page_number, where, f"{reason} from the GraphQL listing")
+
+    def _list_paths_rest(self, ref: PRRef, *, sha: str, where: str) -> PathListing | None:
+        """Walk the REST ``repository/tree?recursive=true`` listing page by page."""
+        headers = self._get_auth_headers()
+        url = f"{self._api_base(ref)}/repository/tree"
+        paths: set[str] = set()
+        for page_number in range(1, MAX_LISTING_PAGES + 1):
+            params: dict[str, int | str] = {
+                "recursive": "true",
+                "per_page": _PAGE_SIZE,
+                "page": page_number,
+                "ref": sha,
+            }
+            try:
+                resp = self._session.get(
+                    url, headers=headers, params=params, timeout=_REQUEST_TIMEOUT
+                )
+            except requests.RequestException as e:
+                return self._listing_stopped(paths, page_number, where, f"a transport failure ({e})")
+            if not resp.ok:
+                return self._listing_stopped(paths, page_number, where, f"HTTP {resp.status_code}")
+            try:
+                entries = resp.json()
+            except ValueError as e:
+                return self._listing_stopped(paths, page_number, where, f"a non-JSON body ({e})")
+            if not isinstance(entries, list):
+                return self._listing_stopped(
+                    paths, page_number, where, f"a {type(entries).__name__} body, not a list"
+                )
+            paths.update(
+                entry["path"] for entry in entries
+                if isinstance(entry, dict) and entry.get("type") == "blob"
+                and isinstance(entry.get("path"), str) and entry["path"]
+            )
+            if not (resp.headers.get("X-Next-Page") or "").strip():
+                return PathListing(paths=tuple(sorted(paths)), complete=True)
+        logger.debug(
+            "list_paths stopped at the %d-page cap for %s with %d paths",
+            MAX_LISTING_PAGES, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
+
+    @staticmethod
+    def _listing_stopped(
+        paths: set[str], page_number: int, where: str, reason: str
+    ) -> PathListing | None:
+        """Log why a ``list_paths`` walk stopped early and return what it has.
+
+        A failure on the first page means there is no listing at all, so the
+        result is ``None``. A failure on a later page keeps the paths already
+        read, marked ``complete=False``, because a partial listing still
+        helps the name search.
+        """
+        if page_number == 1:
+            logger.debug("list_paths got %s for %s", reason, where)
+            return None
+        logger.debug(
+            "list_paths got %s at page %d for %s; keeping the %d paths read so far",
+            reason, page_number, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
 
     def prune_inline_comments(self, ref: PRRef) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.

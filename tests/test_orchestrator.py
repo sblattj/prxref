@@ -1,6 +1,6 @@
 """Orchestrator tests: FakeForge + FakeLLM, no network, no reviewer-file dependency.
 
-``src/prxref/reviewer.py`` is owned by a parallel seat; these tests pin the
+``src/prxref/reviewer.py`` is built separately; these tests pin the
 orchestrator-side contract (``review_chunk(llm, files, pr)`` dict return,
 ``load_prompt`` template) with a stub installed only when the real module
 is absent, and an autouse fixture that pins behavior either way.
@@ -278,7 +278,7 @@ class TestHappyPath:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts",
+            "rule_counts", "repo_context",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -747,7 +747,7 @@ class TestMaxTokensThreading:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts",
+            "rule_counts", "repo_context",
         }
 
 
@@ -1062,7 +1062,7 @@ class TestQualityGateKnobsAreThreaded:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts",
+            "rule_counts", "repo_context",
         }
 
 
@@ -1072,7 +1072,7 @@ RESULT_KEYS = {
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts",
+    "rule_counts", "repo_context",
 }
 
 

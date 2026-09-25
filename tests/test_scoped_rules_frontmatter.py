@@ -1,4 +1,4 @@
-"""Issue #12 T2: the ``applies_to`` front-matter key of a scoped rules file.
+"""Issue #12: the ``applies_to`` front-matter key of a scoped rules file.
 
 ``parse_applies_to`` reads the fence ``split_front_matter`` reads and returns
 the file's path globs in file order, or ``None`` when the file has no such key

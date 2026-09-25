@@ -1,4 +1,4 @@
-"""Issue #14 T6: the judge client, one judge call per case, the grade cache, judge cost and the stamp."""
+"""Issue #14: the judge client, one judge call per case, the grade cache, judge cost and the stamp."""
 from __future__ import annotations
 
 import copy

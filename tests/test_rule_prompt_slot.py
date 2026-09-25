@@ -1,4 +1,4 @@
-"""Issue #13 T2: the ``rule`` request, its prompt slot and its acceptance gate.
+"""Issue #13: the ``rule`` request, its prompt slot and its acceptance gate.
 
 A run that groups findings asks the model for a per-finding ``rule``: the
 :data:`prxref.reviewer.RULE_REQUEST` block rides ``PromptContext.rule_request``
@@ -95,9 +95,9 @@ CONTEXTS = {
 }
 
 # sha256 of (system, user) for every prompt below, captured by rendering the
-# same inputs at 328d1c9 before any #13 T2 edit. The five worker USER hashes
+# same inputs at 328d1c9 before any #13 edit. The five worker USER hashes
 # were re-derived when worker.md dropped its "roughly 30k tokens" promise
-# (0.15, seat Q-ECHO): each is the earlier render with that one sentence
+# (0.15): each is the earlier render with that one sentence
 # replaced by "The diff below is the complete chunk.", and every system hash
 # and every sweep hash is unchanged.
 BASE_GOLDEN = {

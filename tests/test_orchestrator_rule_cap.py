@@ -442,7 +442,7 @@ class TestJsonOutput:
         payload = cli._build_json_result(res)
         keys = list(payload)
         assert keys.index("rule_counts") == keys.index("scoped_rules") + 1
-        assert keys[keys.index("rule_counts") + 1] == "sampling"
+        assert keys[keys.index("rule_counts") + 1] == "repo_context"
         assert payload["rule_counts"] == [{"rule": "no-bare-except", "kind": "rule", "total": 5, "kept": 2}]
 
     def test_the_best_row_carries_locations_across_files(self):
@@ -505,12 +505,12 @@ class TestCliWiring:
 # ---------------------------------------------------------------------------
 # Off-path identity with a rules file loaded. The capture below mirrors
 # tests/test_orchestrator_grouping.py's; the goldens are the sha256 of its
-# output at BASE a81fb53 (seat R18-C, before any #18 wiring edit), where the
+# output at BASE a81fb53 (before any #18 wiring edit), where the
 # orchestrator had no max_findings_per_rule parameter. Record and JSON keys are
 # projected onto the key sets at that BASE, so the only difference a run at cap
 # 0 may show is the new rule_counts key, which the tests pin to null.
 # "rules_grouping" was re-derived when the chunk/sweep split after the gate
-# stopped swapping twins (0.15, seat R18-D, tests/test_sweep_boundary_drops.py):
+# stopped swapping twins (0.15, tests/test_sweep_boundary_drops.py):
 # the sweep's copies of the grouped members at src/app.py:9, :15 and :22 were
 # posted as second comments and now drop as "duplicate of chunk finding". Only
 # those three findings moved: the record and JSON rows, the three inline
@@ -605,10 +605,11 @@ class TestOffPathMatchesBase:
     def test_cap_zero_with_rules_is_byte_identical_to_base(self, name):
         text, res = rules_capture(name, max_findings_per_rule=0)
         assert _sha(text) == RULES_GOLDEN[name]
-        assert set(res) == set(A81_RECORD_KEYS) | {"rule_counts"}
+        assert set(res) == set(A81_RECORD_KEYS) | {"rule_counts", "repo_context"}
         assert res["rule_counts"] is None
+        assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
-        assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "sampling"]
+        assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "repo_context", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

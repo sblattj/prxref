@@ -12,9 +12,11 @@ from requests.adapters import HTTPAdapter
 
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
+    MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     FeedReadError,
     InlineComment,
+    PathListing,
     PRData,
     PRRef,
     Thread,
@@ -602,6 +604,95 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``, best-effort.
+
+        Walks the repository-level ``/files?at=<sha>`` listing with
+        ``start``/``limit`` paging, ``_PAGE_LIMIT`` entries a page. The
+        endpoint shape comes from the Bitbucket Server REST documentation
+        and was not probed live: a page is ``{"values": [...], "isLastPage",
+        "nextPageStart", ...}`` whose values are plain path strings, which
+        name files only. The non-empty strings are kept, sorted and
+        deduplicated. The walk ends when ``isLastPage`` is true (or absent)
+        or when ``nextPageStart`` is missing, as the activity walk does; a
+        page that says it is not the last but names no next start ends the
+        walk with ``complete=False``. It reads at most ``MAX_LISTING_PAGES``
+        pages; when the last page it reads is not the last page, the paths
+        read so far come back with ``complete=False``. A failure on the first
+        page (a transport failure, a non-2xx status, a body that is not
+        JSON, or one with no ``values`` list) gives ``None``; the same
+        failure on a later page gives the paths read so far with
+        ``complete=False``. An empty ``sha`` gives ``None`` with no request.
+        ``ref.owner`` already carries the ``~slug`` form for a personal
+        repository. Never raises.
+        """
+        if not sha:
+            return None
+        headers, auth = self._get_auth()
+        url = self._repo_url(ref, "/files")
+        where = f"{ref.owner}/{ref.repo}@{sha}"
+        paths: set[str] = set()
+        start = 0
+        for page_number in range(1, MAX_LISTING_PAGES + 1):
+            try:
+                resp = self._session.get(
+                    url,
+                    params={"at": sha, "start": start, "limit": _PAGE_LIMIT},
+                    headers=headers,
+                    auth=auth,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                return self._listing_stopped(paths, page_number, where, f"a transport failure ({e})")
+            if not resp.ok:
+                return self._listing_stopped(paths, page_number, where, f"HTTP {resp.status_code}")
+            try:
+                page = resp.json()
+            except ValueError as e:
+                return self._listing_stopped(paths, page_number, where, f"a non-JSON body ({e})")
+            values = page.get("values") if isinstance(page, dict) else None
+            if not isinstance(values, list):
+                return self._listing_stopped(
+                    paths, page_number, where, f"a {type(page).__name__} body with no values list"
+                )
+            paths.update(value for value in values if isinstance(value, str) and value)
+            if page.get("isLastPage", True):
+                return PathListing(paths=tuple(sorted(paths)), complete=True)
+            next_start = page.get("nextPageStart")
+            if next_start is None:
+                logger.debug(
+                    "list_paths got a page that is not the last but has no "
+                    "nextPageStart at page %d for %s; keeping the %d paths read so far",
+                    page_number, where, len(paths),
+                )
+                return PathListing(paths=tuple(sorted(paths)), complete=False)
+            start = next_start
+        logger.debug(
+            "list_paths stopped at the %d-page cap for %s with %d paths",
+            MAX_LISTING_PAGES, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
+
+    @staticmethod
+    def _listing_stopped(
+        paths: set[str], page_number: int, where: str, reason: str
+    ) -> PathListing | None:
+        """Log why a ``list_paths`` walk stopped early and return what it has.
+
+        A failure on the first page means there is no listing at all, so the
+        result is ``None``. A failure on a later page keeps the paths already
+        read, marked ``complete=False``, because a partial listing still
+        helps the name search.
+        """
+        if page_number == 1:
+            logger.debug("list_paths got %s for %s", reason, where)
+            return None
+        logger.debug(
+            "list_paths got %s at page %d for %s; keeping the %d paths read so far",
+            reason, page_number, where, len(paths),
+        )
+        return PathListing(paths=tuple(sorted(paths)), complete=False)
 
     def prune_inline_comments(self, ref: PRRef) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.

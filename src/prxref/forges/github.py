@@ -22,6 +22,7 @@ from .base import (
     DescriptionVersion,
     FeedReadError,
     InlineComment,
+    PathListing,
     PRData,
     PRHistory,
     PRRef,
@@ -696,6 +697,52 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``, best-effort.
+
+        One request to the Git Trees API, ``git/trees/{sha}?recursive=1``,
+        with no paging. Only ``blob`` entries are kept, so directories
+        (``tree``) and submodules (``commit``) are dropped, and the paths are
+        sorted and deduplicated. ``complete`` is ``False`` when GitHub reports
+        the tree ``truncated``. An empty ``sha`` (no request is made), a
+        transport failure, a non-2xx status, a body that is not JSON, or one
+        with no ``tree`` list gives ``None``. Never raises.
+        """
+        if not sha:
+            return None
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/git/trees/"
+            f"{quote(sha, safe='')}"
+        )
+        try:
+            resp = self.session.get(
+                url, headers=self._headers(ref.host), params={"recursive": "1"},
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            logger.debug("list_paths failed for %s/%s@%s: %s", ref.owner, ref.repo, sha, e)
+            return None
+        if not resp.ok:
+            logger.debug(
+                "list_paths got HTTP %s for %s/%s@%s", resp.status_code, ref.owner, ref.repo, sha
+            )
+            return None
+        try:
+            body = resp.json()
+        except ValueError as e:
+            logger.debug("list_paths got a non-JSON body for %s/%s@%s: %s", ref.owner, ref.repo, sha, e)
+            return None
+        tree = body.get("tree") if isinstance(body, dict) else None
+        if not isinstance(tree, list):
+            logger.debug("list_paths got no tree list for %s/%s@%s", ref.owner, ref.repo, sha)
+            return None
+        paths = {
+            entry["path"] for entry in tree
+            if isinstance(entry, dict) and entry.get("type") == "blob"
+            and isinstance(entry.get("path"), str) and entry["path"]
+        }
+        return PathListing(paths=tuple(sorted(paths)), complete=not bool(body.get("truncated")))
 
     def prune_inline_comments(self, ref: PRRef) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.

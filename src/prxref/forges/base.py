@@ -155,6 +155,24 @@ class PRHistory:
                 raise ValueError(f"PRHistory.title_renames must hold TitleRename, got {type(rename).__name__}")
 
 
+MAX_LISTING_PAGES = 20
+
+
+@dataclass(frozen=True)
+class PathListing:
+    """Every file path in a repository at one commit, from ``list_paths``.
+
+    ``paths`` holds repo-relative FILE paths, sorted and deduplicated, with
+    no directories and no submodules. ``complete`` is ``False`` when the
+    forge truncated the listing or the walk stopped at ``MAX_LISTING_PAGES``
+    pages, so a path missing from an incomplete listing may still exist.
+    A listing is immutable and hashable.
+    """
+
+    paths: tuple[str, ...]
+    complete: bool
+
+
 SUMMARY_MARKER = "<!-- prxref-summary -->"
 
 # The attribution prefix every posted comment carries (the full line is
@@ -266,6 +284,20 @@ class Forge(Protocol):
         ``None`` it is the PR's current head. Raises on transport, HTTP or
         authentication failure like ``get_diff``; a history that could not be
         paged to the end is returned with ``complete=False``, never raised.
+        """
+        ...
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``.
+
+        Optional: callers resolve it with ``getattr(forge, "list_paths", None)``,
+        so a Forge without it is still valid, and not every forge implements it
+        (repository context then works without a listing). The paths are
+        repo-relative file paths, sorted and deduplicated, with no directories
+        and no submodules. A listing the forge truncated, or whose walk stopped
+        at ``MAX_LISTING_PAGES`` pages, is returned with ``complete=False``.
+        Returns ``None`` when no listing can be fetched at all; this method
+        never raises.
         """
         ...
 

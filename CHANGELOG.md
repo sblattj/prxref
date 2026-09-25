@@ -8,6 +8,163 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.16.0] — 2026-09-25
+
+The repository-context release (#17). A chunk worker can now see code outside
+its own hunks: definitions from the pull request's other files and from files
+the diff never touches, and excerpts of the API and database contracts a
+change points at. It is off by default. `PRXREF_REPO_CONTEXT=diff` adds
+definitions found in the pull request's own files, and `repo` also reads the
+rest of the repository, through the forge or through a local checkout given
+with `--repo-dir`. At `off`, the prompts, posted comments, trace and logs are
+byte-identical to 0.15.0; the run record and `--format json` gain one key,
+`repo_context`, which is `null`.
+
+### Added
+
+- **Repository context (#17).** `PRXREF_REPO_CONTEXT` sets how much of the
+  repository a chunk worker sees beyond its own hunks: `off` (the default),
+  `diff` or `repo`. `diff` shows the definitions that a chunk's added lines
+  reference from the pull request's other files and, for a type another chunk
+  changes, the changed lines inside it. Those files are read at the PR head
+  through the forge or `--repo-dir`; with no reader, the entries come from the
+  diff's hunk lines alone. `repo` also reads files outside the diff:
+  definitions found through a file's imports, through Java's same-package
+  path convention and by a search of the repository's file names, plus
+  contract excerpts. Definitions extend the prompt's `### Definitions
+  referenced by this chunk` block, and contract excerpts form a new
+  `### Contract excerpts` block after it. Only chunk workers get repository
+  context: the whole-PR sweep prompt is unchanged. At `repo`, a run with no
+  repository reader, or with no file listing, logs one WARNING saying what it
+  runs without. Matching is exact and case-sensitive, and any other value
+  exits 2 naming the variable.
+- **Java definitions (#17).** 0.15.0 showed a chunk the definitions it
+  references for JavaScript, TypeScript and Python only. At `diff` and `repo`,
+  Java type declarations (`class`, `interface`, `record`, `enum` and
+  `@interface`, never a method or a field) are found too, in the chunk's own
+  Java files outside its hunks as well as in other files. At `off`, Java still
+  gets none.
+- **`PRXREF_REPO_CONTEXT_MAX_CHARS` (#17).** The repository-context entries of
+  one chunk share a character budget, default `12000`, which must be greater
+  than 0. An entry costs the length of its `path:line: text` line. Entries are
+  admitted in the rank order of their `reason`: `cross-chunk`, `contract`,
+  `diff-file`, `import`, `path-convention`, then `name-search`, and within a
+  rank by path and line. Admission stops at the first entry that does not
+  fit, and a `… N more context entries omitted` line, not counted against the
+  budget, ends the block of the first entry left out.
+- **Contract excerpts and `PRXREF_CONTEXT_CONTRACT_GLOBS` (#17).** At `repo`, a
+  chunk whose added lines use a route, an operation id, a table, or a name
+  that matches a schema gets the matching slice of the repository's contract
+  files: an OpenAPI operation or schema, a JSON Schema, or an earlier
+  migration of a changed one. `PRXREF_CONTEXT_CONTRACT_GLOBS` picks the
+  contract files once per run; its built-in set is `**/openapi*.y*ml`,
+  `**/openapi*.json`, `**/openapi/**`, `**/swagger*`, `**/*.schema.json`,
+  `**/db/changelog/**`, `**/db/migration/**` and `**/migrations/**`. A set
+  value replaces the built-in set instead of adding to it, and an empty value
+  keeps it. A chunk reads at most 6 spec files (`.yaml`, `.yml` or `.json`)
+  and, for each changed migration, at most the 4 nearest earlier migrations in
+  its directory; each excerpt is capped at 40 lines and 2,000 characters.
+- **`PRXREF_CONTEXT_EXCLUDE_GLOBS` and an exclude floor (#17).** Repository
+  context never lists, reads or shows a path under a floor that is always on:
+  `**/expected.json`, `**/cases.json`, `**/case.json`, `**/prxref-eval/**`,
+  `**/.env*`, `**/*.pem` and `**/*.key`, which keeps eval labels, eval output,
+  dotenv files and keys out of the prompt. `PRXREF_CONTEXT_EXCLUDE_GLOBS` adds
+  globs to that floor; a `!` negation in it never re-admits a floor path.
+  Neither list hides a changed file's hunks, which still reach the prompt as
+  the diff.
+- **Bounded repository reads (#17).** One reader serves the whole run: each
+  path is fetched at most once, and the file listing once. Reads of paths
+  outside the pull request's own files are capped at 16 per chunk and 200 per
+  run; a read past a cap is skipped, so the chunk gets fewer entries, and the
+  run record's `read_cap_hit` says so. The pull request's own files are read
+  without a cap, so the entries built from them never depend on which chunk
+  read a file first.
+- **`--repo-dir PATH` (#17).** `prxref review --repo-dir PATH` names a local
+  checkout of the repository at the PR head. With `PRXREF_REPO_CONTEXT=repo`,
+  repository context reads and lists files there instead of calling the forge
+  (at `diff` it only reads there), so a `--diff-file` review gets repository
+  context with no network. A path that is not an existing directory exits 2
+  before any network call. It is not a replay flag: on its own it neither
+  stops posting nor adds a `replay` stamp.
+- **Repository context in `prxref eval` (#17).** A `cases.json` case takes an
+  optional `repo_dir`, read relative to the file, and a `case-*/` directory
+  takes a `repo/` directory; either is the case's `--repo-dir`. A `repo_dir`
+  that is not an existing directory exits 2 naming it. `run.json` records the
+  four new settings, so two runs that differ only in `PRXREF_REPO_CONTEXT` can
+  be told apart and compared.
+- **`repo_context` in the run record (#17).** The run record and
+  `--format json` gain `repo_context`, always present and `null` at `off`. On,
+  it holds the level, the budget, both glob lists, the reader (`forge`,
+  `repo-dir` or `null`), the listing's path count and whether it is complete,
+  the read count, `read_cap_hit`, and one row per chunk naming each admitted
+  entry's path, line, symbol, kind, reason and length, how many entries were
+  left out, and whether the timeout retry dropped them. It never holds file
+  text. The JSONL trace gains one `chunk context` event per chunk and one
+  `repo_context ok` event per run, and in text output `-v` prints a
+  `repo context:` line with the level, the reader, the listing size, the read
+  count, whether a cap was hit, and the entries admitted and left out. With
+  the feature off none of them appears.
+- **Repository listing on every forge (#17).** Each forge adapter can now list
+  the repository's files at a commit, which `repo` does once per run. GitHub
+  reads `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` in one request.
+  GitLab walks GraphQL's `project.repository.tree(recursive: true).blobs`, 100
+  files a page, and falls back to the REST `repository/tree?recursive=true`
+  walk when the first GraphQL page is unusable. Bitbucket Cloud walks
+  `/2.0/repositories/{owner}/{repo}/src/{sha}/?max_depth=64&pagelen=100`,
+  Bitbucket Server walks `/rest/api/1.0/projects/{key}/repos/{slug}/files` at
+  the commit, 100 paths a page, and Azure DevOps reads the `items` endpoint
+  with `recursionLevel=Full` at the commit in one request. A paged walk stops
+  at 20 pages. Only files are listed: directories and submodules are dropped,
+  though whether Bitbucket Server returns submodules is unverified. A listing
+  that stopped early is marked incomplete (`complete: false` in the run
+  record, `(partial)` on the `-v` line), a listing whose first request fails
+  is none at all, and neither fails a review. See `docs/forges.md`.
+
+### Fixed
+
+- **An empty model reply is now asked for once more.** A reply with no text, or
+  only whitespace, is sent again once with the same prompt and the same
+  budget, after one WARNING (`<unit>: empty model reply
+  (finish_reason=<reason>); retrying once`). This covers chunks and the
+  systemic sweep. A reply the provider stopped at the budget (`finish_reason`
+  `length` or `max_tokens`) is not retried, because it already names
+  `PRXREF_LLM_MAX_TOKENS`. Neither is a non-empty reply that fails to parse,
+  nor a call that raised. Token counts and elapsed time cover both calls, and
+  the reported cost is their sum, or unknown when either call reported none.
+  In 0.15.0 and earlier the unit failed with `no parseable content` even
+  though the provider billed it; the review of 0.15.0's own pull request lost
+  1 of 8 chunks this way.
+
+### Known limitations
+
+- **Read caps cut the lowest-ranked sources first.** A chunk issues its capped
+  reads in rank order, contract files before the files that imports, the path
+  convention and the name search point at, so those definitions are the first
+  left out once a chunk has made 16 reads or the run 200, and which chunk
+  meets the run cap first depends on thread scheduling.
+- **The name search matches file names, not file contents.** Outside the pull
+  request, a definition is found only through an import, the Java path
+  convention, or a same-language file whose name, less its extension, matches
+  the referenced name, so a type declared in a differently named file is not
+  shown.
+- **A file over 512 KiB is read as missing.** Every forge and `--repo-dir`
+  refuse a file past that size, so a large OpenAPI spec gives no excerpt.
+- **A large repository is listed only in part.** A paged listing stops at 20
+  pages and GitHub truncates the tree of a very large repository, so there the
+  name search and the contract globs see only the files listed; on a large
+  GitLab project the listing can take about a minute, once per run, at `repo`
+  only.
+- **The Bitbucket Server listing is untested live.** It is built from the
+  Bitbucket Data Center REST documentation, tested against fakes of that
+  shape, and has not been run against a live instance.
+- **A chunk that times out loses its repository context.** The timeout retry
+  drops the definitions and contract blocks to shrink the prompt, so with a
+  model slower than `PRXREF_LLM_TIMEOUT` (default `45` seconds) a chunk is
+  reviewed without them; raise the timeout for a slow model.
+- **A pull request's file can be fetched twice.** The dependency and same-file
+  definition blocks of 0.15.0 keep their own reader, so a file both they and
+  repository context read costs two requests per run.
+
 ## [0.15.0] — 2026-09-24
 
 The tuning release. A team can now replace the review prompts, scope its review
@@ -1580,7 +1737,9 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/sblattj/prxref/releases/tag/v0.16.0
+[0.15.0]: https://github.com/sblattj/prxref/releases/tag/v0.15.0
 [0.14.0]: https://github.com/sblattj/prxref/releases/tag/v0.14.0
 [0.13.0]: https://github.com/sblattj/prxref/releases/tag/v0.13.0
 [0.12.2]: https://github.com/sblattj/prxref/releases/tag/v0.12.2

@@ -908,8 +908,9 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     A parameter the CLI forgets silently runs at its library default, so its
     environment variable is documented and dead: that is how the price table,
     the cost line and the size advisory would have shipped unreachable. The
-    loaded rules, ticket context and replay stamp are not config keys, but
-    they are the CLI's to build, so they are required by name.
+    loaded rules, ticket context, replay stamp and repository directory are
+    not config keys, but they are the CLI's to build, so they are required by
+    name.
     """
     real = real_orchestrator.orchestrate_review
     assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
@@ -927,7 +928,7 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     calls = fake_runtime["orchestrate_calls"]
     assert len(calls) == 1
     assert sorted(expected - set(calls[0])) == []
-    assert {"rules", "ticket", "replay"} <= set(calls[0])
+    assert {"rules", "ticket", "replay", "repo_dir"} <= set(calls[0])
 
 
 class TestDryRun:

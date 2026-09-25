@@ -1,191 +1,193 @@
-# HANDOFF — v0.15.0 shipped: the tuning release
+# HANDOFF — v0.16.0 shipped: repository context
 
-**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-24 · **Supersedes** the
-v0.14.0 handoff.
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-25 · **Supersedes** the
+v0.15.0 handoff.
 
-0.15.0 gives a team the knobs to tune a review, and a harness to measure what
-the tuning did. The knobs are prompt template overrides, path-scoped review
-rules, finding grouping with per-severity caps, a per-rule cap that a review
-rules file turns on, and an opt-in tier for reworded duplicates. The harness is
-`prxref eval run|score|compare`. GitHub pull requests past the diff endpoint's
-size limit are now reviewed, and a replay pins the PR's title and description to
-the time it replays. The user-facing account is the `[0.15.0]` section of
-`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.14.0
-handoff is in git history.
+0.16.0 lets a chunk worker see code outside its own hunks (#17): definitions
+from the pull request's other files and from files the diff never touches, and
+excerpts of the API and database contracts a change points at.
+`PRXREF_REPO_CONTEXT` turns it on at `diff` or `repo`. It is off by default,
+and at `off` the prompts, posted comments, trace and logs are byte-identical to
+0.15.0. The release also retries an empty model reply once. The user-facing
+account is the `[0.16.0]` section of `CHANGELOG.md`. This file is for whoever
+cuts the next release. The v0.15.0 handoff is in git history.
 
 ## What landed
 
-- **#10 Reworded duplicates.** `quality.apply_sweep_dedup(..., similarity=)`
-  has a second tier that runs after the exact one. It treats two active
-  findings in the same file on the same line as duplicates when
-  `quality.titles_similar` holds. That test is a Jaccard index over title
-  tokens (`quality.title_similarity`). `PRXREF_DEDUP_SIMILARITY` sets the
-  threshold, and leaving it unset skips the tier. A chunk copy always outlives
-  a sweep copy, and the tier never lowers a review's worst severity.
-- **#11 Prompt template overrides.** `prompt_templates.load_prompt_templates`
-  reads `worker.md`, `systemic.md` and `summary.md` from `--prompts-dir` /
-  `PRXREF_PROMPTS_DIR`. A template that is not there falls back to the packaged
-  one. An override must carry every placeholder the packaged template has after
-  its context marker, except those in `OPTIONAL_PLACEHOLDERS`; a missing one
-  exits 2. `prxref prompts export` (`cli._cmd_prompts_export` →
-  `export_prompt_templates`) writes the packaged templates out as a starting
-  point. The run record's `prompt_templates` lists each override.
-- **#12 Path-scoped rules.** `--scoped-rules` / `PRXREF_SCOPED_RULES` name rules
-  files whose `applies_to:` front-matter globs pick the chunks each one reaches.
-  They add to `PRXREF_REVIEW_RULES` and never replace it. Start at
-  `rules.load_scoped_rules`, `rules.match_globs` (where `**/` also matches zero
-  directories) and `ScopedRules.select` / `unit_block`. `unit_block` fits the
-  rules into `PRXREF_SCOPED_RULES_MAX_CHARS`. The orchestrator builds one block
-  per chunk in `_scoped_unit_blocks`, and the sweep gets the union.
-- **#13 Grouping and per-severity caps.** With `PRXREF_GROUP_FINDINGS` on, the
-  worker prompt asks each finding for a `rule` (`triage.normalize_rule`,
-  `orchestrator._enforce_rule`). `quality.apply_rule_grouping` then folds the
-  chunk findings that break one rule in one file into one representative. Its
-  body ends `Also at:` and its `locations` lists the other lines.
-  `--format json` emits `rule` and `locations` (`cli._finding_json`), with
-  `locations` null on an ungrouped finding unless the per-rule cap (#18)
-  folded others into it. `PRXREF_MAX_WARNING_FINDINGS` and
-  `PRXREF_MAX_OUTOFSCOPE_FINDINGS` cap those two severities in
-  `quality.apply_quality_gate`, ranked by `quality.finding_rank_key`, and every
-  cap counts groups.
-- **#14 Eval harness.** `prxref eval run|score|compare` goes from
-  `cli._cmd_eval` to `evals.eval_run`, `eval_score` and `eval_compare`. `eval`
-  adds no environment variable, since every setting is a flag, and it never
-  posts. `eval_cases.load_cases` reads a case: a diff file or a pinned `pr_url`
-  range, plus its expected labels. `eval_metrics` grades a label that has a
-  `must_match` predicate deterministically. Every other label goes to an LLM
-  judge, whose code is in `judge.py` and `eval_judge.py` and whose prompt is
-  `prompts/judge.md`. `compare` also warns when two runs' replay description
-  stamps differ.
-- **#15 GitHub PRs past the diff limit.** In `forges/github.py`, `get_diff`
-  handles a 406 whose error code is `too_large` by calling
-  `_get_diff_past_the_limit`. That reads `get_pr` and then
-  `get_compare_diff(base.sha...head.sha)`. The compare diff is accepted only
-  when `_compare_mismatch` finds its file count and its `+`/`-` line sums equal
-  to the PR's `changed_files`, `additions` and `deletions`. On a mismatch or any
-  HTTP or transport failure, it logs one WARNING and falls back to
-  `_get_diff_from_files`. That pages `/pulls/{number}/files` and renders the
-  diff through `forges/_diff_render.render_diff_entries`. The fallback fails
-  closed: a listing shorter than `changed_files`, or totals that disagree with
-  the PR's (`_refuse_short_totals`), end the run as `Error`, never as a partial
-  review.
-- **GitHub file content.** Start at `get_file_content` in `forges/github.py`.
-  `_is_json_envelope` judges the response by its media type: a type in
-  `_RAW_MEDIA_TYPES` is the file, and `application/json` or any other `+json`
-  type is an envelope that reads as no content. `orchestrator._make_file_reader`
-  wraps the adapter's reader in a per-run cache and feeds it to the chunk
-  context blocks (dependency versions and symbol definitions) and to
-  `quality.apply_manifest_claim_check`. The bug itself is under "Fixes found on
-  the way" below.
-- **#16 Replay pins the title and description.** A `--pr-url` replay goes
-  through `cli._replay_forge` → `_resolve_description`. That reads the forge's
-  `get_pr_history` once: GitHub over GraphQL, Bitbucket Cloud over `/activity`.
-  `forges/replay.choose_cutoff` then picks the cutoff: `--as-of`, else the first
-  human review, else the head commit's date. `ReplayForge` shows the title and
-  description in force at the cutoff (`pin_pr_metadata`). `--description-file`
-  and `--no-description` fix the description instead. Every other outcome
-  replays the live text and logs a WARNING that says why. The run's `replay`
-  stamp records `description` (`pinned`, `live`, `file` or `none`) with the
-  cutoff and its source.
-- **#18 Per-rule cap.** Start at `quality.apply_rule_cap`. `orchestrate_review`
-  calls it through `_cap_rules`, after the grouping pass and before
-  `apply_quality_gate`, only when `rule_cap_active` holds:
-  `max_findings_per_rule` (`PRXREF_MAX_FINDINGS_PER_RULE`, default 2) is above 0
-  and `rules` or `scoped_rules` is not `None`. The same flag turns on #13's rule
-  request through `rule_active`, so a rules-file run asks every unit for a
-  `rule` with grouping off. The pass keys on the rule, or the normalized title,
-  across files, keeps the first `cap` ranked by severity and then
-  `finding_rank_key`, and folds the rest onto the first one's `locations` and
-  `Also at:` paragraph. `quality.rule_cap_counts` builds the run record's
-  `rule_counts`.
-- **Fixes found on the way.**
-  - `quality.apply_example_echo_check` drops a finding whose title echoes a
-    prompt template's example finding. It is the first pass that drops
-    anything.
-  - `worker.md` lost a false sentence claiming the input "stays under roughly
-    30k tokens".
-  - The GitHub adapter's `get_file_content` took GitHub's raw media type,
-    `application/vnd.github.raw+json`, for a JSON envelope and dropped every
-    file it read, so GitHub reviews got no full-file context. Earlier releases
-    are affected too. `_is_json_envelope` now decides by the media type.
-  - `orchestrator._split_at_sweep` re-derives the chunk/sweep boundary across
-    the quality gate by counting the chunk side. The old walk counted the sweep
-    side, and because the gate's stable sort puts a chunk copy ahead of its
-    identical sweep twin, it swapped every twin pair: a sweep finding repeating
-    a grouped or rule-capped chunk finding was posted twice.
-    `tests/test_sweep_boundary_drops.py` pins the gate's tie order it relies on.
-- **Config went from 55 to 63 keys.** The eight new keys are:
-  - `PRXREF_DEDUP_SIMILARITY` (#10)
-  - `PRXREF_PROMPTS_DIR` (#11)
-  - `PRXREF_SCOPED_RULES` and `PRXREF_SCOPED_RULES_MAX_CHARS` (#12; the second
-    defaults to 24,000)
-  - `PRXREF_GROUP_FINDINGS`, `PRXREF_MAX_WARNING_FINDINGS` and
-    `PRXREF_MAX_OUTOFSCOPE_FINDINGS` (#13)
-  - `PRXREF_MAX_FINDINGS_PER_RULE` (#18; defaults to 2, and applies only while
-    a review rules file is loaded)
+- **#17 Repository context, as a module map.** The first five modules below
+  do no I/O and import nothing from `prxref.forges`: they take a
+  `read(path)` callable plus plain data.
+  - `repo_unit.build_unit_context` is the place to start. It builds one
+    chunk's `UnitContext` from the sources below, ranks the entries by
+    `repo_context.REASONS` (`cross-chunk`, `contract`, `diff-file`, `import`,
+    `path-convention`, `name-search`), admits them into
+    `PRXREF_REPO_CONTEXT_MAX_CHARS`, and writes the `… N more context entries
+    omitted` line. `repo_unit.MODES` is the vocabulary: `off`, `diff`, `repo`.
+  - `repo_context`: `ContextEntry`, `find_definitions`, `language_of`
+    (`chunk_context`'s map plus `.java`, with `_JAVA_DEF_RE` for type
+    declarations), and the exclude floor, `EXCLUDE_FLOOR` and
+    `exclude_predicate`.
+  - `repo_crosschunk.diff_definitions`: definitions from the pull request's
+    other files, and, for a type another chunk changes, up to
+    `MAX_CHANGE_LINES` of its changed lines.
+  - `repo_resolve.resolve_candidates`: files outside the diff, found through
+    imports (Java, Python, TypeScript and JavaScript), Java's same-package
+    path convention, and the name search over the listing.
+  - `repo_contracts`: `contract_triggers` reads routes, operation ids, tables
+    and schema names off the added lines; `select_contract_files` and
+    `earlier_migrations` pick the files; `contract_excerpts` dispatches to the
+    OpenAPI, JSON Schema, SQL and Liquibase excerpters.
+  - `repo_reader.RepoReader` is the one reader a run shares, built by
+    `forge_reader` or `repo_dir_reader`. It fetches each path and the listing
+    at most once, single-flight across threads, and keeps the counters behind
+    the record's `reads` and `read_cap_hit`.
+  - `forges/repo_dir.RepoDir` reads and lists a `--repo-dir` checkout.
+  - `forges/base.PathListing(paths, complete)` and the optional
+    `Forge.list_paths(ref, *, sha)`, implemented by all five adapters.
+    `forges/replay.ReplayForge.list_paths` delegates at the pinned head.
+  - `orchestrator`: `_plan_repo_context` builds the run's reader, takes the
+    listing and selects the contract files once, and logs `repo`'s one
+    WARNING; `_routed_read` routes each read (lesson 3); each
+    chunk worker calls `repo_unit.build_unit_context`; `_repo_context_record`
+    and `_unit_row` build the record, `retry_dropped` included; and the
+    `chunk context` and `repo_context ok` trace events.
+  - `chunk_context.render_context_blocks` takes `extra_def_lines` and
+    `contract_lines`, the second under the new `CONTRACT_HEADER`
+    (`### Contract excerpts`). With both empty its output is unchanged.
+  - `cli`: `--repo-dir` (`_open_repo_dir`, which exits 2 before any network
+    call), the `repo_context` JSON key after `rule_counts`, and the `-v` line
+    (`_repo_context_line`).
+  - `eval_cases` and `evals`: a case's `repo_dir` field or `case-*/repo/`
+    directory, and four more `evals.RUN_CONFIG_KEYS` (16 in all).
+- **Entry points and caps.**
+  - `orchestrate_review` takes `repo_context="off"`,
+    `repo_context_max_chars=12000`, `context_contract_globs=()`,
+    `context_exclude_globs=()` and `repo_dir=None`. `cli._run_review` passes
+    the four config values by name, and `repo_dir` from `--repo-dir` or the
+    eval case.
+  - Reads: `repo_reader.MAX_CHUNK_READS` (16) and `MAX_RUN_READS` (200) cap
+    the reads of paths outside the pull request; its own files are uncapped.
+  - Listing: `forges/base.MAX_LISTING_PAGES` (20) pages; `RepoDir` lists at
+    most 100,000 files (`forges/repo_dir._MAX_LISTED_FILES`); Bitbucket Cloud
+    walks at `max_depth=64` (`forges/bitbucket._LISTING_MAX_DEPTH`).
+  - Contracts: `repo_contracts.MAX_SPEC_FILES` (6), `MAX_EARLIER_MIGRATIONS`
+    (4), `MAX_CONTRACT_LINES` (40) and `MAX_CONTRACT_CHARS` (2,000).
+  - Definitions: `repo_resolve.MAX_NAME_SEARCH_PER_NAME` (3) and
+    `repo_crosschunk.MAX_CHANGE_LINES` (12).
+  - Files over 512 KiB read as missing, on every forge and in `--repo-dir`
+    (`forges/repo_dir._MAX_FILE_CONTENT_BYTES`).
+- **GitLab lists through GraphQL.** `forges/gitlab.py` `list_paths` walks
+  `project.repository.tree(recursive: true).blobs`, 100 files a page
+  (`_list_paths_graphql`). It falls back to the REST
+  `repository/tree?recursive=true` walk (`_list_paths_rest`) only when the
+  first GraphQL page is unusable, including the empty page GraphQL answers
+  for a sha it cannot resolve. A later GraphQL page that fails returns the
+  paths read so far with `complete=False`. Lesson 1 says why.
+- **An empty model reply is retried once.** `reviewer._invoke_and_parse` asks
+  again, with the same prompt and budget, when `_is_empty_reply` holds and the
+  provider did not stop at the budget (`finish_reason` `length` or
+  `max_tokens`). Chunks and the sweep share the path. `_fold_retry_usage` sums
+  both calls' tokens and costs, and the unit's `model` is the second call's. A
+  retry that raises fails the unit and keeps the first call's usage. The worst
+  case is 4 `llm.invoke` calls for a chunk (this retry times the
+  orchestrator's one timeout retry) and 2 for the sweep.
+- **Config went from 63 to 67 keys.** The four new keys:
+  - `PRXREF_REPO_CONTEXT` (`off`, `diff` or `repo`; default `off`)
+  - `PRXREF_REPO_CONTEXT_MAX_CHARS` (default 12,000; must be above 0)
+  - `PRXREF_CONTEXT_CONTRACT_GLOBS` (default the built-in set; a set value
+    replaces it)
+  - `PRXREF_CONTEXT_EXCLUDE_GLOBS` (default empty; adds to the always-on
+    floor)
 
-  The first seven are off or unset by default. The per-rule cap is on by
-  default whenever a review rules file is loaded. No existing config default
-  changed.
+  The last three do nothing while `PRXREF_REPO_CONTEXT` is `off`, its
+  default. No existing config default changed.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **A new run-record or JSON key moves eight test pins in three files.**
+1. **A live listing check found what the fakes could not.** GitLab's REST
+   `repository/tree?recursive=true` returns every directory before any file,
+   across the whole recursive walk. On gitlab-org/gitlab, all 2,100 entries
+   read (the 20-page cap plus one probe page) were directories, so the capped
+   walk listed 0 files. GraphQL's `tree.blobs` lists files only, and the same
+   project now lists 2,000 files. A fake built from the documented response
+   shape carries no ordering; record a real response past the page cap before
+   trusting a paged walk.
+2. **"Off is byte-identical" is proven against the previous release, never
+   the tree.** `tests/fixtures/issue17/golden_off_prompts.json` was captured
+   by `make_golden.py` under `uv run --no-project --with prxref==0.15.0`, from
+   outside the repository. `TestOffMatchesTheReleased015` compares the tip's
+   `off` prompts and reads with it byte for byte, over two design points and
+   three keyword-argument variants.
+   - `test_the_golden_is_a_0_15_0_oracle_that_exercises_the_old_blocks` pins
+     the golden's provenance: `prxref_version` and `generated_from:
+     installed distribution`.
+   - `test_control_the_same_comparison_fails_for_repo` shows the comparison
+     can fail.
+   - A golden written from the tree would only compare the tree with itself.
+     When a later release changes an `off` prompt on purpose, capture the
+     golden again the same way, from the release the claim is now made
+     against, and move the version the provenance test pins.
+3. **Reads of the pull request's own files are uncapped.** With one per-chunk
+   cap for every read, a chunk with many diff files spent its 16 reads before
+   it reached its contract file. `orchestrator._routed_read` now sends diff
+   paths to the uncapped `RepoReader.read`, and only other paths to the
+   capped `chunk_reader`. `TestReadCapStarvation` in
+   `tests/test_issue_17_acceptance.py` pins it, with a control that routes
+   every read through the capped reader and loses the spec. It also removed a
+   dependence on thread scheduling: which chunk reads a shared diff file first
+   no longer changes any chunk's entries.
+4. **A thinking model needs more than prxref's defaults.** GLM 5.3 Flash with
+   thinking on, reached through a reasoning lane in llm-ferry, did not fit
+   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45.
+   - At 4,096 tokens a smoke call stopped with `finish_reason=length`: one
+     spent 4,094 tokens on reasoning and returned no answer, another spent
+     3,902 and returned a cut-off one.
+   - On the #17 eval fixture, 16,384 tokens and a 600 s timeout completed
+     every call. The largest reply used 11,433 completion tokens.
+   - On a larger pull request, 16,384 tokens was not enough: a chunk of
+     11,161 input tokens ran out of room after 357 s. At 32,768 tokens and a
+     900 s timeout the same chunk completed in 345 s, with 15,265 output
+     tokens.
+   - Single calls took 90 to 390 s.
+
+   The timeout retry drops the repository-context blocks, so a timeout that
+   is too short quietly removes the feature. One small probe, 4 calls a
+   point, is an observation, not a measurement: `reasoning_effort` `low` and
+   unset gave overlapping reasoning-token ranges (212 to 800 and 496 to
+   1,054), and a request with thinking disabled was answered by a different
+   model.
+5. **`-v` summary lines are text output only.** With `--format json`,
+   `cli._cmd_review` prints the JSON object and skips `_print_summary`, as
+   0.15.0 already did for every `-v` line. A live check scripted against
+   `--format json -v` found no `repo context:` line. Read the `repo_context`
+   key instead, or check the line through `cli._repo_context_line`
+   (`TestVerboseLine` in `tests/test_cli_repo_context.py`).
+6. **Know what repository context cannot reach.**
+   - The name search matches a file name in the same language (ignoring
+     case, and also in snake case for Python), never file content. A type
+     declared in a differently named file is not found (`TestNameSearch` in
+     `tests/test_repo_context_resolve.py`).
+   - Only chunk workers get repository context. The sweep prompt is the same
+     at every level: `test_control_the_same_comparison_fails_for_repo` finds
+     every worker prompt changed at `repo` and the sweep's unchanged.
+
+   A check that looks for either finds nothing, by design.
+7. **A new run-record or JSON key moves twelve test pins in five files.**
+   0.15.0's count of eight in three files was already short: the #12 and #18
+   tests pin the key order too.
    - `tests/test_orchestrator.py`: three `set(res) == {...}` literals and
      `RESULT_KEYS`.
    - `tests/test_run_record.py`: `RECORD_KEYS` and `NULL_WHEN_OFF`.
    - `tests/test_cli_output.py`: `JSON_KEYS` and `NEW_RECORD_KEYS`.
+   - `tests/test_orchestrator_rule_cap.py`: `TestJsonOutput`'s next-key
+     assertion, and `TestOffPathMatchesBase`'s key set and JSON key list.
+   - `tests/test_cli_scoped_rules.py`: `TestJson`'s `sampling` offset.
 
-   All eight spell out the full key set, and the key order is pinned too. A new
-   exit from `orchestrate_review` also moves `TestOneChokePoint`'s count.
-2. **Trace-event order is nondeterministic.** Chunk workers run on a
-   `ThreadPoolExecutor` capped at `max_workers`. A test that asserts trace
-   events must compare them as a multiset, or pin `max_workers=1`.
-3. **A new prompt slot belongs in `prompt_templates.OPTIONAL_PLACEHOLDERS`.**
-   An override must carry every other placeholder the packaged template has. So
-   a slot left out of that set becomes required, and every existing override
-   that lacks it stops loading. A new slot also needs its `replace` line in
-   `tests/test_prompt_context.py`'s `_old_user`.
-4. **The hub files take every issue's kwargs, so merge them one at a time.**
-   `orchestrator.py` was touched by six issues and `cli.py` by seven. Merging
-   one branch at a time kept them green. Each merge got a full gate, and each
-   kwarg-order conflict was resolved as the union of both sides. The order is
-   pinned by tests such as
-   `test_both_kwargs_are_keyword_only_and_follow_prompts` and the record-key
-   order tests in `tests/test_cli_prompts_dir.py` and
-   `tests/test_cli_scoped_rules.py`.
-5. **With its feature off, a new key is present and null, and the output stays
-   byte-identical.** That was decided before any feature work, and every 0.15
-   key keeps to it. The one deliberate exception is removing `worker.md`'s
-   false "stays under roughly 30k tokens" sentence. That moved every worker
-   user-prompt hash, including on runs with every feature off. It shows in the
-   trace, in `--trace-dir`, and in the golden tests of
-   `tests/test_rule_prompt_slot.py` and `tests/test_orchestrator_grouping.py`.
-   The system, sweep and summary-only hashes did not move. A run with a review
-   rules file moved further: the per-rule cap (#18) is on there by default, and
-   its rule request changes both prompt halves of every chunk and of the sweep,
-   which `PRXREF_MAX_FINDINGS_PER_RULE=0` undoes. Keep this in mind when
-   comparing hashes across 0.14 and 0.15 runs.
-6. **Read a packaged template through `prompt_templates.packaged_text`.** The
-   stub `_contract_load_prompt` in `tests/test_orchestrator.py` asserts that the
-   orchestrator asks `reviewer.load_prompt` for the summary template only.
-   Route a new orchestrator read through `load_prompt` instead, and 248 tests
-   fail with a misleading `'worker.md' == 'summary'`.
-7. **Mock the headers the server really sends.** The GitHub file-content bug
-   went unnoticed because the tests' success mocks answered
-   `text/plain`. github.com answers `application/vnd.github.raw+json`, and
-   only a live check showed it. So the `json` substring test that dropped
-   every file stayed green through five releases, 0.12.0 to 0.14.0. Copy
-   content types from a recorded response.
-8. **An unverified API shape may add evidence, never veto verified evidence.**
-   Bitbucket Cloud's history reader was first built so that an unverified
-   snapshot field could fail the verified `changes.description` history of
-   every edited PR. The full gate was green, and only a final review caught it.
-9. **A mutation check still needs `PYTHONDONTWRITEBYTECODE=1`.** Restore the
-   file and `cmp` it afterwards, or a same-size restore can run the cached
-   mutant again.
+   A keyword argument that the CLI builds rather than reads from config, as
+   `repo_dir` is, must also be named in
+   `test_run_review_passes_every_configured_orchestrate_kwarg`.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -207,41 +209,55 @@ together:
 A key that feeds `orchestrate_review` needs one more step. `tests/test_cli.py`
 (`test_run_review_passes_every_configured_orchestrate_kwarg`) requires
 `cli._run_review` to pass every orchestrator kwarg whose name equals a config
-key. Of the 8 keys 0.15.0 added, 7 feed it this way; `prompts_dir` does not,
-since `orchestrate_review` takes the loaded templates as `prompts`. Current
-values: **63** keys, **1** legacy alias, **64** accepted names.
+key. All 4 keys 0.16.0 added feed it this way. Current values: **67** keys,
+**1** legacy alias, **68** accepted names.
 
 ## Release shape (follow this next time)
 
-How 0.15.0 was built:
+How 0.16.0 was built:
 
-1. **Maps and one plan first.** Each issue got a read-only map of the code it
-   would touch. One plan merged the maps, and the owner decided the cross-issue
-   questions before any code was written, including the rule that a new key is
-   null when its feature is off.
-2. **Foundation.** One task landed every new config key, off by default, before
-   any feature work started. #18, which joined later, brought its own key.
-3. **Lanes in waves.** Work was split into lanes by subsystem: quality (#10,
-   #13, #18), prompts (#11, #12), eval (#14), forge (#15) and replay (#16).
-   - Tasks ran in waves of parallel agents, each agent in its own worktree
-     against a pinned base commit.
-   - Each task was rated at most 5 of 10 for complexity and brought its own new
-     test file.
-   - 45 tasks merged in eight waves before the release documents were written:
-     the foundation, 5 forge, 9 quality, 11 prompts, 12 eval and 6 replay
-     tasks, and the example-echo fix. #18 joined the release after that, as 4
-     more tasks in three waves: the pass and its config surfaces in parallel,
-     then the wiring, then the sweep-boundary fix its wiring turned up.
+1. **One map and one decisions file first.** #17 got a read-only map of the
+   code it would touch. A decisions file then settled every open question
+   before any code was written: off by default, `diff` without a reader
+   still adds its hunk-based entries, `list_paths` on all five adapters,
+   `--repo-dir` and the eval field, the contract glob set, the 512 KiB
+   ceiling and the 12,000-character budget. It also gave each new module one
+   owner and fixed the shared interface names, so parallel tasks merged
+   clean.
+2. **Foundation.** One task landed all four config keys on every surface,
+   off by default, before any feature work started.
+3. **Pure modules first, wiring last.** Tasks ran in rounds of parallel
+   agents, each agent in its own worktree against a pinned base commit. Each
+   task was rated at most 5 of 10 for complexity and brought its own new
+   test file. 20 tasks merged in seven rounds:
+   - 6: the config keys, the definitions core, the contract excerpters, the
+     `list_paths` Protocol with GitHub's listing, the `--repo-dir` reader,
+     and the acceptance fixture repository
+   - 5: the resolver, the cross-chunk definitions, the run reader, and the
+     listings of the other four forges
+   - 2: the contract triggers and file selection, and the eval case field
+   - 1: the per-chunk unit context
+   - 2: the orchestrator wiring, and the GitLab GraphQL listing that the
+     listing check brought in
+   - 3: the CLI and eval wiring, the acceptance tests through
+     `orchestrate_review`, and the empty-reply retry
+   - 1: the user documentation and the CHANGELOG section
 4. **One integration gate per merge.** Each branch merged into `release/X.Y.Z`
    on its own. A merge stayed only if the full `uv run pytest` and
-   `uv run ruff check src tests` passed on the merged tree.
-5. **Read-only live checks.** They ran against public PRs, with a guard that
-   blocked forge writes. Six ran:
-   - One found GitHub silently withholding patches once a listing page nears
-     1 MB. That brought in the compare-first path before release.
-   - A later one found the GitHub file-content bug.
-6. **Release.** Parallel tasks swept stale docs, bumped the version, and wrote
-   the CHANGELOG and this file. The file-content fix merged alongside them.
+   `uv run ruff check src tests` passed on the merged tree. Over the 20
+   merges the passing count rose from 6,797 at 0.15.0 to 7,675 and never
+   fell; the documentation merge, the last, added no tests.
+5. **Read-only live checks.** They ran against public repositories and pull
+   requests, with a guard that blocked forge writes, and reviews used one
+   model through one lane. Three ran: the listing on four live forges once
+   the listing tasks merged, then, once the wiring merged, `prxref eval` on
+   the #17 fixture and the bundled cases, and a review of one public pull
+   request end to end. The listing check found the GitLab ordering of lesson
+   1, which brought in the GraphQL walk before release, and GitLab was
+   checked again after it.
+6. **Release.** This commit bumps the version, dates the CHANGELOG and
+   rewrites this file, after the documentation task wrote the CHANGELOG
+   section.
 
 Cutting the release:
 
@@ -267,9 +283,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-6797 passed                                   uv run pytest -q
+7675 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.15.0                                        uv run prxref --version
+0.16.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -277,125 +293,144 @@ updated this file.
 
 ### Live checks
 
-- **#15, before the fix: GitHub withholds patches.** sblattj/prxref#9 (127
-  files, +32,003/-612) gets a 406 from the diff endpoint. An interim build
-  rebuilt it from the `/files` listing: the 110 files whose patch came back
-  matched the compare diff line for line, but 16 ordinary text files
-  (+6,880/-15, 21% of the added lines) came back at 0/0 with no patch at
-  `per_page=100`, and whole at `per_page=30`. That defect brought in the
-  compare-first path. 0.14.0 ends the same review as `Error`.
-- **#15: GitHub's counts on 23 public PRs.** Across 11 repositories (binaries,
-  renames, a submodule, mode-only, empty and deleted files, 211- and 438-file
-  PRs, 48k-line lockfiles, 10 open PRs, 8 of them from forks), the `/files`
-  sums and the compare diff each matched the PR's counts on 23 of 23. The
-  compare diff was byte-identical to the PR diff on 22 of 22, resolved fork
-  SHAs on 17 of 17, and on 10 of 10 open PRs started from the base tip's merge
-  base. GitHub dropped the patch but kept the counts on 10 lockfile entries in
-  4 ordinary PRs, so such a file is reviewed header-only with a warning.
-- **#15: the shipped fix.** `get_diff` reads sblattj/prxref#9 (127 files,
-  +32,003/-612, refused at 20,000 lines) and ObiterDictum/obiter#226 (438
-  files, refused at 300 files) whole from the compare endpoint in 3 GETs, with
-  no `/files` request; the listing alone would refuse #9 (+25,123/-597 against
-  +32,003/-612). The no-post review of #9 completes: `Request-Changes`, 8
-  chunks plus the sweep, 3 findings, USD 0.0745. The same check found the
-  GitHub file-content bug fixed in this release: that review dropped 83 of 83
-  file reads.
-- **#11, #12 and #13 on pallets/click#3860.** It ran as 3 diff chunks at
-  `PRXREF_CHUNK_TOKEN_BUDGET=1500`. #12: each chunk got exactly the scoped
-  rules its globs matched, the sweep got both, and `--scoped-rules ""` turned
-  them off. #13: gpt-4o-mini named a rule on 20 of 20 raw findings and
-  gpt-4.1-mini on 20 of 26; 2 groups per model, `locations` matching `Also
-  at`; the warning cap left 1 warning each. #11: the record stamped the edited
-  `worker.md`'s SHA-256, and a copy without the marker exited 2 before any
-  network call. #10: 0 candidate pairs in 4 on/off pairs. USD 0.046 over 23
-  runs.
-- **Zero chunk findings on sblattj/prxref#9.** Chunk size is not the cause: 8
-  chunks at 39,962-59,470 input tokens and 32 chunks at 9,488-19,532 both
-  returned 0 findings, as did an exact repeat and gpt-4.1-mini (0 of 56 chunk
-  calls). A positive control found 5 of 8 planted labels, all spec-tier, and 0
-  of 3 generic bugs. `worker.md`'s "roughly 30k tokens" sentence was false at
-  defaults (8 of 8 chunks over it) and is removed. 9 of 12 gpt-4o-mini sweep
-  findings were `tests/evals/` fixture text. USD 0.323.
-- **#16 on GitHub and Bitbucket Cloud.** On astral-sh/ruff#28750 (5
-  description versions, 1 rename), `get_pr_history` read a complete history
-  ending at the live body. Two `--as-of` cutoffs pinned versions 2 and 3 with
-  the pre-rename title, no `--as-of` chose the first review, and with no token
-  the replay fell back to the live text with a WARNING naming
-  `PRXREF_GITHUB_TOKEN`. On Bitbucket Cloud, 4 of 4 cutoffs matched a hand
-  derivation, a 25-PR scan found live `changes.title` renames, a PR renamed
-  twice pinned at 6 of 6 cutoffs, and a two-page feed at 10 of 10. USD 0.0034.
-- **This release's own pull request, sblattj/prxref#19.** GitHub refused its
-  unified diff with HTTP 406 (105 files, 33,096 changed lines), and a
-  `--no-post` review read the compare diff instead and reviewed all 105 files
-  in 8 chunks and the sweep. Every chunk prompt carried the full-file context
-  blocks (dependency versions, referenced definitions) that the GitHub
-  file-content fix restores. The example-echo pass dropped 1 sweep finding.
-  One chunk failed: gpt-4o-mini returned an empty reply with `finish=stop`
-  after 518 billed output tokens, and the review went on with
-  `chunks_failed: 1`. Verdict `Approved`, 38 s, USD 0.080.
+- **`list_paths` on four live forges.** 19 of 19 checks passed, with no LLM
+  call. Each listing matched a raw walk exactly: sblattj/prxref on GitHub
+  (229 paths), gitlab-org/gitlab-test on GitLab (40, its 3 submodules
+  dropped), atlassian/forge-bitbucket-related-prs on Bitbucket Cloud (20),
+  and dnceng-public/public's dotnet-public-wiki on Azure DevOps (5). An
+  all-zero sha gave `None` on all four, reads were pinned to the head, and
+  torvalds/linux's truncated tree came back `complete=False` (67,498 of
+  71,638 entries). Before the GraphQL walk, gitlab-org/gitlab listed 0 files
+  (lesson 1). Bitbucket Server has no public instance to check.
+- **GitLab after the GraphQL walk.** Without a token, gitlab-org/gitlab-test
+  listed 40 paths, complete, in 0.4 s, and gitlab-org/gitlab listed 2,000
+  paths in 57.4 s, stopped at the 20-page cap and marked incomplete. GitLab's
+  GraphQL endpoint honours `PRIVATE-TOKEN`: an invalid token gets 401, and no
+  header gets 200.
+- **`prxref eval` on the #17 fixture and the bundled cases**, GLM 5.3 Flash
+  through `domestic.flash`, which served every call (19 of 19 header probes,
+  0 fallbacks). 9 runs made 28 LLM calls with no failed case, at
+  `PRXREF_LLM_MAX_TOKENS=16384` and `PRXREF_LLM_TIMEOUT=600`; at prxref's
+  default of 4,096 tokens a smoke call was cut off (lesson 4).
+  - The fixture ran 3 times at `off` and 3 times at `repo`, reading its
+    `repo_dir`. Within each level the prompts were byte-identical. Between
+    the levels only the chunk prompt differed, by the added
+    repository-context block (62 lines, `### Contract excerpts` among them).
+  - The reader, the contract entries and the `off` null held in every run.
+    Each `repo` record named the `repo-dir` reader, its one chunk carried
+    both the `connectors.yaml` OpenAPI excerpt for the Java service and the
+    earlier migration for the SQL file, and every `off` record held
+    `repo_context: null`. The fixture's three files fit in one chunk at
+    default chunking, and the cross-chunk link needs two chunks: a run with
+    one file per chunk (3 chunks) confirmed it, with each contract entry in
+    its own file's chunk.
+  - An HTTP 201 status code that exists only in the injected OpenAPI excerpt
+    appeared in the findings of all 3 `repo` runs and of none of the 3 `off`
+    runs. The labels could not separate the levels: one matched in 0 of 3
+    runs at `off` and 1 of 3 at `repo`, the other in none at either.
+  - On the three bundled cases, `diff` added no entry (single-file diffs, no
+    reader) and sent byte-identical prompts. Recall was 7 of 8 at both
+    levels, with two labels flipping in opposite directions.
+  - Each `run.json` recorded all 16 `RUN_CONFIG_KEYS`, the four new ones
+    included.
+- **End to end on sblattj/multi-auto-claude-sub#5** (9 files, TypeScript),
+  GLM 5.3 Flash through `domestic.flash`, which served every call (8 of 8
+  header probes, 0 fallbacks).
+  - `off` gave `repo_context: null`.
+  - `repo`, through the GitHub forge and through `--repo-dir`, built the same
+    110 entries over 2 chunks, from a complete 64-path listing, with 22 reads
+    and no cap hit. 26 definitions from outside the diff reached the prompts,
+    25 through imports and 1 through the name search. 1 entry was left out
+    under the 12,000-character budget, with its marker line.
+  - It needed `PRXREF_LLM_MAX_TOKENS=32768` and `PRXREF_LLM_TIMEOUT=900`
+    (lesson 4); at 16,384 an `off` run lost one of its two chunks.
+  - Findings: 2 at `off`, 3 through the forge and 0 through `--repo-dir`. The
+    last two runs sent identical prompts (27,466 input tokens each), so a
+    single run's finding count cannot measure the feature's effect.
+  - The forge run made 28 content reads for 22 paths: the double fetch in the
+    CHANGELOG's known limitations. The repository has no contract files, so
+    contract excerpts were not exercised live, and the empty-reply retry did
+    not fire.
 
 ## Still open — not part of this release
 
-- **#17 Repository context outside the diff.** Mapped and planned for 0.16.0.
-- **An empty model reply is not retried.** A reply with no text and
-  `finish=stop` fails its unit at parse time (`parser.py`, `no parseable
-  content`) and is not re-asked, though the provider billed it. The review of
-  this release's own pull request lost 1 of 8 chunks this way. 0.14.0 behaves
-  the same.
+- **#20 JVM chunk context.** `chunk_context._language` still gives `.java` and
+  `.kt` no language, so the dependency-versions and same-file definitions
+  blocks skip JVM files at every level. Repository context adds Java type
+  declarations only (`repo_context.language_of`, `_JAVA_DEF_RE`). Methods,
+  fields, constants, Kotlin, and Maven or Gradle versions are open.
+- **#21 A reply that does not parse is not retried.** The reviewer retries
+  only an empty reply (`reviewer._invoke_and_parse`, `_is_empty_reply`). A
+  reply that fails to parse, parses to a non-object, or has no `findings`
+  list still fails its unit.
+- **Repository context's effect on findings is unmeasured.**
+  - On the #17 fixture, at 3 runs a level, one label matched in 0 of 3 runs
+    at `off` and 1 of 3 at `repo`, and the other in none. Sampling noise
+    explains that as well as the context does. The defect the second label
+    targets was raised as an active finding in 3 of 3 `off` runs and 1 of 3
+    `repo` runs, never in the wording its predicate requires.
+  - The clearest sign that the model reads the context: an HTTP 201 status
+    code that exists only in the injected OpenAPI excerpt appeared in the
+    findings of all 3 `repo` runs and of none of the `off` runs.
+  - On sblattj/multi-auto-claude-sub#5, identical prompts gave 3 findings and
+    0, so a single run's count cannot measure it.
+
+  Measure with `prxref eval` over more runs a level before changing the
+  default from `off`.
 
 The known limitations, in full in the CHANGELOG:
 
-- **#10 The reworded tier is unproven.** It ships off. Its suggested threshold
-  was chosen on invented negatives. A live check found no candidate pair in
-  eight runs, so the tier has not yet been seen to fire on a real PR.
-- **#12 Chunks are not packed by language.**
-  - `triage.build_chunks` fills chunks by token budget and file cap. Among the
-    chunks with room, it prefers the one sharing the deepest directory
-    (`_shared_dir_depth`).
-  - So a chunk that holds two kinds of file gets the union of both files'
-    scoped rules. A live check saw exactly this.
-- **#13 Grouping keys on the rule the model names.**
-  - A finding with no rule groups by title only. It never joins a group whose
-    findings name a rule, even with the same title in the same file.
-  - A member that line alignment moved to file level adds no `Also at`
-    location.
-  - The caps rank by `finding_rank_key` (confidence, then file path), not by
-    group size. So capping a representative drops all its folded locations from
-    the output. The same goes for the finding the per-rule cap (#18) folded a
-    rule's other findings into.
-- **Findings on files outside the chunk.** A worker can report on a file it saw
-  only in the bounded `### Other files changed in this PR` excerpt
-  (`chunk_context.sibling_summary_block`). Location validation and line
-  alignment run over the whole PR's files, so such a finding is kept and
-  anchored like any other. Nothing marks it as coming from an excerpt.
-- **#14 The judge shares the review's backend.**
-  - Only `--judge-model` changes which model judges.
-  - Self-judging is detected by exact model name. It warns and stamps
-    `self_judged`, and is never refused.
-  - Scoring needs human-labelled cases, and the repository ships three.
-- **#15 Two ways a GitHub run past the diff limit can take long or fail.**
-  - A PR pushed to between the PR read and the listing pages can fail the
-    totals check. The run then ends as `Error`, never as a partial review.
-  - A compare read that times out is retried by the session. The retry policy
-    is `LoggingRetry(total=3)` with a 30-second read timeout, so reaching the
-    fallback can take up to four such timeouts.
-- **#16 Only GitHub and Bitbucket Cloud read description history.**
-  - **Other forges.** On GitLab, Azure DevOps and Bitbucket Server, a replay
-    logs a WARNING and uses the live title and description. An explicit
-    `--as-of` there exits 2.
-  - **Unprobed endpoint.** GitHub Enterprise Server's GraphQL endpoint
-    (`https://<host>/api/graphql`) has not been probed live.
-  - **Large PRs.** A PR with more than 5,000 reviews, comments or title renames
-    pins nothing, so it replays the live text even under `--as-of`.
-  - **Rate limit.** Bitbucket Cloud allows 60 anonymous reads an hour, and a
-    history read costs at least three. So a replay without a credential can
-    fall back to the live text.
-  - **Unverified Bitbucket Cloud shapes.** The `changes_requested` activity
-    entry has not been seen live (0 in 4 feeds) and is read by analogy with an
-    approval. It is also unverified whether the commit `date` used as the head
-    commit's date is the author date or the committer date.
-  - **CRLF.** GitHub stores some description versions with CRLF line endings,
-    and a pinned replay passes them to the prompt verbatim.
+- **Read caps cut the lowest-ranked sources first.** Contract files are read
+  before import, path-convention and name-search files, so those definitions
+  go first once a chunk has made 16 reads or the run 200. Which chunk meets
+  the run cap first depends on thread scheduling.
+- **No content search.** Outside the pull request, a definition is found
+  only through an import, the Java path convention, or a same-language file
+  named after it.
+- **Files over 512 KiB read as missing**, so a large OpenAPI spec gives no
+  excerpt.
+- **A large repository is listed only in part.** A paged listing stops at 20
+  pages and GitHub truncates a very large tree, so the name search and the
+  contract globs see only the files listed. A large GitLab project's listing
+  takes about a minute, once per run, at `repo` only.
+- **The Bitbucket Server listing is untested live.** It is built from the
+  Data Center REST documentation and tested against fakes of that shape.
+  Whether it returns submodules is unverified.
+- **A chunk that times out loses its repository context**, because the
+  timeout retry drops the definitions and contract blocks (lesson 4).
+- **A pull request's file can be fetched twice.** The 0.15.0 dependency and
+  same-file definition blocks keep their own reader.
+
+Listing, retry and cost notes:
+
+- **Bitbucket Cloud's `complete=false` is inferred from directory depth.** The
+  walk asks for `max_depth=64` and marks the listing incomplete when a path
+  reaches 63 slashes. The depth rule comes from probing, not from
+  Bitbucket's documentation, and the live check never came near it: its
+  deepest path had 1 slash.
+- **Azure DevOps continuation tokens are not followed.** A listing that comes
+  back with `x-ms-continuationtoken` is marked incomplete with a WARNING. No
+  live listing has returned one.
+- **GitLab's GraphQL listing is not retried on 429 or 5xx.** The session
+  retries only `GET`, `HEAD` and `OPTIONS`
+  (`allowed_methods` in `forges/gitlab.py`), and the listing is a `POST`. A
+  failed first page falls back to the REST walk; a failed later page gives a
+  partial listing.
+- **An empty-reply retry followed by a timeout retry loses tokens.** When the
+  retry of an empty reply times out, `_run_worker`'s timeout retry replaces
+  the chunk's result, so the billed empty call's tokens drop out of the run
+  totals.
+- **The retry's cost estimate uses the second call's model.** When either
+  call reports no cost, the unit's cost is unknown, and `costs.run_cost`
+  estimates it from the summed tokens at the rate of the unit's `model`,
+  the second call's, even when another model in the fallback chain answered
+  the first call.
+- **prxref's defaults are too small for a thinking model.**
+  `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
+  thinking model in the live checks (lesson 4). Neither default changed in
+  0.16.0; raise both for such a model. The recipe under "Measuring repository
+  context" in `tests/evals/README.md` sets neither, so run verbatim against
+  such a model it cuts the replies off.
 
 Sizing, recall and GitHub notes:
 
@@ -410,7 +445,8 @@ Sizing, recall and GitHub notes:
     which is above real prompt tokens.
   - A live check found that shrinking chunks fourfold did not change the result
     on one large PR. So this is a sizing note, not a known recall loss.
-  - Weigh it against #17's context budget.
+  - Repository context's character budget comes on top of the chunk token
+    budget, which does not count it.
 - **Generic-bug recall is unmeasured beyond a small sample.** On the three
   bundled eval cases, gpt-4o-mini found every spec-grounded label and none of
   the three generic bug labels. `worker.md`'s "Prefer zero findings over one
@@ -420,7 +456,8 @@ Sizing, recall and GitHub notes:
   the size counts. A repository's test fixtures that contain deliberate
   violations are reviewed as code. In this repository, the sweep reviews the
   eval fixtures under `tests/evals/` and reports their planted violations as
-  findings.
+  findings. (Repository context's exclude floor keeps eval label files out of
+  the context entries, not out of the diff.)
 - **GitHub's limits are undocumented.**
   - The 406 `too_large` fires past 20,000 lines **or** 300 files.
   - The `/files` listing withholds `patch` in two ways:
@@ -446,8 +483,56 @@ Sizing, recall and GitHub notes:
   406 without `too_large`, or a compare diff whose counts disagree with the
   PR's.
 
-Carried over from 0.14.0, still true:
+Carried over from 0.15.0 and earlier, still true:
 
+- **#10 The reworded tier is unproven.** It ships off. Its suggested threshold
+  was chosen on invented negatives, and a live check found no candidate pair
+  in eight runs.
+- **#12 Chunks are not packed by language.** `triage.build_chunks` fills
+  chunks by token budget and file cap, preferring the chunk that shares the
+  deepest directory (`_shared_dir_depth`). So a chunk that holds two kinds of
+  file gets the union of both files' scoped rules.
+- **#13 Grouping keys on the rule the model names.**
+  - A finding with no rule groups by title only. It never joins a group whose
+    findings name a rule, even with the same title in the same file.
+  - A member that line alignment moved to file level adds no `Also at`
+    location.
+  - The caps rank by `finding_rank_key` (confidence, then file path), not by
+    group size. So capping a representative drops all its folded locations
+    from the output, and the same goes for the finding the per-rule cap (#18)
+    folded a rule's other findings into.
+- **Findings on files outside the chunk.** A worker can report on a file it saw
+  only in the bounded `### Other files changed in this PR` excerpt
+  (`chunk_context.sibling_summary_block`). Location validation and line
+  alignment run over the whole PR's files, so such a finding is kept and
+  anchored like any other. Nothing marks it as coming from an excerpt.
+- **#14 The judge shares the review's backend.** Only `--judge-model` changes
+  which model judges. Self-judging is detected by exact model name; it warns
+  and stamps `self_judged`, and is never refused. Scoring needs
+  human-labelled cases, and the repository ships three.
+- **#15 Two ways a GitHub run past the diff limit can take long or fail.**
+  - A PR pushed to between the PR read and the listing pages can fail the
+    totals check. The run then ends as `Error`, never as a partial review.
+  - A compare read that times out is retried by the session. The retry policy
+    is `LoggingRetry(total=3)` with a 30-second read timeout, so reaching the
+    fallback can take up to four such timeouts.
+- **#16 Only GitHub and Bitbucket Cloud read description history.**
+  - **Other forges.** On GitLab, Azure DevOps and Bitbucket Server, a replay
+    logs a WARNING and uses the live title and description. An explicit
+    `--as-of` there exits 2.
+  - **Unprobed endpoint.** GitHub Enterprise Server's GraphQL endpoint
+    (`https://<host>/api/graphql`) has not been probed live.
+  - **Large PRs.** A PR with more than 5,000 reviews, comments or title renames
+    pins nothing, so it replays the live text even under `--as-of`.
+  - **Rate limit.** Bitbucket Cloud allows 60 anonymous reads an hour, and a
+    history read costs at least three. So a replay without a credential can
+    fall back to the live text.
+  - **Unverified Bitbucket Cloud shapes.** The `changes_requested` activity
+    entry has not been seen live (0 in 4 feeds) and is read by analogy with an
+    approval. It is also unverified whether the commit `date` used as the head
+    commit's date is the author date or the committer date.
+  - **CRLF.** GitHub stores some description versions with CRLF line endings,
+    and a pinned replay passes them to the prompt verbatim.
 - **Spec digest.**
   - Unpunctuated keyword lines in one paragraph merge into one constraint, and a
     run of them past 400 characters is cut.
@@ -475,12 +560,16 @@ Carried over from 0.14.0, still true:
   - Reading an MR's threads on gitlab.com needs `PRXREF_GITLAB_TOKEN`, even for
     a public project. Without one, thread dedup runs against no threads.
 - **Replay from a diff file.** A `--diff-file` run without `--pr-url` has no
-  file context and no threads. The title comes from the patch mail or the file
-  name. The description comes from the mail, `--description-file` or
+  file context and no threads. `--repo-dir` gives it repository context,
+  but the dependency-versions and same-file definitions blocks still read
+  only through the forge (`orchestrator._make_file_reader`), so they stay
+  empty. The title comes from the patch mail or the file name. The
+  description comes from the mail, `--description-file` or
   `--no-description`.
 - **Azure DevOps.**
   - Only anonymous reads are verified live: the forge reads, the dry-run output
-    shape, the pinned-range compare diff and a pinned-range replay.
+    shape, the pinned-range compare diff, a pinned-range replay, and, new in
+    0.16.0, the repository file listing.
   - Posting, pruning, PAT and `SYSTEM_ACCESSTOKEN` authentication and service
     hooks are tested against recorded API shapes only.
   - Azure DevOps Server is untested.
@@ -495,15 +584,20 @@ Carried over from 0.14.0, still true:
 
 Follow-ups a maintainer can act on:
 
-- **After this release, tune #10's threshold.** Run `prxref eval` on a real
-  replay set, then consider changing the default. Use replays pinned by #16:
-  earlier tuning ran on replays that leaked the PR's current description.
+- **Tune #10's threshold.** Run `prxref eval` on a real replay set, then
+  consider changing the default. Use replays pinned by #16: earlier tuning ran
+  on replays that leaked the PR's current description.
 - **Measure #18's default cap.** The issue's before and after numbers come from
   a simulation over graded replays, and were not re-measured on prxref's own
   output. `prxref eval compare` on two labelled runs measures it: `prxref eval
   run` the same cases with the same `--rules-file` twice, once with
   `PRXREF_MAX_FINDINGS_PER_RULE=0` and once at the default, `prxref eval score`
   both, then compare them. Each run's `run.json` records the cap it used.
+- **The #17 fixture's second label under-counts.** In
+  `tests/fixtures/issue17/cases.json`, its `must_match` requires "mutually
+  exclusive" or "exactly one of", which is narrower than the wording the
+  model writes for the same defect. Widen the predicate, or grade it with
+  the judge, before using the fixture to measure repository context.
 - **Unchecked anchors.** `eval_cases.check_anchors` is public but never runs on
   a `pr_url` case's fetched diff, so those labels are only shape-checked.
 - **Eval cases cannot pin the description.** A case file cannot carry `as_of` or
@@ -520,22 +614,23 @@ Follow-ups a maintainer can act on:
 - **Duplicated code in `rules.py`.** `rules._read_scoped_file` duplicates the
   read block of `load_review_rules`. A `_reason` helper exists in both
   `rules.py` and `prompt_templates.py`.
-- **Missing definitions.** `chunk_context.referenced_definitions` looks only in
-  the same file, and `_language` has no Java entry, so a Java chunk gets no
-  definitions.
+- **Missing definitions at `off`.** With repository context off,
+  `chunk_context.referenced_definitions` still looks only in the same file,
+  and only for JavaScript, TypeScript and Python. `diff` and `repo`
+  add other files and Java types; the rest of the JVM gap is #20.
 - **The history read is untraced.** The replay's history read is outside the
   trace, and only the `replay` stamp records its outcome.
 - **The sweep's example is always in force.** `orchestrator._example_titles`
   always reads the systemic template. So the sweep's example title is in force
   even on a run whose sweep never runs.
 
-The v0.14.0 handoff's GitHub 20,000-line bullet is **fixed** (#15), and so is
-its manual eval scoring (#14).
+The v0.15.0 handoff's #17 bullet is **done**, and so is its empty-reply
+bullet (the empty-reply retry).
 
 | Item | Value |
 |---|---|
-| Released version | `0.15.0` (minor: new eval commands, new inputs and eight new config keys, seven off by default and the per-rule cap on by default whenever a review rules file is loaded; no existing config default changed, but a `--pr-url` replay now pins its title and description by default, a review rules file now also asks every unit for a rule and folds each rule's findings past the second, and every worker prompt hash moved) |
-| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Released version | `0.16.0` (minor: repository context behind four new config keys, all off by default; one new CLI flag, `--repo-dir`; one new run-record and `--format json` key, `repo_context`, `null` when off; an empty model reply is retried once; no existing config default changed) |
+| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
