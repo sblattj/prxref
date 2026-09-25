@@ -605,8 +605,9 @@ class TestOffPathMatchesBase:
     def test_cap_zero_with_rules_is_byte_identical_to_base(self, name):
         text, res = rules_capture(name, max_findings_per_rule=0)
         assert _sha(text) == RULES_GOLDEN[name]
-        assert set(res) == set(A81_RECORD_KEYS) | {"rule_counts"}
+        assert set(res) == set(A81_RECORD_KEYS) | {"rule_counts", "repo_context"}
         assert res["rule_counts"] is None
+        assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
         assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "sampling"]
 
