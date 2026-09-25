@@ -1,193 +1,204 @@
-# HANDOFF — v0.16.0 shipped: repository context
+# HANDOFF — v0.17.0 shipped: JVM chunk context, parse retry, shared-state readers
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-25 · **Supersedes** the
-v0.15.0 handoff.
+v0.16.0 handoff.
 
-0.16.0 lets a chunk worker see code outside its own hunks (#17): definitions
-from the pull request's other files and from files the diff never touches, and
-excerpts of the API and database contracts a change points at.
-`PRXREF_REPO_CONTEXT` turns it on at `diff` or `repo`. It is off by default,
-and at `off` the prompts, posted comments, trace and logs are byte-identical to
-0.15.0. The release also retries an empty model reply once. The user-facing
-account is the `[0.16.0]` section of `CHANGELOG.md`. This file is for whoever
-cuts the next release. The v0.15.0 handoff is in git history.
+0.17.0 gives a chunk worker Java and Kotlin chunk context (#20): for a changed
+`.java`, `.kt` or `.kts` file, the definitions its added lines reference from
+the rest of that file and the Maven or Gradle versions of what they import, at
+every `PRXREF_REPO_CONTEXT` level. A model reply that cannot be used as a
+review is sent again, up to `PRXREF_LLM_PARSE_RETRIES` times, default 1 (#21).
+At `PRXREF_REPO_CONTEXT=repo` a chunk also sees unchanged code that reads the
+state its added lines write, and a new deterministic check, always on, flags a
+toggle that ships on while the pull request's own test setup pins it off (#22,
+parts 2 and 3). `off` still adds no repository context, but a pull request with
+Java or Kotlin files gets new prompt blocks and forge reads with every setting
+at its default, and a `{}` reply now costs a second call. The user-facing
+account is the `[0.17.0]` section of `CHANGELOG.md`. This file is for whoever
+cuts the next release. The v0.16.0 handoff is in git history.
 
 ## What landed
 
-- **#17 Repository context, as a module map.** The first five modules below
-  do no I/O and import nothing from `prxref.forges`: they take a
-  `read(path)` callable plus plain data.
-  - `repo_unit.build_unit_context` is the place to start. It builds one
-    chunk's `UnitContext` from the sources below, ranks the entries by
-    `repo_context.REASONS` (`cross-chunk`, `contract`, `diff-file`, `import`,
-    `path-convention`, `name-search`), admits them into
-    `PRXREF_REPO_CONTEXT_MAX_CHARS`, and writes the `… N more context entries
-    omitted` line. `repo_unit.MODES` is the vocabulary: `off`, `diff`, `repo`.
-  - `repo_context`: `ContextEntry`, `find_definitions`, `language_of`
-    (`chunk_context`'s map plus `.java`, with `_JAVA_DEF_RE` for type
-    declarations), and the exclude floor, `EXCLUDE_FLOOR` and
-    `exclude_predicate`.
-  - `repo_crosschunk.diff_definitions`: definitions from the pull request's
-    other files, and, for a type another chunk changes, up to
-    `MAX_CHANGE_LINES` of its changed lines.
-  - `repo_resolve.resolve_candidates`: files outside the diff, found through
-    imports (Java, Python, TypeScript and JavaScript), Java's same-package
-    path convention, and the name search over the listing.
-  - `repo_contracts`: `contract_triggers` reads routes, operation ids, tables
-    and schema names off the added lines; `select_contract_files` and
-    `earlier_migrations` pick the files; `contract_excerpts` dispatches to the
-    OpenAPI, JSON Schema, SQL and Liquibase excerpters.
-  - `repo_reader.RepoReader` is the one reader a run shares, built by
-    `forge_reader` or `repo_dir_reader`. It fetches each path and the listing
-    at most once, single-flight across threads, and keeps the counters behind
-    the record's `reads` and `read_cap_hit`.
-  - `forges/repo_dir.RepoDir` reads and lists a `--repo-dir` checkout.
-  - `forges/base.PathListing(paths, complete)` and the optional
-    `Forge.list_paths(ref, *, sha)`, implemented by all five adapters.
-    `forges/replay.ReplayForge.list_paths` delegates at the pinned head.
-  - `orchestrator`: `_plan_repo_context` builds the run's reader, takes the
-    listing and selects the contract files once, and logs `repo`'s one
-    WARNING; `_routed_read` routes each read (lesson 3); each
-    chunk worker calls `repo_unit.build_unit_context`; `_repo_context_record`
-    and `_unit_row` build the record, `retry_dropped` included; and the
-    `chunk context` and `repo_context ok` trace events.
-  - `chunk_context.render_context_blocks` takes `extra_def_lines` and
-    `contract_lines`, the second under the new `CONTRACT_HEADER`
-    (`### Contract excerpts`). With both empty its output is unchanged.
-  - `cli`: `--repo-dir` (`_open_repo_dir`, which exits 2 before any network
-    call), the `repo_context` JSON key after `rule_counts`, and the `-v` line
-    (`_repo_context_line`).
-  - `eval_cases` and `evals`: a case's `repo_dir` field or `case-*/repo/`
-    directory, and four more `evals.RUN_CONFIG_KEYS` (16 in all).
-- **Entry points and caps.**
-  - `orchestrate_review` takes `repo_context="off"`,
-    `repo_context_max_chars=12000`, `context_contract_globs=()`,
-    `context_exclude_globs=()` and `repo_dir=None`. `cli._run_review` passes
-    the four config values by name, and `repo_dir` from `--repo-dir` or the
-    eval case.
-  - Reads: `repo_reader.MAX_CHUNK_READS` (16) and `MAX_RUN_READS` (200) cap
-    the reads of paths outside the pull request; its own files are uncapped.
-  - Listing: `forges/base.MAX_LISTING_PAGES` (20) pages; `RepoDir` lists at
-    most 100,000 files (`forges/repo_dir._MAX_LISTED_FILES`); Bitbucket Cloud
-    walks at `max_depth=64` (`forges/bitbucket._LISTING_MAX_DEPTH`).
-  - Contracts: `repo_contracts.MAX_SPEC_FILES` (6), `MAX_EARLIER_MIGRATIONS`
-    (4), `MAX_CONTRACT_LINES` (40) and `MAX_CONTRACT_CHARS` (2,000).
-  - Definitions: `repo_resolve.MAX_NAME_SEARCH_PER_NAME` (3) and
-    `repo_crosschunk.MAX_CHANGE_LINES` (12).
-  - Files over 512 KiB read as missing, on every forge and in `--repo-dir`
-    (`forges/repo_dir._MAX_FILE_CONTENT_BYTES`).
-- **GitLab lists through GraphQL.** `forges/gitlab.py` `list_paths` walks
-  `project.repository.tree(recursive: true).blobs`, 100 files a page
-  (`_list_paths_graphql`). It falls back to the REST
-  `repository/tree?recursive=true` walk (`_list_paths_rest`) only when the
-  first GraphQL page is unusable, including the empty page GraphQL answers
-  for a sha it cannot resolve. A later GraphQL page that fails returns the
-  paths read so far with `complete=False`. Lesson 1 says why.
-- **An empty model reply is retried once.** `reviewer._invoke_and_parse` asks
-  again, with the same prompt and budget, when `_is_empty_reply` holds and the
-  provider did not stop at the budget (`finish_reason` `length` or
-  `max_tokens`). Chunks and the sweep share the path. `_fold_retry_usage` sums
-  both calls' tokens and costs, and the unit's `model` is the second call's. A
-  retry that raises fails the unit and keeps the first call's usage. The worst
-  case is 4 `llm.invoke` calls for a chunk (this retry times the
-  orchestrator's one timeout retry) and 2 for the sweep.
-- **Config went from 63 to 67 keys.** The four new keys:
-  - `PRXREF_REPO_CONTEXT` (`off`, `diff` or `repo`; default `off`)
-  - `PRXREF_REPO_CONTEXT_MAX_CHARS` (default 12,000; must be above 0)
-  - `PRXREF_CONTEXT_CONTRACT_GLOBS` (default the built-in set; a set value
-    replaces it)
-  - `PRXREF_CONTEXT_EXCLUDE_GLOBS` (default empty; adds to the always-on
-    floor)
+- **#20 Java and Kotlin chunk context, as a module map.** Four new modules,
+  stdlib only, that do no I/O except through a `read(path)` callable:
+  - `jvm_lang`: `jvm_language` (`.java` gives `java`, `.kt` and `.kts` give
+    `kotlin`, in any case), `definition_regexes` (Java types, methods, fields
+    and constants, and enum constants; Kotlin types, `fun`, and `val` and
+    `var`), `annotation_start`, `parse_imports`, `keywords` and `JDK_NAMES`.
+  - `jvm_maven.resolve_pom`: a `pom.xml` through its `<properties>`, its
+    parent chain inside the repository, `<dependencyManagement>` and imported
+    BOMs.
+  - `jvm_gradle.gradle_build`: string-notation dependencies, `platform`,
+    `enforcedPlatform` and `mavenBom` as BOM owners, and the
+    `libs.versions.toml` catalog, probed at `catalog_paths` only when the
+    build file mentions `libs.`.
+  - `jvm_deps.dependency_lines`: finds the nearest build file
+    (`_nearest_manifest`, trying `MANIFEST_NAMES` at each level from the
+    file's directory up to the root), then matches the added lines' imports
+    to its dependencies, skipping `SKIPPED_ROOTS` and the project's own group.
 
-  The last three do nothing while `PRXREF_REPO_CONTEXT` is `off`, its
-  default. No existing config default changed.
+  How they reach the prompt: `chunk_context._language` now asks
+  `jvm_lang.jvm_language`; `chunk_context.dependency_versions` hands a Java or
+  Kotlin file to `jvm_deps.dependency_lines`, and skips `build.gradle.kts` and
+  `settings.gradle.kts` (`_GRADLE_SCRIPTS`) without a read; and
+  `chunk_context.referenced_definitions` uses `jvm_lang`'s regexes and starts
+  an entry at the annotation lines above a definition. Both run in
+  `orchestrator._context_blocks`, over the reader that
+  `orchestrator._make_file_reader` builds. `orchestrate_review` builds that
+  reader before, and outside, its `repo_context != "off"` gate, so these
+  blocks and their reads happen at every level, `off` included, whenever the
+  forge has `get_file_content` and the pull request has a head sha. The
+  reader is cached per run and is not counted against the repository-context
+  read caps.
+- **#20 in repository context.** `repo_context.language_of` claims `.kt` and
+  `.kts` as `kotlin`, and `repo_context.definition_regexes` gives Kotlin one
+  regex, `jvm_lang.KOTLIN_TYPE_RE`, for type declarations only, as Java has
+  one for its types. Methods, functions and properties stay with chunk
+  context. `repo_context` keeps the 0.16.0 Java names (`_JAVA_DEF_RE`,
+  `_JAVA_KEYWORDS`, `_JDK_NAMES`) as aliases of `jvm_lang`'s objects.
+- **Who shows a chunk file's own definitions.** Chunk context and repository
+  context both serve definitions, and they split by name, not by file
+  (lesson 3). `repo_crosschunk._SAME_FILE_LANGUAGES` is `js`, `python`,
+  `java` and `kotlin`. With a reader, `repo_crosschunk.diff_definitions`
+  searches a chunk file in one of those languages only for the wanted names
+  that are not identifiers on that file's own added lines, because
+  `chunk_context.referenced_definitions` already shows those. A name that
+  only another file of the chunk references is still found there, as a
+  `diff-file` entry, and a file with no name left is skipped without a read.
+- **#21 `PRXREF_LLM_PARSE_RETRIES`.** `reviewer._invoke_and_parse` holds the
+  whole mechanism, for chunks and the sweep alike.
+  - `_read_reply` classifies a reply and `_may_retry` spends one shared
+    budget, N. Retried: an empty reply, one that does not parse, one that is
+    not a JSON object and, at N of 1 or more only, an object without a
+    `findings` list (`_NO_FINDINGS_ERROR`). An empty reply keeps 0.16.0's one
+    retry even at N = 0.
+  - Never retried: a reply the provider stopped at the budget
+    (`_TRUNCATION_FINISH_REASONS`, `length` or `max_tokens`) and a call that
+    raised.
+  - A unit makes at most `1 + max(N, 1)` calls, so with the orchestrator's
+    timeout retry a chunk tops out at `2 * (1 + max(N, 1))`: 4 at the
+    default, as in 0.16.0.
+  - `_fold_retry_usage` sums every call's tokens and time, and the unit's
+    `model` is the last call's. A traced unit that retried keeps
+    `<label>.attempt<K>.response.json` for each discarded reply, and its meta
+    gains `parse_retries` and `first_error`, which `orchestrator._retry_meta`
+    carries into the worker result.
+  - `orchestrate_review` (`llm_parse_retries`), `review_chunk` and
+    `review_systemic` default to 0 for library callers. `cli._run_review`
+    passes the config value, so `prxref review`, the webhook server and
+    `prxref eval run` get 1.
+- **#21 recording and the judge.**
+  - The run record and `--format json` gain `parse_retries`, right after
+    `repo_context` (`cli._build_json_result`): `null` at N = 0, otherwise
+    `orchestrator._parse_retry_total` over every chunk and the sweep.
+  - `eval_judge.judge_case` retries on any `JudgeParseError`, truncation
+    included, up to N times, and `JudgeOutcome.parse_retries` counts them. At
+    N = 0 an empty judge reply gets no retry. `score.json`'s `judge` block
+    gains `parse_retries` after `llm_calls`, and `score.md`'s cost line names
+    the retries only when there were any.
+  - `evals.RUN_CONFIG_KEYS` gains `llm_parse_retries`, 17 keys in all.
+- **#22 part 2, shared-state readers.** `repo_readers` is new and pure.
+  - `shared_state_keys` takes the keys the added lines write: subscript
+    stores, and calls of a `WRITE_VERBS` verb, through a local alias. A key
+    the added lines assign a new value is skipped.
+  - `reader_candidates` orders the listed, unchanged, same-language files by
+    shared leading directories; `reader_matches` finds the reads (`.key`,
+    `["key"]`, or `key.<method>(` with a method that is not a write verb);
+    `reader_entries` runs the search and cuts each excerpt from the enclosing
+    definition down to the read.
+  - `repo_unit.build_unit_context` calls it at `repo` only, with a file
+    listing, after the resolver, on the reads the other sources leave.
+    `repo_context.KINDS` gains `reader`, and `REASONS` gains `shared-state`,
+    ranked last so the budget cuts it first.
+  - `chunk_context.render_context_blocks` takes `reader_lines` and renders
+    them last, under `READER_HEADER` (`### Code elsewhere that reads state
+    this chunk writes`). With it empty, the output is unchanged.
+- **#22 part 3, the pinned-off toggle.**
+  `heuristics.toggle_pinned_off_findings(files)` is pure and always on. It
+  posts one `warning` at confidence 1.0 on a toggle the pull request adds
+  with a default of on, when the pull request also adds a line to
+  `conftest.py`, `setupTests.*`, `jest.setup.*` or `vitest.setup.*` that pins
+  it off. The body ends `(deterministic check, no model)`. `orchestrate_review`
+  folds it in beside the release-shape finding, on the main path and on the
+  path for a diff with no chunks, so it goes through every quality pass.
+- **Caps**, each read from its constant.
+  - Chunk context, unchanged: `chunk_context.MAX_DEFINITION_ENTRIES` (40),
+    `MAX_LINES_PER_DEFINITION` (6, annotation lines included),
+    `MAX_DEFINITION_CHARS` (8,000) and `MAX_FILE_BYTES` (512 KiB).
+    `jvm_lang.MAX_ANNOTATION_LINES` (2) bounds the annotation lines an entry
+    starts at.
+  - Maven: `jvm_maven.MAX_POM_BYTES` (512 KiB), `MAX_POM_PARENTS` (5),
+    `MAX_PROPERTY_PASSES` (5) and `MAX_INTERPOLATED_CHARS` (1,024). A
+    `pom.xml` that holds `<!DOCTYPE` or `<!ENTITY` is refused before the XML
+    parser runs.
+  - Dependency matching: `jvm_deps.MIN_GROUP_PREFIX_SEGMENTS` (2) and
+    `MIN_SHARED_SEGMENTS` (3).
+  - Readers: `repo_readers.MAX_READER_ENTRIES` (6), `MAX_READER_SCAN` (24)
+    and `MAX_READER_LINES` (8), within `repo_reader.MAX_CHUNK_READS` (16) and
+    `MAX_RUN_READS` (200). They are module constants with no config key, and
+    setting `MAX_READER_ENTRIES` to 0 turns readers off with no read.
+- **Config went from 67 to 68 keys.** The one new key is
+  `PRXREF_LLM_PARSE_RETRIES` (integer, at least 0, no upper bound, default 1).
+  No existing config default changed.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **A live listing check found what the fakes could not.** GitLab's REST
-   `repository/tree?recursive=true` returns every directory before any file,
-   across the whole recursive walk. On gitlab-org/gitlab, all 2,100 entries
-   read (the 20-page cap plus one probe page) were directories, so the capped
-   walk listed 0 files. GraphQL's `tree.blobs` lists files only, and the same
-   project now lists 2,000 files. A fake built from the documented response
-   shape carries no ordering; record a real response past the page cap before
-   trusting a paged walk.
-2. **"Off is byte-identical" is proven against the previous release, never
-   the tree.** `tests/fixtures/issue17/golden_off_prompts.json` was captured
-   by `make_golden.py` under `uv run --no-project --with prxref==0.15.0`, from
-   outside the repository. `TestOffMatchesTheReleased015` compares the tip's
-   `off` prompts and reads with it byte for byte, over two design points and
-   three keyword-argument variants.
-   - `test_the_golden_is_a_0_15_0_oracle_that_exercises_the_old_blocks` pins
-     the golden's provenance: `prxref_version` and `generated_from:
-     installed distribution`.
-   - `test_control_the_same_comparison_fails_for_repo` shows the comparison
-     can fail.
-   - A golden written from the tree would only compare the tree with itself.
-     When a later release changes an `off` prompt on purpose, capture the
-     golden again the same way, from the release the claim is now made
-     against, and move the version the provenance test pins.
-3. **Reads of the pull request's own files are uncapped.** With one per-chunk
-   cap for every read, a chunk with many diff files spent its 16 reads before
-   it reached its contract file. `orchestrator._routed_read` now sends diff
-   paths to the uncapped `RepoReader.read`, and only other paths to the
-   capped `chunk_reader`. `TestReadCapStarvation` in
-   `tests/test_issue_17_acceptance.py` pins it, with a control that routes
-   every read through the capped reader and loses the spec. It also removed a
-   dependence on thread scheduling: which chunk reads a shared diff file first
-   no longer changes any chunk's entries.
-4. **A thinking model needs more than prxref's defaults.** GLM 5.3 Flash with
-   thinking on, reached through a reasoning lane in llm-ferry, did not fit
-   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45.
-   - At 4,096 tokens a smoke call stopped with `finish_reason=length`: one
-     spent 4,094 tokens on reasoning and returned no answer, another spent
-     3,902 and returned a cut-off one.
-   - On the #17 eval fixture, 16,384 tokens and a 600 s timeout completed
-     every call. The largest reply used 11,433 completion tokens.
-   - On a larger pull request, 16,384 tokens was not enough: a chunk of
-     11,161 input tokens ran out of room after 357 s. At 32,768 tokens and a
-     900 s timeout the same chunk completed in 345 s, with 15,265 output
-     tokens.
-   - Single calls took 90 to 390 s.
-
-   The timeout retry drops the repository-context blocks, so a timeout that
-   is too short quietly removes the feature. One small probe, 4 calls a
-   point, is an observation, not a measurement: `reasoning_effort` `low` and
-   unset gave overlapping reasoning-token ranges (212 to 800 and 496 to
-   1,054), and a request with thinking disabled was answered by a different
-   model.
-5. **`-v` summary lines are text output only.** With `--format json`,
-   `cli._cmd_review` prints the JSON object and skips `_print_summary`, as
-   0.15.0 already did for every `-v` line. A live check scripted against
-   `--format json -v` found no `repo context:` line. Read the `repo_context`
-   key instead, or check the line through `cli._repo_context_line`
-   (`TestVerboseLine` in `tests/test_cli_repo_context.py`).
-6. **Know what repository context cannot reach.**
-   - The name search matches a file name in the same language (ignoring
-     case, and also in snake case for Python), never file content. A type
-     declared in a differently named file is not found (`TestNameSearch` in
-     `tests/test_repo_context_resolve.py`).
-   - Only chunk workers get repository context. The sweep prompt is the same
-     at every level: `test_control_the_same_comparison_fails_for_repo` finds
-     every worker prompt changed at `repo` and the sweep's unchanged.
-
-   A check that looks for either finds nothing, by design.
-7. **A new run-record or JSON key moves twelve test pins in five files.**
-   0.15.0's count of eight in three files was already short: the #12 and #18
-   tests pin the key order too.
-   - `tests/test_orchestrator.py`: three `set(res) == {...}` literals and
-     `RESULT_KEYS`.
-   - `tests/test_run_record.py`: `RECORD_KEYS` and `NULL_WHEN_OFF`.
-   - `tests/test_cli_output.py`: `JSON_KEYS` and `NEW_RECORD_KEYS`.
-   - `tests/test_orchestrator_rule_cap.py`: `TestJsonOutput`'s next-key
-     assertion, and `TestOffPathMatchesBase`'s key set and JSON key list.
-   - `tests/test_cli_scoped_rules.py`: `TestJson`'s `sampling` offset.
-
-   A keyword argument that the CLI builds rather than reads from config, as
-   `repo_dir` is, must also be named in
-   `test_run_review_passes_every_configured_orchestrate_kwarg`.
+1. **A golden "from the released version" can silently be the tree.** Run
+   inside the checkout, `uv run --no-project --with prxref==0.16.0` imported
+   the working tree's prxref, whose `__version__` read 0.16.0 until this
+   commit bumped it. The first cross-check of the parse retry against 0.16.0
+   therefore compared the tree with itself, and its 0 differences meant
+   nothing. Only `prxref.__file__`, `src/` rather than `site-packages`,
+   showed it. The fix is in `tests/fixtures/issue20/make_golden.py`: run from
+   outside the repository with `uv run --isolated --no-project --with
+   prxref==0.16.0`, and refuse to write unless `prxref.__file__` is under
+   `/site-packages/` as well as the version matching. Assert where the module
+   came from, never only its version string.
+2. **"Off is byte-identical" was a claim about prompts, and #17's test also
+   pinned forge reads.** Java and Kotlin chunk context added 23 `off` reads
+   to the #17 fixture, 21 build-file probes over 7 directory levels and its
+   two Java files, while every `off` prompt stayed byte-identical to
+   0.15.0's. `TestOffMatchesTheReleased015` in
+   `tests/test_issue_17_acceptance.py` went red 12 times, on the read pins
+   alone. It now compares the prompts with the 0.15.0 golden byte for byte
+   and the reads only after leaving out JVM paths (`_is_jvm`);
+   `test_off_jvm_reads_are_the_pinned_list` pins those reads literally
+   (`JVM_READS`), and `test_the_golden_reads_no_jvm_path` proves the filter
+   hides nothing the golden holds. When a feature adds reads on purpose,
+   split the pin by what changed; regenerating the golden would stop it
+   being a 0.15.0 oracle.
+3. **Two sources that serve definitions must split by name, not by file.**
+   Chunk context now shows a Java or Kotlin file's own definitions, so
+   repository context had to stop repeating them. Leaving every chunk file in
+   a same-file language out of `repo_crosschunk.diff_definitions` did that,
+   but it also lost a definition that one file of a chunk references and
+   another file of the same chunk holds outside its hunks, and 7 tests beyond
+   the #17 read pins went red. The rule that shipped leaves out only the
+   names on a file's own added lines (What landed). `TestTheChunksOwnFiles`
+   in `tests/test_repo_context_crosschunk.py` pins it for Java, Kotlin,
+   Python and JavaScript, and it fixed the same gap in 0.16.0's Python and
+   JavaScript handling (CHANGELOG `[0.17.0]`, Fixed).
+4. **The parse retry changes behaviour at its default, and `0` is exactly
+   0.16.0.** At `PRXREF_LLM_PARSE_RETRIES=1` a `{}` reply costs a second call,
+   and the unit fails if that reply has no `findings` list either, where
+   0.16.0 counted a clean review. `TestZeroIsTheOldBehaviour` in
+   `tests/test_issue_21_acceptance.py` pins `0`. A one-off cross-check ran 6
+   reply scenarios through the tree at `0` and through the released 0.16.0,
+   installed as lesson 1 says, and found 0 differences in exit code, calls
+   per unit, request bodies and JSON output. The control, the tree at `1`,
+   differed in 5 of the 6. A custom worker or systemic template whose reply
+   drops `findings` now fails every unit, and no template check catches it.
+5. **The reader block made a missed bug an asserted one, once.** On issue
+   #22's own fixture through GLM 5.3 Flash (N=3 per arm, interleaved, one
+   factor varied), the shared-state reader block turned the serialization
+   bug from absent or dropped under the confidence floor (0 of 3 active)
+   into an active error-severity finding (3 of 3), for 216 more input tokens
+   per review. The history-window bug surfaced in 3 of 3 runs with readers,
+   but always under the 0.60 floor. The toggle check fired in all 6 runs.
+   Three runs an arm on one fixture is a first measurement, not a verdict on
+   the feature (Live checks).
 
 ## The coupling that will catch the next person adding a config key
 
@@ -209,55 +220,61 @@ together:
 A key that feeds `orchestrate_review` needs one more step. `tests/test_cli.py`
 (`test_run_review_passes_every_configured_orchestrate_kwarg`) requires
 `cli._run_review` to pass every orchestrator kwarg whose name equals a config
-key. All 4 keys 0.16.0 added feed it this way. Current values: **67** keys,
-**1** legacy alias, **68** accepted names.
+key. The one key 0.17.0 added, `llm_parse_retries`, feeds it this way, and
+`prxref eval score` also reads it for the judge. Current values: **68** keys,
+**1** legacy alias, **69** accepted names.
 
 ## Release shape (follow this next time)
 
-How 0.16.0 was built:
+How 0.17.0 was built:
 
-1. **One map and one decisions file first.** #17 got a read-only map of the
-   code it would touch. A decisions file then settled every open question
-   before any code was written: off by default, `diff` without a reader
-   still adds its hunk-based entries, `list_paths` on all five adapters,
-   `--repo-dir` and the eval field, the contract glob set, the 512 KiB
-   ceiling and the 12,000-character budget. It also gave each new module one
-   owner and fixed the shared interface names, so parallel tasks merged
-   clean.
-2. **Foundation.** One task landed all four config keys on every surface,
-   off by default, before any feature work started.
+1. **One survey and one decisions file first.** A read-only survey of the
+   code #20, #21 and #22 would touch came first, down to the test pins each
+   change would move. A decisions file then settled every open question
+   before any code was written: keep the 0.15.0 `off` golden and re-scope
+   its read check rather than regenerate it; put the JVM parsing in new
+   stdlib leaf modules, because `chunk_context` cannot import `repo_context`
+   without a cycle; the groupId matching rule; one shared parse-retry budget
+   that keeps 0.16.0's empty-reply retry, with library callers at 0; readers
+   inside repository context, at `repo` only and ranked last; the toggle as a
+   deterministic check rather than a prompt hint; and #22 part 1 deferred.
+   It also gave each new module one owner.
+2. **Foundation.** One task landed `PRXREF_LLM_PARSE_RETRIES` on every config
+   surface, and it merged first, before the wiring that reads it.
 3. **Pure modules first, wiring last.** Tasks ran in rounds of parallel
    agents, each agent in its own worktree against a pinned base commit. Each
-   task was rated at most 5 of 10 for complexity and brought its own new
-   test file. 20 tasks merged in seven rounds:
-   - 6: the config keys, the definitions core, the contract excerpters, the
-     `list_paths` Protocol with GitHub's listing, the `--repo-dir` reader,
-     and the acceptance fixture repository
-   - 5: the resolver, the cross-chunk definitions, the run reader, and the
-     listings of the other four forges
-   - 2: the contract triggers and file selection, and the eval case field
-   - 1: the per-chunk unit context
-   - 2: the orchestrator wiring, and the GitLab GraphQL listing that the
-     listing check brought in
-   - 3: the CLI and eval wiring, the acceptance tests through
-     `orchestrate_review`, and the empty-reply retry
-   - 1: the user documentation and the CHANGELOG section
+   task was rated at most 5 of 10 for complexity, and each code task brought
+   its own tests. 20 tasks merged in five rounds:
+   - 7: the config key, the JVM language module, the Maven parser, the Gradle
+     parser, the reviewer's parse retry, the shared-state reader search, and
+     the toggle check
+   - 4: the JVM dependency matcher, the orchestrator and CLI threading of the
+     retry budget with its record key, the judge's retry, and the reader
+     wiring into the unit context
+   - 5: the chunk-context JVM wiring with the own-file rule, Kotlin in
+     repository context, the eval recording, the #21 acceptance tests, and
+     the toggle wiring
+   - 1: the #22 acceptance tests over the issue's own fixture
+   - 3: the #17 acceptance re-scope (lesson 2), the #20 acceptance tests
+     against a golden from the released 0.16.0 (lesson 1), and the user
+     documentation with the CHANGELOG section
 4. **One integration gate per merge.** Each branch merged into `release/X.Y.Z`
-   on its own. A merge stayed only if the full `uv run pytest` and
-   `uv run ruff check src tests` passed on the merged tree. Over the 20
-   merges the passing count rose from 6,797 at 0.15.0 to 7,675 and never
-   fell; the documentation merge, the last, added no tests.
-5. **Read-only live checks.** They ran against public repositories and pull
-   requests, with a guard that blocked forge writes, and reviews used one
-   model through one lane. Three ran: the listing on four live forges once
-   the listing tasks merged, then, once the wiring merged, `prxref eval` on
-   the #17 fixture and the bundled cases, and a review of one public pull
-   request end to end. The listing check found the GitLab ordering of lesson
-   1, which brought in the GraphQL walk before release, and GitLab was
-   checked again after it.
-6. **Release.** This commit bumps the version, dates the CHANGELOG and
-   rewrites this file, after the documentation task wrote the CHANGELOG
-   section.
+   on its own, and the 0.16.0 release commit was merged in after the first.
+   A merge stayed only if the full `uv run pytest` and
+   `uv run ruff check src tests` passed on the merged tree, with one
+   exception. The chunk-context JVM wiring was first held at 19 failures
+   (lesson 3), came back with 12, every one an `off` read pin in
+   `tests/test_issue_17_acceptance.py` with every prompt intact (lesson 2),
+   and merged with those 12 known, because the next round's re-scope owned
+   them. That re-scope turned them green: 8,660 passed, 0 failed. Over the 20
+   merges the passing count rose from 7,675 at 0.16.0 to 8,695 and never
+   fell; the documentation merge added no tests.
+5. **One read-only live check**, once the reader and toggle wiring merged:
+   the reader block against no reader on #22's fixture, through one model
+   and one lane, with a guard that blocked forge writes (Live checks).
+6. **Release.** This commit bumps the version, dates the CHANGELOG, corrects
+   the `PRXREF_REPO_CONTEXT` row of `docs/env-vars.md` and rewrites this
+   file, after the documentation task wrote the CHANGELOG section.
 
 Cutting the release:
 
@@ -283,9 +300,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-7675 passed                                   uv run pytest -q
+8695 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.16.0                                        uv run prxref --version
+0.17.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -293,113 +310,136 @@ updated this file.
 
 ### Live checks
 
-- **`list_paths` on four live forges.** 19 of 19 checks passed, with no LLM
-  call. Each listing matched a raw walk exactly: sblattj/prxref on GitHub
-  (229 paths), gitlab-org/gitlab-test on GitLab (40, its 3 submodules
-  dropped), atlassian/forge-bitbucket-related-prs on Bitbucket Cloud (20),
-  and dnceng-public/public's dotnet-public-wiki on Azure DevOps (5). An
-  all-zero sha gave `None` on all four, reads were pinned to the head, and
-  torvalds/linux's truncated tree came back `complete=False` (67,498 of
-  71,638 entries). Before the GraphQL walk, gitlab-org/gitlab listed 0 files
-  (lesson 1). Bitbucket Server has no public instance to check.
-- **GitLab after the GraphQL walk.** Without a token, gitlab-org/gitlab-test
-  listed 40 paths, complete, in 0.4 s, and gitlab-org/gitlab listed 2,000
-  paths in 57.4 s, stopped at the 20-page cap and marked incomplete. GitLab's
-  GraphQL endpoint honours `PRIVATE-TOKEN`: an invalid token gets 401, and no
-  header gets 200.
-- **`prxref eval` on the #17 fixture and the bundled cases**, GLM 5.3 Flash
-  through `domestic.flash`, which served every call (19 of 19 header probes,
-  0 fallbacks). 9 runs made 28 LLM calls with no failed case, at
-  `PRXREF_LLM_MAX_TOKENS=16384` and `PRXREF_LLM_TIMEOUT=600`; at prxref's
-  default of 4,096 tokens a smoke call was cut off (lesson 4).
-  - The fixture ran 3 times at `off` and 3 times at `repo`, reading its
-    `repo_dir`. Within each level the prompts were byte-identical. Between
-    the levels only the chunk prompt differed, by the added
-    repository-context block (62 lines, `### Contract excerpts` among them).
-  - The reader, the contract entries and the `off` null held in every run.
-    Each `repo` record named the `repo-dir` reader, its one chunk carried
-    both the `connectors.yaml` OpenAPI excerpt for the Java service and the
-    earlier migration for the SQL file, and every `off` record held
-    `repo_context: null`. The fixture's three files fit in one chunk at
-    default chunking, and the cross-chunk link needs two chunks: a run with
-    one file per chunk (3 chunks) confirmed it, with each contract entry in
-    its own file's chunk.
-  - An HTTP 201 status code that exists only in the injected OpenAPI excerpt
-    appeared in the findings of all 3 `repo` runs and of none of the 3 `off`
-    runs. The labels could not separate the levels: one matched in 0 of 3
-    runs at `off` and 1 of 3 at `repo`, the other in none at either.
-  - On the three bundled cases, `diff` added no entry (single-file diffs, no
-    reader) and sent byte-identical prompts. Recall was 7 of 8 at both
-    levels, with two labels flipping in opposite directions.
-  - Each `run.json` recorded all 16 `RUN_CONFIG_KEYS`, the four new ones
-    included.
-- **End to end on sblattj/multi-auto-claude-sub#5** (9 files, TypeScript),
-  GLM 5.3 Flash through `domestic.flash`, which served every call (8 of 8
-  header probes, 0 fallbacks).
-  - `off` gave `repo_context: null`.
-  - `repo`, through the GitHub forge and through `--repo-dir`, built the same
-    110 entries over 2 chunks, from a complete 64-path listing, with 22 reads
-    and no cap hit. 26 definitions from outside the diff reached the prompts,
-    25 through imports and 1 through the name search. 1 entry was left out
-    under the 12,000-character budget, with its marker line.
-  - It needed `PRXREF_LLM_MAX_TOKENS=32768` and `PRXREF_LLM_TIMEOUT=900`
-    (lesson 4); at 16,384 an `off` run lost one of its two chunks.
-  - Findings: 2 at `off`, 3 through the forge and 0 through `--repo-dir`. The
-    last two runs sent identical prompts (27,466 input tokens each), so a
-    single run's finding count cannot measure the feature's effect.
-  - The forge run made 28 content reads for 22 paths: the double fetch in the
-    CHANGELOG's known limitations. The repository has no contract files, so
-    contract excerpts were not exercised live, and the empty-reply retry did
-    not fire.
+- **Shared-state readers on issue #22's own fixture**, GLM 5.3 Flash through
+  llm-ferry (`domestic.flash`), on the local CLI path (`--diff-file`,
+  `--repo-dir`, `--description-file`) at `PRXREF_REPO_CONTEXT=repo`,
+  `PRXREF_LLM_MAX_TOKENS=32768` and `PRXREF_LLM_TIMEOUT=900`. One factor
+  varied: arm A set `repo_readers.MAX_READER_ENTRIES` to 0, and arm B kept
+  the default of 6. The runs were interleaved, A B A B A B, N=3 per arm, with
+  no re-rolls.
+  - The reader block reached a prompt only in B: 1 of each run's 3 prompts,
+    the chunk holding `progress.py`.
+  - The serialization bug went from absent or dropped under the 0.60
+    confidence floor (0 of 3 active in A; dropped at 0.50 in 2) to an active
+    error-severity finding in 3 of 3 B runs.
+  - The history-window bug surfaced in 3 of 3 B runs and in none of A's,
+    always dropped at 0.50 under the 0.60 floor: the block made the model see
+    it, not assert it (Still open).
+  - The toggle check fired in all 6 runs, on the same line.
+  - Cost: 216 more input tokens per review (+2.8%). Output tokens overlap
+    between the arms.
+  - The parse retry never fired: 0 retries and 0 failed chunks in 6 runs,
+    with no malformed reply seen.
+  - GLM served every run. llm-ferry's log shows no fallback in the run
+    window, and a probe after the runs reported 0 attempted fallbacks. No
+    probe was taken before the runs; the log window stands in for it.
+  - The write guard was active in all 6 runs.
 
 ## Still open — not part of this release
 
-- **#20 JVM chunk context.** `chunk_context._language` still gives `.java` and
-  `.kt` no language, so the dependency-versions and same-file definitions
-  blocks skip JVM files at every level. Repository context adds Java type
-  declarations only (`repo_context.language_of`, `_JAVA_DEF_RE`). Methods,
-  fields, constants, Kotlin, and Maven or Gradle versions are open.
-- **#21 A reply that does not parse is not retried.** The reviewer retries
-  only an empty reply (`reviewer._invoke_and_parse`, `_is_empty_reply`). A
-  reply that fails to parse, parses to a non-object, or has no `findings`
-  list still fails its unit.
-- **Repository context's effect on findings is unmeasured.**
-  - On the #17 fixture, at 3 runs a level, one label matched in 0 of 3 runs
-    at `off` and 1 of 3 at `repo`, and the other in none. Sampling noise
-    explains that as well as the context does. The defect the second label
-    targets was raised as an active finding in 3 of 3 `off` runs and 1 of 3
-    `repo` runs, never in the wording its predicate requires.
-  - The clearest sign that the model reads the context: an HTTP 201 status
-    code that exists only in the injected OpenAPI excerpt appeared in the
-    findings of all 3 `repo` runs and of none of the `off` runs.
+- **#22 part 1 is not built, and #22 stays open.** Its follow-up lookup, one
+  bounded extra call that looks up the symbol a below-floor finding says it
+  could not see, is deferred. It would be the first time a model's output
+  chooses the next input, which crosses the project's single-shot,
+  pre-gathered-context rule, so it needs a decision on that rule first.
+- **The history-window bug stays under the floor.** With readers, #22's
+  second bug surfaced in 3 of 3 live runs, always at confidence 0.50 under
+  the 0.60 floor, so it was never posted. Nothing in 0.17.0 raises it.
+- **Repository context's effect on findings is measured for readers only.**
+  - The reader block has one single-factor measurement, at N=3 per arm on one
+    fixture (Live checks).
+  - #17's definitions and contract excerpts are still unmeasured. On the #17
+    fixture, at 3 runs a level, one label matched in 0 of 3 runs at `off` and
+    1 of 3 at `repo`, and the other in none; sampling noise explains that as
+    well as the context does. An HTTP 201 status code that exists only in the
+    injected OpenAPI excerpt appeared in the findings of all 3 `repo` runs
+    and of none of the `off` runs, which shows the model reads the context.
   - On sblattj/multi-auto-claude-sub#5, identical prompts gave 3 findings and
     0, so a single run's count cannot measure it.
 
   Measure with `prxref eval` over more runs a level before changing the
   default from `off`.
 
-The known limitations, in full in the CHANGELOG:
+0.17.0's known limitations, in full in its CHANGELOG section:
+
+- **Java and Kotlin files cost forge reads at every level.** For a changed
+  JVM file with an import outside `jvm_deps.SKIPPED_ROOTS`, the dependency
+  walk tries 3 build-file names at each directory level up to the root: up
+  to `3 * (d + 1)` reads for a file `d` directories deep. A Gradle build file
+  that mentions `libs.` adds up to 3 catalog probes, and a `pom.xml` up to 5
+  parents. The reads are cached per run and uncapped; on the #17 fixture
+  they were 21 probes over 7 levels.
+- **Kotlin names and paths.** Kotlin standard-library names such as `Int`,
+  `Unit` or `Pair` are not in `jvm_lang.JDK_NAMES`, so at `repo` each one a
+  chunk mentions is looked for by the file-name search. `repo_resolve` has no
+  Kotlin import or path rules: outside the diff, a Kotlin type is found by
+  the file-name search alone.
+- **Precompiled Gradle script plugins are walked.** Only `build.gradle.kts`
+  and `settings.gradle.kts` are skipped (`chunk_context._GRADLE_SCRIPTS`).
+  Another `*.gradle.kts` file is a Kotlin source, so its Gradle API imports
+  cost a walk for the nearest build file.
+- **Some dependencies are not matched or not resolved.** An artifact whose
+  groupId is not a package prefix of its imports gets no line (Guava,
+  Lombok, JUnit 4, Spring Boot starters and kotlinx among them). Gradle map
+  notation is not read, and a version set through a variable or
+  `gradle.properties` is not resolved.
+- **A truncated review reply is not retried**, by design: its error already
+  names `PRXREF_LLM_MAX_TOKENS`, whatever `PRXREF_LLM_PARSE_RETRIES` says.
+- **`score.json` does not total the reviews' parse retries.** It counts the
+  judge's; each case's own run record carries its review's.
+- **The shared-state search matches names, not types.** Any line that reads
+  a key of the same name, in a file of the same language, is a reader, so an
+  unrelated `.data` or `table` can fill an entry, and a reader in another
+  language is never found.
+- **The toggle check needs both lines in the pull request**, and only the
+  four suite-wide setup file names count as pins.
+
+Found while building 0.17.0, not in the CHANGELOG:
+
+- **A model finding on the toggle's line survives beside the check's.** At
+  the default `PRXREF_DEDUP_SIMILARITY` (unset), both are kept, as any two
+  chunk findings on one line are. With the similarity set, the reworded tier
+  keeps one copy (`docs/quality.md`).
+- **The toggle finding's posted severity varied live.** The check emits
+  `warning`, but the live check recorded its finding at `error` in 2 of the
+  3 reader runs. The pass that raised it was not traced.
+- **A status-added chunk file is read for nothing.** With a reader,
+  `repo_crosschunk.diff_definitions` still reads an added chunk file when
+  another file of the chunk wants a name the added file's own lines lack.
+  Every line of an added file sits inside its hunks, which the search skips,
+  so that read can never yield an entry.
+
+0.16.0's repository-context limitations, still true:
 
 - **Read caps cut the lowest-ranked sources first.** Contract files are read
-  before import, path-convention and name-search files, so those definitions
-  go first once a chunk has made 16 reads or the run 200. Which chunk meets
-  the run cap first depends on thread scheduling.
+  before import, path-convention and name-search files, and the shared-state
+  search spends only the reads those leave, so readers go first, then the
+  other definitions, once a chunk has made 16 reads or the run 200. Which
+  chunk meets the run cap first depends on thread scheduling.
 - **No content search.** Outside the pull request, a definition is found
   only through an import, the Java path convention, or a same-language file
   named after it.
 - **Files over 512 KiB read as missing**, so a large OpenAPI spec gives no
   excerpt.
 - **A large repository is listed only in part.** A paged listing stops at 20
-  pages and GitHub truncates a very large tree, so the name search and the
-  contract globs see only the files listed. A large GitLab project's listing
-  takes about a minute, once per run, at `repo` only.
+  pages and GitHub truncates a very large tree, so the name search, the
+  contract globs and the shared-state search see only the files listed. A
+  large GitLab project's listing takes about a minute, once per run, at
+  `repo` only.
 - **The Bitbucket Server listing is untested live.** It is built from the
   Data Center REST documentation and tested against fakes of that shape.
   Whether it returns submodules is unverified.
-- **A chunk that times out loses its repository context**, because the
-  timeout retry drops the definitions and contract blocks (lesson 4).
-- **A pull request's file can be fetched twice.** The 0.15.0 dependency and
-  same-file definition blocks keep their own reader.
+- **A chunk that times out loses most of its context.** The timeout retry in
+  `orchestrator._run_worker` renders with `include_definitions=False` and no
+  repository-context unit, so it drops the same-file definitions, Java and
+  Kotlin ones included, and every repository-context block: definitions,
+  contract excerpts and readers. The record marks the unit `retry_dropped`.
+  The dependency block, JVM lines included, survives.
+- **A pull request's file can be fetched twice.** Chunk context's reader
+  (`orchestrator._make_file_reader`) and the repository reader
+  (`repo_reader.RepoReader`) share no cache, so a file both of them read
+  costs two requests per run. Java and Kotlin files now read through both at
+  `diff` and `repo`, as other languages' files already did.
 
 Listing, retry and cost notes:
 
@@ -416,21 +456,22 @@ Listing, retry and cost notes:
   (`allowed_methods` in `forges/gitlab.py`), and the listing is a `POST`. A
   failed first page falls back to the REST walk; a failed later page gives a
   partial listing.
-- **An empty-reply retry followed by a timeout retry loses tokens.** When the
-  retry of an empty reply times out, `_run_worker`'s timeout retry replaces
-  the chunk's result, so the billed empty call's tokens drop out of the run
-  totals.
-- **The retry's cost estimate uses the second call's model.** When either
-  call reports no cost, the unit's cost is unknown, and `costs.run_cost`
+- **A parse retry followed by a timeout retry loses tokens and retries.**
+  When a chunk's retried call times out, `_run_worker`'s timeout retry
+  replaces the chunk's result, so the billed earlier calls' tokens drop out
+  of the run totals, and only the second run's `parse_retries` is counted.
+- **The retry's cost estimate uses the last call's model.** When any call
+  reports no cost, the unit's cost is unknown, and `costs.run_cost`
   estimates it from the summed tokens at the rate of the unit's `model`,
-  the second call's, even when another model in the fallback chain answered
-  the first call.
+  the last call's, even when another model in the fallback chain answered
+  an earlier call.
 - **prxref's defaults are too small for a thinking model.**
   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
-  thinking model in the live checks (lesson 4). Neither default changed in
-  0.16.0; raise both for such a model. The recipe under "Measuring repository
-  context" in `tests/evals/README.md` sets neither, so run verbatim against
-  such a model it cuts the replies off.
+  thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
+  and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
+  changed in 0.16.0 or 0.17.0; raise both for such a model. The recipe under
+  "Measuring repository context" in `tests/evals/README.md` sets neither, so
+  run verbatim against such a model it cuts the replies off.
 
 Sizing, recall and GitHub notes:
 
@@ -561,11 +602,11 @@ Carried over from 0.15.0 and earlier, still true:
     a public project. Without one, thread dedup runs against no threads.
 - **Replay from a diff file.** A `--diff-file` run without `--pr-url` has no
   file context and no threads. `--repo-dir` gives it repository context,
-  but the dependency-versions and same-file definitions blocks still read
-  only through the forge (`orchestrator._make_file_reader`), so they stay
-  empty. The title comes from the patch mail or the file name. The
-  description comes from the mail, `--description-file` or
-  `--no-description`.
+  but the dependency-versions and same-file definitions blocks, Java and
+  Kotlin ones included, still read only through the forge
+  (`orchestrator._make_file_reader`), so they stay empty. The title comes
+  from the patch mail or the file name. The description comes from the
+  mail, `--description-file` or `--no-description`.
 - **Azure DevOps.**
   - Only anonymous reads are verified live: the forge reads, the dry-run output
     shape, the pinned-range compare diff, a pinned-range replay, and, new in
@@ -614,23 +655,25 @@ Follow-ups a maintainer can act on:
 - **Duplicated code in `rules.py`.** `rules._read_scoped_file` duplicates the
   read block of `load_review_rules`. A `_reason` helper exists in both
   `rules.py` and `prompt_templates.py`.
-- **Missing definitions at `off`.** With repository context off,
-  `chunk_context.referenced_definitions` still looks only in the same file,
-  and only for JavaScript, TypeScript and Python. `diff` and `repo`
-  add other files and Java types; the rest of the JVM gap is #20.
+- **Missing definitions at `off`, and for Go and Rust.** With repository
+  context off, `chunk_context.referenced_definitions` still looks only in the
+  same file, for JavaScript, TypeScript, Python, Java and Kotlin. `diff` and
+  `repo` add other files, with Java and Kotlin types only. Go and Rust get
+  dependency versions but no definitions at any level:
+  `chunk_context._definition_regexes` has no regex for them.
 - **The history read is untraced.** The replay's history read is outside the
   trace, and only the `replay` stamp records its outcome.
 - **The sweep's example is always in force.** `orchestrator._example_titles`
   always reads the systemic template. So the sweep's example title is in force
   even on a run whose sweep never runs.
 
-The v0.15.0 handoff's #17 bullet is **done**, and so is its empty-reply
-bullet (the empty-reply retry).
+The v0.16.0 handoff's #20 bullet is **done** (Java and Kotlin chunk context),
+and so is its #21 bullet (the parse retry).
 
 | Item | Value |
 |---|---|
-| Released version | `0.16.0` (minor: repository context behind four new config keys, all off by default; one new CLI flag, `--repo-dir`; one new run-record and `--format json` key, `repo_context`, `null` when off; an empty model reply is retried once; no existing config default changed) |
-| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Released version | `0.17.0` (minor: Java and Kotlin chunk context, at every level; one new config key, `PRXREF_LLM_PARSE_RETRIES`, default `1`, which changes behaviour: a `{}` reply now costs a second call and can fail its unit, and `0` restores 0.16.0; one new run-record and `--format json` key, `parse_retries`, `null` at `0`; a new context block at `repo`, `### Code elsewhere that reads state this chunk writes`; one new always-on deterministic check, the pinned-off toggle; no new CLI flag; no existing config default changed) |
+| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS` and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
