@@ -11,7 +11,16 @@ what a user sees: the prompts, the run record and the trace.
 
 The D1 golden, ``golden_off_prompts.json``, was captured from the RELEASED
 prxref 0.15.0 by ``make_golden.py`` (its docstring has the command); it is
-never regenerated from the tree. No test touches the network.
+never regenerated from the tree. No test touches the network. The prompts
+must equal it byte for byte. From 0.17.0 on, the forge reads are compared
+with every JVM path left out: a ``.java``, ``.kt`` or ``.kts`` file, or a
+``pom.xml``, ``build.gradle``, ``build.gradle.kts`` or ``libs.versions.toml``
+manifest. Since #20 the chunk context reads Java and Kotlin files and probes
+the directories above them for their build manifests at every repository
+context level, ``off`` included, and D1 covers what a user sees (prompts,
+posts, trace and logs), not forge reads. So the JVM reads are pinned
+literally instead, and the golden itself is checked to hold no JVM path, so
+the filter cannot hide one of its reads.
 
 The exclusivity message is in every ConnectorService prompt, the feature off
 included, because the "Other files changed in this PR" digest quotes
@@ -69,7 +78,39 @@ SPEC_50 = (SPEC, 50, "contract", "contract", "IdempotencyKey", 369)
 TABLE_4 = (IDEMPOTENCY_TABLE, 4, "contract", "contract", "idempotency_keys", 248)
 REPO_ROWS = [[TC_9, TC_11, SPEC_6, SPEC_31, SPEC_41], [SPEC_31], [SPEC_50, TABLE_4]]
 HUNK_ROWS = [[TC_9, TC_11], [], []]
-REPO_READS = [TRANSPORT_CONFIG, CONNECTOR_SERVICE, SPEC, FIRST_MIGRATION, IDEMPOTENCY_TABLE]
+MANIFEST_PROBES = [
+    "src/main/java/com/acme/connectors/pom.xml",
+    "src/main/java/com/acme/connectors/build.gradle.kts",
+    "src/main/java/com/acme/connectors/build.gradle",
+    "src/main/java/com/acme/pom.xml",
+    "src/main/java/com/acme/build.gradle.kts",
+    "src/main/java/com/acme/build.gradle",
+    "src/main/java/com/pom.xml",
+    "src/main/java/com/build.gradle.kts",
+    "src/main/java/com/build.gradle",
+    "src/main/java/pom.xml",
+    "src/main/java/build.gradle.kts",
+    "src/main/java/build.gradle",
+    "src/main/pom.xml",
+    "src/main/build.gradle.kts",
+    "src/main/build.gradle",
+    "src/pom.xml",
+    "src/build.gradle.kts",
+    "src/build.gradle",
+    "pom.xml",
+    "build.gradle.kts",
+    "build.gradle",
+]
+JVM_READS = [*MANIFEST_PROBES, CONNECTOR_SERVICE, TRANSPORT_CONFIG]
+REPO_READS = [TRANSPORT_CONFIG, CONNECTOR_SERVICE, SPEC, *JVM_READS, FIRST_MIGRATION, IDEMPOTENCY_TABLE]
+JVM_SUFFIXES = (".java", ".kt", ".kts")
+JVM_MANIFESTS = frozenset({"pom.xml", "build.gradle", "build.gradle.kts", "libs.versions.toml"})
+
+
+def _is_jvm(path: str) -> bool:
+    """True for a Java or Kotlin source or a JVM build manifest, judged by the basename."""
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith(JVM_SUFFIXES) or name in JVM_MANIFESTS
 
 
 def _rows(result: dict) -> list[list[tuple]]:
@@ -240,7 +281,9 @@ class TestOffMatchesTheReleased015:
     0.15.0's own, not the tree's. It holds two design points: the fixture, and
     the fixture plus a Python file whose chunk makes the pre-0.16 reader render
     its dependency and definitions blocks, so the rendering
-    ``render_context_blocks`` extended is compared too.
+    ``render_context_blocks`` extended is compared too. The forge reads match
+    the golden's once the JVM paths are left out; those are pinned on their own
+    (see the module docstring).
     """
 
     def test_the_golden_is_a_0_15_0_oracle_that_exercises_the_old_blocks(self):
@@ -254,16 +297,33 @@ class TestOffMatchesTheReleased015:
         assert "requests@==2.32.3" in blocks[0]
         assert "tools/sync.py:5: def load_config(path):" in _block(blocks[0], DEFINITIONS_HEADER)
 
+    def test_the_golden_reads_no_jvm_path(self):
+        """The JVM filter below can hide no read the golden holds, because the golden holds none."""
+        golden_reads = [path for run in GOLDEN["runs"].values() for path in run["content_calls"]]
+        assert golden_reads
+        assert [path for path in golden_reads if _is_jvm(path)] == []
+
     @pytest.mark.parametrize("point", sorted(DESIGN_POINTS))
     @pytest.mark.parametrize("variant", ["no-new-kwargs", "off", "off-with-every-other-kwarg-set"])
     def test_off_prompts_and_reads_equal_the_golden(self, point, variant):
         got = golden_run(point, **_off_variant(variant))
         want = GOLDEN["runs"][point]
         assert got["list_calls"] == want["list_calls"] == 0
-        assert got["content_calls"] == want["content_calls"]
+        assert [path for path in got["content_calls"] if not _is_jvm(path)] == want["content_calls"]
         assert len(got["prompts"]) == len(want["prompts"])
         for index, (old, new) in enumerate(zip(want["prompts"], got["prompts"], strict=True)):
             assert new == old, f"prompt {index}: {_first_difference(old, new)}"
+
+    @pytest.mark.parametrize("point", sorted(DESIGN_POINTS))
+    @pytest.mark.parametrize("variant", ["no-new-kwargs", "off", "off-with-every-other-kwarg-set"])
+    def test_off_jvm_reads_are_the_pinned_list(self, point, variant):
+        """The reads the golden comparison leaves out, in order: the manifest probes, then both Java files.
+
+        The probes walk from the Java package directory up to the root. A probe
+        gained or lost goes red here rather than vanishing into the filter.
+        """
+        got = golden_run(point, **_off_variant(variant))
+        assert [path for path in got["content_calls"] if _is_jvm(path)] == JVM_READS
 
     def test_control_the_same_comparison_fails_for_repo(self):
         """Every worker prompt differs; the sweep, the last prompt, carries no repository context and does not."""
@@ -274,6 +334,7 @@ class TestOffMatchesTheReleased015:
         assert changed == [0, 1, 2]
         assert got["list_calls"] == 1
         assert got["content_calls"] == REPO_READS != want["content_calls"]
+        assert [path for path in got["content_calls"] if not _is_jvm(path)] != want["content_calls"]
 
 
 class TestTheBudget:
@@ -411,7 +472,7 @@ class TestALabelFileIsNeverRead:
             context_exclude_globs=["!**/cases.json"], max_workers=1,
         )
         assert not set(forge.content_calls) & set(LABEL_FILES)
-        assert forge.content_calls == [TRANSPORT_CONFIG, CONNECTOR_SERVICE, SCHEMA]
+        assert forge.content_calls == [TRANSPORT_CONFIG, CONNECTOR_SERVICE, SCHEMA, *JVM_READS]
         record = result["repo_context"]
         assert record["contract_globs"] == LABEL_GLOBS
         assert record["exclude_globs"] == ["!**/cases.json"]
@@ -445,6 +506,7 @@ PARTS = [f"Part{i:02d}" for i in range(1, 21)]
 PARTS_DIR = "src/main/java/com/acme/connectors/parts"
 CONTROLLER = f"{PARTS_DIR}/TransportController.java"
 ONE_CHUNK = {"max_files_per_chunk": 30, "token_budget": 200_000}
+OWN_FILE_READS = len(PARTS) + 1
 
 
 def _new_file_diff(path: str, text: str) -> str:
@@ -490,6 +552,11 @@ class TestReadCapStarvation:
     This adds the forge reader, the fixture's templated route and spec, and a
     control through ``orchestrate_review`` itself: ``orchestrator._routed_read``
     replaced by the capped chunk reader alone.
+
+    From 0.17.0 on (#20) the forge also sees the chunk context read each of the
+    chunk's own Java files once, the controller and every part, outside the
+    repository reader and its cap. Those are the ``OWN_FILE_READS`` in each
+    read count.
     """
 
     def test_the_controller_chunk_keeps_its_route_contract(self, tmp_path):
@@ -503,8 +570,8 @@ class TestReadCapStarvation:
             {"paths": 22, "complete": True}, 22, False,
         )
         assert _rows(result) == [[SPEC_6, SPEC_31, SPEC_41]]
-        assert len(forge.content_calls) == 22 > MAX_CHUNK_READS
-        assert forge.content_calls[-1] == SPEC
+        assert len(forge.content_calls) == 22 + OWN_FILE_READS > MAX_CHUNK_READS
+        assert [path for path in forge.content_calls if not _is_jvm(path)] == [SPEC]
         worker = llm.calls[0][1]
         assert f"{SPEC}:6: /connectors/{{connectorId}}/transports:" in _block(worker, CONTRACT_HEADER)
 
@@ -517,7 +584,7 @@ class TestReadCapStarvation:
         record = result["repo_context"]
         assert (record["reads"], record["read_cap_hit"]) == (MAX_CHUNK_READS, True)
         assert _rows(result) == [[]]
-        assert len(forge.content_calls) == MAX_CHUNK_READS
+        assert len(forge.content_calls) == MAX_CHUNK_READS + OWN_FILE_READS
         assert SPEC not in forge.content_calls
         assert CONTRACT_HEADER not in llm.calls[0][1]
 
