@@ -191,7 +191,7 @@ class TestLayout:
         cases_dir = tmp_path / "out" / "L" / "cases"
         common = {
             "post": False, "no_threads": True, "rules_file": rules_file,
-            "scoped_rules": None, "prompts_dir": None,
+            "scoped_rules": None, "prompts_dir": None, "repo_dir": None,
         }
         assert review.calls == [
             {
