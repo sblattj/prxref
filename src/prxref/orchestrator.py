@@ -6,9 +6,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``parse_unified_diff`` → files. An empty or unchunkable diff (every file
    binary, or no files at all) short-circuits to a summary-only run with
    verdict ``Approved`` — no chunk worker or sweep ever runs, but
-   ``heuristics.release_shape_findings`` still does, gated the same as on
+   ``heuristics.release_shape_findings`` and
+   ``heuristics.toggle_pinned_off_findings`` still do, gated the same as on
    the normal path, so a release-shaped diff with no reviewable text still
-   gets its deterministic finding instead of a silent approval.
+   gets its deterministic finding instead of a silent approval, and so does
+   a toggle/pin pair on a diff that otherwise chunks to nothing — though a
+   toggle needs an added line to match against, so it rarely fires here.
 2. ``build_chunks`` risk-ranked chunking (≤ ``max_chunks``, each chunk
    sized to ``token_budget`` and capped at ``max_files_per_chunk`` files).
 3. Parallel worker fan-out: one ``reviewer.review_chunk(llm, files, pr)``
@@ -46,14 +49,22 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    to ``None`` unless finding grouping or the per-rule cap is on
    (``_enforce_rule``), then gain
    ``heuristics.release_shape_findings(files)`` (a pure, no-LLM finding
-   about a PR that is ≥80% release machinery yet also touches source),
-   folded in BEFORE the passes so it is filtered like any other finding,
-   and spliced in at the chunk/sweep boundary — before the sweep's own
-   findings, never after — so it is always a CHUNK-side finding to
-   ``apply_sweep_dedup``, whose exact tier drops only sweep findings, and
-   being file-level (line 0) it is never compared by that pass's reworded
-   tier either. It can never be dropped as a duplicate of a chunk worker's
-   own restatement:
+   about a PR that is ≥80% release machinery yet also touches source) and
+   ``heuristics.toggle_pinned_off_findings(files)`` (a pure, no-LLM finding
+   about a toggle this PR adds with a default of on that this PR's own
+   test setup pins off), both folded in BEFORE the passes so each is
+   filtered like any other finding, and both spliced in at the chunk/sweep
+   boundary — before the sweep's own findings, never after — so each is
+   always a CHUNK-side finding to ``apply_sweep_dedup``, whose exact tier
+   drops only sweep findings and never one chunk-side finding for another.
+   Being file-level (line 0), a release-shape finding is also never
+   compared by that pass's reworded tier, so it can never be dropped as a
+   duplicate of a chunk worker's own restatement; a toggle finding instead
+   sits on the toggle's own real line, so with ``dedup_similarity`` set it
+   IS compared by that tier against any other chunk-side finding sharing
+   its file and line — a chunk worker's own restatement of the same toggle
+   included — and only the higher-ranked one of the two (severity, then
+   confidence, then content) survives, same as any other same-side pair:
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
@@ -886,20 +897,26 @@ def orchestrate_review(
 
     if not chunks:
         # No chunk survived build_chunks — an empty diff, or every file
-        # binary — but the release-shape heuristic is pure and needs no
-        # chunk to fire on: computed here so a release PR whose only
-        # non-machinery file is binary still gets the deterministic finding
-        # instead of a silent Approved (issue #29 residual, concern #2).
+        # binary — but the release-shape and pinned-toggle heuristics are
+        # pure and need no chunk to fire on: computed here so a release PR
+        # whose only non-machinery file is binary still gets the
+        # deterministic finding instead of a silent Approved (issue #29
+        # residual, concern #2), and so does a toggle/pin pair on a diff
+        # that otherwise chunks to nothing (issue #22) — though a toggle
+        # needs an added, non-binary line, so it rarely fires on this path.
         release_shape = heuristics.release_shape_findings(files)
+        toggle_findings = heuristics.toggle_pinned_off_findings(files)
+        deterministic_findings = release_shape + toggle_findings
         tracer.event(
-            "run", "ok", chunks_reviewed=0, findings=len(release_shape),
+            "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
             **_cost_meta(run_inputs),
-            **(_scope_counts(release_shape) if ticket_active else {}),
+            **(_scope_counts(deterministic_findings) if ticket_active else {}),
         )
         return _run_record(_summary_only_run(
             forge, ref, pr, files, post, t0,
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
+            toggle_findings=toggle_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
             max_outofscope_findings=max_outofscope_findings,
@@ -1166,23 +1183,34 @@ def orchestrate_review(
     if results[-1]["error"]:
         failed_chunks.append((results[-1]["error"], []))
 
-    # A deterministic, non-LLM finding folded in before the quality passes so
-    # it flows through every one of them exactly like a model finding (issue
-    # #10): file-level (line=0) survives apply_line_align untouched, and
-    # warning/1.0 clears apply_quality_gate trivially. Folded in AT the
+    # Two deterministic, non-LLM findings folded in before the quality passes
+    # so each flows through every one of them exactly like a model finding
+    # (issues #10 and #22): warning/1.0 clears apply_quality_gate trivially
+    # for both. release_shape is file-level (line=0), so it survives
+    # apply_line_align untouched; the toggle finding sits on the toggle's
+    # own real line (> 0) instead, so apply_line_align's content pass
+    # re-corroborates it like any model anchor — the body quotes the
+    # toggle call itself, so the anchor holds. Both are folded in AT the
     # chunk/sweep boundary — before the sweep's own findings, not after —
-    # and sweep_start moves with it: apply_sweep_dedup never drops a
+    # and sweep_start moves with them: apply_sweep_dedup never drops a
     # CHUNK-side finding for a sweep-side one (its exact tier drops only
-    # sweep findings; its reworded tier, on with dedup_similarity, can drop
-    # one chunk copy for another on the same line, but never compares line
-    # 0, which this finding always sits on). Appending this after the
+    # sweep findings). Its reworded tier, on with dedup_similarity, never
+    # compares release_shape (line 0 is never compared), but DOES compare
+    # the toggle finding against any other chunk-side finding sharing its
+    # file and line — a chunk worker's own restatement of the same toggle
+    # included — keeping only the higher-ranked one of the two (severity,
+    # then confidence, then content). Appending either finding after the
     # sweep's findings would put it on the sweep side of that boundary,
     # where a chunk worker's own finding sharing its file and normalized
     # title could drop the deterministic finding as "duplicate of chunk
     # finding" and keep the model's restatement instead.
     release_shape = heuristics.release_shape_findings(files)
-    findings = findings[:sweep_start] + release_shape + findings[sweep_start:]
-    sweep_start += len(release_shape)
+    toggle_findings = heuristics.toggle_pinned_off_findings(files)
+    deterministic_findings = release_shape + toggle_findings
+    findings = (
+        findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
+    )
+    sweep_start += len(deterministic_findings)
 
     # FIRST among the passes: a team word the map knows ("blocker") would
     # otherwise die at the gate as an invalid severity, and consistency and
@@ -2933,6 +2961,7 @@ def _summary_only_run(
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
+    toggle_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
@@ -2941,19 +2970,24 @@ def _summary_only_run(
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
-    No worker ever ran, but the release-shape heuristic
-    (:func:`heuristics.release_shape_findings`) is pure and needs no chunk
-    to fire on, so its findings — passed in by the caller, already computed
-    over the full file list — are put through the same location and
-    quality passes a chunk-sourced finding gets (:func:`apply_location_validation`,
-    :func:`apply_quality_gate`) before they reach ``findings_active`` /
-    ``verdict`` / the summary. An empty diff still yields
-    ``release_shape_findings=[]`` (fewer than 2 files can never be
-    release-shaped), so this degrades to exactly the prior empty-diff
-    behaviour: ``Approved``, no findings, no banner. ``confidence_floor``,
-    ``max_errors``, ``max_warning_findings`` and ``max_outofscope_findings``
-    are that gate's knobs, threaded from :func:`orchestrate_review`. No
-    grouping pass runs here: there is no chunk finding to group.
+    No worker ever ran, but the release-shape and pinned-toggle heuristics
+    (:func:`heuristics.release_shape_findings`,
+    :func:`heuristics.toggle_pinned_off_findings`) are pure and need no
+    chunk to fire on, so their findings — passed in by the caller, already
+    computed over the full file list — are put through the same location
+    and quality passes a chunk-sourced finding gets
+    (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
+    they reach ``findings_active`` / ``verdict`` / the summary. No
+    :func:`apply_line_align` call here: both heuristics already anchor on a
+    real diff line and there is no worker-supplied anchor to re-corroborate.
+    An empty diff still yields ``release_shape_findings=[]`` and
+    ``toggle_findings=[]`` (fewer than 2 files can never be release-shaped,
+    and no file has an added line for a toggle or a pin to match), so this
+    degrades to exactly the prior empty-diff behaviour: ``Approved``, no
+    findings, no banner. ``confidence_floor``, ``max_errors``,
+    ``max_warning_findings`` and ``max_outofscope_findings`` are that
+    gate's knobs, threaded from :func:`orchestrate_review`. No grouping
+    pass runs here: there is no chunk finding to group.
 
     ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
     ``summary_template`` are handed to :func:`_render_summary` unchanged; all
@@ -2964,7 +2998,7 @@ def _summary_only_run(
     elapsed_ms = _elapsed_ms(t0)
     posted = False
 
-    findings = list(release_shape_findings or [])
+    findings = list(release_shape_findings or []) + list(toggle_findings or [])
     if findings:
         findings = apply_location_validation(findings, [f.path for f in files])
         findings = apply_quality_gate(
