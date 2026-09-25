@@ -712,9 +712,11 @@ def orchestrate_review(
     through a fresh ``chunk_reader()``, so the per-chunk read cap is spent
     on the paths outside the diff alone, and the entries do not depend on
     which chunk reads a shared diff file first. The context's definition
-    lines extend the definitions block and its contract lines form a
-    ``### Contract excerpts`` block, on the first attempt only: the timeout
-    retry carries neither. A build that raises gives that chunk no context
+    lines extend the definitions block, its contract lines form a
+    ``### Contract excerpts`` block and its reader lines a last
+    ``### Code elsewhere that reads state this chunk writes`` block, on the
+    first attempt only: the timeout retry passes no unit, so it carries none
+    of the three. A build that raises gives that chunk no context
     and one WARNING naming the chunk; the review goes on. The dependency and
     same-file definition blocks keep their own reader in every mode, so a
     diff file can be fetched once by each reader.
