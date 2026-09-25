@@ -321,7 +321,7 @@ RUN_KEYS = ["version", "label", "cases_path", "created_at", "case_ids", "prompts
             "scoped_rules", "config"]
 SCORE_KEYS = ["version", "label", "run", "judge", "failed", "metrics", "cases"]
 JUDGE_KEYS = ["model", "sampling", "prompt_version", "prompt_sha256", "self_judged", "cost_usd", "cost_estimated",
-              "llm_calls", "cached", "errors"]
+              "llm_calls", "parse_retries", "cached", "errors"]
 METRIC_KEYS = ["case_count", "recall", "recall_by_severity", "recall_by_category", "recall_accepted",
                "unmatched_ai", "severity_agreement", "chunks_failed", "elapsed_ms", "review_cost", "judge_cost"]
 CASE_IDS = ["case-001-mcp-protocol-upgrade", "case-002-session-token-logging", "case-003-config-schema-pin",

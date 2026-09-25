@@ -342,11 +342,13 @@ def judge_cost(outcomes: Iterable[JudgeOutcome], price_table: Mapping[str, Any] 
     """Total a scoring run's judge cost: ``(cost_usd, cost_estimated)``.
 
     Totals the :attr:`JudgeOutcome.unit` of every outcome that made a request
-    with :func:`prxref.costs.run_cost`, the rule a review's cost follows: a
-    request that raised is skipped, and any received call without a reported
-    or estimated figure makes the whole total ``None``, never ``0`` and never
-    a partial sum. A run that made no request (every case cached or
-    unlabelled) costs a known ``0.0``.
+    with :func:`prxref.costs.run_cost`, the rule a review's cost follows. A
+    case's unit sums every attempt it made, parse retries included, so a case
+    is skipped only when none of its calls received a reply; a case whose
+    retry raised after a rejected reply still counts that reply. Any received
+    case without a reported or estimated figure makes the whole total
+    ``None``, never ``0`` and never a partial sum. A run that made no request
+    (every case cached or unlabelled) costs a known ``0.0``.
     """
     units = [outcome.unit for outcome in outcomes if outcome.unit is not None]
     if not units:

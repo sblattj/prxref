@@ -266,6 +266,12 @@ matter for a comparison are recorded in `run.json`. In particular:
   `trace/` directory.
 - `PRXREF_TRACE_FILE` is inherited, so every case appends to the same JSONL
   trace.
+- `PRXREF_LLM_PARSE_RETRIES` reaches every case's review, which re-sends a
+  chunk or sweep whose reply cannot be parsed, and the run records it under
+  `config.llm_parse_retries`. Each case's `record.json` carries the review's
+  own `parse_retries`. `eval score` reads the variable from its own
+  environment, not from `run.json`, to bound the judge's retries (see
+  [The judge](#the-judge)).
 
 So two arms that differ only in their scoped rules or prompt templates are
 set with these flags, and `run.json` and the `run` block of `score.json`
@@ -327,7 +333,7 @@ prxref-eval/                        --out
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
 | `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
-| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs` |
+| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
 only under `prompts.prompt_templates`. `prompt_templates`, `sampling`,
@@ -336,7 +342,7 @@ order, whose record's verdict is not `Error`. They are `null` when there is
 none, and `review_rules`, `scoped_rules` and `prompt_templates` are `null`
 when their input is off.
 
-**No credential is ever written.** `config` is an allowlist of the sixteen
+**No credential is ever written.** `config` is an allowlist of the seventeen
 settings above, and a record carries no credential. The traces do hold the
 prompts, and the prompts hold the diff, so treat a run directory like the
 code it reviewed.
@@ -420,8 +426,10 @@ is graded `full` (credit 1), `partial` (credit 0.5) or `none` (credit 0):
   `partial` or `none` per label, citing the AI finding that earns a credit.
   The code then checks every answer: a credit must name a real finding in
   the label's own file, or it becomes `none`; a label the judge left out is
-  `none`. A reply that cannot be read at all, or a call that fails, makes
-  every judge-tier label of that case `judge_error`.
+  `none`. A reply that cannot be read at all is asked for again (see
+  [The judge](#the-judge)); one still unreadable when the retries run out,
+  or a call that fails, makes every judge-tier label of that case
+  `judge_error`.
 
 `judge_error` is not `none`. A label the judge failed to grade is counted
 on its own and left out of every denominator, so a flaky judge lowers
@@ -465,8 +473,21 @@ which makes the run's review-cost total unknown too.
 - **Same backend, no separate key.** The judge runs on the review's own
   LLM backend, base URL, credentials, timeout, temperature and seed, with
   only the model changed to `--judge-model`. It is one model, not a chain:
-  an empty value or a comma-separated list exits `2`. There is no judge
-  setting other than the flag.
+  an empty value or a comma-separated list exits `2`. The flag is the
+  judge's only setting of its own; `PRXREF_LLM_PARSE_RETRIES` bounds its
+  retries as it bounds the review's.
+- **Parse retries.** A reply the judge parser rejects, for any reason (not
+  JSON, not an object, no `grades` list, or a grades row that is not an
+  object, has no `human_id` or names an unknown grade), is asked for again
+  with the same request while fewer than `PRXREF_LLM_PARSE_RETRIES`
+  (default `1`) retries have run, so a case makes at most one call more than
+  that number. A judge reply cut short at the token limit is retried like
+  any other rejected reply, where a review chunk's is not. Each retry logs a
+  WARNING ending `parse retry <k> of <N>`. A call that raises is never
+  retried, and `0` turns retries off. When the retries run out, the case is
+  a judge error carrying the last reply's reason. Every attempt's tokens
+  and cost count toward the case, including a rejected reply followed by a
+  retry that raised.
 - **The cache.** Each case's graded reply is cached under
   `<out>/<label>/judge-cache/`, keyed on the judge prompt's SHA-256, the
   judge model, and the labels and AI findings exactly as the judge sees
@@ -482,7 +503,12 @@ which makes the run's review-cost total unknown too.
   with a note that the grades may be inflated. It is not an error: the
   score is still written.
 - **Traces.** A live judge call writes `judge.system.md`, `judge.user.md`,
-  `judge.response.json` and `judge.meta.json` into the case's `trace/`.
+  `judge.response.json` and `judge.meta.json` into the case's `trace/`, for
+  its last call. With `PRXREF_LLM_PARSE_RETRIES` at `1` or more,
+  each rejected reply that was retried is kept as
+  `judge.attempt<K>.response.json` (`K` from 1), and once a retry ran
+  `judge.meta.json` adds `parse_retries` and `first_error`, the reason the
+  first reply was rejected.
 
 ### `score.json`
 
@@ -499,10 +525,14 @@ The keys, in order:
     version and SHA-256;
   - `self_judged`;
   - `cost_usd` and `cost_estimated`: the cost of this scoring's judge
-    calls. A cached case costs nothing, so a fully cached rescore reports
-    `0.0`. A call that raised adds nothing, unless every call raised,
-    which makes it `null`, and so does one reply nothing could price;
-  - `llm_calls`: the judge calls made;
+    calls, parse retries included. A cached case costs nothing, so a fully
+    cached rescore reports `0.0`. A case whose every call raised adds
+    nothing. It is `null` when every call made raised, or when nothing
+    could price one reply;
+  - `llm_calls`: the judge calls made, parse retries included;
+  - `parse_retries`: how many of those calls re-sent a request because the
+    reply before it was rejected, summed over the cases; `0` when nothing
+    was retried or `PRXREF_LLM_PARSE_RETRIES` is `0`;
   - `cached`: the cases answered from the cache;
   - `errors`: `[{"case_id", "error"}]` for each case the judge failed to
     grade, by case id.
@@ -558,9 +588,10 @@ The keys, in order:
   `priced`, `unpriced` and `estimated` (the cases whose cost came from
   `PRXREF_PRICE_TABLE`). **An unknown cost is never summed:** one unpriced
   case makes `total_usd` and `per_pr_usd` `null`, and `unpriced` says how
-  many. `judge_cost` sums the per-case judge costs, where a case whose judge
-  call raised is unpriced, so it can be `null` while `judge.cost_usd`, which
-  skips a raised call, is a number.
+  many. `judge_cost` sums the per-case judge costs, where a case whose
+  every judge call raised is unpriced, so it can be `null` while
+  `judge.cost_usd`, which skips such a case, is a number. A case whose
+  retry raised after a rejected reply is priced by that reply.
 
 ### `score.md`
 
@@ -571,7 +602,10 @@ severity`, `## Recall by category`, `## Accepted labels`, `## Unmatched AI
 findings`, `## Severity agreement`, `## Chunks failed`, `## Elapsed`,
 `## Cost` and `## Judge`. An empty section reads `None.` (or `No labels.`
 for a recall table), an unknown value reads `unknown`, and a recall with
-nothing scored reads `n/a`. It holds no wall-clock time of the scoring run.
+nothing scored reads `n/a`. The judge's cost line names its parse retries
+only when there were any, as in `- Judge: $0.0040, 2 call(s) (1 parse
+retry), 0 case(s) from the cache`. It holds no wall-clock time of the
+scoring run.
 
 This is the `score.md` of a three-case fixture run in the test suite, with a
 judge; case `c` failed:
