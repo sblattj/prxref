@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from . import chunk_context
 from .rules import match_globs
 
-REASONS = ("cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search")
-KINDS = ("definition", "contract")
+REASONS = ("cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search", "shared-state")
+KINDS = ("definition", "contract", "reader")
 
 _JAVA_DEF_RE = re.compile(
     r"^\s*(?:(?:@(?!interface\b)[A-Za-z_$][\w$.]*(?:\((?:[^()]|\([^()]*\))*\))?"

@@ -1878,17 +1878,18 @@ def _make_file_reader(forge: Forge, ref: PRRef, pr: PRData):
 def _context_blocks(
     chunk, reader, *, include_definitions: bool, unit: repo_unit.UnitContext | None = None,
 ) -> str:
-    """Render the chunk's dependency, definition and contract blocks; never raises.
+    """Render the chunk's dependency, definition, contract and reader blocks; never raises.
 
     ``unit`` is the chunk's repository context. Its definition lines follow
-    the same-file definitions under one header and its contract lines form
-    the contracts block; they render with no ``reader`` too, over empty
-    dependency and same-file lists. ``None``, or a unit with no lines, is
-    exactly the rendering without repository context.
+    the same-file definitions under one header, its contract lines form the
+    contracts block and its reader lines the last block; they render with no
+    ``reader`` too, over empty dependency and same-file lists. ``None``, or a
+    unit with no lines, is exactly the rendering without repository context.
     """
     extra = unit.definition_lines if unit is not None else ()
     contracts = unit.contract_lines if unit is not None else ()
-    if reader is None and not (extra or contracts):
+    readers = unit.reader_lines if unit is not None else ()
+    if reader is None and not (extra or contracts or readers):
         return ""
     deps: list[str] = []
     defs: list[str] = []
@@ -1902,12 +1903,12 @@ def _context_blocks(
             )
         except Exception as e:  # noqa: BLE001
             logger.debug("chunk context unavailable: %s", e)
-            if not (extra or contracts):
+            if not (extra or contracts or readers):
                 return ""
             deps, defs = [], []
     try:
         return chunk_context.render_context_blocks(
-            deps, defs, extra_def_lines=extra, contract_lines=contracts,
+            deps, defs, extra_def_lines=extra, contract_lines=contracts, reader_lines=readers,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("chunk context unavailable: %s", e)
