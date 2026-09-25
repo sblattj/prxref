@@ -901,14 +901,6 @@ def test_run_review_passes_only_real_orchestrate_kwargs(fake_runtime, monkeypatc
     assert sorted(set(calls[0]) - set(params)) == []
 
 
-# ``orchestrate_review`` parameters that are config keys but that ``_run_review``
-# does not pass yet. The test below asserts they are still absent from the call,
-# so passing one fails it until the name is removed from here.
-NOT_WIRED_YET = frozenset({
-    "repo_context", "repo_context_max_chars", "context_contract_globs", "context_exclude_globs",
-})
-
-
 def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monkeypatch):
     """The reverse direction: every ``orchestrate_review`` parameter that is also
     a ``load_config`` key is handed over by ``_run_review``.
@@ -916,15 +908,15 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     A parameter the CLI forgets silently runs at its library default, so its
     environment variable is documented and dead: that is how the price table,
     the cost line and the size advisory would have shipped unreachable. The
-    loaded rules, ticket context and replay stamp are not config keys, but
-    they are the CLI's to build, so they are required by name.
+    loaded rules, ticket context, replay stamp and repository directory are
+    not config keys, but they are the CLI's to build, so they are required by
+    name.
     """
     real = real_orchestrator.orchestrate_review
     assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
     params = inspect.signature(real).parameters
-    expected = {name for name in params if name in config._DEFAULTS} - NOT_WIRED_YET
+    expected = {name for name in params if name in config._DEFAULTS}
     assert expected, "no orchestrate parameter is a config key, so the check is vacuous"
-    assert NOT_WIRED_YET <= set(params)
     ref = PRRef(
         forge="github", host="github.com", owner="org", repo="repo",
         number=7, url="https://github.com/org/repo/pull/7",
@@ -936,8 +928,7 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     calls = fake_runtime["orchestrate_calls"]
     assert len(calls) == 1
     assert sorted(expected - set(calls[0])) == []
-    assert not NOT_WIRED_YET & set(calls[0]), "now passed: drop it from NOT_WIRED_YET"
-    assert {"rules", "ticket", "replay"} <= set(calls[0])
+    assert {"rules", "ticket", "replay", "repo_dir"} <= set(calls[0])
 
 
 class TestDryRun:

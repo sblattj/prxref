@@ -57,10 +57,6 @@ NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
     "scoped_rules", "rule_counts", "repo_context",
 )
-# Record keys the orchestrator stamps that ``--format json`` does not carry
-# yet. The JSON test below asserts they are still absent, so emitting one
-# fails it until the key is removed from here.
-NOT_IN_JSON_YET = frozenset({"repo_context"})
 
 REPLAY = {
     "base_sha": "b" * 40,
@@ -282,9 +278,8 @@ class TestTheRecordKeys:
         assert "replay" not in normal_payload
         assert set(replay_payload) == set(normal_payload) | {"replay"}
         assert replay_payload["replay"] == REPLAY
-        for key in RECORD_KEYS - NOT_IN_JSON_YET:
+        for key in RECORD_KEYS:
             assert key in normal_payload, key
-        assert not NOT_IN_JSON_YET & set(normal_payload), "now emitted: drop it from NOT_IN_JSON_YET"
         assert normal_payload["size_advisory"] is None
         assert normal_payload["cost_estimated"] is False
 
