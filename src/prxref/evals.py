@@ -65,6 +65,7 @@ RUN_CONFIG_KEYS = (
     "max_outofscope_findings",
     "max_findings_per_rule",
     "scoped_rules_max_chars",
+    "context_followup",
     "repo_context",
     "repo_context_max_chars",
     "context_contract_globs",
