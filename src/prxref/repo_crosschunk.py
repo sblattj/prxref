@@ -33,7 +33,7 @@ from .repo_context import (
 
 MAX_CHANGE_LINES = 12
 
-_SAME_FILE_LANGUAGES = frozenset({"js", "python"})
+_SAME_FILE_LANGUAGES = frozenset({"js", "python", "java", "kotlin"})
 
 
 def _diff_lines(f: object) -> list[object]:

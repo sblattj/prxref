@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from prxref import repo_crosschunk
+from prxref import chunk_context, repo_crosschunk
 from prxref.repo_context import REASONS, ContextEntry
 from prxref.repo_crosschunk import MAX_CHANGE_LINES, diff_definitions
 from prxref.triage import build_chunks, parse_unified_diff
@@ -126,7 +126,7 @@ class TestFixture:
         files, chunks = _fixture()
         read = _RepoReader()
         diff_definitions(_chunk_holding(chunks, CONNECTOR_SERVICE), files, read)
-        assert read.calls == [TRANSPORT_CONFIG, CONNECTOR_SERVICE]
+        assert read.calls == [TRANSPORT_CONFIG]
 
     @pytest.mark.parametrize("read", [None, lambda path: None], ids=["no-reader", "reader-returns-none"])
     def test_without_file_text_the_entries_come_from_hunks(self, read):
@@ -170,17 +170,29 @@ class TestReasons:
         entries = diff_definitions([CALLER], [CALLER, limits], read)
         assert _keys(entries) == [("app/Limits.java", 3, "Limits", "definition", "cross-chunk")]
 
-    def test_java_definition_in_the_chunks_own_file_outside_its_hunks_is_diff_file(self):
-        widget = _file(
+    @pytest.mark.parametrize(("path", "hunk", "text"), [
+        (
             "p/Widget.java",
-            (7, ["     Widget copy() {", "+        return new Widget();", "     }"]),
-        )
-        text = (
+            ["     Widget copy() {", "+        return new Widget();", "     }"],
             "package p;\n\npublic class Widget {\n\n    private int size;\n\n"
-            "    Widget copy() {\n        return new Widget();\n    }\n}\n"
-        )
-        entries = diff_definitions([widget], [widget], _Reader({"p/Widget.java": text}))
-        assert _keys(entries) == [("p/Widget.java", 3, "Widget", "definition", "diff-file")]
+            "    Widget copy() {\n        return new Widget();\n    }\n}\n",
+        ),
+        (
+            "p/Widget.kt",
+            ["     fun copy(): Widget {", "+        return Widget()", "     }"],
+            "package p\n\nclass Widget {\n\n    private val size = 0\n\n"
+            "    fun copy(): Widget {\n        return Widget()\n    }\n}\n",
+        ),
+    ], ids=["java", "kotlin"])
+    def test_a_jvm_definition_in_the_chunks_own_file_is_left_to_chunk_context(self, path, hunk, text):
+        widget = _file(path, (7, hunk))
+        read = _Reader({path: text})
+        assert diff_definitions([widget], [widget], read) == []
+        assert read.calls == []
+        lines = text.splitlines()
+        assert chunk_context.referenced_definitions(chunk_context.chunk_files([widget]), read) == [
+            f"{path}:3: " + "\n".join(lines[2:8]),
+        ]
 
 
 class TestSkips:
@@ -189,10 +201,17 @@ class TestSkips:
             "p/Widget.java",
             (3, [" public class Widget {", "+    Widget copy() { return new Widget(); }", " }"]),
         )
-        text = "package p;\n\npublic class Widget {\n    Widget copy() { return new Widget(); }\n}\n"
-        read = _Reader({"p/Widget.java": text})
+        assert diff_definitions([widget], [widget], None) == []
+
+    @pytest.mark.parametrize(("path", "line"), [
+        ("p/Widget.java", "+    Widget copy() { return new Widget(); }"),
+        ("p/Widget.kt", "+    fun copy(): Widget = Widget()"),
+    ], ids=["java", "kotlin"])
+    def test_a_jvm_file_in_the_chunk_is_skipped_when_a_reader_is_given(self, path, line):
+        widget = _file(path, (3, [" class Widget {", line, " }"]))
+        read = _Reader({path: "package p\n\nclass Widget {\n" + line[1:] + "\n}\n"})
         assert diff_definitions([widget], [widget], read) == []
-        assert read.calls == ["p/Widget.java"]
+        assert read.calls == []
 
     def test_a_python_file_in_the_chunk_is_skipped_when_a_reader_is_given(self):
         service = _file("app/service.py", (20, [" def handle(req):", "+    return build_reply(req)"]))
