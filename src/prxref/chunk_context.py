@@ -42,6 +42,7 @@ DEPENDENCY_HEADER = "### Dependency versions"
 DEFINITIONS_HEADER = "### Definitions referenced by this chunk"
 SIBLING_HEADER = "### Other files changed in this PR"
 CONTRACT_HEADER = "### Contract excerpts"
+READER_HEADER = "### Code elsewhere that reads state this chunk writes"
 
 _JS_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
 
@@ -487,6 +488,7 @@ def render_context_blocks(
     def_lines: Sequence[str],
     extra_def_lines: Sequence[str] = (),
     contract_lines: Sequence[str] = (),
+    reader_lines: Sequence[str] = (),
 ) -> str:
     """Render the prompt blocks, omitting each when it has no lines.
 
@@ -494,10 +496,13 @@ def render_context_blocks(
     ``def_lines`` followed by ``extra_def_lines`` (repository-context
     definitions) under one :data:`DEFINITIONS_HEADER`, and is present when
     either is non-empty. The contracts block, ``contract_lines`` under
-    :data:`CONTRACT_HEADER`, comes last. With the two optional arguments
-    empty, the output is exactly the two-block rendering repository context
-    predates. Returns the empty string when every list is empty, so the
-    prompt slot leaves no stray header behind.
+    :data:`CONTRACT_HEADER`, comes next, and the readers block,
+    ``reader_lines`` (code outside the diff that reads state the chunk
+    writes) under :data:`READER_HEADER`, comes last. With the three optional
+    arguments empty, the output is exactly the two-block rendering repository
+    context predates, and with ``reader_lines`` empty it is exactly the
+    rendering without a readers block. Returns the empty string when every
+    list is empty, so the prompt slot leaves no stray header behind.
     """
     blocks: list[str] = []
     if dep_lines:
@@ -507,6 +512,8 @@ def render_context_blocks(
         blocks.append(DEFINITIONS_HEADER + "\n\n" + "\n".join(definitions))
     if contract_lines:
         blocks.append(CONTRACT_HEADER + "\n\n" + "\n".join(contract_lines))
+    if reader_lines:
+        blocks.append(READER_HEADER + "\n\n" + "\n".join(reader_lines))
     return "\n\n".join(blocks)
 
 

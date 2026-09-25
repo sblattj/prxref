@@ -392,7 +392,8 @@ class TestCoerceFinding:
 def _recording_chunk_double(calls: list, *, outcomes: list[str] | None = None, item=None):
     def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, context_lines=None, context_blocks="",
-            sibling_files=(), trace_label="", trace_dir="", prompt_context=None):
+            sibling_files=(), trace_label="", trace_dir="", prompt_context=None,
+            parse_retries=0):
         calls.append({"prompt_context": prompt_context, "context_lines": context_lines})
         error = outcomes.pop(0) if outcomes else ""
         findings = [dict(item, file=files[0].path)] if item else []
@@ -407,7 +408,7 @@ def _recording_chunk_double(calls: list, *, outcomes: list[str] | None = None, i
 def _recording_sweep_double(calls: list, *, item=None):
     def _rs(llm, digest, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, threads=(), trace_label="", trace_dir="",
-            prompt_context=None):
+            prompt_context=None, parse_retries=0):
         calls.append({"prompt_context": prompt_context})
         return ([dict(item)] if item else []), {
             "escalations": [], "input_tokens": 1, "output_tokens": 1,
