@@ -759,16 +759,20 @@ def _build_json_result(result: Any) -> dict:
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
-    ``repo_context``, then ``sampling`` and ``replay`` when present.
+    ``repo_context``, ``parse_retries``, then ``sampling`` and ``replay``
+    when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
     to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
     run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``),
-    0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts``, and
-    0.16's ``repo_context`` are always emitted and are ``null`` when their
-    feature is off (``rule_counts`` whenever the per-rule cap did not run,
-    ``repo_context`` whenever ``PRXREF_REPO_CONTEXT`` is ``off``);
+    0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts``,
+    0.16's ``repo_context`` and 0.17's ``parse_retries`` are always emitted
+    and are ``null`` when their feature is off (``rule_counts`` whenever the
+    per-rule cap did not run, ``repo_context`` whenever
+    ``PRXREF_REPO_CONTEXT`` is ``off``, ``parse_retries`` whenever
+    ``PRXREF_LLM_PARSE_RETRIES`` is ``0``; otherwise it is the run's total
+    of parse retries over every chunk and the sweep, ``0`` when none ran);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -805,6 +809,7 @@ def _build_json_result(result: Any) -> dict:
         "scoped_rules": result.get("scoped_rules"),
         "rule_counts": result.get("rule_counts"),
         "repo_context": result.get("repo_context"),
+        "parse_retries": result.get("parse_retries"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1430,6 +1435,7 @@ def _run_review(
         context_contract_globs=cfg["context_contract_globs"],
         context_exclude_globs=cfg["context_exclude_globs"],
         repo_dir=repo,
+        llm_parse_retries=cfg["llm_parse_retries"],
     )
 
 

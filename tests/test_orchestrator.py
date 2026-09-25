@@ -38,7 +38,7 @@ SUMMARY_TEMPLATE = (
 def _contract_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
     max_tokens=None, context_lines=None, context_blocks="", sibling_files=(),
-    trace_label="", trace_dir="", prompt_context=None,
+    trace_label="", trace_dir="", prompt_context=None, parse_retries=0,
 ):
     result = llm.invoke(
         system="review the chunk",
@@ -70,7 +70,7 @@ def _contract_review_chunk(
 
 def _contract_review_systemic(
     llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
-    threads=(), trace_label="", trace_dir="", prompt_context=None,
+    threads=(), trace_label="", trace_dir="", prompt_context=None, parse_retries=0,
 ):
     return [], {
         "escalations": [], "input_tokens": 0, "output_tokens": 0,
@@ -278,7 +278,7 @@ class TestHappyPath:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context",
+            "rule_counts", "repo_context", "parse_retries",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -415,6 +415,7 @@ class TestParallelFanOut:
             llm, files, *, pr_title="", pr_description="", repo_hint="",
             max_tokens=None, context_lines=None, context_blocks="",
             sibling_files=(), trace_label="", trace_dir="", prompt_context=None,
+            parse_retries=0,
         ):
             barrier.wait()
             return [Finding(
@@ -747,7 +748,7 @@ class TestMaxTokensThreading:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context",
+            "rule_counts", "repo_context", "parse_retries",
         }
 
 
@@ -1062,7 +1063,7 @@ class TestQualityGateKnobsAreThreaded:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context",
+            "rule_counts", "repo_context", "parse_retries",
         }
 
 
@@ -1072,7 +1073,7 @@ RESULT_KEYS = {
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context",
+    "rule_counts", "repo_context", "parse_retries",
 }
 
 
@@ -2540,7 +2541,7 @@ def _sweep_double(results: list, **meta_overrides):
     def _review_systemic(
         llm, digest, *, pr_title="", pr_description="", repo_hint="",
         max_tokens=None, threads=(), trace_label="", trace_dir="",
-        prompt_context=None,
+        prompt_context=None, parse_retries=0,
     ):
         calls.append({
             "digest": digest, "max_tokens": max_tokens,
@@ -2806,7 +2807,8 @@ class TestReleaseShapeFoldIn:
         def _review_chunk(llm, files, *, pr_title="", pr_description="",
                            repo_hint="", max_tokens=None, context_lines=None,
                            context_blocks="", sibling_files=(),
-                           trace_label="", trace_dir="", prompt_context=None):
+                           trace_label="", trace_dir="", prompt_context=None,
+                           parse_retries=0):
             return [self._matching_finding("chunk worker restatement")], {
                 "input_tokens": 10, "output_tokens": 5, "model": "m",
                 "elapsed_ms": 1, "error": "",
@@ -2814,7 +2816,8 @@ class TestReleaseShapeFoldIn:
 
         def _review_systemic(llm, digest, *, pr_title="", pr_description="",
                               repo_hint="", max_tokens=None, threads=(),
-                              trace_label="", trace_dir="", prompt_context=None):
+                              trace_label="", trace_dir="", prompt_context=None,
+                              parse_retries=0):
             return [self._matching_finding("sweep restatement")], {
                 "input_tokens": 7, "output_tokens": 3, "model": "sweep-model",
                 "elapsed_ms": 1, "error": "",
@@ -2948,7 +2951,7 @@ class TestChunkTimeoutRetry:
         def _rc(llm, files, *, pr_title="", pr_description="", repo_hint="",
                 max_tokens=None, context_lines=None, context_blocks="",
                 sibling_files=(), trace_label="", trace_dir="",
-                prompt_context=None):
+                prompt_context=None, parse_retries=0):
             calls.append({
                 "context_lines": context_lines,
                 "context_blocks": context_blocks,
