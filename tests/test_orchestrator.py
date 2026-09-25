@@ -1,6 +1,6 @@
 """Orchestrator tests: FakeForge + FakeLLM, no network, no reviewer-file dependency.
 
-``src/prxref/reviewer.py`` is owned by a parallel seat; these tests pin the
+``src/prxref/reviewer.py`` is built separately; these tests pin the
 orchestrator-side contract (``review_chunk(llm, files, pr)`` dict return,
 ``load_prompt`` template) with a stub installed only when the real module
 is absent, and an autouse fixture that pins behavior either way.

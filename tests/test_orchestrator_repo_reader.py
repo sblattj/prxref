@@ -1,4 +1,4 @@
-"""The run-scoped repository reader (#17 T12): ``prxref.repo_reader``.
+"""The run-scoped repository reader (#17): ``prxref.repo_reader``.
 
 Plain fakes only: no forge adapter, no network. The single-flight tests hold
 the first fetch (or listing) open on a ``threading.Event`` while seven more

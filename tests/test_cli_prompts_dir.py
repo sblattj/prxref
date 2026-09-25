@@ -1,4 +1,4 @@
-"""``review --prompts-dir DIR`` and ``PRXREF_PROMPTS_DIR`` at the CLI (#11 T4).
+"""``review --prompts-dir DIR`` and ``PRXREF_PROMPTS_DIR`` at the CLI (#11).
 
 ``_run_review`` loads the prompt-template directory next to the rules and
 ticket files: after config, before ``make_forge`` and the LLM client, under

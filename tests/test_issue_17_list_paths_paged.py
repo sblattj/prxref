@@ -1,4 +1,4 @@
-"""Tests for the paged ``list_paths`` listings (issue #17, task T9).
+"""Tests for the paged ``list_paths`` listings (issue #17).
 
 GitLab walks ``repository/tree?recursive=true`` page by page and stops when
 ``X-Next-Page`` is absent or empty. Bitbucket Server / Data Center walks the

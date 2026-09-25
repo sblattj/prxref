@@ -1,4 +1,4 @@
-"""Structural checks for the issue #17 acceptance fixture (T16).
+"""Structural checks for the issue #17 acceptance fixture.
 
 ``tests/fixtures/issue17/`` reproduces the two repository-context misses from
 issue #17: a contract file outside the diff (the OpenAPI idempotency-key

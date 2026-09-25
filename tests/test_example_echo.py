@@ -1,4 +1,4 @@
-"""The example-echo quality pass and the worker prompt's size promise (0.15, seat Q-ECHO).
+"""The example-echo quality pass and the worker prompt's size promise (0.15).
 
 Live gpt-4o-mini sweeps returned the title of systemic.md's own output
 example, "Paid API handler has no auth check", pinned to an unrelated line,

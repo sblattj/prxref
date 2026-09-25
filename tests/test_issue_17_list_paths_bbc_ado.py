@@ -1,4 +1,4 @@
-"""Tests for ``list_paths`` on Bitbucket Cloud and Azure DevOps (issue #17, task T10).
+"""Tests for ``list_paths`` on Bitbucket Cloud and Azure DevOps (issue #17).
 
 Bitbucket Cloud walks the paged ``/src/{sha}/`` listing, following ``next``
 verbatim; Azure DevOps answers from one ``items?recursionLevel=Full`` request.

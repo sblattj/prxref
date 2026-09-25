@@ -1,4 +1,4 @@
-"""Prompt-template overrides (#11 T2): the two renderers honour ``PromptContext`` templates.
+"""Prompt-template overrides (#11): the two renderers honour ``PromptContext`` templates.
 
 ``PromptContext.worker_template`` and ``systemic_template`` carry an
 operator's override of ``worker.md`` / ``systemic.md`` into

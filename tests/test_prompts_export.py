@@ -1,4 +1,4 @@
-"""``prxref prompts export DIR [--force]`` (#11 T5): the packaged templates as an override starting point."""
+"""``prxref prompts export DIR [--force]`` (#11): the packaged templates as an override starting point."""
 from __future__ import annotations
 
 import hashlib

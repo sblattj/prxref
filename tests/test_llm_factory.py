@@ -387,7 +387,7 @@ class TestCliBackendWiring:
 
 
 class TestCliBackendModuleContract:
-    """The llm_cli_backends entry points every later seat codes against."""
+    """The llm_cli_backends entry points the rest of prxref codes against."""
 
     def test_resolve_cli_binary_signature(self):
         sig = inspect.signature(prxref.llm_cli_backends.resolve_cli_binary)

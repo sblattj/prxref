@@ -1,4 +1,4 @@
-"""``prxref eval run``: the per-case replay loop, its run directory and its fences (#14 T3).
+"""``prxref eval run``: the per-case replay loop, its run directory and its fences (#14).
 
 Most tests call :func:`prxref.evals.eval_run` directly with a fake review
 runner, so a case can be made to crash, return nothing or end in an ``Error``

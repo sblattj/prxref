@@ -1,4 +1,4 @@
-"""Issue #14 T5: the judge prompt, its response parser, the per-ref cap and the cache key."""
+"""Issue #14: the judge prompt, its response parser, the per-ref cap and the cache key."""
 from __future__ import annotations
 
 import hashlib

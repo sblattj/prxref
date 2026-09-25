@@ -87,12 +87,10 @@ GUARD_FINDING = {
 def _cls(text: str, kind: str = "-") -> str | None:
     """``match_class`` for a line of a given diff kind.
 
-    ASSUMPTION recorded for the fix seat: today ``match_class(text)`` takes only
-    the text, so removal cannot be a matching condition. The recommended
-    signature is ``match_class(text, kind="+"|"-"|" ")`` with ``kind``
-    keyword-only and defaulted, keeping every existing call site valid. This
-    helper calls the new form and falls back to the old one so the controls
-    below pass under both.
+    ``match_class`` now accepts ``kind`` keyword-only and defaulted
+    (``match_class(text, kind="+"|"-"|" ")``), keeping every existing call
+    site valid. This helper calls the new form and falls back to the old
+    one so the controls below pass under both.
     """
     try:
         return match_class(text, kind=kind)

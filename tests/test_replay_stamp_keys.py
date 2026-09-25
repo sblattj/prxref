@@ -1,4 +1,4 @@
-"""Issue #16 T5: the replay stamp's description keys and the ``replay:`` summary line.
+"""Issue #16: the replay stamp's description keys and the ``replay:`` summary line.
 
 ``_ReplayRequest.stamp`` appends three keys to the four of 0.14:
 ``description`` (``pinned``, ``live``, ``file`` or ``none``), ``as_of`` (the

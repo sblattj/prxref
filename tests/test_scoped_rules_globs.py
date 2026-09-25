@@ -1,4 +1,4 @@
-"""Issue #12 T1: ``match_globs``, the path matcher behind ``applies_to``.
+"""Issue #12: ``match_globs``, the path matcher behind ``applies_to``.
 
 Pinned here, as one table of ``(path, patterns, selected)`` rows:
 
