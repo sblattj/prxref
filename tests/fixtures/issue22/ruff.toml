@@ -1,0 +1,7 @@
+# repo/ is the issue #22 fixture project's PR head, checked in byte for byte as
+# review input. Linting it would force edits that change what the reviewer reads,
+# so it is excluded; everything else here keeps the project's own rules and the
+# project's own cache directory.
+extend = "../../../pyproject.toml"
+extend-exclude = ["repo"]
+cache-dir = "../../../.ruff_cache"
