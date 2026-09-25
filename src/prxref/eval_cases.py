@@ -7,21 +7,21 @@ labels, so the run and score steps never see which form a dataset used.
 
 A ``cases.json`` file is ``{"version": 1, "cases": [...]}``. Each case is an
 object with a required ``id`` and ``expected`` and the optional ``pr_url``,
-``base_sha``, ``head_sha``, ``diff_file``, ``context_file`` and ``spec`` (one
-string or a list of them). ``expected`` is a list, possibly empty, of human
-findings, each with ``id``, ``file``, ``line`` and ``severity`` and the
-optional ``category``, ``accepted``, ``text`` and ``must_match``. An optional
-field set to ``null`` counts as absent. A relative ``diff_file``,
-``context_file`` or ``spec`` path is read relative to the directory holding
-the ``cases.json`` file; a ``spec`` entry that is an ``http(s)`` URL is kept
-as given.
+``base_sha``, ``head_sha``, ``diff_file``, ``context_file``, ``repo_dir`` and
+``spec`` (one string or a list of them). ``expected`` is a list, possibly
+empty, of human findings, each with ``id``, ``file``, ``line`` and
+``severity`` and the optional ``category``, ``accepted``, ``text`` and
+``must_match``. An optional field set to ``null`` counts as absent. A
+relative ``diff_file``, ``context_file``, ``repo_dir`` or ``spec`` path is
+read relative to the directory holding the ``cases.json`` file; a ``spec``
+entry that is an ``http(s)`` URL is kept as given.
 
 A ``case-*/`` directory supplies ``diff.patch`` (required) as its
 ``diff_file``, ``expected.json`` (required: the ``expected`` list above) and,
-when present, ``ticket.md`` as its ``context_file`` and ``docs/`` as its one
-``spec`` source. Its id is the directory name. ``expected.json`` spells
-``line`` as ``line_hint`` and ``category`` as ``source``, and every message
-about it uses those spellings.
+when present, ``ticket.md`` as its ``context_file``, ``repo/`` as its
+``repo_dir`` and ``docs/`` as its one ``spec`` source. Its id is the
+directory name. ``expected.json`` spells ``line`` as ``line_hint`` and
+``category`` as ``source``, and every message about it uses those spellings.
 
 A case replays either a local diff (``diff_file``) or a pinned commit range of
 a pull request (``pr_url`` with both ``base_sha`` and ``head_sha``), and may
@@ -72,7 +72,8 @@ _CASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
 _TOP_KEYS = ("version", "cases")
 _CASE_KEYS = (
-    "id", "pr_url", "base_sha", "head_sha", "diff_file", "context_file", "spec", "expected",
+    "id", "pr_url", "base_sha", "head_sha", "diff_file", "context_file", "repo_dir", "spec",
+    "expected",
 )
 _EXPECTED_KEYS = (
     "id", "file", "line", "severity", "category", "accepted", "text", "must_match",
@@ -109,12 +110,15 @@ class EvalCase:
     """One validated eval case: what to replay and the findings it should yield.
 
     ``id`` is a single safe path segment, unique within its dataset.
-    ``diff_file`` and ``context_file`` are paths ready to open, already
-    joined onto the ``cases.json`` directory or the case directory; ``spec``
-    holds the spec sources in order, each such a path or an ``http(s)`` URL,
-    and is empty when the case sets none. ``base_sha`` and ``head_sha`` are
-    both full lowercased SHAs, and ``pr_url`` is set, or both are ``None``.
-    ``expected`` keeps the labels in file order and may be empty.
+    ``diff_file``, ``context_file`` and ``repo_dir`` are paths ready to open,
+    already joined onto the ``cases.json`` directory or the case directory;
+    ``repo_dir`` is a directory holding the repository at the PR head, read
+    by repository context (``PRXREF_REPO_CONTEXT=repo``) in place of a forge.
+    ``spec`` holds the spec sources in order, each such a path or an
+    ``http(s)`` URL, and is empty when the case sets none. ``base_sha`` and
+    ``head_sha`` are both full lowercased SHAs, and ``pr_url`` is set, or
+    both are ``None``. ``expected`` keeps the labels in file order and may
+    be empty.
     """
 
     id: str
@@ -125,6 +129,7 @@ class EvalCase:
     diff_file: str | None = None
     context_file: str | None = None
     spec: tuple[str, ...] = ()
+    repo_dir: str | None = None
 
 
 def load_cases(path: str | os.PathLike[str], *, source: str = "--cases") -> list[EvalCase]:
@@ -171,11 +176,12 @@ def case_to_json(case: EvalCase) -> dict[str, Any]:
 
     The keys follow the ``cases.json`` spelling in a fixed order: ``id``,
     ``pr_url``, ``base_sha``, ``head_sha``, ``diff_file``, ``context_file``,
-    ``spec`` (a list, empty when the case sets none) and ``expected``, a list
-    of labels each keyed ``id``, ``file``, ``line``, ``severity``,
-    ``category``, ``accepted``, ``text`` and ``must_match``. Every field is
-    written, ``null`` when unset. Paths are written exactly as the case holds
-    them, already joined onto the dataset directory when it was loaded.
+    ``repo_dir``, ``spec`` (a list, empty when the case sets none) and
+    ``expected``, a list of labels each keyed ``id``, ``file``, ``line``,
+    ``severity``, ``category``, ``accepted``, ``text`` and ``must_match``.
+    Every field is written, ``null`` when unset. Paths are written exactly
+    as the case holds them, already joined onto the dataset directory when
+    it was loaded.
     """
     return {
         "id": case.id,
@@ -184,6 +190,7 @@ def case_to_json(case: EvalCase) -> dict[str, Any]:
         "head_sha": case.head_sha,
         "diff_file": case.diff_file,
         "context_file": case.context_file,
+        "repo_dir": case.repo_dir,
         "spec": list(case.spec),
         "expected": [
             {key: getattr(finding, key) for key in _EXPECTED_KEYS} for finding in case.expected
@@ -219,7 +226,7 @@ def case_from_json_record(obj: Any, *, source: str = "case.json") -> EvalCase:
         )
     texts = {
         key: _optional_text(obj, key, where, source)
-        for key in ("pr_url", "base_sha", "head_sha", "diff_file", "context_file")
+        for key in ("pr_url", "base_sha", "head_sha", "diff_file", "context_file", "repo_dir")
     }
     spec = obj.get("spec")
     if spec is None:
@@ -292,6 +299,7 @@ def _case_from_json(entry: Any, index: int, base: Path, source: str) -> EvalCase
     head_sha = _optional_text(entry, "head_sha", where, source)
     diff_file = _optional_text(entry, "diff_file", where, source)
     context_file = _optional_text(entry, "context_file", where, source)
+    repo_dir = _optional_text(entry, "repo_dir", where, source)
     base_sha, head_sha = _check_replay(pr_url, base_sha, head_sha, diff_file, where, source)
     if pr_url is not None and detect_forge(pr_url) is None:
         raise ConfigError(
@@ -302,6 +310,10 @@ def _case_from_json(entry: Any, index: int, base: Path, source: str) -> EvalCase
         context_file = _join(base, context_file)
         if not Path(context_file).is_file():
             raise ConfigError(f"{source}: {where}: context_file: no such file {context_file!r}")
+    if repo_dir is not None:
+        repo_dir = _join(base, repo_dir)
+        if not Path(repo_dir).is_dir():
+            raise ConfigError(f"{source}: {where}: repo_dir: no such directory {repo_dir!r}")
     spec = _spec_sources(entry.get("spec"), base, where, source)
     if "expected" not in entry:
         raise ConfigError(f"{source}: {where}: expected: required (an array of findings, possibly empty)")
@@ -312,7 +324,7 @@ def _case_from_json(entry: Any, index: int, base: Path, source: str) -> EvalCase
         _check_anchors(expected, files, where, "expected", _JSON_SPELLING, source)
     return EvalCase(
         id=case_id, expected=expected, pr_url=pr_url, base_sha=base_sha, head_sha=head_sha,
-        diff_file=diff_file, context_file=context_file, spec=spec,
+        diff_file=diff_file, context_file=context_file, repo_dir=repo_dir, spec=spec,
     )
 
 
@@ -413,11 +425,13 @@ def _case_from_directory(case_dir: Path, source: str) -> EvalCase:
     _check_anchors(expected, files, where, "expected.json", _DIRECTORY_SPELLING, source)
     ticket = case_dir / "ticket.md"
     docs = case_dir / "docs"
+    repo = case_dir / "repo"
     return EvalCase(
         id=case_id,
         expected=expected,
         diff_file=diff_file,
         context_file=str(ticket) if ticket.is_file() else None,
+        repo_dir=str(repo) if repo.is_dir() else None,
         spec=(str(docs),) if docs.is_dir() else (),
     )
 

@@ -1,4 +1,4 @@
-"""Issue #16 T1: pin a replay's PR title and description to a cutoff.
+"""Issue #16: pin a replay's PR title and description to a cutoff.
 
 A replay of a PR must not show the reviewer a description the author edited
 after review to list the fixes. These are the pure pieces, with no forge and

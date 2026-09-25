@@ -1,4 +1,4 @@
-"""``review --scoped-rules PATH`` and ``PRXREF_SCOPED_RULES`` at the CLI (#12 T6).
+"""``review --scoped-rules PATH`` and ``PRXREF_SCOPED_RULES`` at the CLI (#12).
 
 ``_run_review`` loads the path-scoped rules right after the always-on rules
 file, through the same ``_load_text_input`` fence: after config, before
@@ -310,7 +310,7 @@ class TestJson:
         keys = list(payload)
         assert keys.index("scoped_rules") == keys.index("prompt_templates") + 1
         assert keys[keys.index("scoped_rules") + 1] == "rule_counts"
-        assert keys.index("sampling") == keys.index("scoped_rules") + 2
+        assert keys.index("sampling") == keys.index("scoped_rules") + 3
 
     def test_the_key_is_null_for_a_pre_0_15_result(self):
         assert cli._build_json_result({})["scoped_rules"] is None

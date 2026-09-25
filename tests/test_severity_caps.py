@@ -1,4 +1,4 @@
-"""Per-severity caps in ``apply_quality_gate`` (issue #13, T4)."""
+"""Per-severity caps in ``apply_quality_gate`` (issue #13)."""
 from __future__ import annotations
 
 import itertools

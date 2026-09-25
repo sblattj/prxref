@@ -223,11 +223,11 @@ CONTROL_BODIES = [
 
 
 class TestCControls:
-    """Legitimate findings must survive. PASSES today via the no-op shim.
+    """Legitimate findings must survive, now via the real gate.
 
-    Until ``apply_hedge_gate`` exists the shim below is an identity function,
-    so this test is green today by construction; its value is that the SAME
-    assertions bind the real gate the moment the fix seat lands it.
+    ``apply_hedge_gate`` has landed, so ``getattr(quality, "apply_hedge_gate",
+    ...)`` below resolves to the real function; these are the same
+    assertions that bound the no-op identity shim before the gate existed.
     """
 
     @pytest.mark.parametrize("label,body", CONTROL_BODIES, ids=[b[0] for b in CONTROL_BODIES])

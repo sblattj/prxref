@@ -1,4 +1,4 @@
-"""``prxref eval score``: grading a run in two tiers into ``score.json`` and ``score.md`` (#14 T7).
+"""``prxref eval score``: grading a run in two tiers into ``score.json`` and ``score.md`` (#14).
 
 Most tests write a run directory by hand, exactly as ``eval run`` lays it out
 (``run.json``, then ``cases/<id>/case.json`` plus ``record.json`` or

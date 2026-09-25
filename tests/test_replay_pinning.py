@@ -1,4 +1,4 @@
-"""Issue #16 T4: a ``--pr-url`` replay shows the PR title and description in force at a cutoff.
+"""Issue #16: a ``--pr-url`` replay shows the PR title and description in force at a cutoff.
 
 ``cli._replay_forge`` resolves the description eagerly, before the
 orchestrator runs: ``--description-file`` and ``--no-description`` fix it

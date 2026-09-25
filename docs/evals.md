@@ -86,6 +86,7 @@ no case runs.
       "id": "local-1",
       "diff_file": "diffs/local-1.diff",
       "context_file": "tickets/local-1.md",
+      "repo_dir": "repos/local-1",
       "spec": ["docs/specs"],
       "expected": []
     }
@@ -105,15 +106,17 @@ is refused, and a field set to `null` counts as absent.
 | `diff_file` | one of these two | A unified diff (`git diff` or `git format-patch` output) holding at least one file diff. |
 | `base_sha`, `head_sha` | with `pr_url` | The pinned range, as the replay flags take it: a pair, full 40- or 64-character hex, two different commits. Stored lowercased. |
 | `context_file` | no | The ticket the PR implements, given to the review as `--context-file`. |
+| `repo_dir` | no | A directory holding the repository at the PR head. Repository context (`PRXREF_REPO_CONTEXT=repo`) reads and lists files there instead of calling a forge; the field has no effect when repository context is off. |
 | `spec` | no | Spec sources, as `--spec` takes them: one string or an array of strings, each a local path or an `http(s)` URL. |
 
 A case replays either a local diff (`diff_file`), or a pull request pinned
 to a range (`pr_url` with both SHAs). It may also give `pr_url` beside
 `diff_file`, with or without the SHAs, as `prxref review` allows. SHAs need
 `pr_url`, and `pr_url` without `diff_file` needs both SHAs. A relative
-`diff_file`, `context_file` or local `spec` path is read relative to the
-directory holding `cases.json`. `context_file` and every local `spec` path
-must exist, and a `spec` URL is kept as given.
+`diff_file`, `context_file`, `repo_dir` or local `spec` path is read
+relative to the directory holding `cases.json`. `context_file` and every
+local `spec` path must exist, `repo_dir` must be an existing directory, and
+a `spec` URL is kept as given.
 
 Each entry of `expected` is one label, a finding a human reviewer left:
 
@@ -144,6 +147,7 @@ case, read in name order, and its id is the directory name.
 | `diff.patch` | yes | `diff_file` |
 | `expected.json` | yes | `expected`: a JSON array of labels |
 | `ticket.md` | no | `context_file` |
+| `repo/` | no | `repo_dir` |
 | `docs/` | no | the case's one `spec` source |
 
 `meta.json` is not read. `expected.json` spells two label fields
@@ -165,7 +169,8 @@ the path.
   case does not have.
 - Neither `pr_url` nor `diff_file`; a `pr_url` no forge recognises; SHAs
   that break the rules above; a `diff_file` that cannot be read or holds no
-  file diff; a `context_file` or local `spec` path that does not exist.
+  file diff; a `context_file` or local `spec` path that does not exist; a
+  `repo_dir` that is not an existing directory.
 - `expected` missing or not an array.
 - A label with a required field missing, a `line` below `1`, a `severity`
   outside the five, a `category`, `text` or `must_match` that is not a
@@ -291,8 +296,8 @@ prxref-eval/                        --out
 ```
 
 - **`cases/<id>/case.json`** holds the case as the harness read it: `id`,
-  `pr_url`, `base_sha`, `head_sha`, `diff_file`, `context_file`, `spec` (a
-  list) and `expected`, each label with all eight fields, in the
+  `pr_url`, `base_sha`, `head_sha`, `diff_file`, `context_file`, `repo_dir`,
+  `spec` (a list) and `expected`, each label with all eight fields, in the
   `cases.json` spelling. `eval score` grades against this copy, so it needs
   no `--cases` and never opens the files the case names.
 - **`cases/<id>/record.json`** is the review's record, exactly what
@@ -322,7 +327,7 @@ prxref-eval/                        --out
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
 | `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
-| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars` |
+| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
 only under `prompts.prompt_templates`. `prompt_templates`, `sampling`,
@@ -331,7 +336,7 @@ order, whose record's verdict is not `Error`. They are `null` when there is
 none, and `review_rules`, `scoped_rules` and `prompt_templates` are `null`
 when their input is off.
 
-**No credential is ever written.** `config` is an allowlist of the twelve
+**No credential is ever written.** `config` is an allowlist of the sixteen
 settings above, and a record carries no credential. The traces do hold the
 prompts, and the prompts hold the diff, so treat a run directory like the
 code it reviewed.

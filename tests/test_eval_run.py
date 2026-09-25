@@ -1,4 +1,4 @@
-"""``prxref eval run``: the per-case replay loop, its run directory and its fences (#14 T3).
+"""``prxref eval run``: the per-case replay loop, its run directory and its fences (#14).
 
 Most tests call :func:`prxref.evals.eval_run` directly with a fake review
 runner, so a case can be made to crash, return nothing or end in an ``Error``
@@ -191,7 +191,7 @@ class TestLayout:
         cases_dir = tmp_path / "out" / "L" / "cases"
         common = {
             "post": False, "no_threads": True, "rules_file": rules_file,
-            "scoped_rules": None, "prompts_dir": None,
+            "scoped_rules": None, "prompts_dir": None, "repo_dir": None,
         }
         assert review.calls == [
             {
@@ -628,7 +628,8 @@ class TestCaseJsonRoundTrip:
     def test_the_keys_come_in_the_cases_json_spelling_and_a_fixed_order(self):
         record = case_to_json(_full_case())
         assert list(record) == [
-            "id", "pr_url", "base_sha", "head_sha", "diff_file", "context_file", "spec", "expected",
+            "id", "pr_url", "base_sha", "head_sha", "diff_file", "context_file", "repo_dir", "spec",
+            "expected",
         ]
         assert list(record["expected"][0]) == [
             "id", "file", "line", "severity", "category", "accepted", "text", "must_match",

@@ -1,4 +1,4 @@
-"""Issue #12 T4: selecting scoped rules per review unit, and the block each unit gets.
+"""Issue #12: selecting scoped rules per review unit, and the block each unit gets.
 
 ``ScopedRules.select`` picks the rules files a unit's diff paths reach,
 ``ScopedRules.unit_block`` builds that unit's ``## Team review rules`` block

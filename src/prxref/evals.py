@@ -64,6 +64,10 @@ RUN_CONFIG_KEYS = (
     "max_outofscope_findings",
     "max_findings_per_rule",
     "scoped_rules_max_chars",
+    "repo_context",
+    "repo_context_max_chars",
+    "context_contract_globs",
+    "context_exclude_globs",
 )
 SCORE_VERSION = 1
 SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "scoped_rules", "config")
@@ -105,7 +109,8 @@ def eval_run(
     and ``no_threads=True``, so nothing is ever posted. ``context_file`` is
     ``""`` and ``spec_sources`` is ``[]`` unless the case sets them, so the
     environment's ticket and spec inputs cannot leak into a case.
-    ``args.rules_file``, ``args.scoped_rules`` and ``args.prompts_dir`` are
+    ``repo_dir`` is the case's ``repo_dir``, as ``review --repo-dir`` takes
+    it, or ``None``. ``args.rules_file``, ``args.scoped_rules`` and ``args.prompts_dir`` are
     passed to every case as given, as ``review --rules-file``,
     ``--scoped-rules`` and ``--prompts-dir`` take them: ``None`` leaves the
     variable in force, and ``""`` (``[""]`` for the scoped rules) turns it
@@ -115,7 +120,8 @@ def eval_run(
     Each case is fenced. A crash, a ``None`` result (an unrecognised URL) or
     any other exception is recorded as that case's ``error.json`` and the next
     case still runs. That includes a ``ConfigError`` the review raises for one
-    case, such as an unreadable ``diff_file``: it is a failed case, not exit
+    case, such as an unreadable ``diff_file`` or a ``repo_dir`` that has
+    vanished since the dataset was loaded: it is a failed case, not exit
     2. A review whose verdict is ``Error`` is recorded as a normal
     ``record.json`` carrying that verdict. The run returns 0 whatever the
     cases did.
@@ -272,6 +278,7 @@ def _run_case(
             scoped_rules=args.scoped_rules,
             prompts_dir=args.prompts_dir,
             trace_dir=str(trace_dir),
+            repo_dir=case.repo_dir,
         )
         if result is None:
             raise RuntimeError(f"unrecognized PR URL {case.pr_url!r}")

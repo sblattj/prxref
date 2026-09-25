@@ -35,6 +35,7 @@ from prxref.forges.base import (
     SUMMARY_MARKER,
     FeedReadError,
     InlineComment,
+    PathListing,
     PRData,
     PRRef,
     Thread,
@@ -641,6 +642,59 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return bytes(buf).decode("utf-8", errors="replace")
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``, best-effort.
+
+        One request to the ``items`` endpoint with ``recursionLevel=Full`` at
+        the commit, starting at the repository root, with no paging. Only
+        ``blob`` entries that are not flagged ``isFolder`` are kept, so the
+        root (``/``), directories (``tree``) and every other object type,
+        submodules included, are dropped. Azure DevOps returns each path with
+        a leading slash, which is stripped; the paths are sorted and
+        deduplicated.
+
+        ``complete`` is ``False`` when the response carries an
+        ``x-ms-continuationtoken`` header. Continuation on this endpoint is
+        undocumented and was never observed, so the token is not followed: the
+        paths already returned are kept and the listing is marked incomplete.
+        An empty ``sha`` (no request is made), a transport failure, a non-2xx
+        status, a 203 sign-in page or other non-JSON body, or a body with no
+        ``value`` list gives ``None``. Never raises.
+        """
+        if not sha:
+            return None
+        where = f"{ref.owner}/{ref.repo}@{sha}"
+        try:
+            resp = self._get(
+                f"{self._api_base(ref)}/items",
+                {
+                    "recursionLevel": "Full",
+                    "versionDescriptor.version": sha,
+                    "versionDescriptor.versionType": "commit",
+                },
+            )
+            body = self._json(resp, "item listing")
+        except (requests.RequestException, ValueError) as e:
+            logger.debug("list_paths failed for %s: %s", where, e)
+            return None
+        values = body.get("value")
+        if not isinstance(values, list):
+            logger.debug("list_paths got no value list for %s", where)
+            return None
+        paths = {
+            entry["path"].lstrip("/") for entry in values
+            if isinstance(entry, dict) and entry.get("gitObjectType") == "blob"
+            and not entry.get("isFolder")
+            and isinstance(entry.get("path"), str) and entry["path"].lstrip("/")
+        }
+        complete = not resp.headers.get("x-ms-continuationtoken")
+        if not complete:
+            logger.debug(
+                "list_paths got an x-ms-continuationtoken for %s and did not follow it; "
+                "the listing is incomplete", where,
+            )
+        return PathListing(paths=tuple(sorted(paths)), complete=complete)
 
     def _read_threads(self, ref: PRRef) -> list[dict]:
         """Read every thread on the PR (one response; the API does not page them).

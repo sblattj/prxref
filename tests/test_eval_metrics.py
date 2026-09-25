@@ -1,5 +1,5 @@
 """Tests for prxref.eval_metrics: the section 7.2 deterministic matcher and the
-``eval score`` metrics (issue #14, task T4).
+``eval score`` metrics (issue #14).
 
 Human findings are small frozen-dataclass fakes and AI findings are dict rows
 shaped like a run record's ``findings``. Nothing here imports the case loader:

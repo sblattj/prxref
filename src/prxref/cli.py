@@ -43,6 +43,16 @@ posts, and its run record gains a ``replay`` stamp. They are validated
 before the URL is parsed, and a bad set exits 2 naming the flag. The webhook
 daemon never replays.
 
+``--repo-dir PATH`` names a local checkout of the repository at the PR head.
+With ``PRXREF_REPO_CONTEXT`` at ``diff`` or ``repo``, repository context
+reads files there (and, at ``repo``, lists them) instead of calling the
+forge, so a ``--diff-file`` review gets repository context with no network.
+It is not a replay flag: on its own it neither stops posting nor stamps
+``replay``. The directory is checked before any network call, so a path that
+is not an existing directory exits 2 naming ``--repo-dir``; it is checked and
+passed even when ``PRXREF_REPO_CONTEXT`` is ``off``, which ignores it. The
+webhook daemon never takes one.
+
 A ``--pr-url`` replay also pins the PR's title and description by default
 (issue #16): it shows the ones in force at a cutoff, which is ``--as-of
 TIME`` when given, else the PR's first human review, else its head commit's
@@ -112,6 +122,7 @@ from prxref.config import load_config, make_forge
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
 from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
+from prxref.forges.repo_dir import RepoDir
 from prxref.llm import ConfigError
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
 from prxref.rules import load_review_rules, load_scoped_rules
@@ -255,6 +266,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "replay: review this unified diff (git diff or git format-patch "
             "output) instead of fetching one; --pr-url becomes optional; "
             "implies no posting"
+        ),
+    )
+    rev.add_argument(
+        "--repo-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "a local checkout of the repository at the PR head; with "
+            "PRXREF_REPO_CONTEXT=repo, repository context reads and lists "
+            "files there instead of calling the forge"
         ),
     )
     rev.add_argument(
@@ -523,9 +544,12 @@ def _print_summary(
     (the number of scoped rules files, then ``<path>=<sha256 prefix>`` for
     each in load order, then ``cap=<per-unit cap>``), ``prompts:`` (the
     directory, then ``<name>=<sha256 prefix>`` for each overridden template
-    in name order), ``ticket:`` (with the active findings' scope counts), and
-    ``spec:``. ``result`` may be partial, or not a dict at all; a missing or
-    ``None`` record prints nothing.
+    in name order), ``ticket:`` (with the active findings' scope counts),
+    ``spec:``, and ``repo context:`` (the repository-context level, reader,
+    listing, read count, read cap and entry totals; see
+    :func:`_repo_context_line`). ``result`` may be partial, or not a dict at
+    all; a missing or ``None`` record prints nothing, so ``repo context:``
+    is absent while ``PRXREF_REPO_CONTEXT`` is ``off``.
     """
     target = sys.stdout if out is None else out
     record = result if isinstance(result, dict) else {}
@@ -593,6 +617,38 @@ def _print_summary(
             f"{_dash(spec.get('constraints'))} constraint(s)",
             file=target,
         )
+    repo = record.get("repo_context")
+    if isinstance(repo, dict):
+        print(_repo_context_line(repo), file=target)
+
+
+def _repo_context_line(repo: dict) -> str:
+    """Render the ``-v`` summary line for a ``repo_context`` run-record value.
+
+    ``repo context: mode=<mode> reader=<reader> listing=<paths>
+    reads=<reads> cap_hit=<yes|no> entries=<n> omitted=<n>`` on one line.
+    ``listing`` is the listed path count, suffixed ``(partial)`` when the
+    listing is incomplete, or ``-`` without one; ``entries`` and ``omitted``
+    are summed over every chunk row of ``units`` and are 0 when ``units``
+    is ``None``. A missing value prints ``-``.
+    """
+    listing = repo.get("listing")
+    if isinstance(listing, dict):
+        partial = "(partial)" if listing.get("complete") is False else ""
+        listed = f"{_dash(listing.get('paths'))}{partial}"
+    else:
+        listed = "-"
+    units = repo.get("units")
+    chunks = units.get("chunks") if isinstance(units, dict) else None
+    rows = [row for row in chunks if isinstance(row, dict)] if isinstance(chunks, list) else []
+    entries = sum(len(row["entries"]) for row in rows if isinstance(row.get("entries"), list))
+    omitted = sum(row["omitted"] for row in rows if isinstance(row.get("omitted"), int))
+    cap_hit = "yes" if repo.get("read_cap_hit") else "no"
+    return (
+        f"repo context: mode={_dash(repo.get('mode'))} reader={_dash(repo.get('reader'))} "
+        f"listing={listed} reads={_dash(repo.get('reads'))} cap_hit={cap_hit} "
+        f"entries={entries} omitted={omitted}"
+    )
 
 
 def _fmt_finding_line(f: Any) -> str:
@@ -702,19 +758,20 @@ def _build_json_result(result: Any) -> dict:
     ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
-    ``prompt_templates``, ``scoped_rules``, ``rule_counts``, then
-    ``sampling`` and ``replay`` when present.
+    ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
+    ``repo_context``, then ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
     to ``None`` and ``findings`` defaults to ``[]`` rather than raising. The
-    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``) and
-    0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts`` are
-    always emitted and are ``null`` when their feature is off
-    (``rule_counts`` whenever the per-rule cap did not run); ``cost_usd`` is
-    also ``null`` when no source could price the run, never ``0``. Every
-    ``findings`` row, active or dropped, carries 0.15's ``rule`` and
-    ``locations`` the same way (see :func:`_finding_json`).
+    run-record keys new in 0.14 (``cost_usd`` through ``size_advisory``),
+    0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts``, and
+    0.16's ``repo_context`` are always emitted and are ``null`` when their
+    feature is off (``rule_counts`` whenever the per-rule cap did not run,
+    ``repo_context`` whenever ``PRXREF_REPO_CONTEXT`` is ``off``);
+    ``cost_usd`` is also ``null`` when no source could price the run, never
+    ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
+    and ``locations`` the same way (see :func:`_finding_json`).
     ``sampling`` and ``replay`` are forwarded only when the result already
     carries them. ``replay`` is on replay runs only, so a normal run's
     payload has no ``replay`` key at all.
@@ -747,6 +804,7 @@ def _build_json_result(result: Any) -> dict:
         "prompt_templates": result.get("prompt_templates"),
         "scoped_rules": result.get("scoped_rules"),
         "rule_counts": result.get("rule_counts"),
+        "repo_context": result.get("repo_context"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1164,6 +1222,25 @@ def _load_prompts_dir(path: str | None, *, source: str) -> Any:
         raise ConfigError(f"{source}: cannot load prompts directory {path!r}: {exc}") from exc
 
 
+def _open_repo_dir(path: str | None) -> RepoDir | None:
+    """Open ``--repo-dir`` as a :class:`~prxref.forges.repo_dir.RepoDir`, or ``None`` when it is not given.
+
+    ``_run_review`` calls it before any network call, so a path that is not
+    an existing directory raises ``ConfigError`` naming ``--repo-dir`` and
+    exits 2. A blank path is refused the same way: the flag has no variable
+    for ``""`` to turn off, and a blank path would otherwise resolve to the
+    working directory.
+    """
+    if path is None:
+        return None
+    if not path.strip():
+        raise ConfigError(f"--repo-dir: no such directory {path!r}")
+    try:
+        return RepoDir(path)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"--repo-dir: no such directory {path!r}") from exc
+
+
 def _run_review(
     url: str | None,
     *,
@@ -1183,6 +1260,7 @@ def _run_review(
     as_of: str | None = None,
     description_file: str | None = None,
     no_description: bool = False,
+    repo_dir: str | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1238,9 +1316,9 @@ def _run_review(
             "prompts_dir": "--prompts-dir",
         },
     )
-    # The rules files, the ticket file and the prompts directory are read
-    # here, after config and before make_forge and the LLM client, so an
-    # unusable one exits 2 before any network I/O. load_config stays I/O-free.
+    # The rules files, the ticket file, the prompts directory and --repo-dir
+    # are read here, after config and before make_forge and the LLM client, so
+    # an unusable one exits 2 before any network I/O. load_config stays I/O-free.
     # Each is reported under the input that supplied its path: the flag
     # whenever it was given, else the variable. The scoped rules are checked
     # against the always-on file, so one team word mapped to two tiers across
@@ -1266,6 +1344,7 @@ def _run_review(
         cfg["prompts_dir"],
         source="--prompts-dir" if prompts_dir is not None else "PRXREF_PROMPTS_DIR",
     )
+    repo = _open_repo_dir(repo_dir)
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
     # the flag still wins when the environment says nothing. This sits inside
@@ -1346,6 +1425,11 @@ def _run_review(
         prompts=prompts,
         scoped_rules=scoped,
         scoped_rules_max_chars=cfg["scoped_rules_max_chars"],
+        repo_context=cfg["repo_context"],
+        repo_context_max_chars=cfg["repo_context_max_chars"],
+        context_contract_globs=cfg["context_contract_globs"],
+        context_exclude_globs=cfg["context_exclude_globs"],
+        repo_dir=repo,
     )
 
 
@@ -1443,6 +1527,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             as_of=args.as_of,
             description_file=args.description_file,
             no_description=args.no_description,
+            repo_dir=args.repo_dir,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

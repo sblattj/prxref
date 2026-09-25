@@ -1,4 +1,4 @@
-"""Issue #12 T3: ``load_scoped_rules``, from the configured entries to a ``ScopedRules``.
+"""Issue #12: ``load_scoped_rules``, from the configured entries to a ``ScopedRules``.
 
 ``PRXREF_SCOPED_RULES`` / ``--scoped-rules`` name rules files and directories
 whose ``applies_to:`` front matter scopes each file to paths. What is pinned

@@ -15,7 +15,7 @@ from .triage import Finding
 
 try:
     from .reviewer import load_prompt as _reviewer_load_prompt
-except ImportError:  # reviewer seat not landed yet; inline default applies
+except ImportError:  # reviewer's load_prompt unavailable; inline default applies
     _reviewer_load_prompt = None
 
 

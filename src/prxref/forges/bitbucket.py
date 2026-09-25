@@ -13,10 +13,12 @@ from requests.adapters import HTTPAdapter
 
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
+    MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     DescriptionVersion,
     FeedReadError,
     InlineComment,
+    PathListing,
     PRData,
     PRHistory,
     PRRef,
@@ -36,6 +38,9 @@ _PAGE_SIZE = 100
 # 500 comments. 50 puts the ceiling far past any real PR, and running out of
 # budget is now a refusal to post rather than an invisible short read.
 _MAX_PAGES = 50
+# list_paths asks /src for this many directory levels; the orchestrator's
+# probe saw 64 accepted and the whole tree returned.
+_LISTING_MAX_DEPTH = 64
 # get_file_content is best-effort context, not the review itself: a body past
 # this size (or one that looks binary) is worth skipping rather than shipping
 # hundreds of KB into a worker prompt.
@@ -466,6 +471,110 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
+        """Return every file path in the repository at commit ``sha``, best-effort.
+
+        Reads the repository-level ``/src/{sha}/`` listing with ``max_depth``
+        set to ``_LISTING_MAX_DEPTH`` and ``pagelen`` to ``_PAGE_SIZE``, then
+        follows each page's ``next`` URL verbatim, adding no parameters of its
+        own, until a page carries no ``next``. Only ``commit_file`` entries are
+        kept, so directories (``commit_directory``) and every other type,
+        submodules included, are dropped; the paths are sorted and
+        deduplicated.
+
+        ``complete`` is ``False`` when the walk stops at ``MAX_LISTING_PAGES``
+        pages with a ``next`` still to follow, when a page after the first
+        cannot be read (the paths read so far are returned), or when a
+        returned ``commit_directory`` sits at the depth limit, its path
+        holding ``_LISTING_MAX_DEPTH - 1`` slashes. That depth rule is
+        inferred from probing, not documented by Bitbucket: ``max_depth=N``
+        was observed to list N directory levels, so a directory on level N is
+        listed without its contents. An empty ``sha`` (no request is made)
+        gives ``None``, as does a first request that fails in transport,
+        returns a non-2xx status, or returns a body that is not JSON or holds
+        no ``values`` list. Never raises.
+        """
+        if not sha:
+            return None
+        headers, auth = self._get_auth()
+        url = f"{_API_BASE}/repositories/{ref.owner}/{ref.repo}/src/{quote(sha, safe='')}/"
+        params: dict[str, int] | None = {"max_depth": _LISTING_MAX_DEPTH, "pagelen": _PAGE_SIZE}
+        where = f"{ref.owner}/{ref.repo}@{sha}"
+        files: set[str] = set()
+        at_depth_limit = False
+        for page in range(MAX_LISTING_PAGES):
+            body = self._read_listing_page(url, params, headers, auth, where)
+            if body is None:
+                if page == 0:
+                    return None
+                return PathListing(paths=tuple(sorted(files)), complete=False)
+            for entry in body["values"]:
+                if not isinstance(entry, dict):
+                    continue
+                path = entry.get("path")
+                if not isinstance(path, str) or not path:
+                    continue
+                if entry.get("type") == "commit_file":
+                    files.add(path)
+                elif (
+                    entry.get("type") == "commit_directory"
+                    and path.rstrip("/").count("/") >= _LISTING_MAX_DEPTH - 1
+                ):
+                    at_depth_limit = True
+            next_url = body.get("next")
+            if not next_url:
+                if at_depth_limit:
+                    logger.debug(
+                        "list_paths reached max_depth=%d for %s; the listing is incomplete",
+                        _LISTING_MAX_DEPTH, where,
+                    )
+                return PathListing(paths=tuple(sorted(files)), complete=not at_depth_limit)
+            url = next_url
+            params = None
+        logger.debug(
+            "list_paths stopped at the %d-page cap for %s; the listing is incomplete",
+            MAX_LISTING_PAGES, where,
+        )
+        return PathListing(paths=tuple(sorted(files)), complete=False)
+
+    def _read_listing_page(
+        self,
+        url: str,
+        params: dict[str, int] | None,
+        headers: dict[str, str],
+        auth: tuple[str, str] | None,
+        where: str,
+    ) -> dict | None:
+        """Return one ``/src`` listing page, or ``None`` (logged at DEBUG) when it cannot be read.
+
+        A page is readable when the request succeeds with a 2xx status and a
+        JSON object holding a ``values`` list and, if it has one, a string
+        ``next``.
+        """
+        try:
+            resp = self._session.get(
+                url, params=params, headers=headers, auth=auth, timeout=_REQUEST_TIMEOUT
+            )
+        except requests.RequestException as e:
+            logger.debug("list_paths failed for %s: %s", where, e)
+            return None
+        if not resp.ok:
+            logger.debug("list_paths got HTTP %s for %s", resp.status_code, where)
+            return None
+        try:
+            body = resp.json()
+        except ValueError as e:
+            logger.debug("list_paths got a non-JSON body for %s: %s", where, e)
+            return None
+        if (
+            not isinstance(body, dict)
+            or not isinstance(body.get("values"), list)
+            or not isinstance(body.get("next") or "", str)
+        ):
+            logger.debug("list_paths got no values list for %s", where)
+            return None
+        return body
 
     def prune_inline_comments(self, ref: PRRef) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
