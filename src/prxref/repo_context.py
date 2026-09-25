@@ -5,11 +5,13 @@ definition sits in the SAME changed file, and it knows no Java. This module
 holds the pieces the repository-context feature (``PRXREF_REPO_CONTEXT``)
 builds on: the :class:`ContextEntry` record every context source emits, the
 admission ranks in :data:`REASONS`, a language map and definition regexes that
-add Java, the names an added line references, and a definition scan over the
-text of ANY file.
+add Java, the names an added line references, a definition scan over the
+text of ANY file, and the exclude floor (:data:`EXCLUDE_FLOOR`,
+:func:`exclude_predicate`) that keeps label files and secrets out of every read.
 
-The module is pure. It is stdlib plus :mod:`prxref.chunk_context`, performs no
-I/O and no network, and callers hand it file text they already read. It
+The module is pure. It is stdlib plus :mod:`prxref.chunk_context` and
+:func:`prxref.rules.match_globs`, performs no I/O and no network, and
+callers hand it file text they already read. It
 imports ``chunk_context``'s underscore helpers (``_language``,
 ``_definition_regexes``, ``_keywords``, ``_entry_text``, ``_IDENT_RE``) on
 purpose, so both modules scan and render a definition the same way instead of
@@ -20,10 +22,11 @@ with the feature off, and feature-off output must stay byte-identical.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from . import chunk_context
+from .rules import match_globs
 
 REASONS = ("cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search")
 KINDS = ("definition", "contract")
@@ -230,3 +233,33 @@ def find_definitions(
                 out.append((name, number, chunk_context._entry_text(lines, idx, max_lines)))
             break
     return out
+
+
+EXCLUDE_FLOOR = (
+    "**/expected.json",
+    "**/cases.json",
+    "**/case.json",
+    "**/prxref-eval/**",
+    "**/.env*",
+    "**/*.pem",
+    "**/*.key",
+)
+
+
+def exclude_predicate(extra_globs: Sequence[str] = ()) -> Callable[[str], bool]:
+    """A ``path -> bool`` that is true for a path repository context must never read.
+
+    A path is excluded when :func:`prxref.rules.match_globs` selects it with
+    :data:`EXCLUDE_FLOOR` (eval labels, eval output, dotenv files, keys), or
+    with ``extra_globs`` (``PRXREF_CONTEXT_EXCLUDE_GLOBS``) when that list is
+    non-empty. The two lists are matched separately, so the extra globs only
+    ever ADD exclusions: a ``!`` negation in ``extra_globs`` vetoes only the
+    extra list's own positives and can never re-admit a floor path, which it
+    would if both were one ``match_globs`` list.
+    """
+    extra = tuple(extra_globs)
+
+    def excluded(path: str) -> bool:
+        return match_globs(path, EXCLUDE_FLOOR) or bool(extra and match_globs(path, extra))
+
+    return excluded
