@@ -44,6 +44,13 @@ LLM / pipeline:
   PRXREF_LLM_CLI_CONCURRENCY    claude-cli / kiro-cli only: max CLI
                                 processes one client runs at once; positive
                                 int (default 2)
+  PRXREF_LLM_PARSE_RETRIES      Times a reply that is empty, does not parse, or
+                                lacks a ``findings`` list is re-sent up to N
+                                times; >= 0, where 0 keeps only the single
+                                empty-reply retry (default 1). Each discarded
+                                attempt is written as
+                                ``<label>.attempt<K>.response.json`` when
+                                ``--trace-dir`` is set.
   PRXREF_CONFIDENCE_FLOOR       Findings below this confidence are dropped;
                                 a probability in [0.0, 1.0] (default 0.6)
   PRXREF_MAX_ERROR_FINDINGS     Max error-severity findings reported per
@@ -393,6 +400,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_seed": None,
     "llm_cli_path": "",
     "llm_cli_concurrency": 2,
+    "llm_parse_retries": 1,
     "confidence_floor": DEFAULT_CONFIDENCE_FLOOR,
     "max_error_findings": DEFAULT_MAX_ERRORS,
     "max_warning_findings": None,
@@ -484,7 +492,7 @@ _INT_KEYS = frozenset({
     "llm_cli_concurrency", "review_rules_max_chars",
     "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
-    "max_findings_per_rule", "repo_context_max_chars",
+    "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
 _BOOL_KEYS = frozenset({
@@ -576,6 +584,7 @@ _RANGES: dict[str, _Range] = {
     "spec_max_chars": _Range(0),
     "spec_digest_tokens": _Range(0),
     "llm_cli_concurrency": _Range(0),
+    "llm_parse_retries": _Range(0, low_inclusive=True),
     "review_rules_max_chars": _Range(0),
     "ticket_context_max_chars": _Range(0),
     "size_warn_lines": _Range(0, low_inclusive=True),
