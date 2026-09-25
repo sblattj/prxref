@@ -74,6 +74,41 @@ without any doc. The label stays as it is by owner decision, so when such a
 finding credits `S2`, the severity agreement of `prxref eval score` counts
 it as a mismatch (human `spec`, AI `error`); its recall is unaffected.
 
+## Measuring repository context
+
+To see what repository context (`PRXREF_REPO_CONTEXT`, see "Repository
+Context" in the top-level README) changes, review the same cases at two
+levels under two labels, score both runs, and compare them. From the
+repository root:
+
+```bash
+PRXREF_REPO_CONTEXT=off uv run prxref eval run --cases tests/fixtures/issue17/cases.json --label ctx-off
+PRXREF_REPO_CONTEXT=repo uv run prxref eval run --cases tests/fixtures/issue17/cases.json --label ctx-repo
+uv run prxref eval score --label ctx-off
+uv run prxref eval score --label ctx-repo
+uv run prxref eval compare ctx-off ctx-repo
+```
+
+Each run's `run.json` records the level and the other three
+repository-context settings, so the two runs can be told apart.
+`eval compare` prints one row per metric, and the "Recall, severity `error`"
+row is the must-fix recall. Both labels of that case have a `must_match`
+predicate, so `eval score` needs no `--judge-model`; a dataset whose labels
+lack one needs it.
+
+The three cases in this directory measure little on their own. Each is a
+`diff.patch` with no `repo/` directory, and a local diff has no forge to read
+files from, so `diff` and `repo` give them only entries built from the diff's
+hunk lines, and at `repo` each case logs a WARNING that there is no
+repository reader. A case measures `repo` when it carries the repository at
+the PR head: a `repo/` directory beside its `diff.patch`, or a `repo_dir`
+field in a `cases.json` file, read relative to that file.
+`tests/fixtures/issue17/cases.json` is such a case: its `repo_dir` holds a
+small Java service with an OpenAPI spec and SQL changelog migrations, and
+each of its two labels needs evidence that its own chunk does not show, such
+as a type changed in another chunk, the OpenAPI spec, or an earlier
+migration.
+
 ## Case layout
 
 ```
