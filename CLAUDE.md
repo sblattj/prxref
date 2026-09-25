@@ -44,7 +44,12 @@ auto-detects the forge.
 
 - stdlib + requests only in core; LLM backends are optional extras
 - docstrings on public API, no inline commentary
-- all LLM calls single-shot with pre-gathered context (no agent loops)
+- all LLM calls single-shot with pre-gathered context (no agent loops). One
+  bounded exception: with PRXREF_CONTEXT_FOLLOWUP=on (off by default, repo
+  level only), a chunk whose first reply asks about a symbol it was not shown
+  is re-sent once with that symbol's definition appended. The lookup is
+  deterministic, the model calls no tools, and a follow-up never triggers
+  another.
 - non-blocking by default: `review` exits 0 on every review error — empty diff,
   network failure, LLM timeout, bad credentials, a totally failed review
   (advisor, not gate). Exit 2 is reserved for a configuration error: a required

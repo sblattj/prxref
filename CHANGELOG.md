@@ -8,6 +8,100 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.18.0] — 2026-09-25
+
+An opt-in context follow-up (#22, part 1). A chunk worker that cannot see a
+symbol's definition is told to ask about it at confidence 0.5 or below, so the
+default confidence floor of 0.6 drops the question however real the bug is.
+With `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo`, prxref looks
+up the symbols such a question names and sends the chunk once more with their
+definitions; a question the second reply confirms posts, and one it does not
+is dropped with its own reason. It is off by default, and at `off` every
+prompt, forge read, LLM call and run-record value is the same as in 0.17.0.
+The run record and `--format json` gain one key, `context_followup`, which is
+`null` at `off`. The live check of the follow-up on #22's case is pending.
+
+### Added
+
+- **`PRXREF_CONTEXT_FOLLOWUP` (#22).** `off` (the default) or `on`; any other
+  value, `true` and `1` included, exits `2` naming the variable, as a bad
+  `PRXREF_REPO_CONTEXT` does. It works only at `PRXREF_REPO_CONTEXT=repo`
+  with a repository reader (the forge or `--repo-dir`). At another level, or
+  with no reader, the run logs one WARNING saying the context follow-up is
+  off for the run, and makes no extra call; this is not a configuration
+  error. There are no tuning knobs: every cap below is fixed.
+- **The context follow-up (#22).** A chunk gets one when its first call
+  returned a review, it was not re-run after a timeout, and at least one of
+  its findings is below the confidence floor. Only the names such a question
+  puts in backticks are looked up: identifiers of at least 3 characters that
+  are not a receiver, a literal or a language keyword, type-like names first,
+  then names that follow a `.`, then the rest. A question with no backticks
+  falls back to the type-like words of its text. The chunk looks up at most
+  3 names, skipping any name the pull request defines. Nothing matches
+  phrases in the model's wording.
+- **Whole definitions for the follow-up (#22).** Each name is found through
+  the chunk's imports, path conventions and file-name search, then in files
+  of the same language from the listing. A file the pull request changes and
+  an excluded path are never read, and a chunk makes at most 8 reads for it,
+  cached ones included. The excerpt is the whole definition, not the one-line
+  entry of the definitions block: a Python class or function with its
+  indented body, a brace-language one up to its closing brace, at most 30
+  lines, cut with `… N more lines`. A name defined inside another excerpt
+  counts as found, and an excerpt the first prompt already showed is left
+  out. At most 4 excerpts and 4000 characters are admitted; with none, no
+  call is made.
+- **The follow-up call (#22).** The first user prompt with one block added
+  after its last context block, `### Definitions referenced by this chunk,
+  looked up for its open questions`, and a note to treat the definitions as
+  shown and to report findings at their lines in the diff. The system prompt
+  and the worker template are unchanged. The call keeps the first call's
+  token budget, gets no parse retries and no timeout retry, and never leads
+  to another follow-up, so it adds at most 2 calls to a chunk (the empty
+  reply retry included). The whole-PR sweep never gets one.
+- **Confirmation (#22).** A finding of the second reply confirms a question
+  when it is in the same file, at or above the floor, and within 5 lines of
+  it, has the same normalized title, or names a symbol looked up for it. A
+  confirmed question is replaced by the confirming finding, which then runs
+  every quality pass. A question with a looked-up symbol and no confirmation
+  is dropped as `not confirmed by context follow-up (confidence C below
+  floor F)`; one whose symbols were not found is left to the floor. The
+  second reply's other findings are discarded and counted, never posted, and
+  findings already at or above the floor are never touched. A follow-up that
+  fails, times out or is truncated keeps the first reply's findings, logs a
+  WARNING and never fails the review.
+- **`context_followup` in the run record (#22).** The run record and
+  `--format json` gain `context_followup` after `parse_retries`: `null` at
+  `off`; at `on`, `active`, the run's `calls`, `confirmed`, `unconfirmed`,
+  `discarded`, `input_tokens` and `output_tokens`, and `chunks`, one row per
+  chunk with its question count, the names looked up, each excerpt's path,
+  line, symbol, source and size (never its text), its error and why it was
+  `skipped`. The JSONL trace gains `followup` events per chunk and a
+  run-level `context_followup` event, and `PRXREF_TRACE_DIR` gains
+  `chunk<i>.followup.*` trace files beside the chunk's own.
+
+### Changed
+
+- **A follow-up's tokens and cost count toward its chunk (#22).** They are
+  added to the first call's, the cost is unknown when either is, and the
+  chunk's model becomes the follow-up's when it answered. The chunk's
+  `parse_retries` and `first_error` stay the first call's.
+- **`run.json` records one more setting (#22).** `prxref eval run` writes
+  `context_followup` into `run.json`'s `config`, right before `repo_context`,
+  so the block now holds 18 settings.
+
+### Known limitations
+
+- **Only backticked names are looked up.** A question that names the symbol
+  it could not see without backticks, and without a type-like word, gets no
+  follow-up. `get`, `set` and `type` are JavaScript keywords to the lookup,
+  so a symbol of one of those names is never looked up.
+- **A confirmation is a second sample.** The follow-up changes two things at
+  once: the prompt gains the definitions, and the model answers the chunk a
+  second time. A confirmation does not show which of the two moved it.
+- **One follow-up, chunks only.** A chunk re-run after a timeout, the
+  whole-PR sweep, and a question in the second reply get no follow-up, and
+  the caps have no setting.
+
 ## [0.17.0] — 2026-09-25
 
 Java and Kotlin chunk context (#20), a bounded retry for unusable model replies
