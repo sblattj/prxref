@@ -438,6 +438,7 @@ def orchestrate_review(
     context_contract_globs: Sequence[str] = (),
     context_exclude_globs: Sequence[str] = (),
     repo_dir: RepoDir | None = None,
+    llm_parse_retries: int = 0,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -445,11 +446,12 @@ def orchestrate_review(
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
-    rule_counts, repo_context}``, plus ``replay`` on a replay run only.
-    Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last ten keys are always present and are
+    rule_counts, repo_context, parse_retries}``, plus ``replay`` on a replay
+    run only. Every exit, error and empty-diff exits included, goes through
+    :func:`_run_record`, so the last eleven keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
-    ``False``) when their feature is off or the run never reached it.
+    ``False``; ``parse_retries``: ``0`` before any review unit when the
+    parse retry is on) when their feature is off or the run never reached it.
     ``cost_usd`` is ``None`` when the cost is unknown, never ``0``.
     ``cost_api_equivalent`` (always ``True``) is added only when every
     reported unit cost came from claude-cli
@@ -722,6 +724,19 @@ def orchestrate_review(
     row. One ``chunk context`` trace event per chunk (``index``, ``total``,
     ``entries``, ``omitted``, ``chars``) and one ``repo_context ok`` event
     per run carry the same figures, only when on.
+
+    ``llm_parse_retries`` (``PRXREF_LLM_PARSE_RETRIES``, issue #21) is the
+    parse-retry budget N handed to every chunk worker and to the sweep as
+    ``parse_retries`` (see :func:`reviewer.review_chunk`). The library
+    default is ``0``, which behaves exactly as 0.16.0; the CLI passes the
+    config's default of ``1``. A unit whose reviewer meta carries
+    ``parse_retries`` and ``first_error`` (a retry ran at N of 1 or more)
+    keeps both in its worker result. The record's ``parse_retries`` is
+    ``None`` unless N is an ``int`` of 1 or more, and otherwise the sum of
+    those unit counts over every chunk and the sweep: ``0`` when nothing
+    was retried, including an exit reached before any review unit ran.
+    When the timeout retry re-runs a chunk, only the second run's count
+    survives.
     """
     if repo_context not in repo_unit.MODES:
         raise ValueError(
@@ -747,6 +762,9 @@ def orchestrate_review(
         "scoped_rules": None,
         "rule_counts": None,
         "repo_context": None,
+        "parse_retries": (
+            0 if isinstance(llm_parse_retries, int) and llm_parse_retries >= 1 else None
+        ),
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -1058,6 +1076,7 @@ def orchestrate_review(
         reader=reader, all_files=files, trace_dir=trace_dir,
         prompt_context=prompt_context, scoped_blocks=scoped_blocks,
         repo_plan=repo_plan, unit_records=unit_records,
+        parse_retries=llm_parse_retries,
     )
     if repo_plan is not None and unit_records is not None:
         run_inputs["repo_context"] = _repo_context_record(
@@ -1081,8 +1100,11 @@ def orchestrate_review(
             token_budget=token_budget, tracer=tracer, threads=threads,
             trace_dir=trace_dir,
             prompt_context=prompt_context, scoped_block=sweep_block,
+            parse_retries=llm_parse_retries,
         )
     )
+    if run_inputs["parse_retries"] is not None:
+        run_inputs["parse_retries"] = _parse_retry_total(results)
 
     # Priced once every review unit is final, and BEFORE the total-failure
     # exit below: requests went out, so that exit's record must say what they
@@ -1772,6 +1794,22 @@ def _stamp_run_cost(
     run_inputs["cost_api_equivalent"] = costs.api_equivalent_run(units)
 
 
+def _parse_retry_total(units: Sequence[Mapping[str, Any]]) -> int:
+    """The run record's ``parse_retries``: the sum of every unit's own count (issue #21).
+
+    Called once, after the sweep, with every review unit's result (the chunk
+    workers plus the sweep). A unit without the key made no parse retry and
+    adds 0, and so does a value that is not an ``int`` (a ``bool`` included),
+    so a malformed test double can never raise out of the review.
+    """
+    total = 0
+    for unit in units:
+        value = unit.get("parse_retries", 0)
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
+    return total
+
+
 def _attribution(
     model: str, tokens: int, elapsed_ms: int, *, cost_label: str = "",
 ) -> str:
@@ -2129,6 +2167,7 @@ def _run_workers(
     scoped_blocks: Sequence[Any] | None = None,
     repo_plan: _RepoPlan | None = None,
     unit_records: list[dict[str, Any] | None] | None = None,
+    parse_retries: int = 0,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -2167,6 +2206,7 @@ def _run_workers(
                 prompt_context=prompt_context,
                 scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
                 repo_plan=repo_plan, unit_records=unit_records,
+                parse_retries=parse_retries,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -2209,6 +2249,22 @@ def _is_timeout_error(error: str) -> bool:
 _TIMEOUT_RETRY_CONTEXT_LINES = 0
 
 
+def _retry_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """The parse-retry keys a worker result carries over from its reviewer meta (issue #21).
+
+    ``{"parse_retries", "first_error"}`` when ``meta`` has ``parse_retries``,
+    which the reviewer sets only when a parse retry ran at
+    ``parse_retries`` of 1 or more, and ``{}`` otherwise, so a result
+    without a retry keeps exactly its 0.16.0 keys.
+    """
+    if "parse_retries" not in meta:
+        return {}
+    return {
+        "parse_retries": meta["parse_retries"],
+        "first_error": meta.get("first_error", ""),
+    }
+
+
 def _invoke_chunk(
     llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None, context_lines: int | None,
@@ -2216,6 +2272,7 @@ def _invoke_chunk(
     trace_label: str = "", trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     unit: repo_unit.UnitContext | None = None,
+    parse_retries: int = 0,
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -2243,6 +2300,11 @@ def _invoke_chunk(
     ``cost_source`` beside the token counts; a call that raised, or a stub
     whose meta lacks them, gives ``None`` and ``""``. Pricing is left to
     :func:`_stamp_run_cost`, over the whole run.
+
+    ``parse_retries`` is passed to the reviewer unchanged (issue #21). When
+    its meta carries ``parse_retries`` and ``first_error``, the shape
+    carries both after ``cost_source`` (:func:`_retry_meta`); otherwise,
+    and always for a call that raised, it has neither.
     """
     blocks = _context_blocks(chunk, reader, include_definitions=include_definitions, unit=unit)
     try:
@@ -2251,7 +2313,7 @@ def _invoke_chunk(
             max_tokens=max_tokens, context_lines=context_lines,
             context_blocks=blocks, sibling_files=all_files or (),
             trace_label=trace_label, trace_dir=trace_dir or "",
-            prompt_context=prompt_context,
+            prompt_context=prompt_context, parse_retries=parse_retries,
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -2272,6 +2334,7 @@ def _invoke_chunk(
             "error": meta.get("error", ""),
             "cost_usd": meta.get("cost_usd"),
             "cost_source": meta.get("cost_source", ""),
+            **_retry_meta(meta),
         }
 
     findings = []
@@ -2292,6 +2355,7 @@ def _invoke_chunk(
         "elapsed_ms": res.get("elapsed_ms", 0),
         "cost_usd": res.get("cost_usd"),
         "cost_source": res.get("cost_source", ""),
+        **_retry_meta(res),
     }
 
 
@@ -2304,6 +2368,7 @@ def _run_worker(
     scoped_block: Any = None,
     repo_plan: _RepoPlan | None = None,
     unit_records: list[dict[str, Any] | None] | None = None,
+    parse_retries: int = 0,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -2338,7 +2403,7 @@ def _run_worker(
     res = _invoke_chunk(
         llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
         trace_label=trace_label, trace_dir=trace_dir, prompt_context=unit_context,
-        unit=unit,
+        unit=unit, parse_retries=parse_retries,
     )
     if (
         res["error"]
@@ -2366,7 +2431,7 @@ def _run_worker(
             llm, chunk, pr, max_tokens, _TIMEOUT_RETRY_CONTEXT_LINES, reader,
             include_definitions=False, all_files=all_files,
             trace_label=trace_label, trace_dir=trace_dir,
-            prompt_context=unit_context,
+            prompt_context=unit_context, parse_retries=parse_retries,
         )
 
     error = res["error"]
@@ -2398,6 +2463,7 @@ def _run_worker(
         "elapsed_ms": _elapsed_ms(t0),
         "cost_usd": res["cost_usd"],
         "cost_source": res["cost_source"],
+        **_retry_meta(res),
     }
 
 
@@ -2410,6 +2476,7 @@ def _run_sweep(
     trace_dir: str | None = None,
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     scoped_block: Any = None,
+    parse_retries: int = 0,
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -2428,7 +2495,10 @@ def _run_sweep(
     failed chunk in the caller's coverage accounting. ``scoped_block``, the
     sweep's path-scoped rules block, replaces ``rules_sweep`` in the context
     and its files ride the ``sweep start`` event as ``rules``; ``None`` (no
-    scoped rules) leaves both exactly as they were.
+    scoped rules) leaves both exactly as they were. ``parse_retries`` is
+    passed to the reviewer unchanged (issue #21), and the result carries
+    the meta's ``parse_retries`` and ``first_error`` exactly as a chunk's
+    does (:func:`_retry_meta`); a sweep that raised carries neither.
     """
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -2451,7 +2521,7 @@ def _run_sweep(
             llm, digest, pr_title=pr.title, pr_description=pr.description,
             max_tokens=max_tokens, threads=discussion,
             trace_label="sweep", trace_dir=trace_dir or "",
-            prompt_context=prompt_context,
+            prompt_context=prompt_context, parse_retries=parse_retries,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[sweep] raised: %s", e)
@@ -2502,6 +2572,7 @@ def _run_sweep(
         "elapsed_ms": _elapsed_ms(t0),
         "cost_usd": meta.get("cost_usd"),
         "cost_source": meta.get("cost_source", ""),
+        **_retry_meta(meta),
     }
 
 

@@ -97,7 +97,7 @@ def _with_cost(meta: dict, result) -> dict:
 def _cost_review_chunk(
     llm, files, *, pr_title="", pr_description="", repo_hint="",
     max_tokens=None, context_lines=None, context_blocks="", sibling_files=(),
-    trace_label="", trace_dir="", prompt_context=None,
+    trace_label="", trace_dir="", prompt_context=None, parse_retries=0,
 ):
     seen = []
 
@@ -117,7 +117,7 @@ def _cost_review_chunk(
 
 def _cost_review_systemic(
     llm, digest, *, pr_title="", pr_description="", repo_hint="", max_tokens=None,
-    threads=(), trace_label="", trace_dir="", prompt_context=None,
+    threads=(), trace_label="", trace_dir="", prompt_context=None, parse_retries=0,
 ):
     result = llm.invoke(system=SWEEP_SYSTEM, user="[]")
     return [], _with_cost({
