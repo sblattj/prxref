@@ -1,23 +1,33 @@
 """Repository context outside the diff: shared types and the definitions core.
 
 ``chunk_context`` answers what a referenced identifier IS only when its
-definition sits in the SAME changed file, and it knows no Java. This module
-holds the pieces the repository-context feature (``PRXREF_REPO_CONTEXT``)
-builds on: the :class:`ContextEntry` record every context source emits, the
-admission ranks in :data:`REASONS`, a language map and definition regexes that
-add Java, the names an added line references, a definition scan over the
-text of ANY file, and the exclude floor (:data:`EXCLUDE_FLOOR`,
+definition sits in the SAME changed file. This module holds the pieces the
+repository-context feature (``PRXREF_REPO_CONTEXT``) builds on: the
+:class:`ContextEntry` record every context source emits, the admission ranks
+in :data:`REASONS`, a language map and definition regexes that answer Java and
+Kotlin themselves, the names an added line references, a definition scan over
+the text of ANY file, and the exclude floor (:data:`EXCLUDE_FLOOR`,
 :func:`exclude_predicate`) that keeps label files and secrets out of every read.
 
-The module is pure. It is stdlib plus :mod:`prxref.chunk_context` and
-:func:`prxref.rules.match_globs`, performs no I/O and no network, and
-callers hand it file text they already read. It
+The module is pure. It is stdlib plus :mod:`prxref.chunk_context`,
+:mod:`prxref.jvm_lang` and :func:`prxref.rules.match_globs`, performs no I/O
+and no network, and callers hand it file text they already read. It
 imports ``chunk_context``'s underscore helpers (``_language``,
 ``_definition_regexes``, ``_keywords``, ``_entry_text``, ``_IDENT_RE``) on
 purpose, so both modules scan and render a definition the same way instead of
-drifting apart. Java lives here rather than in
-``chunk_context._definition_regexes`` because ``referenced_definitions`` runs
-with the feature off, and feature-off output must stay byte-identical.
+drifting apart.
+
+``chunk_context`` handles Java and Kotlin itself for the same-file context,
+with methods, fields, enum constants and more. This module keeps a TYPES-ONLY
+view of both for repository context, and answers them before
+``chunk_context`` is consulted: a Java ``class``, ``interface``, ``record``,
+``enum`` or ``@interface`` declaration, and a Kotlin ``class`` of any flavour,
+``interface``, ``object`` or ``typealias``. That keeps the names a repository
+search looks for to type names, the names a JVM source file is called after,
+and keeps their number small. The shared facts live in
+:mod:`prxref.jvm_lang`: ``_JAVA_DEF_RE``, ``_JAVA_KEYWORDS`` and ``_JDK_NAMES``
+here are the SAME objects as its ``JAVA_TYPE_RE``, ``JAVA_KEYWORDS`` and
+``JDK_NAMES``, so there is one implementation.
 """
 from __future__ import annotations
 
@@ -25,62 +35,21 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from . import chunk_context
+from . import chunk_context, jvm_lang
 from .rules import match_globs
 
 REASONS = ("cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search", "shared-state")
 KINDS = ("definition", "contract", "reader")
 
-_JAVA_DEF_RE = re.compile(
-    r"^\s*(?:(?:@(?!interface\b)[A-Za-z_$][\w$.]*(?:\((?:[^()]|\([^()]*\))*\))?"
-    r"|public|protected|private|static|final|abstract|sealed|non-sealed|strictfp)\s+)*"
-    r"(?:class|interface|record|enum|@interface)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
-)
+_JAVA_DEF_RE = jvm_lang.JAVA_TYPE_RE
 
 _JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?((?:java|javax)\.[\w$.]*[\w$])(?:\.\*)?\s*;")
 
-_JAVA_KEYWORDS = frozenset({
-    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
-    "class", "const", "continue", "default", "do", "double", "else", "enum",
-    "exports", "extends", "false", "final", "finally", "float", "for", "goto",
-    "if", "implements", "import", "instanceof", "int", "interface", "long",
-    "module", "native", "new", "non", "null", "open", "opens", "package",
-    "permits", "private", "protected", "provides", "public", "record",
-    "requires", "return", "sealed", "short", "static", "strictfp", "super",
-    "switch", "synchronized", "this", "throw", "throws", "to", "transient",
-    "transitive", "true", "try", "uses", "var", "void", "volatile", "when",
-    "while", "with", "yield",
-})
+_JAVA_KEYWORDS = jvm_lang.JAVA_KEYWORDS
 
-_JDK_NAMES = frozenset({
-    "AbstractMap", "ArithmeticException", "ArrayDeque", "ArrayIndexOutOfBoundsException",
-    "ArrayList", "Arrays", "AssertionError", "AtomicBoolean", "AtomicInteger",
-    "AtomicLong", "AtomicReference", "AutoCloseable", "Base64", "BigDecimal",
-    "BigInteger", "BiConsumer", "BiFunction", "BinaryOperator", "BiPredicate",
-    "Boolean", "Byte", "Callable", "CharSequence", "Character", "Charset",
-    "ChronoUnit", "Class", "ClassCastException", "Clock", "Cloneable",
-    "Collection", "Collections", "Collectors", "Comparable", "Comparator",
-    "CompletableFuture", "CompletionStage", "ConcurrentHashMap", "ConcurrentMap",
-    "Consumer", "CountDownLatch", "Date", "DateTimeFormatter", "Deprecated",
-    "Deque", "Double", "Duration", "Enum", "Error", "Exception", "ExecutorService",
-    "Executors", "File", "Files", "Float", "Function", "FunctionalInterface",
-    "Future", "HashMap", "HashSet", "IllegalArgumentException",
-    "IllegalStateException", "IndexOutOfBoundsException", "InputStream", "Instant",
-    "IntStream", "Integer", "InterruptedException", "IOException", "Iterable",
-    "Iterator", "LinkedHashMap", "LinkedHashSet", "LinkedList", "List",
-    "LocalDate", "LocalDateTime", "LocalTime", "Locale", "Long", "LongStream",
-    "Map", "Matcher", "Math", "NoSuchElementException", "NullPointerException",
-    "Number", "NumberFormatException", "Object", "Objects", "OffsetDateTime",
-    "Optional", "OptionalDouble", "OptionalInt", "OptionalLong", "OutputStream",
-    "Override", "Path", "Paths", "Pattern", "Period", "Predicate", "PriorityQueue",
-    "Queue", "Random", "Reader", "Record", "ReentrantLock", "Runnable", "Runtime",
-    "RuntimeException", "SafeVarargs", "Set", "Short", "SortedMap", "SortedSet",
-    "StandardCharsets", "Stream", "String", "StringBuilder", "StringJoiner",
-    "Supplier", "SuppressWarnings", "System", "Thread", "ThreadLocal", "Throwable",
-    "TimeUnit", "TreeMap", "TreeSet", "UUID", "UnaryOperator",
-    "UncheckedIOException", "UnsupportedOperationException", "URI", "URL", "Void",
-    "Writer", "ZoneId", "ZoneOffset", "ZonedDateTime",
-})
+_JDK_NAMES = jvm_lang.JDK_NAMES
+
+_KOTLIN_PLATFORM_ROOTS = frozenset({"kotlin", "java", "javax"})
 
 
 @dataclass(frozen=True)
@@ -119,26 +88,33 @@ class ContextEntry:
 
 
 def language_of(path: str) -> str:
-    """The definition language of ``path``: ``chunk_context``'s map plus ``"java"`` for ``.java``.
+    """The definition language of ``path``: ``"java"``, ``"kotlin"``, else ``chunk_context``'s map.
 
-    Returns ``""`` for a path no language claims.
+    ``.java`` gives ``"java"`` and ``.kt`` or ``.kts`` gives ``"kotlin"``, in
+    any case, before ``chunk_context`` is asked; a ``.kts`` build script is
+    Kotlin too. Returns ``""`` for a path no language claims.
     """
-    if path.lower().endswith(".java"):
-        return "java"
-    return chunk_context._language(path)
+    return jvm_lang.jvm_language(path) or chunk_context._language(path)
 
 
 def definition_regexes(language: str) -> tuple[re.Pattern[str], ...]:
     """The definition regexes for ``language``; group 1 of a match is the defined name.
 
-    ``"java"`` gets one regex for a type declaration (``class``, ``interface``,
-    ``record``, ``enum`` or ``@interface``, after optional modifiers and
-    same-line annotations); it never matches a method, a field or a local
-    variable. Every other language delegates to ``chunk_context``, which covers
-    js and python and returns ``()`` otherwise.
+    Java and Kotlin get one regex each, for a type declaration only.
+    ``"java"`` gets :data:`prxref.jvm_lang.JAVA_TYPE_RE` (``class``,
+    ``interface``, ``record``, ``enum`` or ``@interface``, after optional
+    modifiers and same-line annotations). ``"kotlin"`` gets
+    :data:`prxref.jvm_lang.KOTLIN_TYPE_RE` (``class`` in every flavour, such as
+    ``data class`` or ``enum class``, ``interface``, a named ``object`` and
+    ``typealias``). Neither ever matches a method or function, a field or
+    property, or a local variable. Every other language delegates to
+    ``chunk_context``, which covers js and python and returns ``()``
+    otherwise.
     """
     if language == "java":
         return (_JAVA_DEF_RE,)
+    if language == "kotlin":
+        return (jvm_lang.KOTLIN_TYPE_RE,)
     return chunk_context._definition_regexes(language)
 
 
@@ -151,6 +127,16 @@ def _jdk_imports(added: Iterable[str]) -> set[str]:
     return names
 
 
+def _kotlin_platform_imports(added: Iterable[str]) -> set[str]:
+    names: set[str] = set()
+    for parsed in jvm_lang.parse_imports(added):
+        if parsed.segments[0] in _KOTLIN_PLATFORM_ROOTS:
+            names.update(parsed.segments)
+            if parsed.alias:
+                names.add(parsed.alias)
+    return names
+
+
 def _type_like(name: str) -> bool:
     return name[:1].isupper() and any(c.islower() for c in name)
 
@@ -160,17 +146,24 @@ def referenced_names(added: Iterable[str], language: str) -> list[str]:
 
     Language keywords are removed, and so is every name a
     :func:`definition_regexes` match defines on the added lines themselves, as
-    ``chunk_context.referenced_definitions`` does. For Java, JDK names are also
-    removed (every segment of a ``java.*`` or ``javax.*`` import on the added
-    lines, plus a built-in set of common ``java.lang``, ``java.util``,
-    ``java.time`` and related types), and only type-like names are kept: an
-    uppercase first letter and at least one lowercase letter, since a Java
-    definition regex can only ever find a type. That drops constants, locals,
-    methods and single-letter type parameters.
+    ``chunk_context.referenced_definitions`` does. Java and Kotlin, whose
+    definition regexes here can only ever find a type, are filtered further:
+
+    - keywords are :func:`prxref.jvm_lang.keywords` of the language;
+    - JDK names are removed: the built-in set of common ``java.lang``,
+      ``java.util``, ``java.time`` and related types
+      (:data:`prxref.jvm_lang.JDK_NAMES`), plus every segment of a
+      ``java.*`` or ``javax.*`` import on the added lines. For Kotlin that
+      covers a ``kotlin.*`` import too, with or without a semicolon, and the
+      ``as`` alias of any of the three; ``kotlinx.*`` is a library, not the
+      platform, and is kept;
+    - only type-like names are kept: an uppercase first letter and at least
+      one lowercase letter. That drops constants, locals, methods and
+      functions, properties and single-letter type parameters.
     """
     lines = list(added)
-    java = language == "java"
-    keywords = _JAVA_KEYWORDS if java else chunk_context._keywords(language)
+    language_is_jvm = language in ("java", "kotlin")
+    keywords = jvm_lang.keywords(language) if language_is_jvm else chunk_context._keywords(language)
     defined: set[str] = set()
     for text in lines:
         for regex in definition_regexes(language):
@@ -178,14 +171,16 @@ def referenced_names(added: Iterable[str], language: str) -> list[str]:
             if match:
                 defined.add(match.group(1))
     dropped = keywords | defined
-    if java:
+    if language == "java":
         dropped = dropped | _JDK_NAMES | _jdk_imports(lines)
+    elif language == "kotlin":
+        dropped = dropped | _JDK_NAMES | _kotlin_platform_imports(lines)
     out: dict[str, None] = {}
     for text in lines:
         for name in chunk_context._IDENT_RE.findall(text):
             if name in dropped or name in out:
                 continue
-            if java and not _type_like(name):
+            if language_is_jvm and not _type_like(name):
                 continue
             out[name] = None
     return list(out)
