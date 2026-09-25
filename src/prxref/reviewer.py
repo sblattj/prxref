@@ -1,8 +1,9 @@
 """Worker-review layer: one LLM call per diff chunk, plus the systemic sweep.
 
 The reviewer renders ``prompts/worker.md`` with the chunk's unified diff,
-makes a single :meth:`LLMClient.invoke` call (no retries — the model
-fallback chain handles transient failures), and maps the JSON response
+makes a single :meth:`LLMClient.invoke` call (the model fallback chain
+handles transient failures; the one retry here is for a reply that came
+back empty, made once with the same prompt), and maps the JSON response
 onto :class:`prxref.triage.Finding` records. Unparseable or malformed
 responses degrade to ``([], [])`` with a logged warning; this layer
 never raises. :func:`review_systemic` is the same contract over the
@@ -60,7 +61,7 @@ from importlib import resources
 from typing import Any
 
 from .chunk_context import sibling_summary_block
-from .costs import valid_usd
+from .costs import combine_reported, valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
@@ -154,6 +155,55 @@ def _budget_stop_reason(result: Any) -> str:
         return ""
     literal = reason.strip()
     return literal if literal.lower() in _TRUNCATION_FINISH_REASONS else ""
+
+
+def _is_empty_reply(result: Any) -> bool:
+    """True when a completion came back with no text: empty or whitespace only.
+
+    Only a string is judged. A backend or test double whose ``text`` is not a
+    string keeps the path it always had, where the parse names what it got.
+    """
+    text = getattr(result, "text", None)
+    return isinstance(text, str) and not text.strip()
+
+
+def _finish_reason_text(result: Any) -> str:
+    """The provider's stop reason for a log line, stripped; ``-`` when none was reported."""
+    reason = getattr(result, "finish_reason", "")
+    if not isinstance(reason, str) or not reason.strip():
+        return "-"
+    return reason.strip()
+
+
+def _result_cost(result: Any) -> tuple[float | None, str]:
+    """``(cost_usd, cost_source)`` as the backend reported them for one call.
+
+    The figure goes through :func:`prxref.costs.valid_usd`; the source is
+    ``""`` whenever the figure is ``None``.
+    """
+    cost = valid_usd(getattr(result, "cost_usd", None))
+    source = str(getattr(result, "cost_source", "") or "") if cost is not None else ""
+    return cost, source
+
+
+def _fold_retry_usage(meta: dict, result: Any) -> None:
+    """Add the empty-reply retry's usage to ``meta``, which holds the first call's.
+
+    Both calls were billed, so ``input_tokens`` and ``output_tokens`` are
+    summed. ``model`` becomes the retry's, the reply the unit went on to use.
+    The reported cost folds through :func:`prxref.costs.combine_reported`,
+    the rule a backend applies to the attempts inside one invoke: the sum
+    when both calls reported a figure, else ``None`` with source ``""``. A
+    ``None`` leaves the unit to :func:`prxref.costs.run_cost`, which prices it
+    from the summed tokens when a price table knows the model.
+    """
+    meta["input_tokens"] = (meta["input_tokens"] or 0) + (result.input_tokens or 0)
+    meta["output_tokens"] = (meta["output_tokens"] or 0) + (result.output_tokens or 0)
+    meta["model"] = result.model
+    meta["cost_usd"], meta["cost_source"] = combine_reported([
+        (meta["cost_usd"], meta["cost_source"]),
+        _result_cost(result),
+    ])
 
 
 def load_prompt(name: str) -> str:
@@ -458,6 +508,10 @@ def _write_trace_files(
     Each file lands via a temp file plus :func:`os.replace`, so a concurrent
     reader never observes a half-written file, and a timeout retry simply
     overwrites: the trace ends up showing the attempt whose result was used.
+    The empty-reply retry in :func:`_invoke_and_parse` writes only once,
+    after its final call, so the files describe that call (the meta's token
+    counts cover both calls) and the empty first reply is visible only in its
+    WARNING log line.
     Empty ``trace_dir`` is the declared off switch and does nothing — no
     directory, no syscalls, no cost. Every failure (directory cannot be
     created, path unwritable, disk full) is a logged warning and nothing more:
@@ -518,6 +572,24 @@ def _invoke_and_parse(
     ``accept_rule`` does the same for ``rule`` (through
     :func:`prxref.triage.normalize_rule`); false, the default, leaves every
     finding's ``rule`` at ``None``.
+
+    A reply that came back EMPTY (no text, or whitespace only) is asked for
+    again, once, with the same prompt and the same budget, after one WARNING
+    ``<label>: empty model reply (finish_reason=<reason>); retrying once``
+    (``-`` when no reason was reported). Nothing else is retried: not a reply
+    the provider stopped at the budget (``finish_reason`` ``length`` or
+    ``max_tokens``, the truncation path, which already names the budget
+    lever), not a non-empty reply that fails to parse, and not a call that
+    raised. At most one extra call is made. ``input_tokens``,
+    ``output_tokens`` and ``elapsed_ms`` then cover both calls, ``model`` is
+    the second call's, and ``cost_usd`` follows
+    :func:`_fold_retry_usage`. The second reply is handled exactly as a
+    first reply would be, so an empty one fails the unit with the same error
+    as before. A retry that raises fails the unit with that exception, keeping
+    the first call's tokens. Per unit the worst case is 4 ``invoke`` calls
+    for a chunk (these 2, times the orchestrator's one timeout retry of the
+    whole chunk) and 2 for the systemic sweep, which has no timeout retry;
+    each ``invoke`` may still walk the backend's model fallback chain.
     """
     t0 = time.perf_counter()
     meta = {
@@ -552,10 +624,30 @@ def _invoke_and_parse(
     meta["input_tokens"] = result.input_tokens
     meta["output_tokens"] = result.output_tokens
     meta["model"] = result.model
-    meta["cost_usd"] = valid_usd(getattr(result, "cost_usd", None))
-    meta["cost_source"] = str(getattr(result, "cost_source", "") or "") if meta["cost_usd"] is not None else ""
+    meta["cost_usd"], meta["cost_source"] = _result_cost(result)
 
     stop_reason = _budget_stop_reason(result)
+    if not stop_reason and _is_empty_reply(result):
+        logger.warning(
+            "%s: empty model reply (finish_reason=%s); retrying once",
+            label, _finish_reason_text(result),
+        )
+        try:
+            result = llm.invoke(
+                system=system,
+                user=user,
+                max_tokens=budget,
+                json_mode=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("worker review failed for %s: %s", label, e)
+            meta["error"] = f"{type(e).__name__}: {e}"
+            meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+            _write_trace_files(trace_dir, trace_label, system, user, None, meta)
+            return [], meta
+        _fold_retry_usage(meta, result)
+        stop_reason = _budget_stop_reason(result)
+
     truncated_error = _TRUNCATED_ERROR.format(budget=budget, reason=stop_reason)
 
     try:
@@ -629,27 +721,31 @@ def review_chunk(
     trace_label: str = "",
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> tuple[list[Finding], dict]:
-    """Review one chunk with a single LLM call.
+    """Review one chunk with a single LLM call, repeated once when the reply is empty.
 
     Returns ``(findings, meta)`` where ``meta`` carries ``escalations`` plus
     cost telemetry (``input_tokens``, ``output_tokens``, ``model``,
-    ``elapsed_ms`` — zeros when the call failed — and ``cost_usd`` /
-    ``cost_source``, ``None`` / ``""`` when the call failed or the backend
+    ``elapsed_ms`` — zeros when no reply came back — and ``cost_usd`` /
+    ``cost_source``, ``None`` / ``""`` when no reply came back or the backend
     reported no cost). Severity passes through
     unfiltered — the quality gate normalizes and drops downstream. A missing
     ``confidence`` maps to 0.5. Any LLM or parse failure logs a warning and
     yields ``([], meta)`` with ``meta["error"]`` set to the failure reason;
-    this layer never raises and never retries. ``meta["error"]`` is the
-    empty string on success.
+    this layer never raises, and the only retry it makes is one repeat of an
+    EMPTY reply with the same prompt (:func:`_invoke_and_parse`), so a chunk
+    costs at most 2 ``invoke`` calls here and at most 4 with the
+    orchestrator's timeout retry. ``meta["error"]`` is the empty string on
+    success.
 
     When the response cannot be parsed and the backend reported
     ``finish_reason == "length"``, ``meta["error"]`` names the budget that was
     in force and the variable that raises it — the operator's lever — instead
-    of a ``JSONDecodeError`` that looks like a model-quality problem. A clean
-    empty response (any other finish reason) keeps the parse error verbatim
-    and is never mislabelled as truncation. A response that parses to the wrong
-    SHAPE is treated the same way: unusable is unusable, and the budget is named
-    when the budget is why.
+    of a ``JSONDecodeError`` that looks like a model-quality problem, and an
+    empty one is not retried. A clean empty response (any other finish
+    reason) is retried once; when the retry is empty too, it keeps the parse
+    error verbatim and is never mislabelled as truncation. A response that
+    parses to the wrong SHAPE is treated the same way: unusable is unusable,
+    and the budget is named when the budget is why.
 
     ``max_tokens`` is the completion budget for the call; ``None`` keeps the
     module default :data:`MAX_TOKENS`, so direct callers are unaffected. The
@@ -727,7 +823,7 @@ def review_systemic(
     trace_label: str = "",
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
 ) -> tuple[list[Finding], dict]:
-    """Review the whole-PR systemic digest with a single LLM call.
+    """Review the whole-PR systemic digest with a single LLM call, repeated once when the reply is empty.
 
     The second-order complement to :func:`review_chunk`: chunk workers each
     see one slice of the diff, so cross-file classes — an unauthenticated
@@ -746,8 +842,9 @@ def review_systemic(
 
     Returns ``(findings, meta)`` under exactly the :func:`review_chunk`
     contract — never raises, ``meta["error"]`` empty on success, truncation
-    named when the budget is why — so the orchestrator can treat the sweep
-    as one more worker-style unit for coverage accounting.
+    named when the budget is why, an empty reply asked for once more — so
+    the orchestrator can treat the sweep as one more worker-style unit for
+    coverage accounting.
 
     ``trace_dir``/``trace_label`` work exactly as in :func:`review_chunk`;
     the orchestrator passes ``trace_label="sweep"`` so the sweep's prompt and
