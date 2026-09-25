@@ -199,6 +199,21 @@ Written down because each one cost real time.
    but always under the 0.60 floor. The toggle check fired in all 6 runs.
    Three runs an arm on one fixture is a first measurement, not a verdict on
    the feature (Live checks).
+6. **A pass that runs over every finding runs over the deterministic ones
+   too.** The toggle check has no model, yet its finding was posted as an
+   `error` in 2 of arm B's 3 live runs and as a `warning` in the third
+   (Live checks). Severity consistency had raised it: a model `error` in the
+   same file shared a rare code token with it. Those two runs logged
+   `severity consistency: raised 1 finding(s) via shared rare code
+   token(s)`, binding on `true` in one and on `assistant_progress_notes` in
+   the other, and the third run logged no such line. Only the variation gave
+   it away, because a check with no model should post the same severity on
+   every run. A finding that `heuristics.is_deterministic` marks now takes no
+   part in severity consistency. `TestDeterministicFindingsKeepTheirSeverity`
+   in `tests/test_quality.py` and `tests/test_deterministic_severity.py`,
+   through the local review path on #22's fixture, pin it, each with a
+   control that shows the raise without the exemption. Finding grouping,
+   which is opt-in, can still raise one (`docs/quality.md`).
 
 ## The coupling that will catch the next person adding a config key
 
@@ -300,7 +315,7 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-8695 passed                                   uv run pytest -q
+8703 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.17.0                                        uv run prxref --version
 ```
@@ -673,7 +688,7 @@ and so is its #21 bullet (the parse retry).
 | Item | Value |
 |---|---|
 | Released version | `0.17.0` (minor: Java and Kotlin chunk context, at every level; one new config key, `PRXREF_LLM_PARSE_RETRIES`, default `1`, which changes behaviour: a `{}` reply now costs a second call and can fail its unit, and `0` restores 0.16.0; one new run-record and `--format json` key, `parse_retries`, `null` at `0`; a new context block at `repo`, `### Code elsewhere that reads state this chunk writes`; one new always-on deterministic check, the pinned-off toggle; no new CLI flag; no existing config default changed) |
-| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS` and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |

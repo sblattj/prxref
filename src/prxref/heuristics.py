@@ -76,6 +76,19 @@ _MIN_FILES_FOR_SHAPE = 2
 _BODY_SUFFIX = " (deterministic check, no model)"
 
 
+def is_deterministic(finding: Finding) -> bool:
+    """True when ``finding`` came from a check in this module, not a model.
+
+    Every finding this module makes ends its body with " (deterministic
+    check, no model)", and that ending is the mark: a finding whose ``body``
+    is a string ending with it is deterministic. Its severity and
+    confidence are the check's own, so
+    :func:`prxref.quality.apply_severity_consistency` leaves it out.
+    """
+    body = finding.body
+    return isinstance(body, str) and body.endswith(_BODY_SUFFIX)
+
+
 def _is_release_machinery(path: str) -> bool:
     """True when ``path`` is release machinery under the frozen contract.
 
