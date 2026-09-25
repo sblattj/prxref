@@ -1186,7 +1186,8 @@ def orchestrate_review(
         failed_chunks.append((results[-1]["error"], []))
 
     # Two deterministic, non-LLM findings folded in before the quality passes
-    # so each flows through every one of them exactly like a model finding
+    # so each flows through them like a model finding, except that
+    # apply_severity_consistency leaves them out (heuristics.is_deterministic)
     # (issues #10 and #22): warning/1.0 clears apply_quality_gate trivially
     # for both. release_shape is file-level (line=0), so it survives
     # apply_line_align untouched; the toggle finding sits on the toggle's
