@@ -80,8 +80,9 @@ class TestDefinitionRegexes:
     def test_languages_without_regexes_get_none(self, language):
         assert definition_regexes(language) == ()
 
-    def test_java_is_not_added_to_chunk_context(self):
-        assert chunk_context._definition_regexes("java") == ()
+    def test_java_is_added_to_chunk_context(self):
+        assert chunk_context._definition_regexes("java") is chunk_context.jvm_lang.JAVA_DEFINITION_REGEXES
+        assert len(chunk_context._definition_regexes("java")) == 4
         assert len(definition_regexes("java")) == 1
 
 
