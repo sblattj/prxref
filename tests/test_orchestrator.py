@@ -278,7 +278,7 @@ class TestHappyPath:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries",
+            "rule_counts", "repo_context", "parse_retries", "context_followup",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -748,7 +748,7 @@ class TestMaxTokensThreading:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries",
+            "rule_counts", "repo_context", "parse_retries", "context_followup",
         }
 
 
@@ -1063,7 +1063,7 @@ class TestQualityGateKnobsAreThreaded:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries",
+            "rule_counts", "repo_context", "parse_retries", "context_followup",
         }
 
 
@@ -1073,7 +1073,7 @@ RESULT_KEYS = {
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context", "parse_retries",
+    "rule_counts", "repo_context", "parse_retries", "context_followup",
 }
 
 

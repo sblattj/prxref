@@ -183,7 +183,18 @@ from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 
-from . import chunk_context, costs, heuristics, repo_contracts, repo_reader, repo_unit, reviewer, specs, systemic
+from . import (
+    chunk_context,
+    costs,
+    followup,
+    heuristics,
+    repo_contracts,
+    repo_reader,
+    repo_unit,
+    reviewer,
+    specs,
+    systemic,
+)
 from .forges.base import (
     ATTRIBUTION_MARKER,
     Forge,
@@ -199,6 +210,7 @@ from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates,
 from .quality import (
     GROUPED_INTO_PREFIX,
     RULE_CAP_PREFIX,
+    _resolve_confidence_floor,
     active,
     apply_containment_note,
     apply_example_echo_check,
@@ -450,6 +462,7 @@ def orchestrate_review(
     context_exclude_globs: Sequence[str] = (),
     repo_dir: RepoDir | None = None,
     llm_parse_retries: int = 0,
+    context_followup: str = "off",
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -457,9 +470,10 @@ def orchestrate_review(
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
-    rule_counts, repo_context, parse_retries}``, plus ``replay`` on a replay
-    run only. Every exit, error and empty-diff exits included, goes through
-    :func:`_run_record`, so the last eleven keys are always present and are
+    rule_counts, repo_context, parse_retries, context_followup}``, plus
+    ``replay`` on a replay run only. Every exit, error and empty-diff exits
+    included, goes through
+    :func:`_run_record`, so the last twelve keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``; ``parse_retries``: ``0`` before any review unit when the
     parse retry is on) when their feature is off or the run never reached it.
@@ -750,10 +764,40 @@ def orchestrate_review(
     was retried, including an exit reached before any review unit ran.
     When the timeout retry re-runs a chunk, only the second run's count
     survives.
+
+    ``context_followup`` (``PRXREF_CONTEXT_FOLLOWUP``, issue #22) is
+    ``"off"`` (the default) or ``"on"``; any other value raises
+    ``ValueError`` before any forge call, a guard for a library caller only.
+    Off, nothing new is resolved, read, logged, traced or called, and the
+    record's ``context_followup`` key is ``None``. On, the follow-up runs
+    only at ``repo_context="repo"`` with a repository reader; otherwise the
+    run logs one WARNING naming ``PRXREF_CONTEXT_FOLLOWUP`` and makes no
+    follow-up call. With it active, the confidence floor is resolved once
+    (``confidence_floor``, else ``PRXREF_CONFIDENCE_FLOOR``, else the
+    default), and each chunk whose first attempt succeeded without the
+    timeout retry goes through :func:`prxref.followup.run_chunk_followup`:
+    a chunk with findings below the floor that name symbols it was not
+    shown is re-sent once with their definitions appended as the last
+    context block, over its own capped per-chunk reader. A chunk that took
+    the timeout retry is skipped. The sweep never gets a follow-up.
+
+    The ``context_followup`` key, when on, is ``{"active", "calls",
+    "confirmed", "unconfirmed", "discarded", "input_tokens",
+    "output_tokens", "chunks"}``. ``active`` is false, the counts are 0 and
+    ``chunks`` is ``None`` when the gate above left it off, and on every
+    exit reached before the chunk workers finish. Once they finish on an
+    active run, the counts are the sums over the chunk rows and ``chunks``
+    lists one row per chunk in chunk order (see
+    :data:`prxref.followup.ROW_KEYS`), or ``None`` for a chunk whose worker
+    left no row; one ``context_followup ok`` trace event carries the totals.
     """
     if repo_context not in repo_unit.MODES:
         raise ValueError(
             f"repo_context must be one of {repo_unit.MODES}, got {repo_context!r}"
+        )
+    if context_followup not in FOLLOWUP_MODES:
+        raise ValueError(
+            f"context_followup must be one of {FOLLOWUP_MODES}, got {context_followup!r}"
         )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -778,6 +822,7 @@ def orchestrate_review(
         "parse_retries": (
             0 if isinstance(llm_parse_retries, int) and llm_parse_retries >= 1 else None
         ),
+        "context_followup": _followup_record() if context_followup == "on" else None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -1089,6 +1134,14 @@ def orchestrate_review(
             repo_context, forge, ref, pr, files, run_inputs["repo_context"], repo_dir=repo_dir,
         )
         unit_records = [None] * len(chunks)
+    followup_floor: float | None = None
+    followup_records: list[dict[str, Any] | None] | None = None
+    if context_followup == "on":
+        if repo_plan is not None and repo_plan.mode == "repo" and repo_plan.reader is not None:
+            followup_floor = _resolve_confidence_floor(confidence_floor)
+            followup_records = [None] * len(chunks)
+        else:
+            logger.warning(FOLLOWUP_INACTIVE_WARNING)
     results = _run_workers(
         llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
         context_lines=context_lines, tracer=tracer,
@@ -1096,6 +1149,7 @@ def orchestrate_review(
         prompt_context=prompt_context, scoped_blocks=scoped_blocks,
         repo_plan=repo_plan, unit_records=unit_records,
         parse_retries=llm_parse_retries,
+        followup_floor=followup_floor, followup_records=followup_records,
     )
     if repo_plan is not None and unit_records is not None:
         run_inputs["repo_context"] = _repo_context_record(
@@ -1107,6 +1161,10 @@ def orchestrate_review(
             listing=record["listing"], reads=record["reads"],
             read_cap_hit=record["read_cap_hit"],
         )
+    if followup_records is not None:
+        run_inputs["context_followup"] = _followup_record(followup_records)
+        totals = {k: v for k, v in run_inputs["context_followup"].items() if k != "chunks"}
+        tracer.event("context_followup", "ok", **totals)
 
     # One more worker-style unit, not inside the pool: the sweep digests the
     # WHOLE diff, so it only has something to say once every chunk result —
@@ -2130,6 +2188,34 @@ def _repo_context_record(
     }
 
 
+FOLLOWUP_MODES = ("off", "on")
+
+FOLLOWUP_INACTIVE_WARNING = (
+    "PRXREF_CONTEXT_FOLLOWUP=on needs PRXREF_REPO_CONTEXT=repo and a repository reader; "
+    "the context follow-up is off for this run"
+)
+
+_FOLLOWUP_TOTALS = ("confirmed", "unconfirmed", "discarded", "input_tokens", "output_tokens")
+
+
+def _followup_record(rows: Sequence[dict[str, Any] | None] | None = None) -> dict[str, Any]:
+    """The ``context_followup`` record of a run with ``PRXREF_CONTEXT_FOLLOWUP=on``.
+
+    ``rows`` is ``None`` for a run whose follow-up is not active (the level
+    gate left it off, or the chunk workers have not finished): ``active`` is
+    false, every count 0 and ``chunks`` ``None``. Otherwise ``rows`` holds one
+    chunk row or ``None`` per chunk, in chunk order; ``calls`` counts the rows
+    whose follow-up was sent and every other count is the sum over the rows.
+    """
+    present = [row for row in rows or () if row is not None]
+    return {
+        "active": rows is not None,
+        "calls": sum(1 for row in present if row.get("called")),
+        **{key: sum(int(row.get(key) or 0) for row in present) for key in _FOLLOWUP_TOTALS},
+        "chunks": list(rows) if rows is not None else None,
+    }
+
+
 def _scoped_unit_blocks(
     scoped_rules: Any, chunks, always_on, *, max_chars: int,
 ) -> tuple[list[Any], Any]:
@@ -2199,6 +2285,8 @@ def _run_workers(
     repo_plan: _RepoPlan | None = None,
     unit_records: list[dict[str, Any] | None] | None = None,
     parse_retries: int = 0,
+    followup_floor: float | None = None,
+    followup_records: list[dict[str, Any] | None] | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -2238,6 +2326,7 @@ def _run_workers(
                 scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
                 repo_plan=repo_plan, unit_records=unit_records,
                 parse_retries=parse_retries,
+                followup_floor=followup_floor, followup_records=followup_records,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -2304,6 +2393,7 @@ def _invoke_chunk(
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     unit: repo_unit.UnitContext | None = None,
     parse_retries: int = 0,
+    extra_blocks: str = "",
 ) -> dict:
     """One normalized :func:`reviewer.review_chunk` call; never raises.
 
@@ -2336,8 +2426,15 @@ def _invoke_chunk(
     its meta carries ``parse_retries`` and ``first_error``, the shape
     carries both after ``cost_source`` (:func:`_retry_meta`); otherwise,
     and always for a call that raised, it has neither.
+
+    ``extra_blocks`` is a pre-rendered block appended after every other
+    context block, separated by a blank line: the context follow-up's
+    looked-up definitions (issue #22). ``""`` (the default) leaves the
+    blocks exactly as they were.
     """
     blocks = _context_blocks(chunk, reader, include_definitions=include_definitions, unit=unit)
+    if extra_blocks:
+        blocks = "\n\n".join(part for part in (blocks.strip(), extra_blocks.strip()) if part)
     try:
         res = reviewer.review_chunk(
             llm, chunk, pr_title=pr.title, pr_description=pr.description,
@@ -2390,6 +2487,54 @@ def _invoke_chunk(
     }
 
 
+def _chunk_followup(
+    first: dict, llm: LLMClient, chunk, pr: PRData,
+    max_tokens: int | None, context_lines: int | None, reader, all_files, *,
+    plan: _RepoPlan, unit: repo_unit.UnitContext | None, floor: float,
+    prompt_context: PromptContext, trace_label: str, trace_dir: str | None,
+    index: int, total: int, tracer: Tracer,
+) -> tuple[dict, dict]:
+    """Run one chunk's context follow-up (issue #22) after its first attempt; never raises.
+
+    Returns ``(result, row)`` from :func:`prxref.followup.run_chunk_followup`.
+    Its lookup reads through a fresh :func:`_routed_read`, so the follow-up
+    spends its own per-chunk read cap. ``shown`` is the first attempt's
+    context blocks plus the rendered chunk, so an excerpt the worker already
+    saw is not sent again. The re-run is :func:`_invoke_chunk` with the same
+    arguments as the first attempt, the follow-up block as ``extra_blocks``,
+    no parse retry and the trace label ``<trace_label>.followup``. A failure
+    outside the driver keeps ``first`` and records the error in the row.
+    """
+    def invoke(block: str) -> dict:
+        return _invoke_chunk(
+            llm, chunk, pr, max_tokens, context_lines, reader, all_files=all_files,
+            trace_label=f"{trace_label}.followup", trace_dir=trace_dir,
+            prompt_context=prompt_context, unit=unit, parse_retries=0,
+            extra_blocks=block,
+        )
+
+    try:
+        shown = (
+            _context_blocks(chunk, reader, include_definitions=True, unit=unit)
+            + reviewer.render_chunk(chunk, context_lines)
+        )
+        return followup.run_chunk_followup(
+            first, chunk=chunk, all_files=all_files if all_files is not None else chunk,
+            read=_routed_read(plan.reader, plan.diff_paths),
+            listing_paths=plan.listing_paths, listing_complete=plan.listing_complete,
+            exclude=plan.exclude, shown=shown, floor=floor, invoke=invoke,
+            index=index, total=total, tracer=tracer,
+        )
+    except Exception as e:  # noqa: BLE001
+        row = followup.skipped_row()
+        row["error"] = str(e) or e.__class__.__name__
+        logger.warning(
+            "[chunk %d/%d] context follow-up failed (keeping the first review): %s",
+            index, total, row["error"],
+        )
+        return first, row
+
+
 def _run_worker(
     index: int, total: int, llm: LLMClient, chunk, pr: PRData,
     max_tokens: int | None = None, context_lines: int | None = None,
@@ -2400,6 +2545,8 @@ def _run_worker(
     repo_plan: _RepoPlan | None = None,
     unit_records: list[dict[str, Any] | None] | None = None,
     parse_retries: int = 0,
+    followup_floor: float | None = None,
+    followup_records: list[dict[str, Any] | None] | None = None,
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
@@ -2436,11 +2583,13 @@ def _run_worker(
         trace_label=trace_label, trace_dir=trace_dir, prompt_context=unit_context,
         unit=unit, parse_retries=parse_retries,
     )
+    retried = False
     if (
         res["error"]
         and _is_timeout_error(res["error"])
         and context_lines != _TIMEOUT_RETRY_CONTEXT_LINES
     ):
+        retried = True
         # Issue #29's timeout half: a chunk that outruns the deadline took the
         # whole chunk's findings with it. One deterministic retry with the
         # context trimmed to the changed lines — same chunk, same budget,
@@ -2464,6 +2613,19 @@ def _run_worker(
             trace_label=trace_label, trace_dir=trace_dir,
             prompt_context=unit_context, parse_retries=parse_retries,
         )
+
+    if followup_floor is not None and repo_plan is not None and repo_plan.reader is not None:
+        if retried:
+            row = followup.skipped_row("timeout-retry")
+        else:
+            res, row = _chunk_followup(
+                res, llm, chunk, pr, max_tokens, context_lines, reader, all_files,
+                plan=repo_plan, unit=unit, floor=followup_floor, prompt_context=unit_context,
+                trace_label=trace_label, trace_dir=trace_dir, index=index, total=total,
+                tracer=tracer,
+            )
+        if followup_records is not None:
+            followup_records[index - 1] = row
 
     error = res["error"]
     if error:
