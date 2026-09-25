@@ -442,7 +442,7 @@ class TestJsonOutput:
         payload = cli._build_json_result(res)
         keys = list(payload)
         assert keys.index("rule_counts") == keys.index("scoped_rules") + 1
-        assert keys[keys.index("rule_counts") + 1] == "sampling"
+        assert keys[keys.index("rule_counts") + 1] == "repo_context"
         assert payload["rule_counts"] == [{"rule": "no-bare-except", "kind": "rule", "total": 5, "kept": 2}]
 
     def test_the_best_row_carries_locations_across_files(self):
@@ -609,7 +609,7 @@ class TestOffPathMatchesBase:
         assert res["rule_counts"] is None
         assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
-        assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "sampling"]
+        assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "repo_context", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):
