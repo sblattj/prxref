@@ -1,4 +1,4 @@
-"""``docs/evals.md``, the ``prxref eval`` reference, pinned to the code it documents (#14 T10).
+"""``docs/evals.md``, the ``prxref eval`` reference, pinned to the code it documents (#14).
 
 Every name list here is derived from the code that writes it, never copied
 by hand: the ``run.json`` keys from :func:`prxref.evals._run_json`, the

@@ -1,4 +1,4 @@
-"""The CLI and eval wiring of repository context (issue #17, T14 and T15b).
+"""The CLI and eval wiring of repository context (issue #17).
 
 ``_run_review`` hands the four repository-context settings and a checked
 ``--repo-dir`` to ``orchestrate_review``; ``--format json`` carries the run

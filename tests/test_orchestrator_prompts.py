@@ -1,4 +1,4 @@
-"""Prompt-template overrides (#11 T3): ``orchestrate_review(prompts=...)``.
+"""Prompt-template overrides (#11): ``orchestrate_review(prompts=...)``.
 
 The orchestrator takes one loaded
 :class:`prxref.prompt_templates.PromptTemplates` and wires it three ways:

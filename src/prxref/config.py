@@ -438,7 +438,7 @@ _DEFAULTS: dict[str, object] = {
     "ticket_context_max_chars": 6000,
     "repo_context": "off",
     "repo_context_max_chars": 12000,
-    # The OQ5 built-in contract-glob set (map-17, decisions.md). Unlike the
+    # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
     # it rather than adding to it, and an empty value reads as unset (the
     # normal "empty or whitespace-only reads as unset" rule), so this set

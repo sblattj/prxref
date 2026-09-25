@@ -1,4 +1,4 @@
-"""The reworded-duplicate tier of ``apply_sweep_dedup`` (issue #10, T2).
+"""The reworded-duplicate tier of ``apply_sweep_dedup`` (issue #10).
 
 P1-P3 are the reworded same-line pairs quoted in issue #10; N1 and N2 are
 the closest different-problem negatives from the issue map, and S1/S2 the

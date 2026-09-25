@@ -1,4 +1,4 @@
-"""Repository context in the orchestrator (#17 T13): ``orchestrate_review(repo_context=...)``.
+"""Repository context in the orchestrator (#17): ``orchestrate_review(repo_context=...)``.
 
 The orchestrator takes the level (``off``, ``diff`` or ``repo``), the per-chunk
 budget, the contract and exclude globs and an optional ``RepoDir``, and wires

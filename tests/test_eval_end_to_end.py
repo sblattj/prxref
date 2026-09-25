@@ -1,4 +1,4 @@
-"""The eval harness end to end (#14 T9): ``eval run``, ``eval score``, ``eval compare``.
+"""The eval harness end to end (#14): ``eval run``, ``eval score``, ``eval compare``.
 
 Every step goes through ``cli.main`` with its argv built here, and the real
 case loader, CLI, orchestrator, reviewer, quality passes, judge prompt, judge

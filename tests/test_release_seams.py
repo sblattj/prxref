@@ -1,4 +1,4 @@
-"""The 0.14.0 seams no single feature seat could test: each needs another seat's code.
+"""The 0.14.0 seams no single feature by itself could test: each needs another feature's code.
 
 1. #67 config to CLI exit code: a malformed ``PRXREF_PRICE_TABLE`` is a
    configuration error, so ``main(["review", ...])`` exits 2 naming the

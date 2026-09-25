@@ -1,4 +1,4 @@
-"""Eval case loading (issue #14, T1): ``prxref.eval_cases.load_cases``.
+"""Eval case loading (issue #14): ``prxref.eval_cases.load_cases``.
 
 ``--cases`` is a ``cases.json`` file or a directory of ``case-*/`` dirs. Both
 forms load into the same frozen records; the directory form maps

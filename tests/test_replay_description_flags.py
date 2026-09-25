@@ -1,4 +1,4 @@
-"""The replay description flags through the CLI (issue #16 T3): parser, request, validation.
+"""The replay description flags through the CLI (issue #16): parser, request, validation.
 
 ``--as-of TIME``, ``--description-file PATH`` and ``--no-description`` choose
 which PR description a replay shows. These tests pin what ``prxref.cli`` does

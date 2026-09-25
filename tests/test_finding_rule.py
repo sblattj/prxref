@@ -1,4 +1,4 @@
-"""Issue #13 T1: the optional per-finding ``rule`` and its parser gate.
+"""Issue #13: the optional per-finding ``rule`` and its parser gate.
 
 ``Finding.rule`` names the rule or standard the reviewer applied. It is read
 from model output only when the run asked for it (``accept_rule``), through

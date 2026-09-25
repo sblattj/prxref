@@ -1,4 +1,4 @@
-"""Prompt-template overrides (#11 T1): the loader, validation and run record."""
+"""Prompt-template overrides (#11): the loader, validation and run record."""
 from __future__ import annotations
 
 import dataclasses
