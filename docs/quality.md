@@ -34,6 +34,42 @@ yields zero chunks (every file binary, or an empty diff): the heuristic
 needs no chunk to fire on, so it is computed and gated on that path too,
 not only when at least one chunk survives `build_chunks`.
 
+**Pinned-off toggles.** When a PR adds a toggle whose default is on and also
+adds a line to a suite-wide test setup file that turns the same toggle off,
+the toggle's line gets a `warning` at confidence 1.0: the passing suite runs
+with the toggle off, so it never exercises the default the PR ships. Both
+sides must be ADDED lines of this PR; a toggle or a pin on a context or
+removed line is never reported. The toggle side is a call named by a string
+literal whose default is a literal true, with exactly those two arguments —
+`f("name", default=True)`, `f("name", True)` or `f("name", true)`, where `f`
+is any call but a setter (a last name segment that is `set` or `put`, or
+starts with one and goes on with anything but a lowercase letter, such as
+`setFlag`, `set_flag` or `putBoolean`) — or `getenv`, `environ.get` or
+`getProperty` called as `("NAME", "true")`, or `process.env.NAME ?? "true"`
+or `|| "true"`. The pin side is a line in a file named `conftest.py`, or
+whose name starts with `setupTests.`, `jest.setup.` or `vitest.setup.`, that
+sets a name to `"false"`, `"0"` or `"off"` (any case, either quote): through
+`setenv`, `stubEnv` or `setProperty` called as `("NAME", value)`, through
+`process.env.NAME = value` or `process.env["NAME"] = value`, or through
+`os.environ["NAME"] = value`. A pin names a toggle when the pin name's
+tokens, lowercased and split on `_`, `.` and `-`, END with the toggle name's
+tokens, so `ASSISTANT_PROGRESS_NOTES` names `progress_notes`. The title reads
+`Toggle "<name>" defaults on but the test setup pins it off`, and the body
+quotes the toggle call, names every file that pins it, and ends with
+`(deterministic check, no model)`. The check is always on and has no knob.
+
+Like the release-shape finding, it is folded in at the chunk/sweep boundary,
+so it is a CHUNK-side finding, it also runs on a diff that yields zero
+chunks, and it goes through every pass below like a model finding. Unlike
+that finding, it sits on a real line, so line alignment and the
+reworded-duplicate tier both reach it. When a chunk worker also reports the
+toggle on the same line, both findings are kept at the default
+(`PRXREF_DEDUP_SIMILARITY` unset), as for any two chunk findings on one
+line. With the similarity set and titles similar enough, the reworded tier
+keeps one copy, the more severe, then the more confident: on a severity tie
+the check's 1.0 outranks a model's lower confidence, and the model's copy is
+dropped as `duplicate of chunk finding (reworded, similarity <s>)`.
+
 ## The passes, in the order they run
 
 `orchestrate_review` applies these in a fixed order; several of them depend on
@@ -297,8 +333,8 @@ text.
   one rule may produce across the review in `apply_rule_cap`, and `0` turns
   it off. These seven are the only knobs here. See
   [Tuning for Your Team](env-vars.md#tuning-for-your-team).
-- The hedge gate, the manifest checks, and the removal-claim check have **no
-  knob**. They are correctness checks against the diff itself, not noise
+- The hedge gate, the manifest checks, the removal-claim check, and the
+  pinned-off toggle check have **no knob**. They are correctness checks against the diff itself, not noise
   levers. The example-echo check has none either: a finding that repeats the
   prompt's own example was never found in the diff. To change what it drops,
   change the example in an overridden template. A hedged finding is unverified by its own admission; the escape hatch

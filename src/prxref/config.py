@@ -256,17 +256,24 @@ LLM / pipeline:
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
   PRXREF_REPO_CONTEXT           Repository context (0.16.0): "off" (default) |
-                                "diff" | "repo". "off" leaves every prompt,
-                                post, trace and default-verbosity log
-                                byte-identical to 0.15.0. "diff" adds
+                                "diff" | "repo". "off" adds no repository
+                                context entry, read, trace event or log line;
+                                the same-file definitions and dependency
+                                versions, Java and Kotlin ones included since
+                                0.17.0, do not depend on it. "diff" adds
                                 cross-chunk definitions from other files
                                 already in the diff, plus diff-file entries,
                                 all read from the diff itself; no repository
                                 reader is needed. "repo" also reads files
                                 outside the diff — import, path-convention and
                                 name-search definitions, plus contract excerpts
-                                — through the forge's repository reader when
-                                one is available, or --repo-dir. Matching is
+                                and, with a file listing, readers (since
+                                0.17.0: excerpts of unchanged code that reads
+                                state the chunk's added lines write, in a last
+                                "Code elsewhere that reads state this chunk
+                                writes" block) — through the forge's
+                                repository reader when one is available, or
+                                --repo-dir. Matching is
                                 exact and case-sensitive, like PRXREF_FAIL_ON;
                                 any other value is a configuration error
   PRXREF_REPO_CONTEXT_MAX_CHARS Repository context (0.16.0): per-chunk
