@@ -1,0 +1,145 @@
+diff --git a/shop/shop-api/src/main/java/com/example/shop/api/OrderMapper.java b/shop/shop-api/src/main/java/com/example/shop/api/OrderMapper.java
+--- a/shop/shop-api/src/main/java/com/example/shop/api/OrderMapper.java
++++ b/shop/shop-api/src/main/java/com/example/shop/api/OrderMapper.java
+@@ -1,8 +1,23 @@
+ package com.example.shop.api;
+ 
++import com.example.shop.core.Money;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import java.util.List;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
+ public class OrderMapper {
++
++    private static final Logger LOG = LoggerFactory.getLogger("orders");
++
++    private final ObjectMapper mapper = new ObjectMapper();
+ 
+     public String describe(int count) {
+         return "orders: " + count;
+     }
++
++    public String toJson(List<Money> totals) throws Exception {
++        LOG.debug("mapping {} totals", totals.size());
++        return mapper.writeValueAsString(totals);
++    }
+ }
+diff --git a/shop/shop-api/src/main/java/com/example/shop/pricing/PriceCalculator.java b/shop/shop-api/src/main/java/com/example/shop/pricing/PriceCalculator.java
+--- a/shop/shop-api/src/main/java/com/example/shop/pricing/PriceCalculator.java
++++ b/shop/shop-api/src/main/java/com/example/shop/pricing/PriceCalculator.java
+@@ -3,6 +3,7 @@
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import jakarta.annotation.Nullable;
+ import java.math.BigDecimal;
++import java.util.Objects;
+ import org.springframework.transaction.annotation.Transactional;
+ 
+ public class PriceCalculator {
+@@ -27,6 +28,11 @@
+     }
+ 
+     public BigDecimal total(BigDecimal unit, int items) {
+-        return unit.multiply(BigDecimal.valueOf(items));
++        Objects.requireNonNull(unit, "unit");
++        if (!open || items > MAX_ITEMS) {
++            throw new IllegalStateException("closed or too many items");
++        }
++        var gross = applyDiscount(unit.multiply(BigDecimal.valueOf(items)), items);
++        return gross.add(gross.multiply(taxRate));
+     }
+ }
+diff --git a/shop/shop-legacy/src/main/java/com/example/shop/legacy/LegacyExport.java b/shop/shop-legacy/src/main/java/com/example/shop/legacy/LegacyExport.java
+--- a/shop/shop-legacy/src/main/java/com/example/shop/legacy/LegacyExport.java
++++ b/shop/shop-legacy/src/main/java/com/example/shop/legacy/LegacyExport.java
+@@ -1,8 +1,12 @@
+ package com.example.shop.legacy;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
+ 
+ public class LegacyExport {
+ 
+-    public String export(Object order) {
+-        return String.valueOf(order);
++    private final ObjectMapper writer = new ObjectMapper();
++
++    public String export(Object order) throws Exception {
++        return writer.writeValueAsString(order);
+     }
+ }
+diff --git a/inventory/src/main/java/com/example/inventory/StockClient.java b/inventory/src/main/java/com/example/inventory/StockClient.java
+--- a/inventory/src/main/java/com/example/inventory/StockClient.java
++++ b/inventory/src/main/java/com/example/inventory/StockClient.java
+@@ -1,8 +1,17 @@
+ package com.example.inventory;
++
++import com.example.inventory.model.Sku;
++import com.fasterxml.jackson.databind.ObjectMapper;
+ 
+ public class StockClient {
+ 
+-    public String fetch(String sku) {
+-        return sku;
++    private final ObjectMapper json = new ObjectMapper();
++
++    public String fetch(Sku sku) throws Exception {
++        return json.writeValueAsString(sku);
++    }
++
++    public StockLevel parse(String body) throws Exception {
++        return json.readValue(body, StockLevel.class);
+     }
+ }
+diff --git a/inventory/src/main/kotlin/com/example/inventory/StockReport.kt b/inventory/src/main/kotlin/com/example/inventory/StockReport.kt
+--- a/inventory/src/main/kotlin/com/example/inventory/StockReport.kt
++++ b/inventory/src/main/kotlin/com/example/inventory/StockReport.kt
+@@ -1,5 +1,6 @@
+ package com.example.inventory
+ 
++import com.fasterxml.jackson.databind.ObjectMapper
+ import java.time.LocalDate
+ 
+ /**
+@@ -19,6 +20,7 @@
+     fun title(): String = "Stock on $day"
+ 
+     fun render(levels: List<StockLevel>): String {
+-        return title()
++        val lines = levels.sortedBy(StockLevel::onHand).map { formatLevel(it) }
++        return ObjectMapper().writeValueAsString(listOf(title()) + lines)
+     }
+ }
+diff --git a/inventory/reports/src/main/java/com/example/reports/ReportWriter.java b/inventory/reports/src/main/java/com/example/reports/ReportWriter.java
+--- a/inventory/reports/src/main/java/com/example/reports/ReportWriter.java
++++ b/inventory/reports/src/main/java/com/example/reports/ReportWriter.java
+@@ -1,8 +1,12 @@
+ package com.example.reports;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
+ 
+ public class ReportWriter {
+ 
+-    public String write(Object report) {
+-        return String.valueOf(report);
++    private final ObjectMapper output = new ObjectMapper();
++
++    public String write(Object report) throws Exception {
++        return output.writeValueAsString(report);
+     }
+ }
+diff --git a/tools/export_orders.py b/tools/export_orders.py
+--- a/tools/export_orders.py
++++ b/tools/export_orders.py
+@@ -1,4 +1,5 @@
+ """Export orders to the reporting service."""
++import requests
+ 
+ TIMEOUT_SECONDS = 10
+ 
+@@ -13,4 +14,5 @@
+ 
+ 
+ def export(orders, url):
+-    return {"orders": orders, "url": url}
++    payload = build_payload(orders)
++    return requests.post(url, json=payload, timeout=TIMEOUT_SECONDS)
