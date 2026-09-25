@@ -217,7 +217,6 @@ class TestFixtureRepoMode:
         assert read.calls == [
             TRANSPORT_CONFIG,
             CONNECTOR_SERVICE,
-            CONNECTOR_SERVICE,
             SPEC,
             CONNECTOR_SERVICE,
         ]
@@ -251,7 +250,7 @@ class TestFixtureDiffModeAndNoReader:
             (TRANSPORT_CONFIG, 11, "TransportConfig", "definition", "cross-chunk"),
         ]
         assert unit.contract_lines == ()
-        assert read.calls == [TRANSPORT_CONFIG, CONNECTOR_SERVICE]
+        assert read.calls == [TRANSPORT_CONFIG]
         assert SPEC not in read.calls
 
     def test_diff_without_a_reader_gives_the_hunk_only_entries(self):
@@ -303,7 +302,7 @@ class TestReadCap:
 
     @pytest.mark.parametrize(
         ("allowed", "count"),
-        [(0, 2), (1, 2), (2, 2), (3, 2), (4, 5), (5, 5)],
+        [(0, 2), (1, 2), (2, 2), (3, 5), (4, 5), (5, 5)],
     )
     def test_a_reader_that_goes_dry_raises_nothing(self, allowed, count):
         run = _run()
@@ -524,7 +523,7 @@ class TestResolver:
 
         assert _keys(unit.entries) == [(WIDGET, 3, "Widget", "definition", "path-convention")]
         assert unit.entries[0].text.startswith("public class Widget {")
-        assert read.calls == [SERVICE, SERVICE, WIDGET]
+        assert read.calls == [SERVICE, WIDGET]
 
     def test_a_name_the_diff_already_resolved_causes_no_resolver_read(self):
         legacy = "src/main/java/com/acme/legacy/Widget.java"
@@ -538,7 +537,7 @@ class TestResolver:
         )
 
         assert WIDGET not in read.calls
-        assert read.calls == [SERVICE, legacy]
+        assert read.calls == [legacy]
         assert [(e.path, e.reason) for e in unit.entries] == [(legacy, "cross-chunk"), (legacy, "cross-chunk")]
 
     def test_a_name_the_resolver_found_is_not_searched_again_for_the_next_file(self):
@@ -555,7 +554,7 @@ class TestResolver:
         )
 
         assert read.calls.count(WIDGET) == 1
-        assert read.calls == [SERVICE, second, SERVICE, WIDGET]
+        assert read.calls == [SERVICE, WIDGET]
         assert [e.path for e in unit.entries] == [WIDGET]
 
     def test_a_removed_chunk_file_is_not_resolved(self):

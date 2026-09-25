@@ -245,6 +245,107 @@ class TestSkips:
         assert read.calls == []
 
 
+INTRA_CHUNK = {
+    "java": {
+        "caller": ("p/A.java", (6, ["     void run() {", "+        Helper h = new Helper(new Own());", "     }"]),
+                   "package p;\n\nclass Own {\n}\n\npublic class A {\n    void run() {\n"
+                   "        Helper h = new Helper(new Own());\n    }\n}\n"),
+        "helper": ("p/Helper.java", (7, ["     int size() {", "+        return 2;", "     }"]),
+                   "package p;\n\npublic class Helper {\n    Helper(Own own) {\n    }\n\n"
+                   "    int size() {\n        return 2;\n    }\n}\n"),
+        "self_reference": "+        return new Helper(null).size();",
+        "name": "Helper", "name_line": 3, "own_line": 3,
+    },
+    "kotlin": {
+        "caller": ("p/A.kt", (6, ["     fun run() {", "+        val h = Helper(Own())", "     }"]),
+                   "package p\n\nclass Own\n\nclass A {\n    fun run() {\n        val h = Helper(Own())\n    }\n}\n"),
+        "helper": ("p/Helper.kt", (5, ["     fun size(): Int {", "+        return 2", "     }"]),
+                   "package p\n\nclass Helper(val own: Own) {\n\n    fun size(): Int {\n        return 2\n    }\n}\n"),
+        "self_reference": "+        return Helper(Own()).size()",
+        "name": "Helper", "name_line": 3, "own_line": 3,
+    },
+    "python": {
+        "caller": ("app/a.py", (5, [" def run():", "+    return load_helper(own())"]),
+                   "def own():\n    return 1\n\n\ndef run():\n    return load_helper(own())\n"),
+        "helper": ("app/helper.py", (5, [" def size():", "+    return 2"]),
+                   "def load_helper(value):\n    return value\n\n\ndef size():\n    return 2\n"),
+        "self_reference": "+    return load_helper(2)",
+        "name": "load_helper", "name_line": 1, "own_line": 1,
+    },
+    "js": {
+        "caller": ("web/a.ts", (5, [" export function run() {", "+  return renderCard(own());", " }"]),
+                   "function own() {\n  return 1;\n}\n\nexport function run() {\n  return renderCard(own());\n}\n"),
+        "helper": ("web/card.ts", (5, [" export function size() {", "+  return 2;", " }"]),
+                   "export function renderCard(value) {\n  return value;\n}\n\n"
+                   "export function size() {\n  return 2;\n}\n"),
+        "self_reference": "+  return renderCard(2);",
+        "name": "renderCard", "name_line": 1, "own_line": 1,
+    },
+}
+
+
+def _intra_chunk(language: str, *, helper_references_the_name: bool = False):
+    """The caller/helper pair for ``language``; line 1 of each helper hunk body is its one ``+`` line."""
+    case = INTRA_CHUNK[language]
+    caller_path, caller_hunk, caller_text = case["caller"]
+    helper_path, (start, body), helper_text = case["helper"]
+    if helper_references_the_name:
+        assert helper_text.count(body[1][1:]) == 1
+        helper_text = helper_text.replace(body[1][1:], case["self_reference"][1:])
+        body = [body[0], case["self_reference"], *body[2:]]
+    caller = _file(caller_path, caller_hunk)
+    helper = _file(helper_path, (start, body))
+    read = _Reader({caller_path: caller_text, helper_path: helper_text})
+    return case, caller, helper, read
+
+
+class TestTheChunksOwnFiles:
+    """With a reader, a chunk file is searched only for names its own added lines do not mention.
+
+    ``referenced_definitions`` shows a file's own out-of-hunk definitions for the
+    names on that file's added lines, so those are left to it; a name another
+    file of the same chunk references is still searched for, and so still found.
+    """
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_name_another_file_of_the_chunk_references_is_found_outside_the_hunk(self, language):
+        case, caller, helper, read = _intra_chunk(language)
+        entries = diff_definitions([caller, helper], [caller, helper], read)
+        assert _keys(entries) == [(helper.path, case["name_line"], case["name"], "definition", "diff-file")]
+        assert read.calls == [helper.path]
+        shown = chunk_context.referenced_definitions(chunk_context.chunk_files([caller, helper]), _Reader(read.texts))
+        assert [entry for entry in shown if entry.startswith(f"{helper.path}:")] == []
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_files_own_reference_is_left_to_chunk_context_and_that_file_is_not_read(self, language):
+        case, caller, helper, read = _intra_chunk(language)
+        entries = diff_definitions([caller, helper], [caller, helper], read)
+        assert [entry for entry in entries if entry.path == caller.path] == []
+        assert caller.path not in read.calls
+        lines = read.texts[caller.path].splitlines()
+        shown = chunk_context.referenced_definitions(chunk_context.chunk_files([caller, helper]), _Reader(read.texts))
+        assert [entry for entry in shown if entry.startswith(f"{caller.path}:")] == [
+            f"{caller.path}:{case['own_line']}: "
+            + chunk_context._entry_text(lines, case["own_line"] - 1, chunk_context.MAX_LINES_PER_DEFINITION),
+        ]
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_one_file_chunk_reads_nothing(self, language):
+        _, caller, _, read = _intra_chunk(language)
+        assert diff_definitions([caller], [caller], read) == []
+        assert read.calls == []
+
+    @pytest.mark.parametrize("language", sorted(INTRA_CHUNK))
+    def test_a_name_both_files_reference_is_shown_once_by_chunk_context(self, language):
+        case, caller, helper, read = _intra_chunk(language, helper_references_the_name=True)
+        assert diff_definitions([caller, helper], [caller, helper], read) == []
+        assert caller.path not in read.calls
+        shown = chunk_context.referenced_definitions(chunk_context.chunk_files([caller, helper]), _Reader(read.texts))
+        assert [entry.split(":", 2)[1] for entry in shown if entry.startswith(f"{helper.path}:")] == [
+            str(case["name_line"]),
+        ]
+
+
 class TestChangeEntries:
     def test_the_window_ends_at_the_next_top_level_definition(self):
         caller = _file("app/Caller.java", (1, ["+First first = new First();"]))
