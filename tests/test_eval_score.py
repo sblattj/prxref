@@ -262,7 +262,7 @@ class TestGolden:
                                 "scoped_rules": None, "config": RUN_CONFIG}
         assert list(score["judge"]) == [
             "model", "sampling", "prompt_version", "prompt_sha256", "self_judged",
-            "cost_usd", "cost_estimated", "llm_calls", "cached", "errors",
+            "cost_usd", "cost_estimated", "llm_calls", "parse_retries", "cached", "errors",
         ]
         assert score["judge"]["model"] == JUDGE
         assert score["judge"]["sampling"] == {"temperature": 0.0, "seed": 5, "models": [JUDGE]}

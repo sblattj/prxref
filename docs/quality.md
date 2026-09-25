@@ -23,7 +23,7 @@ ratio is exact rational arithmetic, never a float. This catches a release cut
 from an unmerged branch, or a hand edit smuggled into a release.
 
 The finding is folded into the raw results **before** the passes below, so it
-is validated, aligned, deduplicated and gated exactly like a model finding.
+is validated, aligned, deduplicated and gated like a model finding.
 It is spliced in at the chunk/sweep boundary — before the systemic sweep's
 own findings, never after — so `apply_sweep_dedup` always treats it as a
 CHUNK-side finding and can never drop it as a duplicate of a chunk worker's
@@ -33,6 +33,55 @@ which never compares line 0. It also runs on a diff that
 yields zero chunks (every file binary, or an empty diff): the heuristic
 needs no chunk to fire on, so it is computed and gated on that path too,
 not only when at least one chunk survives `build_chunks`.
+
+**Pinned-off toggles.** When a PR adds a toggle whose default is on and also
+adds a line to a suite-wide test setup file that turns the same toggle off,
+the toggle's line gets a `warning` at confidence 1.0: the passing suite runs
+with the toggle off, so it never exercises the default the PR ships. Both
+sides must be ADDED lines of this PR; a toggle or a pin on a context or
+removed line is never reported. The toggle side is a call named by a string
+literal whose default is a literal true, with exactly those two arguments —
+`f("name", default=True)`, `f("name", True)` or `f("name", true)`, where `f`
+is any call but a setter (a last name segment that is `set` or `put`, or
+starts with one and goes on with anything but a lowercase letter, such as
+`setFlag`, `set_flag` or `putBoolean`) — or `getenv`, `environ.get` or
+`getProperty` called as `("NAME", "true")`, or `process.env.NAME ?? "true"`
+or `|| "true"`. The pin side is a line in a file named `conftest.py`, or
+whose name starts with `setupTests.`, `jest.setup.` or `vitest.setup.`, that
+sets a name to `"false"`, `"0"` or `"off"` (any case, either quote): through
+`setenv`, `stubEnv` or `setProperty` called as `("NAME", value)`, through
+`process.env.NAME = value` or `process.env["NAME"] = value`, or through
+`os.environ["NAME"] = value`. A pin names a toggle when the pin name's
+tokens, lowercased and split on `_`, `.` and `-`, END with the toggle name's
+tokens, so `ASSISTANT_PROGRESS_NOTES` names `progress_notes`. The title reads
+`Toggle "<name>" defaults on but the test setup pins it off`, and the body
+quotes the toggle call, names every file that pins it, and ends with
+`(deterministic check, no model)`. The check is always on and has no knob.
+
+Like the release-shape finding, it is folded in at the chunk/sweep boundary,
+so it is a CHUNK-side finding, it also runs on a diff that yields zero
+chunks, and it goes through the passes below like a model finding. Unlike
+that finding, it sits on a real line, so line alignment and the
+reworded-duplicate tier both reach it. When a chunk worker also reports the
+toggle on the same line, both findings are kept at the default
+(`PRXREF_DEDUP_SIMILARITY` unset), as for any two chunk findings on one
+line. With the similarity set and titles similar enough, the reworded tier
+keeps one copy, the more severe, then the more confident: on a severity tie
+the check's 1.0 outranks a model's lower confidence, and the model's copy is
+dropped as `duplicate of chunk finding (reworded, similarity <s>)`.
+
+**Both checks keep their own severity.** A finding whose body ends with
+`(deterministic check, no model)` takes no part in severity consistency
+(pass 7): it joins no group, so no model finding raises it or is raised by
+it, and its text does not count toward a code token's rarity. One other pass
+can still change its severity or confidence: finding grouping (pass 10,
+opt-in). When a chunk worker's finding in the same file names no rule and
+has the same normalized title, the group's anchor takes the highest severity
+and confidence, so a deterministic anchor can be raised, and a deterministic
+finding that does not anchor is dropped as `grouped into <file>:<line>`.
+Every other pass leaves its severity and confidence alone, and several can
+still drop it, among them the thread passes, the per-rule cap, the gate's
+caps and, for the toggle finding, the reworded-duplicate tier.
 
 ## The passes, in the order they run
 
@@ -47,7 +96,7 @@ it (noted in the table).
 | 4 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
 | 5 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
 | 6 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
-| 7 | `apply_severity_consistency` | Rewrites only: findings sharing a normalized title are all raised to the group's maximum severity. |
+| 7 | `apply_severity_consistency` | Rewrites only: groups findings and raises every member to the group's maximum severity. Two rules group findings, and a group binds transitively: a shared normalized title, in any file; or a shared rare code token (one in the text of at most 2 findings) when the two sit in the same file or their titles name a common problem class. A deterministic finding (see [Deterministic checks](#deterministic-checks-findings-prxref-computes-itself)) is left out: it is never raised, never raises another finding, and its text does not count toward a token's rarity. |
 | 8 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
 | 9 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
 | 10 | `apply_rule_grouping` | Opt-in: runs only with `PRXREF_GROUP_FINDINGS` set to `1`. Folds chunk findings in one file that name the same rule (compared case-insensitively), or that name no rule and share a normalized title, into one finding. The finding with the smallest positive line anchors the group; a file-level (line 0) finding anchors only when no member has a line. The anchor takes the group's highest severity and highest confidence, and its body gains `Also at:` followed by each other line of the group as a backticked `<file>:<line>`. Every other member is dropped as `grouped into <file>:<line>`. Only active findings at or above the confidence floor are grouped, and whole-PR sweep findings are never grouped. The same rule in two files makes two groups. Runs **after** the thread, removal and hedge passes, so a dropped finding is never listed as a location, and **before** the gate, so the error cap counts groups, not lines. |
@@ -297,8 +346,8 @@ text.
   one rule may produce across the review in `apply_rule_cap`, and `0` turns
   it off. These seven are the only knobs here. See
   [Tuning for Your Team](env-vars.md#tuning-for-your-team).
-- The hedge gate, the manifest checks, and the removal-claim check have **no
-  knob**. They are correctness checks against the diff itself, not noise
+- The hedge gate, the manifest checks, the removal-claim check, and the
+  pinned-off toggle check have **no knob**. They are correctness checks against the diff itself, not noise
   levers. The example-echo check has none either: a finding that repeats the
   prompt's own example was never found in the diff. To change what it drops,
   change the example in an overridden template. A hedged finding is unverified by its own admission; the escape hatch

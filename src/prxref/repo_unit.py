@@ -1,6 +1,6 @@
 """One worker chunk's repository context: sources, order, budget and exclusion (#17).
 
-:func:`build_unit_context` combines the three repository-context sources for
+:func:`build_unit_context` combines the four repository-context sources for
 one chunk into the lines its prompt carries:
 
 1. :func:`prxref.repo_crosschunk.diff_definitions`: definitions from the PR's
@@ -11,7 +11,10 @@ one chunk into the lines its prompt carries:
 3. the resolver, :func:`prxref.repo_resolve.resolve_candidates` plus
    :func:`prxref.repo_context.find_definitions` over the candidate files
    (``import``, ``path-convention``, ``name-search``), at the ``repo`` level
-   only.
+   only;
+4. :func:`prxref.repo_readers.reader_entries`: excerpts of code outside the
+   diff that reads shared state the chunk's added lines write
+   (``shared-state``, #22), at the ``repo`` level with a file listing only.
 
 The sources are called in that order, which is their admission rank, so under
 a capped reader the higher-ranked sources get their reads first. Every read
@@ -32,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 
+from . import repo_readers
 from .chunk_context import chunk_files
 from .repo_context import (
     REASONS,
@@ -52,19 +56,23 @@ MODES = ("off", "diff", "repo")
 class UnitContext:
     """The repository context admitted into one worker chunk's prompt.
 
-    ``definition_lines`` and ``contract_lines`` are the rendered admitted
-    entries of each kind, in admission order, ready for
-    :func:`prxref.chunk_context.render_context_blocks` as ``extra_def_lines``
-    and ``contract_lines``; when entries were left out, one omitted line (a
-    horizontal ellipsis, then ``N more context entries omitted``) ends the
-    list of the kind of the first entry left out. ``entries`` holds the admitted entries in
-    admission order, and ``omitted`` counts the entries the budget left out.
+    ``definition_lines``, ``contract_lines`` and ``reader_lines`` are the
+    rendered admitted entries of kind ``definition``, ``contract`` and
+    ``reader``, in admission order, ready for
+    :func:`prxref.chunk_context.render_context_blocks` as ``extra_def_lines``,
+    ``contract_lines`` and ``reader_lines``; when entries were left out, one
+    omitted line (a horizontal ellipsis, then ``N more context entries
+    omitted``) ends the list of the kind of the first entry left out.
+    ``entries`` holds the admitted entries in admission order, and
+    ``omitted`` counts the entries the budget left out. ``reader_lines`` comes
+    last and defaults to empty, so a unit built without it is unchanged.
     """
 
     definition_lines: tuple[str, ...]
     contract_lines: tuple[str, ...]
     entries: tuple[ContextEntry, ...]
     omitted: int
+    reader_lines: tuple[str, ...] = ()
 
     def record(self) -> dict:
         """The run-record row for this chunk: ``{"entries": [...], "omitted": N}``."""
@@ -158,6 +166,10 @@ def _merge(entries: list[ContextEntry], exclude: Callable[[str], bool] | None) -
     return out
 
 
+def _block(kind: str) -> str:
+    return kind if kind in ("definition", "reader") else "contract"
+
+
 def _admit(entries: list[ContextEntry], max_chars: int) -> UnitContext:
     admitted: list[ContextEntry] = []
     used = 0
@@ -168,15 +180,19 @@ def _admit(entries: list[ContextEntry], max_chars: int) -> UnitContext:
         admitted.append(entry)
         used += size
     omitted = len(entries) - len(admitted)
-    definition_lines = [entry.rendered() for entry in admitted if entry.kind == "definition"]
-    contract_lines = [entry.rendered() for entry in admitted if entry.kind != "definition"]
+    lines: dict[str, list[str]] = {"definition": [], "contract": [], "reader": []}
+    for entry in admitted:
+        lines[_block(entry.kind)].append(entry.rendered())
     if omitted:
         marker = f"\N{HORIZONTAL ELLIPSIS} {omitted} more context entries omitted"
-        if entries[len(admitted)].kind == "definition":
-            definition_lines.append(marker)
-        else:
-            contract_lines.append(marker)
-    return UnitContext(tuple(definition_lines), tuple(contract_lines), tuple(admitted), omitted)
+        lines[_block(entries[len(admitted)].kind)].append(marker)
+    return UnitContext(
+        tuple(lines["definition"]),
+        tuple(lines["contract"]),
+        tuple(admitted),
+        omitted,
+        tuple(lines["reader"]),
+    )
 
 
 def build_unit_context(
@@ -225,7 +241,16 @@ def build_unit_context(
        all found already, with no read. Each other path is read once, and
        :func:`prxref.repo_context.find_definitions` over it gives a
        ``definition`` entry whose reason is that name's candidate reason
-       there; its symbol then counts as found.
+       there; its symbol then counts as found;
+    4. at ``"repo"`` with a reader and a ``listing_paths`` that is not None,
+       :func:`prxref.repo_readers.reader_entries` over the chunk's files,
+       with the same guarded reader, so it gets only the reads the chunk's
+       cap has left after the resolver, every PR diff file's path as
+       ``diff_paths``, so a diff file is never a candidate, and ``exclude``.
+       It gives ``reader`` entries with reason ``shared-state``: excerpts of
+       non-diff files that read state the chunk's added lines write. Its
+       caps, :data:`prxref.repo_readers.MAX_READER_ENTRIES` and
+       :data:`prxref.repo_readers.MAX_READER_SCAN`, are read when it runs.
 
     ``"repo"`` with ``read`` None is exactly ``"diff"`` with ``read`` None.
 
@@ -261,6 +286,16 @@ def build_unit_context(
                 listing_complete=listing_complete,
                 exclude=exclude,
                 found=found,
+            )
+        )
+    if mode == "repo" and guarded is not None and listing_paths is not None:
+        entries.extend(
+            repo_readers.reader_entries(
+                chunk_files(chunk),
+                listing=listing_paths,
+                read=guarded,
+                diff_paths={getattr(f, "path", "") for f in all_files},
+                exclude=exclude,
             )
         )
     return _admit(_merge(entries, exclude), max_chars)

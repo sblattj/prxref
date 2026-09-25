@@ -1,0 +1,32 @@
+diff --git a/billing/ledger.py b/billing/ledger.py
+new file mode 100644
+--- /dev/null
++++ b/billing/ledger.py
+@@ -0,0 +1,12 @@
++"""Ledger entries for the acme billing service."""
++
++
++def post_entry(ledger, account, amount):
++    """Append one entry and return the new balance."""
++    balance = ledger.get(account, 0)
++    balance = balance + amount
++    ledger[account] = balance
++    return balance
++
++
++LEDGER_VERSION = 2
+diff --git a/billing/export.py b/billing/export.py
+new file mode 100644
+--- /dev/null
++++ b/billing/export.py
+@@ -0,0 +1,10 @@
++"""CSV export of ledger balances for the example.com reports."""
++import csv
++
++
++def export_balances(ledger, path):
++    """Write one row per account."""
++    with open(path, "w", newline="") as handle:
++        writer = csv.writer(handle)
++        for account, balance in ledger.items():
++            writer.writerow([account, balance])
