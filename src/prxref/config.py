@@ -280,6 +280,17 @@ LLM / pipeline:
                                 character budget shared by the cross-chunk,
                                 contract and other repository-context entries;
                                 positive int (default 12000)
+  PRXREF_CONTEXT_FOLLOWUP       Context follow-up (0.18.0): "off" (the
+                                default) makes no extra call, read, log line,
+                                trace event or trace file, byte-identical to
+                                0.17.0. "on" re-sends a chunk once, at
+                                PRXREF_REPO_CONTEXT=repo only, when its first
+                                reply asks about a symbol it was not shown,
+                                with that symbol's definition appended; at
+                                another level, or at "repo" with no
+                                repository reader, the run logs one WARNING
+                                and the follow-up stays off for that run. Any
+                                other value is a configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -453,6 +464,7 @@ _DEFAULTS: dict[str, object] = {
     "ticket_context_max_chars": 6000,
     "repo_context": "off",
     "repo_context_max_chars": 12000,
+    "context_followup": "off",
     # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
     # it rather than adding to it, and an empty value reads as unset (the
@@ -518,6 +530,7 @@ _LIST_KEYS = frozenset({
 _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
+    "context_followup": frozenset({"off", "on"}),
 }
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
