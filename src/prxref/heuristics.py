@@ -6,7 +6,8 @@ none of them originates a Finding on its own. A heuristic here is the
 opposite: pure, computed once over the parsed diff's ``FileDiff`` list, no
 model in the loop, so its output can be concatenated onto the LLM-sourced
 findings list before the quality passes run and survive them the same way a
-model finding would.
+model finding would, except that severity consistency never regroups them
+(``is_deterministic``).
 """
 from __future__ import annotations
 
