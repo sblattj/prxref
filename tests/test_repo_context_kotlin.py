@@ -151,8 +151,10 @@ class TestKotlinReferencedNames:
         assert referenced_names(added, "kotlin") == ["Invoice"]
 
     def test_the_alias_of_a_platform_import_is_dropped(self):
-        added = ["import kotlin.collections.ArrayDeque as Queue", "val q = Queue<Widget>()"]
-        assert referenced_names(added, "kotlin") == ["Widget"]
+        use = "val q = Ring<Widget>()"
+        assert referenced_names([use], "kotlin") == ["Ring", "Widget"]
+        assert referenced_names(["import kotlin.collections.ArrayDeque as Ring", use], "kotlin") == ["Widget"]
+        assert referenced_names(["import com.acme.collections.Deque as Ring", use], "kotlin") == ["Ring", "Widget"]
 
     def test_kotlinx_is_a_library_not_the_platform(self):
         added = ["import kotlinx.coroutines.flow.Flow", "fun stream(): Flow<Widget> = TODO()"]
