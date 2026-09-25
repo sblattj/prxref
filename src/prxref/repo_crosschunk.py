@@ -1,13 +1,14 @@
 """Cross-chunk and diff-file definitions for one worker chunk.
 
 ``chunk_context.referenced_definitions`` shows a worker the definition of a
-name its added lines reference only when that definition sits in the SAME
-changed file, and it knows no Java. When a PR changes a type in one chunk and
-another chunk calls it, the calling chunk's worker never sees the new
-invariant. :func:`diff_definitions` closes that gap for the ``diff`` level of
-``PRXREF_REPO_CONTEXT``: it searches every file of the PR, not just the
-chunk's own, and for a type changed in another chunk it also shows the changed
-lines inside that type.
+name a file's added lines reference only when that definition sits in the SAME
+changed file. When a PR changes a type in one chunk and another chunk calls it,
+or one file of a chunk calls what another file of that chunk defines outside
+its hunks, the worker never sees the definition. :func:`diff_definitions`
+closes that gap for the ``diff`` level of ``PRXREF_REPO_CONTEXT``: it searches
+every file of the PR, the chunk's own files included for the names they do not
+reference themselves, and for a type changed in another chunk it also shows
+the changed lines inside that type.
 
 File text comes from the ``read(path) -> str | None`` callable at the PR head.
 With no reader, or when a read returns ``None``, the only text known is the
@@ -160,9 +161,17 @@ def diff_definitions(
     the file's hunks: each contiguous run of known new-file lines is scanned
     on its own, so an entry carries true line numbers and never shows a line
     the hunks lack. A removed file is skipped, and so are the lines of this
-    chunk's own hunks. A js or python file in the chunk is skipped entirely
-    when ``read`` is given, because ``referenced_definitions`` already covers
-    it; a Java file in the chunk is searched outside its hunks.
+    chunk's own hunks.
+
+    When ``read`` is given, a js, python, Java or Kotlin file of the chunk is
+    searched only for the wanted names that do not occur as an identifier on
+    its own added lines. ``referenced_definitions`` already shows that file's
+    own definitions of the names its added lines mention, and every such name
+    is one of those identifiers, so no definition is shown twice; a name only
+    another file of the chunk references is still found there, with reason
+    ``"diff-file"``. When no name is left the file is skipped without a read,
+    so a one-file chunk never reads its own file here. Without ``read`` the
+    known text of a chunk file is its hunks alone, which are all skipped.
 
     A hit in a file outside the chunk that has ``+`` lines anywhere in the PR
     has reason ``"cross-chunk"``, and every other hit ``"diff-file"``. A
@@ -179,9 +188,13 @@ def diff_definitions(
     own_files = chunk_context.chunk_files(chunk)
     own = {entry.path: entry for entry in reversed(own_files)}
     names: dict[str, None] = {}
+    own_idents: dict[str, set[str]] = {}
     for entry in own_files:
         for name in referenced_names(entry.added, language_of(entry.path)):
             names.setdefault(name, None)
+        own_idents.setdefault(entry.path, set()).update(
+            name for text in entry.added for name in chunk_context._IDENT_RE.findall(text)
+        )
     if not names:
         return []
     wanted = list(names)
@@ -204,16 +217,19 @@ def diff_definitions(
         if not definition_regexes(language):
             continue
         mine = own.get(path)
+        searched_for = wanted
         if mine is not None and read is not None and language in _SAME_FILE_LANGUAGES:
-            continue
+            searched_for = [name for name in wanted if name not in own_idents[path]]
+            if not searched_for:
+                continue
         skip = mine.hunk_lines if mine is not None else frozenset()
         text = read(path) if read is not None else None
         if isinstance(text, str):
             known = dict(enumerate(text.splitlines(), start=1))
-            found = find_definitions(text, wanted, language=language, skip_lines=skip)
+            found = find_definitions(text, searched_for, language=language, skip_lines=skip)
         else:
             known = _hunk_text(f)
-            found = _hunk_definitions(known, wanted, language, skip)
+            found = _hunk_definitions(known, searched_for, language, skip)
         reason = "cross-chunk" if mine is None and path in changed else "diff-file"
         for symbol, line, body in found:
             collected.append(ContextEntry(path, line, symbol, "definition", reason, body))
