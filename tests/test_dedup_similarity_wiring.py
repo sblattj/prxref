@@ -1,4 +1,4 @@
-"""Issue #10 T4: ``PRXREF_DEDUP_SIMILARITY`` reaches ``apply_sweep_dedup``.
+"""Issue #10: ``PRXREF_DEDUP_SIMILARITY`` reaches ``apply_sweep_dedup``.
 
 The reworded tier itself is covered in tests/test_sweep_dedup_similarity.py.
 This file covers only the wiring: the ``orchestrate_review`` keyword, its

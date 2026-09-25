@@ -1,4 +1,4 @@
-"""Wave-3 release fix: a total LLM failure counts the review units truthfully.
+"""0.14.0 release fix: a total LLM failure counts the review units truthfully.
 
 When every chunk worker fails, ``orchestrate_review`` takes its total-failure
 exit and returns verdict ``Error`` even if the systemic sweep answered: the

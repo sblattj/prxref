@@ -1,11 +1,11 @@
-"""The eval-case half of ``--repo-dir`` (issue #17, T15a, OQ4).
+"""The eval-case half of ``--repo-dir`` (issue #17).
 
 ``repo_dir`` is an optional :class:`~prxref.eval_cases.EvalCase` field: a
 directory holding the repository at the PR head. Repository context
 (``PRXREF_REPO_CONTEXT=repo``) reads and lists files there instead of
 calling a forge. This module only loads, validates, joins and round-trips
 the field; the CLI flag, the threading into ``evals._run_case`` and the
-orchestrator are T15b's job, and neither is exercised here.
+orchestrator are ``test_cli_repo_context.py``'s job, and neither is exercised here.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Tests for the GitHub adapter's ``get_pr_history`` (issue #16, T2).
+"""Tests for the GitHub adapter's ``get_pr_history`` (issue #16).
 
 The adapter reads a PR's description versions, title renames, first human
 review and head commit date from GitHub's GraphQL API, one POST per page. The

@@ -1,10 +1,10 @@
 """End-to-end test of GitHub's 406 too_large fallback (issue #15).
 
-``test_github_get_diff.py`` (seat F15-C) pins the 406 detection and hand-off
+``test_github_get_diff.py`` pins the 406 detection and hand-off
 to ``_get_diff_from_files``, with that method doubled out on every test.
-``test_github_files_fallback.py`` (seat F15-B) pins the listing rebuild by
+``test_github_files_fallback.py`` pins the listing rebuild by
 calling ``_get_diff_from_files`` directly, with the diff GET never in the
-picture. Each seat's tests double away the other half, so neither drives the
+picture. Each module's tests double away the other half, so neither drives the
 real path: a real 406 too_large refusal, a real PR-metadata read, a compare
 read that fails (HTTP 404 here; the compare-first path has its own module,
 ``test_github_compare_fallback.py``), a real paged ``/pulls/{n}/files`` walk,

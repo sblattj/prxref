@@ -1,4 +1,4 @@
-"""Cross-seat seams of the 0.14.0 wave-2 features: each needs code from two merged seats.
+"""Cross-feature seams of the 0.14.0 second batch of features: each needs code from two merged features.
 
 - #65 replay x #62 Azure DevOps. ``cli._replay_forge`` exits 2 when a forge
   cannot fetch a pinned commit range. Every built-in forge's real adapter must

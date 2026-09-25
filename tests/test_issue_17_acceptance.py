@@ -239,8 +239,8 @@ class TestOffMatchesTheReleased015:
     --with prxref==0.15.0`` from outside the repository, so the prompts are
     0.15.0's own, not the tree's. It holds two design points: the fixture, and
     the fixture plus a Python file whose chunk makes the pre-0.16 reader render
-    its dependency and definitions blocks, so the rendering T7 extended is
-    compared too.
+    its dependency and definitions blocks, so the rendering
+    ``render_context_blocks`` extended is compared too.
     """
 
     def test_the_golden_is_a_0_15_0_oracle_that_exercises_the_old_blocks(self):
@@ -312,7 +312,7 @@ class TestTheBudget:
 
 
 class TestNoReaderMeansNoReads:
-    """Check 5: ``LocalDiffForge`` with no ``repo_dir`` reads nothing and keeps the hunk-based entries (OQ2)."""
+    """Check 5: ``LocalDiffForge`` with no ``repo_dir`` reads nothing and keeps the hunk-based entries."""
 
     @pytest.mark.parametrize(("mode", "warnings"), [("repo", 1), ("diff", 0)])
     def test_a_local_diff_forge_gives_hunk_entries_only(self, mode, warnings, caplog):
@@ -485,7 +485,7 @@ def _starvation_forge(root: Path) -> FixtureForge:
 class TestReadCapStarvation:
     """Check 8 (decision D-L): a chunk of many diff files still reads its spec, because diff files are uncapped.
 
-    T13's ``TestDiffFileReadsAreUncapped`` proves the routing over a
+    ``test_orchestrator_repo_context.py``'s ``TestDiffFileReadsAreUncapped`` proves the routing over a
     ``repo_dir`` with a ``/widgets`` spec and controls it with a direct build.
     This adds the forge reader, the fixture's templated route and spec, and a
     control through ``orchestrate_review`` itself: ``orchestrator._routed_read``
