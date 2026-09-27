@@ -559,6 +559,8 @@ def _record(res: dict) -> dict:
 
 def _json_payload(res: dict) -> dict:
     payload = cli._build_json_result(res)
+    for row in payload["findings"]:
+        assert (row.pop("suggestion"), row.pop("suggestion_end_line")) == (None, 0)
     return {key: payload[key] for key in A81_JSON_KEYS}
 
 
