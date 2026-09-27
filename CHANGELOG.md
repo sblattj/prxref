@@ -8,6 +8,63 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.22.0] — 2026-09-27
+
+Incremental re-review on push (#34). With the new key `PRXREF_INCREMENTAL=on`,
+a push re-reviews only the pull request's files changed since the head that
+prxref's previous summary recorded, instead of the whole pull request. The key
+is off by default, and at the default every prompt, LLM call, forge read and
+forge write is the same as in 0.21.1; the run record and `--format json` gain
+one key, `incremental`, which is `null` while the key is off.
+
+### Added
+
+- **`PRXREF_INCREMENTAL` (`off`|`on`, default `off`) (#34).** When `on`, each
+  summary prxref posts ends with an invisible marker naming the PR head it
+  reviewed, `<!-- prxref-reviewed-head: <sha> -->`. On a later push prxref
+  reads that summary back, fetches the compare diff from the marked head to
+  the new one, and chunks and reviews only the files of the PR's own diff
+  that the compare diff touches, so a merge from the base branch or a rebase
+  cannot widen the set. Only those files' earlier prxref inline comments are
+  pruned, and they are the only files that get repository context. The
+  whole-PR systemic sweep, the size advisory and the deterministic checks
+  still see every file, and the summary notes the incremental scope in one
+  line. A push that touched none of the PR's files runs the sweep alone and
+  prunes nothing. With it on, the chunk findings, and so the verdict, cover
+  only the re-reviewed files (plus what the sweep and the deterministic
+  checks find anywhere in the PR), while earlier inline comments on the other
+  files still stand. Any other value exits 2 naming the variable.
+- **Full-review fallbacks (#34).** An incremental-on run reviews every file,
+  and says why in the run record, on a first review, when the forge cannot
+  read its summary, when that read fails (a WARNING), when the summary has
+  no reviewed-head marker, when the PR head is unknown, when the forge cannot
+  compare commits, when the compare diff fails (a force-push can make the
+  marked head unknown; a WARNING), and with `PRXREF_POST_MODE=inline`, which
+  never writes the marker. Replays always run full. `--full-review` and any
+  `PRXREF_FAIL_ON` gate force a full review that still records the head, so
+  the following push is incremental again.
+- **`prxref review --full-review` (#34),** which reviews every file even when
+  `PRXREF_INCREMENTAL=on`.
+- **A failed review unit never advances the marker (#34).** When a chunk or
+  the sweep fails, the summary keeps the previous marker's head, so the next
+  push re-reviews the files that unit covered. A run with no previous marker
+  (a first review, or a forced full review, which never reads it) writes none
+  then, and the next push reviews every file.
+- **The run record and `--format json` gain `incremental` (#34),** right
+  after `suggestions`: `null` when the key is off, else `{"mode", "reason",
+  "since_sha", "files_total", "files_reviewed", "marker_sha"}`.
+- **Every forge adapter can read back the summary comment it last posted
+  (`get_summary`) (#34),** through the same lookup `post_summary` uses to
+  update it, so an incremental run finds its previous marker without ever
+  writing. It is an optional `Forge` method; a forge without it runs full.
+- **`prune_inline_comments` takes an optional `paths` collection (#34):**
+  only prxref's own inline comments on those files are deleted, a renamed
+  GitLab file matches under either name, and a comment whose file cannot be
+  told is kept. Without `paths` it prunes exactly as before.
+- **Cost (#34).** With the key on, a run makes one extra forge read for the
+  previous summary, plus a compare diff read when the head has moved since
+  the marker. Off, it makes none.
+
 ## [0.21.1] — 2026-09-27
 
 A worker or sweep reply that the provider stopped at the completion budget
@@ -2240,7 +2297,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.21.1...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/sblattj/prxref/releases/tag/v0.22.0
 [0.21.1]: https://github.com/sblattj/prxref/releases/tag/v0.21.1
 [0.21.0]: https://github.com/sblattj/prxref/releases/tag/v0.21.0
 [0.20.0]: https://github.com/sblattj/prxref/releases/tag/v0.20.0

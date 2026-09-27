@@ -609,12 +609,13 @@ class TestOffPathMatchesBase:
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "repo_context", "parse_retries", "context_followup", "suggestions",
+            "incremental",
         }
         assert res["rule_counts"] is None
         assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
         assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "repo_context", "parse_retries",
-                           "context_followup", "suggestions", "sampling"]
+                           "context_followup", "suggestions", "incremental", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):
