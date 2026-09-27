@@ -31,14 +31,19 @@ the ones whose artifactId has the most tokens (split on ``-``, ``.`` and
 ``_``, ignoring tokens that are groupId segments) equal to an import segment
 win, and a tie keeps every tied candidate: ``com.fasterxml.jackson.databind``
 picks ``jackson-databind`` over ``jackson-core`` and ``jackson-annotations``.
+When the winners score 0, no artifactId token names the import, so the match
+is only by group (#25): every winner is kept, since a true dependency such as
+``spring-webmvc`` for ``org.springframework.web`` also scores 0, and its line
+ends in :data:`GROUP_MATCH_SUFFIX`. A dependency that some other import of the
+file matches by artifact renders once, without the mark.
 
 **Lines.** A Maven dependency renders through
 :meth:`prxref.jvm_maven.MavenDependency.line`, keeping the owner jvm_maven
 chose. A Gradle dependency renders as ``g:a@v``; without a version but with at
-least one platform it renders as ``g:a@(managed by bg:ba@bv)``, the owner being
-the platform whose group shares the most leading segments with the
-dependency's, the first declared on a tie. A winning dependency with neither a
-version nor an owner renders no line.
+least one platform, its owner comes from
+:func:`prxref.jvm_maven.managed_dependency`, the same rule a Maven dependency
+follows over its imported BOMs, with the platforms as the candidates. A
+winning dependency with neither a version nor an owner renders no line.
 """
 from __future__ import annotations
 
@@ -54,6 +59,7 @@ CATALOG_FILE_NAME = jvm_gradle.CATALOG_FILE_NAME
 SKIPPED_ROOTS = frozenset({"java", "jdk", "sun", "kotlin"})
 MIN_GROUP_PREFIX_SEGMENTS = 2
 MIN_SHARED_SEGMENTS = 3
+GROUP_MATCH_SUFFIX = " (group match only)"
 
 _TOKEN_RE = re.compile(r"[-._]")
 
@@ -135,13 +141,13 @@ def _score(declared: _Declared, segments: Sequence[str]) -> int:
     )
 
 
-def _matches(segments: Sequence[str], declared: Sequence[_Declared]) -> list[_Declared]:
+def _matches(segments: Sequence[str], declared: Sequence[_Declared]) -> tuple[list[_Declared], bool]:
     candidates = [dep for dep in declared if _is_candidate(dep.group, segments)]
     if not candidates:
-        return []
+        return [], False
     scores = [_score(dep, segments) for dep in candidates]
     best = max(scores)
-    return [dep for dep, score in zip(candidates, scores, strict=True) if score == best]
+    return [dep for dep, score in zip(candidates, scores, strict=True) if score == best], best > 0
 
 
 def _maven(path: str, text: str, read: Reader) -> tuple[str | None, list[_Declared]]:
@@ -153,21 +159,14 @@ def _maven(path: str, text: str, read: Reader) -> tuple[str | None, list[_Declar
     ]
 
 
-def _gradle_owner(
-    dependency: jvm_gradle.GradleDependency,
-    boms: Sequence[jvm_gradle.GradleDependency],
-) -> jvm_maven.MavenCoordinate:
-    segments = dependency.group.split(".")
-    bom = max(boms, key=lambda candidate: _shared(candidate.group.split("."), segments))
-    return jvm_maven.MavenCoordinate(bom.group, bom.artifact, bom.version)
-
-
 def _gradle_line(
     dependency: jvm_gradle.GradleDependency,
     boms: Sequence[jvm_gradle.GradleDependency],
 ) -> str | None:
-    owner = _gradle_owner(dependency, boms) if dependency.version is None and boms else None
-    return jvm_maven.MavenDependency(dependency.group, dependency.artifact, dependency.version, owner).line()
+    if dependency.version is not None:
+        return jvm_maven.MavenDependency(dependency.group, dependency.artifact, dependency.version).line()
+    owners = [jvm_maven.MavenCoordinate(bom.group, bom.artifact, bom.version) for bom in boms]
+    return jvm_maven.managed_dependency(dependency.group, dependency.artifact, owners, "platform").line()
 
 
 def _gradle(path: str, text: str, read: Reader) -> tuple[str | None, list[_Declared]]:
@@ -192,12 +191,15 @@ def _dependency_lines(path: str, added: Sequence[str], read: Reader) -> list[str
         own_group, declared = _maven(manifest_path, text, cached)
     else:
         own_group, declared = _gradle(manifest_path, text, cached)
-    lines: set[str] = set()
+    specific: dict[str, bool] = {}
     for item in imports:
         if _under(own_group, item.segments):
             continue
-        lines.update(dep.line for dep in _matches(item.segments, declared) if dep.line)
-    return sorted(lines)
+        matched, by_artifact = _matches(item.segments, declared)
+        for dep in matched:
+            if dep.line:
+                specific[dep.line] = specific.get(dep.line, False) or by_artifact
+    return sorted(line if by_artifact else line + GROUP_MATCH_SUFFIX for line, by_artifact in specific.items())
 
 
 def dependency_lines(path: str, added: Sequence[str], read: Reader) -> list[str]:
@@ -206,8 +208,9 @@ def dependency_lines(path: str, added: Sequence[str], read: Reader) -> list[str]
     ``path`` is the changed file's repository-relative path (``.java``, ``.kt``
     or ``.kts``; any other path yields ``[]``), ``added`` holds the text of its
     added lines, and ``read`` maps a repository-relative path to its text or
-    ``None``. Returns ``g:a@v`` and ``g:a@(managed by ...)`` lines, sorted and
-    deduplicated, the same shape
+    ``None``. Returns ``g:a@v`` and ``g:a@(... managed by ...)`` lines, each
+    ending in :data:`GROUP_MATCH_SUFFIX` when only its group matched, sorted
+    and deduplicated, the same shape
     :func:`prxref.chunk_context.dependency_versions` returns for other
     languages. ``read`` is never called when every import is skipped, and never
     twice for one path. Never raises: any failure yields ``[]``.
