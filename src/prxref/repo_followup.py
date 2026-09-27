@@ -12,9 +12,15 @@ the pull request head (:func:`lookup_excerpts`) and renders the prompt block
 Names come from structure, never from phrase lists: the backtick spans of a
 finding's title and body first, then the identifiers of its plain text whose
 shape marks them as code (a dotted chain, a call, a ``_``, a type-like word;
-see :func:`name_tiers`). A name the PR defines itself, on a hunk line of any
-file or anywhere in the head text of the chunk's own files
-(:func:`diff_defined_names`), is not looked up, since the worker was shown it.
+see :func:`name_tiers`). A Python builtin class such as ``TypeError`` never
+counts, nor does a bare lowercase builtin such as ``len(``, since neither
+has a definition in the repository; after a dot (``store.filter(``) a
+lowercase builtin name is a repository attribute and counts. A name the PR
+defines itself, on a hunk line of any file or anywhere in the head text of
+the chunk's own files (:func:`diff_defined_names`), is not looked up, since
+the worker was shown it. Every question gets one name before any question
+gets a second (:func:`lookup_names`), so one question's names cannot fill
+the cap alone.
 
 The module is pure: stdlib plus :mod:`prxref.repo_context`,
 :mod:`prxref.repo_resolve`, :mod:`prxref.repo_readers`,
@@ -25,6 +31,7 @@ a test can patch it.
 """
 from __future__ import annotations
 
+import builtins
 import re
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
@@ -54,9 +61,12 @@ _CHAIN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
 _PATH_SEPARATORS = ("/", "\\")
 _RECEIVERS = frozenset({"self", "this", "cls", "super"})
 _LITERALS = frozenset({"None", "True", "False", "null", "true", "false", "undefined", "nil", "NaN"})
+_PY_BUILTIN_CLASSES = frozenset(name for name in dir(builtins) if name[:1].isupper())
+_PY_BARE_BUILTINS = frozenset(dir(builtins)) - _PY_BUILTIN_CLASSES
 _DROPPED = (
     _RECEIVERS
     | _LITERALS
+    | _PY_BUILTIN_CLASSES
     | chunk_context._PY_KEYWORDS
     | chunk_context._JS_KEYWORDS
     | jvm_lang.JAVA_KEYWORDS
@@ -113,8 +123,8 @@ def question_indices(findings: Sequence[Finding], floor: float) -> list[int]:
     return sorted(picked, key=lambda index: (-findings[index].confidence, index))
 
 
-def _kept(name: str) -> bool:
-    return len(name) >= 3 and name not in _DROPPED
+def _kept(name: str, dotted: bool) -> bool:
+    return len(name) >= 3 and name not in _DROPPED and (dotted or name not in _PY_BARE_BUILTINS)
 
 
 def _sentence_start(text: str, start: int) -> bool:
@@ -153,7 +163,7 @@ def _plain_names(text: str) -> list[tuple[int, str]]:
         called = text[end : end + 1] == "("
         at_start = _sentence_start(text, start)
         for position, name in enumerate(parts):
-            if name in seen or not _kept(name):
+            if name in seen or not _kept(name, position > 0):
                 continue
             tier = _plain_tier(name, len(parts), position, called and position == len(parts) - 1, at_start)
             if tier is None:
@@ -169,9 +179,14 @@ def name_tiers(title: str, body: str) -> tuple[tuple[str, ...], tuple[str, ...],
     The identifiers inside the backtick spans of ``title`` and ``body`` (a
     span is one line of at most 120 characters) are kept when they have at
     least three characters and are not a receiver (``self``, ``this``,
-    ``cls``, ``super``), a literal or a Python, JS/TS, Java or Kotlin keyword.
-    Tier 0 holds the type-like names (an uppercase first letter and a
-    lowercase letter), tier 1 the other names that directly follow a ``.``,
+    ``cls``, ``super``), a literal, a Python, JS/TS, Java or Kotlin keyword,
+    or a capitalised name of Python's :mod:`builtins` (``TypeError``,
+    ``Exception``), which cannot resolve to a repository definition. A
+    lowercase builtin (``len``, ``dict``, ``open``, ``filter``) is dropped as
+    a bare name or call, but kept when it directly follows a ``.``
+    (``store.filter(``), where it names a repository attribute. Tier 0 holds
+    the type-like names (an uppercase first letter and a lowercase letter),
+    tier 1 the other names that directly follow a ``.``,
     tier 2 the rest; each name appears once, in its first tier and position.
 
     The plain text outside the spans gives names too, under the same filters.
@@ -203,12 +218,13 @@ def name_tiers(title: str, body: str) -> tuple[tuple[str, ...], tuple[str, ...],
     for span in spans:
         for match in _NAME_RE.finditer(span):
             name = match.group(0)
-            if name in seen or not _kept(name):
+            dotted = match.start() > 0 and span[match.start() - 1] == "."
+            if name in seen or not _kept(name, dotted):
                 continue
             seen.add(name)
             if _type_like(name):
                 tiers[0].append(name)
-            elif match.start() > 0 and span[match.start() - 1] == ".":
+            elif dotted:
                 tiers[1].append(name)
             else:
                 tiers[2].append(name)
@@ -234,16 +250,23 @@ def lookup_names(
     defined: Collection[str],
     max_names: int | None = None,
 ) -> list[str]:
-    """The chunk's lookup list: the questions' names merged tier by tier.
+    """The chunk's lookup list: one name per question first, then the rest tier by tier.
 
     ``ranked`` holds one entry per question, highest confidence first. An
     entry is either a :func:`name_tiers` result or a flat
     :func:`finding_names` list, whose type-like names then form its first
-    tier and the rest its second. The list takes the first tier of every
-    entry in order, then the second, then the third, deduplicated, keeping
-    the first. Names in ``defined`` (normally :func:`diff_defined_names`) are
-    removed, and the list is cut to ``max_names``, which defaults to
-    :data:`MAX_FOLLOWUP_NAMES` read when the function runs.
+    tier and the rest its second. Names in ``defined`` (normally
+    :func:`diff_defined_names`) are never taken, and the list holds at most
+    ``max_names``, which defaults to :data:`MAX_FOLLOWUP_NAMES` read when the
+    function runs.
+
+    Every question gets a slot before any question gets a second one: the
+    list first takes each entry's best name, its first name in tier order
+    not in ``defined``, in entry order, and a question whose best name an
+    earlier question already took counts as served. With more questions than
+    slots, the first entries win. The remaining slots take the first tier of
+    every entry in order, then the second, then the third, deduplicated,
+    keeping the first.
     """
     limit = MAX_FOLLOWUP_NAMES if max_names is None else max_names
     if limit <= 0:
@@ -252,6 +275,13 @@ def lookup_names(
     depth = max((len(tiers) for tiers in tiered), default=0)
     skip = set(defined)
     out: list[str] = []
+    for tiers in tiered:
+        best = next((name for tier in tiers for name in tier if name not in skip), None)
+        if best is None or best in out:
+            continue
+        out.append(best)
+        if len(out) >= limit:
+            return out
     for level in range(depth):
         for tiers in tiered:
             if level >= len(tiers):
