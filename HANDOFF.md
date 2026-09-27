@@ -1,110 +1,111 @@
-# HANDOFF — v0.22.0 shipped: incremental re-review on push (#34)
+# HANDOFF — v0.23.0 shipped: graceful degradation when the token cannot post (#48)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.21.1 handoff.
+v0.22.0 handoff.
 
-0.22.0 is one feature. #34: with the new key `PRXREF_INCREMENTAL=on`, each
-summary prxref posts records the PR head it reviewed, and a later push
-chunks and reviews only the PR's files touched since that head, pruning only
-their earlier prxref inline comments. The whole-PR systemic sweep, the size
-advisory and the deterministic checks still see every file. The key is off
-by default, and at the default every prompt, LLM call, forge read, forge
-write and run-record value is the same as in 0.21.1, apart from the one new
-run-record key `incremental`, which is `null`. One new config key, one new
-CLI flag (`--full-review`), one new run-record and `--format json` key, and
-one new optional `Forge` method (`get_summary`). The user-facing account is
-the `[0.22.0]` section of `CHANGELOG.md`. This file is for whoever cuts the
-next release. The v0.21.1 handoff is in git history.
+0.23.0 is one feature. #48: when the token can read a pull request but not
+comment on it (a fork PR under a plain `pull_request` workflow, or a
+read-only pipeline token), the review still reaches the author through the
+CI job: GitHub annotations and the job summary, Azure Pipelines logging
+commands, a GitLab Code Quality report, or the log. The new key
+`PRXREF_FALLBACK` is `auto` by default but acts only when a post fails, so
+when every post succeeds (or nothing is posted) every prompt, forge read,
+forge write, stdout byte and run-record value is the same as in 0.22.0,
+apart from the one new run-record key `degraded`, which is `null`. One new
+config key, one new module (`ci_fallback`), one new run-record and
+`--format json` key, and no new CLI flag or `Forge` method. The user-facing
+account is the `[0.23.0]` section of `CHANGELOG.md`. This file is for
+whoever cuts the next release. The v0.22.0 handoff is in git history.
 
 ## What landed
 
-- **The key and the flag.** `PRXREF_INCREMENTAL` (`off`|`on`, default
-  `off`) is a `_CHOICE_KEYS` key that `cli._run_review` passes to
-  `orchestrate_review(incremental=)`. `prxref review --full-review` forces a
-  full review of an incremental-on run, and so does any `PRXREF_FAIL_ON`
-  other than `never`, because a gate's verdict must see the whole PR; the
-  CLI passes `full_review=True` with `full_review_reason` `--full-review` or
-  `PRXREF_FAIL_ON=<value>`. With the key off both keywords are ignored.
-- **The marker.** `orchestrator.reviewed_head_line(sha)` writes
-  `<!-- prxref-reviewed-head: <sha> -->` and `REVIEWED_HEAD_RE` reads it
-  back; both are built from `REVIEWED_HEAD_PREFIX` and
-  `REVIEWED_HEAD_SUFFIX`, so the writer and the reader cannot drift.
-  `_with_reviewed_head` appends it after a blank line at all four post sites
-  (the summary, the refreshed summary, `_summary_only_run` and
-  `_error_run`), and `_mark_reviewed_head` picks the SHA: the PR head when
-  every review unit succeeded, else the previous marker's SHA, else none.
-- **Scope resolution, `_resolve_incremental_scope`,** runs right after the
-  diff is parsed and never raises. Its full-review reasons, from the code:
-  `PRXREF_POST_MODE=<mode> never writes the reviewed-head marker` (checked
-  first, so an inline-only run reads nothing), `forge cannot read its
-  summary`, `previous summary could not be read` (a WARNING), `first
-  review`, `previous summary has no reviewed-head marker`, `PR head is
-  unknown`, `forge cannot compare commits` and `compare diff failed` (a
-  WARNING). A forced run records `--full-review`, `PRXREF_FAIL_ON=<value>`
-  or, with no reason given, `full review requested`, and an exit taken
-  before scope resolution records `review ended before scope resolution`.
-- **The delta** is the compare diff from the marked head to the PR head,
-  intersected with the PR's own diff: the members of the parsed PR files
-  whose path or old path the compare diff touches. So inline positions stay
-  those of the PR diff, and a merge from the base branch or a rebase cannot
-  widen the set. `build_chunks` and `_plan_repo_context` get the delta;
-  `_run_sweep`, `_size_advisory`, the heuristics, location validation, line
-  alignment and each chunk's sibling-file summary (`all_files`) keep every
-  file. A marker equal to the head, an empty compare diff, or a compare that
-  touches none of the PR's files gives an empty delta, which runs the sweep
-  alone (`sweep_alone`), prunes nothing and posts the summary. The summary
-  of an incremental run carries one note line (`_incremental_note`).
-- **Forge reads.** Every adapter's summary lookup moved verbatim into a
-  private `_find_summary`, now shared by `post_summary` and the new
-  `get_summary(ref) -> str | None` on all five adapters, so the read finds
-  exactly the comment the post would update. `get_summary` is an optional
-  `Forge` Protocol method, resolved with `getattr`; the replay forges lack
-  it, so a replay runs full.
-- **Prune by path.** `prune_inline_comments(ref, *, paths=None)` on all five
-  adapters deletes only prxref's comments on those paths when `paths` is
-  given; a renamed GitLab file matches under either name, and a comment
-  whose file cannot be told is kept. It is not in the Protocol. An
-  incremental run calls it with the delta's new and old paths, and a full
-  run calls `prune(ref)` exactly as before.
-- **The run-record key.** `incremental`, after `suggestions` in the record
-  and in `--format json`: `null` while the key is off, else `{"mode",
-  "reason", "since_sha", "files_total", "files_reviewed", "marker_sha"}`.
-  It is not in `evals.RUN_CONFIG_KEYS`, so `run.json` does not record it.
-- **Tests.** Two new files, `tests/test_issue_34_forge_summary.py` and
-  `tests/test_issue_34_incremental.py`. Existing pins moved only where they
-  list record or JSON keys, plus one new entry in the GitHub timeout test
-  (lesson 4).
+- **The key.** `PRXREF_FALLBACK` (`auto`|`off`, default `auto`) is a
+  `_CHOICE_KEYS` key. It never reaches the orchestrator:
+  `cli._cmd_review` reads it from the same `load_config()` call as
+  `fail_on`, and after the review returns, and before either output format
+  prints, calls `cli._emit_fallback` when it is `auto`. It is not an
+  `orchestrate_review` keyword and is left out of `evals.RUN_CONFIG_KEYS`.
+- **`src/prxref/ci_fallback.py`, pure renderers.** Nothing in it reads the
+  environment or writes a file. `github_annotations` renders `::error`,
+  `::warning` or `::notice` lines with `file`, `line` and `title`
+  properties, errors first, then warnings, then the rest, capped at
+  `GITHUB_ANNOTATION_CAP` (50). `azure_log_issues` renders
+  `##vso[task.logissue type=error|warning;...]` lines with no cap.
+  `gitlab_codequality` renders Code Quality entries: `check_name` is the
+  finding's rule or `prxref`, `fingerprint` is the SHA-256 of `[file, line,
+  title]` so it is stable across runs, and severity maps to `major`, `minor`
+  or `info`. `step_summary_markdown` prefixes the summary with one quoted
+  line saying it could not be posted. `GITLAB_REPORT_FILE` is
+  `gl-code-quality-report.json`, and `DEGRADED_SUMMARY_KEY` names the result
+  key that carries the summary markdown.
+- **`detect_ci(environ)`** returns `github` when `GITHUB_ACTIONS` is `true`,
+  `azure` when `TF_BUILD` is `true`, `gitlab` when `GITLAB_CI` is `true`
+  (each case-insensitive), `bitbucket` when `BITBUCKET_BUILD_NUMBER` is
+  non-empty, else `None`; the first match wins. The GitHub branch also reads
+  `GITHUB_STEP_SUMMARY` for the job-summary path.
+- **The emission, `cli._emit_fallback`,** does nothing unless the result's
+  `degraded` is a dict, and emits only the active findings. Under GitHub
+  Actions it prints the annotations and appends the summary to
+  `$GITHUB_STEP_SUMMARY` when that is set; under Azure Pipelines it prints
+  the logging commands; under GitLab CI it writes the report in the working
+  directory, replacing any existing file; under Bitbucket Pipelines and no
+  CI it logs the summary at WARNING. Under `--format json` the stdout lines
+  are skipped so stdout stays one JSON document. Every CI then logs one
+  WARNING naming the cause. It never raises: a failed write is logged and
+  left out of `fallback`, and any other failure is logged and stops the
+  emission. The exit code is `_fail_on_exit`'s, untouched. The webhook
+  daemon never calls it, so it records `degraded` but never emits.
+- **The run-record key.** `degraded`, after `incremental` in the record and
+  in `--format json`: `null` when no post failed, else `{"cause", "failed",
+  "fallback", "annotations"}`. The orchestrator fills `cause` and `failed`:
+  `orchestrator.post_failure_cause` classifies each failed post as
+  `permission` when the exception's `response.status_code` is in
+  `PERMISSION_STATUSES` (401, 403), else `error`, and `_degraded_record`
+  lists each failed post kind once (a failed summary re-post counts as
+  `summary`) and says `permission` when any failure was. The main exit,
+  `_summary_only_run` and `_error_run` stamp it through `_with_degraded`,
+  which also sets `DEGRADED_SUMMARY_KEY` to the summary the post would have
+  carried (rendered fresh for `PRXREF_POST_MODE=inline`); that key never
+  reaches `--format json`. The CLI fills `fallback` and `annotations` as it
+  emits.
+- **The conftest clears the CI variables.** The autouse env fixture in
+  `tests/conftest.py` now also deletes `GITHUB_ACTIONS`,
+  `GITHUB_STEP_SUMMARY`, `TF_BUILD`, `GITLAB_CI` and
+  `BITBUCKET_BUILD_NUMBER` (`CI_ENV_NAMES`), because the suite itself runs
+  under GitHub Actions (lesson 1).
+- **Tests.** One new file, `tests/test_issue_48_degradation.py`, which also
+  pins sha256 goldens of the text, `-v` and JSON stdout and the posted
+  summaries of a successful review, measured on the 0.22.0 CLI. Existing
+  pins moved only where they list record or JSON keys.
+- **Docs.** `docs/forges.md` gains the "When prxref cannot post" matrix,
+  and `docs/env-vars.md`, `.env.example` and the `config.py` docstring
+  describe the key.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **A cleanup that deletes the tool's own earlier comments becomes data
-   loss the moment a run stops covering every file.** A full run prunes all
-   of prxref's stale inline comments before it posts; an incremental run
-   that did the same would delete the comments on every file it did not
-   re-review and post nothing in their place. Scoping the prune to the
-   re-reviewed paths (`prune_inline_comments(paths=)`,
-   `TestPruneScope` in `tests/test_issue_34_incremental.py`) was the
-   load-bearing half of the feature, not a refinement of it.
-2. **`all([])` is `True`, so "every unit failed" over an empty unit list
-   needs an explicit guard.** The empty-delta path runs the sweep with no
-   chunks, and the total-failure check `all(r["error"] for r in
-   results[:-1])` (every result but the sweep's) is `True` there, so every
-   such run would have been an Error. The check now falls back to the
-   sweep's own error when there are no chunks (`TestEmptyDelta`).
-3. **A switch that turns a feature off for one run can silently break the
-   next run.** `--full-review` and a `PRXREF_FAIL_ON` gate first passed
-   `incremental="off"`, so that run's summary carried no marker and
-   overwrote the old one, and the push after it reviewed everything again.
-   The fix keeps the feature on and forces the scope instead
-   (`full_review=`), so a forced run still stamps the head
-   (`TestForcedFullReview::test_the_next_push_is_incremental`).
-4. **A test that enumerates every public adapter method must grow whenever
-   an adapter gains one.** `tests/test_forge_github.py`'s
-   `test_every_request_the_adapter_sends_carries_the_timeout` walks the
-   GitHub adapter's public methods by design, so `get_summary` needed a
-   `drive` entry there. That is the test working, not a regression.
+1. **The test suite runs under GitHub Actions, so a feature keyed on CI
+   environment variables fires inside the project's own CI run.**
+   `.github/workflows/ci.yml` runs `uv run pytest -q` on a runner where
+   `GITHUB_ACTIONS=true` and `GITHUB_STEP_SUMMARY` names the job's real
+   summary file. Any CLI test with a failing post would have printed
+   annotations into the job log and appended to that summary, and passed or
+   failed differently than on a laptop. The fixtures now clear those
+   variables (`CI_ENV_NAMES` in `tests/conftest.py`), and each test sets the
+   ones it needs.
+2. **A forge adapter that swallows per-comment 4xx errors hides a permission
+   failure from any caller that looks for exceptions.** Only GitHub's
+   `post_inline_comments` raises on a 401 or 403. Bitbucket Cloud,
+   Bitbucket Server, GitLab and Azure DevOps skip each refused comment and
+   return a count, so `PRXREF_POST_MODE=inline` on those forges records no
+   degradation. The default mode is covered only because the summary post
+   raises first. It is a documented gap (Still open), not a fix.
+3. **A record key pinned by numeric offset escapes a name-based search.**
+   `tests/test_cli_scoped_rules.py` asserts `keys.index("sampling") ==
+   keys.index("scoped_rules") + 8` (it was `+ 7`), so a grep for
+   `incremental` to find every pin of the record's key list misses it. The
+   full suite found it.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -131,14 +132,17 @@ key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
 `.env.example` and `docs/env-vars.md` to describe it, and a value that is
 not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
 Current values, counted from `config._DEFAULTS` and
-`config._LEGACY_ENV_ALIASES` at this release: **71** keys, **1** legacy
-alias, **72** accepted names, up from 70 and 71 in 0.21.1. The most recent
-new key is `incremental` (`PRXREF_INCREMENTAL`), added in 0.22.0, and it took
-every surface above: the `_CHOICE_KEYS` table, the docstring,
-`.env.example`, both counts and the LLM / Pipeline heading of
-`docs/env-vars.md`, and the `cli._run_review` pass-through. It is left out
-of `evals.RUN_CONFIG_KEYS`, and a test pins that. The key before it,
-`suggestions` (`PRXREF_SUGGESTIONS`, 0.21.0), took the same surfaces.
+`config._LEGACY_ENV_ALIASES` at this release: **72** keys, **1** legacy
+alias, **73** accepted names, up from 71 and 72 in 0.22.0. The most recent
+new key is `fallback` (`PRXREF_FALLBACK`), added in 0.23.0. It took the
+`_CHOICE_KEYS` table, the docstring, `.env.example`, both counts and the
+LLM / Pipeline heading of `docs/env-vars.md`, but no `cli._run_review`
+pass-through, because it is not an `orchestrate_review` keyword:
+`cli._cmd_review` reads it itself. It is left out of
+`evals.RUN_CONFIG_KEYS`. The key before it, `incremental`
+(`PRXREF_INCREMENTAL`, 0.22.0), took every surface above, the pass-through
+included, and is left out of `evals.RUN_CONFIG_KEYS` too, which a test
+pins. `suggestions` (`PRXREF_SUGGESTIONS`, 0.21.0) took the same surfaces.
 `config.SUGGESTIONS_MAX_TOKENS` is a module constant, not a key. 0.21.0 also
 changes one default conditionally:
 `llm_max_tokens` is 8192 instead of 4096 when suggestions are on and the
@@ -148,24 +152,19 @@ sources for every default; it now keeps an explicit set of supplied keys.
 
 ## Release shape (follow this next time)
 
-How 0.22.0 was built:
+How 0.23.0 was built:
 
-1. **Two code tasks in parallel, each in its own worktree from one pinned
-   commit, its tests in a new file, merged behind a full gate.** The forge
-   task added `get_summary` and `prune_inline_comments(paths=)` to the five
-   adapters; the core task added the key, the flag, scope resolution and
-   the marker to the config, the CLI and the orchestrator. Neither task's
-   base held the other's work, so the seam between them (the optional
-   `get_summary`, resolved with `getattr`, and the `paths` keyword) was
-   fixed in advance. `uv run pytest` rose from 9106 to 9173 (forge) and to
-   9215 (core), and `uv run ruff check src tests` stayed clean throughout.
-2. **One follow-up fix,** which the core task flagged as open: a forced full
-   review keeps the feature on and still stamps the head (lesson 3). 9215 to
-   9222.
-3. **Live checks,** read-only, at the merged tip.
-4. **Release.** This commit bumps the version, adds the CHANGELOG section,
-   rewrites this file and tightens the README section; it adds no test,
-   so the count stays at 9222.
+1. **One code task in its own worktree from a pinned commit, its tests in
+   a new file, merged behind a full gate.** It added the key, `ci_fallback`,
+   the orchestrator's failure classification and the CLI's emission, and
+   pinned sha256 goldens of a successful review's output measured on the
+   0.22.0 CLI before any edit. `uv run pytest` rose from 9222 to 9280 (55
+   new tests, plus 3 from `tests/test_docs_consistency.py` parametrizing
+   over the new key), and `uv run ruff check src tests` stayed clean.
+2. **No live checks** (see below).
+3. **Release.** This commit bumps the version, adds the CHANGELOG section,
+   rewrites this file and tightens one README sentence; it adds no test,
+   so the count stays at 9280.
 
 Cutting the release:
 
@@ -191,9 +190,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9222 passed                                   uv run pytest -q
+9280 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.22.0                                        uv run prxref --version
+0.23.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -201,28 +200,26 @@ updated this file.
 
 ### Live checks
 
-Read-only, at the merged tip, against this repository's own pull requests,
-whose CI job runs the released prxref.
-
-- **`get_summary` on GitHub,** against sblattj/prxref#54 and #53: both
-  found the prxref summary (it carries the summary marker), and neither has
-  a reviewed-head marker. That is expected, because the released version
-  that posted them predates the marker.
-- **A `--no-post` review of #54 with `PRXREF_INCREMENTAL=on`,** through GLM
-  5.3 Flash: the record was `{"mode": "full", "reason": "previous summary
-  has no reviewed-head marker", "files_total": 14, "files_reviewed": 14,
-  "marker_sha": null}`. 2 of the 4 review units failed: their replies
-  stopped at 4096, and the one retry at 8192 was cut off too. So no marker
-  would have been written, which is what the failed-unit rule requires. The
-  failures are the model's reasoning budget, not the feature.
-
-What this shows: the read path finds the summary a real run posted, and a
-summary without the marker falls back to a full review with the right
-reason. It does not show the incremental path live. Posting was not
-exercised, because verification never writes to a forge, so the marker
-round-trip is covered by the mocked suite only.
+None. The feature only acts when a post fails, and verification never
+writes to a forge, so a refused post was exercised only through mocked
+HTTP 401 and 403 responses in the test suite. The GitHub annotations, the
+job summary, the Azure Pipelines logging commands and the GitLab Code
+Quality report follow each CI's documented syntax, and are checked against
+that syntax in the suite, but none of them has run on a live runner yet.
 
 ## Still open — not part of this release
+
+- **With `PRXREF_POST_MODE=inline`, a read-only token is detected on GitHub
+  only.** Bitbucket Cloud, Bitbucket Server, GitLab and Azure DevOps skip a
+  refused inline comment without raising (lesson 2), so an inline-only run
+  on those forges records no degradation and emits nothing. The default
+  post mode is covered, because the summary post fails first and the
+  inline comments wait on it. Closing it means those adapters must report
+  a 401 or 403 on an inline comment, which changes what `post_inline_comments`
+  returns or raises on four forges.
+- **The fallback formats have no live proof yet.** The first will be a fork
+  PR under a plain `pull_request` workflow in a real CI run; watch its
+  annotations, its job summary and its `degraded` record.
 
 - **The incremental marker round-trip has not been exercised live with
   posting.** Verification never posts, so no live run has written a marker
@@ -676,8 +673,8 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.22.0` (minor: incremental re-review on push, #34, off by default; one new config key, `PRXREF_INCREMENTAL`; one new CLI flag, `--full-review`; one new run-record and `--format json` key, `incremental`, `null` while off; one new optional `Forge` method, `get_summary`; `prune_inline_comments` gains an optional `paths` keyword on every adapter; no new module) |
-| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Released version | `0.23.0` (minor: graceful degradation when the token cannot post, #48, on by default but acting only on a failed post; one new config key, `PRXREF_FALLBACK`; one new run-record and `--format json` key, `degraded`, `null` when no post failed; one new module, `ci_fallback`; no new CLI flag or `Forge` method) |
+| Registration points | CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
