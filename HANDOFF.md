@@ -1,126 +1,95 @@
-# HANDOFF — v0.19.0 shipped: JVM BOM owners and litellm effort/seed (#25, #26)
+# HANDOFF — v0.20.0 shipped: chunk context for local diff replays (#29)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.18.0 handoff.
+v0.19.0 handoff.
 
-0.19.0 is two fixes. #25: in the `### Dependency versions` block, a
-version-less Maven or Gradle dependency was attributed to the first imported
-BOM whether or not that BOM manages it; it now names an owner only when there
-is one candidate or a clear best guess, and marks a dependency matched to an
-import by its group alone. #26: the litellm backend now forwards
-`PRXREF_LLM_REASONING_EFFORT`, and `PRXREF_LLM_SEED=off` sends no seed, for
-providers such as Bedrock that reject it. No config key, run-record key or
-module was added. At the defaults nothing moves except the dependency-version
-lines of Java and Kotlin files. The user-facing account is the `[0.19.0]`
-section of `CHANGELOG.md`. This file is for whoever cuts the next release.
-The v0.18.0 handoff is in git history.
+0.20.0 is one fix. #29: a review of a local diff, `prxref review
+--diff-file <patch> --repo-dir <checkout>` with no `--pr-url`, built no
+chunk context: no `### Dependency versions` block and no same-file
+definitions, although the checkout held every file that context needs. It
+now reads them from `--repo-dir`. No config key, run-record key, CLI flag or
+module was added. Forge-backed reviews (`--pr-url`, the webhook service, the
+GitHub Action) are unchanged, because a forge that can read files at the PR
+head is still asked first. The user-facing account is the `[0.20.0]` section
+of `CHANGELOG.md`. This file is for whoever cuts the next release. The
+v0.19.0 handoff is in git history.
 
 ## What landed
 
-- **The change, as a module map.** `git diff --stat v0.18.0..HEAD -- src/`
-  touches four files and adds none.
-  - `jvm_maven`, the owner rule (#25). `managed_dependency(group_id,
-    artifact_id, owners, kind="bom")` takes the candidate owners in declared
-    order and returns a `MavenDependency`. `MavenDependency` gains `likely`,
-    `owners` and `owner_kind` (one of `OWNER_KINDS`: `bom`, `parent`,
-    `platform`); the positional four-field form is unchanged. `_resolve`
-    builds the candidates as the external parent, if any, then the imported
-    BOMs, nearest pom first, and hands them to `managed_dependency` with kind
-    `parent` or `bom`.
-  - `jvm_deps`, the Gradle side and the group-only mark (#25).
-    `_gradle_owner` is gone; `_gradle_line` calls `managed_dependency` with
-    the platforms as candidates and kind `platform`. `_matches` also returns
-    whether the best match scored above 0, and `_dependency_lines` appends
-    `GROUP_MATCH_SUFFIX`, ` (group match only)`, to a line only a 0-score
-    match produced.
-  - `llm_backends`, the litellm fix (#26). `LiteLLMClient` takes
-    `reasoning_effort` (normalised with `or None`) and sends it as
-    `reasoning_effort=` after `seed` when truthy. `create_llm_client` passes
-    the configured effort to it, and reads the raw seed once: when it strips
-    to exactly `SEED_OFF` (`"off"`), the seed is `None` and
-    `_auto_run_seed` is never called; otherwise the 0.18.0 path is unchanged.
-  - `config`, the value (#26). `_SEED_OFF` restates `"off"` privately (a
-    test pins it equal to `llm_backends.SEED_OFF`); `_coerce_env` returns
-    it for `llm_seed` before integer coercion, and `_check_ranges` skips it
-    as it skips `None`. Lowercase only: `OFF` exits 2, like every other
-    choice-style value `config.py` checks.
-- **The owner rule.** With one candidate, it is named as in 0.18.0:
-  `g:a@(managed by bg:ba@bv)`. With several, each candidate's groupId is
-  scored by the leading segments it shares with the dependency's; the best is
-  named as `g:a@(likely managed by bg:ba@bv)` only when it shares at least
-  `MIN_OWNER_SHARED_SEGMENTS` (2) and strictly more than every other.
-  Otherwise no owner is named and at most `MAX_LISTED_OWNERS` (3) artifactIds
-  are listed in declared order, then `+K more`: `one of N imported BOMs: ...`,
-  `the parent or an imported BOM: ...` or `the parent or one of B imported
-  BOMs: ...` (the parent listed first, B counting the BOMs only), or `one of
-  N platforms: ...`. The external parent takes part in the guess, so
-  `spring-boot-starter-parent` can be the likely owner of a
-  `org.springframework.boot` starter. Gradle always named one platform
-  before, the one sharing the most segments and the first on a tie, even at
-  0 shared; it now follows the same rule.
-- **Why it lives in `jvm_maven`.** `jvm_deps` imports `jvm_maven`, and
-  `test_the_module_imports_only_the_standard_library` in
-  `tests/test_jvm_maven.py` forbids `jvm_maven` importing any non-stdlib
-  module, prxref's own included. So the one helper both Maven's `_resolve`
-  and Gradle's `_gradle_line` can call without an import cycle is in
-  `jvm_maven`.
-- **The group-only mark.** A match scores 0 when no artifactId token names a
-  segment of the import (`org.slf4j:slf4j-api` for `import
-  org.slf4j.Logger`). Such lines are kept, not dropped, because a true
-  dependency such as `spring-webmvc` for `org.springframework.web` also
-  scores 0; every tied 0-score match is marked. An artifact that another
-  import of the same file matches by name renders once, unmarked, in either
-  import order.
-- **Effort and seed on litellm.** Unset effort leaves the kwargs exactly as
-  0.18.0 sent them. `off` applies on `openai-compat` and `litellm`, which
-  then send no `seed`, and the run record's `sampling.seed` is `null`. On
-  `claude-cli` and `kiro-cli`, which never send a seed, `off` is not an
-  error. Error texts for a bad seed are unchanged.
-- **Tests.** Two new files, `tests/test_issue_25_bom_owner.py` and
-  `tests/test_issue_26_litellm_effort_seed.py`. The group-only mark moved
-  existing assertions: 18 expected lines in `tests/test_jvm_deps.py` gained
-  the mark, the Gradle owner test there and
-  `test_owner_precedence_is_external_parent_then_boms_nearest_first` in
-  `tests/test_jvm_maven.py` now expect the new owner text, and the slf4j line
-  of `tests/test_issue_20_acceptance.py` gained the mark. The #26 change
-  moved no existing test.
+- **The change, as a module map.** `git diff --stat v0.19.0..HEAD -- src/`
+  touches three files and adds none.
+  - `orchestrator`, the fix. `_make_file_reader(forge, ref, pr, *,
+    repo_dir=None)` gained the `repo_dir` keyword. It uses the forge's
+    `get_file_content` at `pr.source_sha` when the forge has the method and
+    the PR has a head sha, even when `repo_dir` is also given; otherwise it
+    falls back to `repo_dir.read`; with neither it returns `None`, the
+    signal to skip chunk context, as before. Both sources share one body:
+    the per-run cache, the lock, and the rule that any exception degrades to
+    `None`. The debug log names the source that failed. `orchestrate_review`
+    passes `repo_dir=repo_dir` at its one call site.
+  - `cli`, the words. The `--repo-dir` help text and the module docstring
+    now say that a review with no forge file reader, such as `--diff-file`
+    without `--pr-url`, reads its chunk context there, and no longer say
+    that `PRXREF_REPO_CONTEXT=off` ignores the directory.
+  - `forges/replay`, a docstring. `LocalDiffForge` still has no
+    `get_file_content`; its docstring now says the orchestrator reads chunk
+    context from `--repo-dir` when one is given.
+- **The precedence rule: the forge first.** `repo_dir` is only a fallback,
+  so a `--pr-url` review that also passes `--repo-dir` reads chunk context
+  from the forge exactly as in 0.19.0
+  (`test_forge_is_read_and_repo_dir_content_is_not_shown`). The fallback
+  applies no exclusion, as the forge reader applies none;
+  `PRXREF_CONTEXT_EXCLUDE_GLOBS` stays scoped to repository context.
+- **At every level.** Chunk context is built at every `PRXREF_REPO_CONTEXT`
+  level, `off` included, so the fallback is too. `cli._open_repo_dir`
+  already checked and opened the directory at `off`; nothing used it there
+  before.
+- **A second surface.** `apply_manifest_claim_check(findings, files,
+  read=reader)` in `orchestrate_review` takes the same reader, so in a
+  `--diff-file` run with `--repo-dir` the manifest check's full-file section
+  lookup now reads the checkout too. `eval` passes a case's `repo_dir` to
+  the same review, so an eval diff-file case with a `repo_dir` gets the same
+  context.
+- **Docs.** `README.md` (the `--repo-dir` bullet and the `--diff-file`
+  bullet), `docs/evals.md` (the `repo_dir` field row and the diff-file case
+  bullet) and `docs/llm.md` (the best-effort paragraph of the chunk context
+  section) say the new behaviour.
+- **Tests.** One new file, `tests/test_issue_29_diff_file_repo_dir_context.py`,
+  with 10 tests: an end-to-end run through `cli._run_review` against a mock
+  LLM server with and without `--repo-dir`, the same-file definition, forge
+  precedence, an empty checkout and a raising read, the no-source case, the
+  cache, and a JSON payload check. One existing golden moved (lesson 3).
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **"First candidate wins" is a silent wrong answer, and a test pinned
-   it.** 0.17.0 named the external parent, or else the nearest first
-   imported BOM, as the owner of every version-less dependency.
-   `test_owner_precedence_is_external_parent_then_boms_nearest_first` in
-   `tests/test_jvm_maven.py` had three candidates and asserted that
-   `jackson-databind` was managed by `corporate-parent`, then by
-   `spring-boot-dependencies`, with `jackson-bom` imported beside them: it
-   pinned the order of the candidates, not which one manages the artifact,
-   so it read as a precedence rule rather than a wrong answer. On #25's repro,
-   `dependency_lines` at v0.18.0 printed `managed by
-   com.fasterxml.jackson:jackson-bom@2.21.5` for both
-   `jackson-databind` and `micrometer-registry-dynatrace`; at 0.19.0 the
-   first is `likely managed by` jackson-bom and the second is `managed by one
-   of 2 imported BOMs: jackson-bom, spring-boot-dependencies (group match
-   only)`. A test of a rule that picks one of several candidates should say
-   why the expected one is right, and include a case where the first is
-   wrong.
-2. **The local diff mode cannot check dependency lines end to end.** The same
-   repro through `prxref review --no-post --diff-file ... --repo-dir ...`
-   produced no dependency block at either version, because chunk context
-   reads only through the forge (`orchestrator._make_file_reader`), and a
-   `--diff-file` run has no forge. The end-to-end check had to call
-   `jvm_deps.dependency_lines` with a reader over the repro on disk (Still
-   open, "Replay from a diff file").
-3. **A provider-parameter fix needs the real library in the loop.** The
-   mocked tests prove what prxref passes to `litellm.completion`, not what
-   litellm does with it. An offline probe through real litellm (a dead
-   proxy, fake AWS credentials, a Bedrock model, effort `medium`) showed the
-   reported bug before any request: with `PRXREF_LLM_SEED` unset or `7`,
-   litellm raised `UnsupportedParamsError` naming `seed`. With `off`, param
-   mapping passed, `reasoning_effort` included, and the call failed only
-   with `APIConnectionError`, where the network was blocked on purpose.
+1. **The input mode decides the context, not the machine.** Chunk context
+   depends only on whether the review has a file reader: a forge with
+   `get_file_content` and a head sha, or, since 0.20.0, a `--repo-dir`
+   checkout (`orchestrator._make_file_reader`). A laptop and a CI runner
+   running the same command get the same prompt. The split that mattered
+   was a forge-backed review against a local diff, and before 0.20.0 a local
+   diff got no chunk context wherever it ran.
+2. **An end-to-end check through the CLI needs the CLI's input mode to carry
+   the context.** 0.19.0's #25 check could not run through `prxref review
+   --no-post --diff-file ... --repo-dir ...`, because that path built no
+   dependency block at either version, so it called
+   `jvm_deps.dependency_lines` directly. At 0.20.0 the same repro runs
+   through the real CLI (Live checks), and the chunk prompt carries the #25
+   lines, while v0.19.0, the control, carries none.
+3. **A golden that is itself a replay run pins this exact path.**
+   `tests/test_context_followup_off_identity.py` runs `--diff-file` with
+   `--repo-dir`, so "goldens never change" was the wrong expectation for
+   this fix: one of its three recorded message hashes moved. The fix was to
+   re-record that one value, keeping both as `PRE_29_SHA` and `POST_29_SHA`,
+   and to prove the delta:
+   `test_the_29_delta_is_exactly_one_definition_line` finds the request that
+   hashes to `POST_29_SHA`, checks that the one new line,
+   `assistant/engine.py:12: class Step:`, appears in exactly one message
+   exactly once, removes it, and asserts the messages then hash to
+   `PRE_29_SHA`. The other two hashes, the request count and the other
+   acceptance goldens did not move.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -146,32 +115,31 @@ key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
 0.19.0, touches none of the counts, but still needs the docstring,
 `.env.example` and `docs/env-vars.md` to describe it, and a value that is
 not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
-Current values: **69** keys, **1** legacy alias, **70** accepted names,
-unchanged from 0.18.0.
+Current values, counted from `config._DEFAULTS` and
+`config._LEGACY_ENV_ALIASES` at this release: **69** keys, **1** legacy
+alias, **70** accepted names, unchanged from 0.18.0. 0.20.0 changed no config
+key, value or default.
 
 ## Release shape (follow this next time)
 
-How 0.19.0 was built:
+How 0.20.0 was built:
 
-1. **Two parallel code tasks from the 0.18.0 merge.** Each ran in its own
-   worktree against the pinned 0.18.0 merge commit, brought its own tests in
-   a new test file, and kept to its own files: the #26 task `config.py`,
-   `llm_backends.py` and the seed and effort docs in `README.md`,
-   `docs/env-vars.md`, `.env.example` and `docs/llm.md`; the #25 task
-   `jvm_maven.py`, `jvm_deps.py`, the existing JVM tests and the Java and
-   Kotlin bullet of `docs/llm.md`, the one file both edited, in separate
-   regions. Both were cut off by a usage
-   limit mid-task and resumed from their uncommitted worktrees without loss.
-2. **One integration gate per merge.** Each branch merged into
-   `release/X.Y.Z` on its own, and a merge stayed only if the full
+1. **One code task from the 0.19.0 merge.** It ran in its own worktree
+   against the pinned 0.19.0 merge commit, brought its tests in a new test
+   file, and kept to `orchestrator.py`, `cli.py`, the `LocalDiffForge`
+   docstring, `README.md` and `docs/evals.md`. It stopped to ask before
+   touching a golden when the off-identity hash moved (lesson 3), and the
+   re-record landed as its own commit.
+2. **One integration gate for the merge.** The branch merged into
+   `release/X.Y.Z`, and the merge stayed only because the full
    `uv run pytest` and `uv run ruff check src tests` passed on the merged
-   tree. The passing count rose from 8,865 at 0.18.0 to 8,900 after the
-   effort and seed fix and 8,926 after the BOM-owner fix, and never fell.
-3. **Two offline end-to-end checks**, one per issue, each once its fix
-   merged (Live checks). No live model run: nothing model-facing changed except the JVM
-   dependency lines.
+   tree. The passing count rose from 8,926 at 0.19.0 to 8,937 after the fix
+   (10 new tests and the delta test of lesson 3), and never fell.
+3. **One offline end-to-end check** once the fix merged (Live checks). No
+   live model run: nothing model-facing changed for a forge-backed review.
 4. **Release.** This commit bumps the version, adds the CHANGELOG section,
-   and rewrites this file.
+   fixes one `docs/llm.md` sentence the fix made wrong, and rewrites this
+   file.
 
 Cutting the release:
 
@@ -197,9 +165,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-8926 passed                                   uv run pytest -q
+8937 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.19.0                                        uv run prxref --version
+0.20.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -207,35 +175,24 @@ updated this file.
 
 ### Live checks
 
-0.19.0 changes no model-facing behaviour except the JVM dependency lines, so
-no live model run was made for it. Two offline end-to-end checks ran instead:
+0.20.0 changes no model-facing behaviour for a forge-backed review, so no
+live model run was made for it. One offline end-to-end check ran instead:
 
-- **#25 on the issue's own repro, built on disk.** A root pom importing
-  `com.fasterxml.jackson:jackson-bom:2.21.5`, then
-  `org.springframework.boot:spring-boot-dependencies:3.5.0`; an `app` module
-  with version-less `io.micrometer:micrometer-registry-dynatrace` and
-  `com.fasterxml.jackson.core:jackson-databind`; a Java file adding
-  `import io.micrometer.core.instrument.MeterRegistry;` and
-  `import com.fasterxml.jackson.databind.ObjectMapper;`.
-  `jvm_deps.dependency_lines` with a reader over the directory printed:
-  - at 0.19.0:
+- **#29 on #25's repro, through the real CLI.** The v0.19.0 handoff's #25
+  repro, built on disk: a root pom importing `jackson-bom`, then
+  `spring-boot-dependencies`, and a Java file adding the `MeterRegistry` and
+  `ObjectMapper` imports. `prxref review --no-post --diff-file <patch>
+  --repo-dir <checkout> --trace-dir <dir>` ran against a dead LLM endpoint,
+  so the trace holds the prompts only.
+  - At 0.20.0, the chunk prompt carries
     `com.fasterxml.jackson.core:jackson-databind@(likely managed by
     com.fasterxml.jackson:jackson-bom@2.21.5)` and
     `io.micrometer:micrometer-registry-dynatrace@(managed by one of 2
     imported BOMs: jackson-bom, spring-boot-dependencies) (group match
-    only)`;
-  - at v0.18.0, the control: `managed by
-    com.fasterxml.jackson:jackson-bom@2.21.5` for both.
-
-  Through `prxref review --no-post --diff-file ... --repo-dir ...` the same
-  repro gave no dependency block at either version (lesson 2).
-- **#26 on the real litellm library, offline.** A dead proxy, fake AWS
-  credentials, the model `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
-  `PRXREF_LLM_REASONING_EFFORT=medium`, `LITELLM_DROP_PARAMS` unset.
-  `PRXREF_LLM_SEED` unset or `7`: `UnsupportedParamsError` naming `seed`
-  before any request, the reported bug. `off`: param mapping passed,
-  `reasoning_effort` included, and the call failed only with
-  `APIConnectionError`, the network being blocked by design.
+    only)`.
+  - At v0.19.0, the control, the same command gives no dependency-version
+    lines: the prompt's only headers are `### Spec constraints` and
+    `### Diff`.
 - The last live model result is 0.18.0's, the context follow-up on #22's
   fixture through GLM 5.3 Flash: see the intro of the `[0.18.0]` section of
   `CHANGELOG.md`.
@@ -246,7 +203,7 @@ no live model run was made for it. Two offline end-to-end checks ran instead:
   #22's second bug surfaced in 2 of 3 live runs, and both times its
   definitions were looked up and sent, but GLM 5.3 Flash did not re-assert
   it at or above the 0.60 floor, so it was dropped as "not confirmed". On
-  that model, nothing in 0.18.0 or 0.19.0 posts it. A stronger model, or
+  that model, nothing in 0.18.0 through 0.20.0 posts it. A stronger model, or
   more runs, is the next measurement (the v0.18.0 handoff's Live checks).
 - **The follow-up's effect is one single-factor measurement.** Three live
   checks at N=3 per arm on one fixture, through one model. A confirmation is
@@ -267,6 +224,18 @@ no live model run was made for it. Two offline end-to-end checks ran instead:
 
   Measure with `prxref eval` over more runs a level before changing the
   default from `off`.
+
+0.20.0's known limitations:
+
+- **Nothing records where chunk context came from.** The run record's
+  `repo_context.reader` names the repository-context reader only (`forge`,
+  `repo-dir` or `null`), and `repo_context` itself is `null` at `off`, so a
+  run record does not say
+  whether the dependency and definitions blocks were read from the forge or
+  from `--repo-dir`; the trace's prompt files show what was sent.
+- **The `--repo-dir` fallback applies no exclusion**, as the forge's chunk
+  reader applies none. `PRXREF_CONTEXT_EXCLUDE_GLOBS` limits repository
+  context only.
 
 0.19.0's known limitations:
 
@@ -431,7 +400,7 @@ Listing, retry and cost notes:
   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
   thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
   and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
-  changed in 0.16.0 through 0.19.0; raise both for such a model. The
+  changed in 0.16.0 through 0.20.0; raise both for such a model. The
   recipe under "Measuring repository context" in `tests/evals/README.md` sets
   neither, so run verbatim against such a model it cuts the replies off.
 
@@ -563,13 +532,9 @@ Carried over from 0.15.0 and earlier, still true:
   - Reading an MR's threads on gitlab.com needs `PRXREF_GITLAB_TOKEN`, even for
     a public project. Without one, thread dedup runs against no threads.
 - **Replay from a diff file.** A `--diff-file` run without `--pr-url` has no
-  file context and no threads. `--repo-dir` gives it repository context,
-  but the dependency-versions and same-file definitions blocks, Java and
-  Kotlin ones included, still read only through the forge
-  (`orchestrator._make_file_reader`), so they stay empty; 0.19.0's #25
-  check hit this (lesson 2). The title comes
-  from the patch mail or the file name. The description comes from the
-  mail, `--description-file` or `--no-description`.
+  threads, and no file context unless `--repo-dir` names a checkout. The
+  title comes from the patch mail or the file name. The description comes
+  from the mail, `--description-file` or `--no-description`.
 - **Azure DevOps.**
   - Only anonymous reads are verified live: the forge reads, the dry-run output
     shape, the pinned-range compare diff, a pinned-range replay, and, new in
@@ -632,7 +597,7 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.19.0` (minor: the JVM BOM-owner fix, #25, and the litellm effort and seed fix, #26; no new config key, one new value, `PRXREF_LLM_SEED=off`; no new run-record or `--format json` key; no new module; no new CLI flag; no existing config default changed; at the defaults only the dependency-version lines of Java and Kotlin files change) |
+| Released version | `0.20.0` (minor: chunk context from `--repo-dir` for a `--diff-file` review with no `--pr-url`, #29; no new config key or value; no new run-record or `--format json` key; no new module; no new CLI flag; no existing config default changed; forge-backed reviews unchanged) |
 | Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
