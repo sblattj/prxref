@@ -50,7 +50,8 @@ NEW_RECORD_KEYS = [
     "context_followup", "suggestions",
 ]
 FINDING_KEYS = [
-    "file", "line", "severity", "confidence", "scope", "rule", "locations", "title", "body", "drop_reason",
+    "file", "line", "severity", "confidence", "scope", "rule", "suggestion", "suggestion_end_line",
+    "locations", "title", "body", "drop_reason",
 ]
 
 RULES = {

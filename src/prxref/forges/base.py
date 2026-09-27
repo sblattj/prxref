@@ -48,13 +48,20 @@ class InlineComment:
 
 @dataclass
 class Thread:
-    """An existing discussion thread on a PR (for dedup against re-review)."""
+    """An existing discussion thread on a PR (for dedup against re-review).
+
+    ``line`` is the thread's anchor line: the last line of a multi-line
+    thread. ``start_line`` is the first line of a multi-line thread, and
+    ``None`` for a single-line or file-level thread or on a forge that does
+    not report one.
+    """
 
     path: str | None
     line: int | None
     resolved: bool
     author: str
     body_snippet: str
+    start_line: int | None = None
 
 
 @dataclass

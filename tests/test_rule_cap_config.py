@@ -34,6 +34,7 @@ EVALS_MD = (REPO_ROOT / "docs" / "evals.md").read_text(encoding="utf-8")
 NUMBER_WORDS = {
     10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
     15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen",
+    19: "nineteen",
 }
 
 
