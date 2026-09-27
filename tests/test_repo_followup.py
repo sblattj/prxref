@@ -339,9 +339,66 @@ def test_lookup_names_merges_tiers_across_questions_and_caps(monkeypatch):
     assert lookup_names([first, second], defined=(), max_names=10) == [
         "Alpha", "Gamma", "beta", "delta", "a_helper",
     ]
-    assert lookup_names([first, second], defined={"Gamma"}) == ["Alpha", "beta", "delta"]
+    assert lookup_names([first, second], defined={"Gamma"}) == ["Alpha", "delta", "beta"]
     monkeypatch.setattr(repo_followup, "MAX_FOLLOWUP_NAMES", 0)
     assert lookup_names([first, second], defined=()) == []
+
+
+PARAPHRASE_Q1 = (
+    "Serialization fails",
+    "engine.run_turn calls store.save which json.dumps the ProgressLedger; "
+    "StateStore.save raises TypeError on run.root(",
+)
+PARAPHRASE_Q2 = ("History window", "history.py builds model_history from table.recent(session_id)")
+
+
+def test_a_second_question_gets_a_name_and_builtins_get_none():
+    ranked = [name_tiers(*PARAPHRASE_Q1), name_tiers(*PARAPHRASE_Q2)]
+    names = lookup_names(ranked, defined={"ProgressLedger"})
+    assert {"recent", "model_history"} & set(names)
+    assert "TypeError" not in names
+    assert names[0] == "StateStore"
+
+
+def test_every_question_gets_a_slot_before_any_gets_two():
+    first = (("Alpha", "Beta", "Gamma", "Delta", "Epsilon"), (), ())
+    second = ((), (), ("second_name",))
+    third = ((), (), ("third_name",))
+    assert lookup_names([first, second, third], defined=(), max_names=3) == [
+        "Alpha", "second_name", "third_name",
+    ]
+    assert lookup_names([first, second, third], defined=(), max_names=5) == [
+        "Alpha", "second_name", "third_name", "Beta", "Gamma",
+    ]
+
+
+def test_more_questions_than_slots_keeps_the_first_questions():
+    ranked = [((f"Name{i}", f"Other{i}"), (), ()) for i in range(5)]
+    assert lookup_names(ranked, defined=(), max_names=3) == ["Name0", "Name1", "Name2"]
+    assert lookup_names(list(reversed(ranked)), defined=(), max_names=2) == ["Name4", "Name3"]
+
+
+def test_a_question_whose_best_name_is_taken_counts_as_served():
+    ranked = [(("Alpha",), (), ()), (("Alpha", "Beta"), (), ()), (("Gamma",), (), ())]
+    assert lookup_names(ranked, defined=(), max_names=2) == ["Alpha", "Gamma"]
+    assert lookup_names(ranked, defined=(), max_names=3) == ["Alpha", "Gamma", "Beta"]
+
+
+def test_a_question_best_name_skips_defined_names():
+    ranked = [(("Alpha", "Beta"), (), ()), (("Gamma",), ("delta",), ())]
+    assert lookup_names(ranked, defined={"Alpha", "Gamma"}, max_names=2) == ["Beta", "delta"]
+
+
+def test_name_tiers_never_returns_a_python_builtin():
+    tiers = name_tiers(
+        "`TypeError` in `StateStore.save`",
+        "It calls len(rows), dict(x) and isinstance(run, object); StateStore raises ValueError.",
+    )
+    flat = [name for tier in tiers for name in tier]
+    assert "StateStore" in flat and "save" in flat
+    for builtin in ("TypeError", "ValueError", "len", "dict", "isinstance", "object"):
+        assert builtin not in flat
+    assert finding_names("t", "`KeyError` from `print` and `open`") == []
 
 
 def test_question_indices_below_floor_best_first():
