@@ -106,7 +106,7 @@ is refused, and a field set to `null` counts as absent.
 | `diff_file` | one of these two | A unified diff (`git diff` or `git format-patch` output) holding at least one file diff. |
 | `base_sha`, `head_sha` | with `pr_url` | The pinned range, as the replay flags take it: a pair, full 40- or 64-character hex, two different commits. Stored lowercased. |
 | `context_file` | no | The ticket the PR implements, given to the review as `--context-file`. |
-| `repo_dir` | no | A directory holding the repository at the PR head. Repository context (`PRXREF_REPO_CONTEXT=repo`) reads and lists files there instead of calling a forge; the field has no effect when repository context is off. |
+| `repo_dir` | no | A directory holding the repository at the PR head. Repository context (`PRXREF_REPO_CONTEXT=repo`) reads and lists files there instead of calling a forge. A diff-file case also reads its chunk context (dependency versions, definitions) there at any repository context level, `off` included; a pull-request case reads chunk context from the forge. |
 | `spec` | no | Spec sources, as `--spec` takes them: one string or an array of strings, each a local path or an `http(s)` URL. |
 
 A case replays either a local diff (`diff_file`), or a pull request pinned
@@ -224,8 +224,10 @@ process by the same code `prxref review` runs, as a replay with
   `PRXREF_TICKET_CONTEXT_FILE` and `PRXREF_SPEC_SOURCES` never reach a case.
 - **No threads.** The PR's existing discussion is hidden from the prompt and
   from the thread-dedup passes, as with `--no-threads`.
-- **A diff-file case** contacts no forge. It has no threads and no file
-  context, and a `git format-patch` file supplies the title and description.
+- **A diff-file case** contacts no forge. It has no threads, and no file
+  context unless it has a `repo_dir`, which serves its chunk context
+  (dependency versions, definitions). A `git format-patch` file supplies the
+  title and description.
 - **A pull-request case** reads the merge-base diff `BASE...HEAD` from the
   forge, with file context at `HEAD`, so it needs the forge's credentials as
   `prxref review` does. Its title and description are pinned as a replay
