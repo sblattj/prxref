@@ -204,6 +204,7 @@ from .forges.base import (
     Thread,
 )
 from .forges.repo_dir import RepoDir
+from .formatter import SUGGESTION_STYLE_GITHUB, format_suggestion_block, suggestion_range
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
 from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
@@ -1450,12 +1451,11 @@ def orchestrate_review(
                 *finding_rank_key(f),
             ),
         )
+        suggestion_style = getattr(forge, "suggestion_style", None)
+        if not isinstance(suggestion_style, str):
+            suggestion_style = None
         comments = [
-            InlineComment(
-                path=f.file,
-                line=f.line,
-                body=_format_finding(f, model),
-            )
+            _inline_comment(f, model, suggestion_style)
             for f in ordered[:max_inline_comments]
         ]
         inline_attempted = len(comments)
@@ -3104,12 +3104,31 @@ def _summary_bullets(findings: Sequence[Finding]) -> str:
     )
 
 
-def _format_finding(f: Finding, model: str) -> str:
+def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
+    block = format_suggestion_block(f, suggestion_style)
+    suggestion = f"{block}\n\n" if block else ""
     return (
         f"{inline_header(f)}\n\n"
         f"{f.body}\n\n"
+        f"{suggestion}"
         f"---\n*Reviewed by prxref · model={model}*"
     )
+
+
+def _inline_comment(f: Finding, model: str, suggestion_style: str | None) -> InlineComment:
+    """Build one finding's inline comment for a forge's ``suggestion_style``.
+
+    GitHub applies a suggestion to the comment's whole line range, so a
+    multi-line suggestion there is anchored at its last line with
+    ``start_line`` at its first. Every other style anchors at the finding's
+    line, and a finding without a renderable suggestion is the exact comment
+    it was before suggestions existed.
+    """
+    span = suggestion_range(f)
+    body = _format_finding(f, model, suggestion_style)
+    if suggestion_style == SUGGESTION_STYLE_GITHUB and span is not None and span[1] > span[0]:
+        return InlineComment(path=f.file, line=span[1], body=body, start_line=span[0])
+    return InlineComment(path=f.file, line=f.line, body=body)
 
 
 def _trace_post_begin(
