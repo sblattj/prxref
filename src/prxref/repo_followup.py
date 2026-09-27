@@ -12,8 +12,10 @@ the pull request head (:func:`lookup_excerpts`) and renders the prompt block
 Names come from structure, never from phrase lists: the backtick spans of a
 finding's title and body first, then the identifiers of its plain text whose
 shape marks them as code (a dotted chain, a call, a ``_``, a type-like word;
-see :func:`name_tiers`). A Python builtin such as ``TypeError`` or ``len``
-never counts, since it has no definition in the repository. A name the PR
+see :func:`name_tiers`). A Python builtin class such as ``TypeError`` never
+counts, nor does a bare lowercase builtin such as ``len(``, since neither
+has a definition in the repository; after a dot (``store.filter(``) a
+lowercase builtin name is a repository attribute and counts. A name the PR
 defines itself, on a hunk line of any file or anywhere in the head text of
 the chunk's own files (:func:`diff_defined_names`), is not looked up, since
 the worker was shown it. Every question gets one name before any question
@@ -59,11 +61,12 @@ _CHAIN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
 _PATH_SEPARATORS = ("/", "\\")
 _RECEIVERS = frozenset({"self", "this", "cls", "super"})
 _LITERALS = frozenset({"None", "True", "False", "null", "true", "false", "undefined", "nil", "NaN"})
-_PY_BUILTINS = frozenset(dir(builtins))
+_PY_BUILTIN_CLASSES = frozenset(name for name in dir(builtins) if name[:1].isupper())
+_PY_BARE_BUILTINS = frozenset(dir(builtins)) - _PY_BUILTIN_CLASSES
 _DROPPED = (
     _RECEIVERS
     | _LITERALS
-    | _PY_BUILTINS
+    | _PY_BUILTIN_CLASSES
     | chunk_context._PY_KEYWORDS
     | chunk_context._JS_KEYWORDS
     | jvm_lang.JAVA_KEYWORDS
@@ -120,8 +123,8 @@ def question_indices(findings: Sequence[Finding], floor: float) -> list[int]:
     return sorted(picked, key=lambda index: (-findings[index].confidence, index))
 
 
-def _kept(name: str) -> bool:
-    return len(name) >= 3 and name not in _DROPPED
+def _kept(name: str, dotted: bool) -> bool:
+    return len(name) >= 3 and name not in _DROPPED and (dotted or name not in _PY_BARE_BUILTINS)
 
 
 def _sentence_start(text: str, start: int) -> bool:
@@ -160,7 +163,7 @@ def _plain_names(text: str) -> list[tuple[int, str]]:
         called = text[end : end + 1] == "("
         at_start = _sentence_start(text, start)
         for position, name in enumerate(parts):
-            if name in seen or not _kept(name):
+            if name in seen or not _kept(name, position > 0):
                 continue
             tier = _plain_tier(name, len(parts), position, called and position == len(parts) - 1, at_start)
             if tier is None:
@@ -177,9 +180,13 @@ def name_tiers(title: str, body: str) -> tuple[tuple[str, ...], tuple[str, ...],
     span is one line of at most 120 characters) are kept when they have at
     least three characters and are not a receiver (``self``, ``this``,
     ``cls``, ``super``), a literal, a Python, JS/TS, Java or Kotlin keyword,
-    or a name of Python's :mod:`builtins` (``TypeError``, ``len``, ``dict``),
-    which cannot resolve to a repository definition. Tier 0 holds the type-like names (an uppercase first letter and a
-    lowercase letter), tier 1 the other names that directly follow a ``.``,
+    or a capitalised name of Python's :mod:`builtins` (``TypeError``,
+    ``Exception``), which cannot resolve to a repository definition. A
+    lowercase builtin (``len``, ``dict``, ``open``, ``filter``) is dropped as
+    a bare name or call, but kept when it directly follows a ``.``
+    (``store.filter(``), where it names a repository attribute. Tier 0 holds
+    the type-like names (an uppercase first letter and a lowercase letter),
+    tier 1 the other names that directly follow a ``.``,
     tier 2 the rest; each name appears once, in its first tier and position.
 
     The plain text outside the spans gives names too, under the same filters.
@@ -211,12 +218,13 @@ def name_tiers(title: str, body: str) -> tuple[tuple[str, ...], tuple[str, ...],
     for span in spans:
         for match in _NAME_RE.finditer(span):
             name = match.group(0)
-            if name in seen or not _kept(name):
+            dotted = match.start() > 0 and span[match.start() - 1] == "."
+            if name in seen or not _kept(name, dotted):
                 continue
             seen.add(name)
             if _type_like(name):
                 tiers[0].append(name)
-            elif match.start() > 0 and span[match.start() - 1] == ".":
+            elif dotted:
                 tiers[1].append(name)
             else:
                 tiers[2].append(name)
