@@ -8,7 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
-## [0.18.0] — 2026-09-25
+## [0.18.0] — 2026-09-27
 
 An opt-in context follow-up (#22, part 1). A chunk worker that cannot see a
 symbol's definition is told to ask about it at confidence 0.5 or below, so the
@@ -19,7 +19,11 @@ definitions; a question the second reply confirms posts, and one it does not
 is dropped with its own reason. It is off by default, and at `off` every
 prompt, forge read, LLM call and run-record value is the same as in 0.17.0.
 The run record and `--format json` gain one key, `context_followup`, which is
-`null` at `off`. The live check of the follow-up on #22's case is pending.
+`null` at `off`. On #22's own fixture through GLM 5.3 Flash (N=3 runs an arm,
+follow-up off against on), the history-window question appeared in 2 of the 3
+runs with it on; both times its definitions were looked up and sent, yet the
+model did not re-assert it above the floor, so it was dropped as not
+confirmed. The follow-up added about 3,000 input tokens when it fired.
 
 ### Added
 
@@ -2060,7 +2064,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/sblattj/prxref/releases/tag/v0.18.0
 [0.17.0]: https://github.com/sblattj/prxref/releases/tag/v0.17.0
 [0.16.0]: https://github.com/sblattj/prxref/releases/tag/v0.16.0
 [0.15.0]: https://github.com/sblattj/prxref/releases/tag/v0.15.0
