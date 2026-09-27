@@ -119,6 +119,7 @@ class ForgeImpl:
     """GitLab Forge adapter."""
 
     name: str = "gitlab"
+    suggestion_style: str = "gitlab"
 
     def __init__(self, session: requests.Session | None = None) -> None:
         """Initialize with an optional custom requests Session."""
