@@ -1,219 +1,191 @@
-# HANDOFF — v0.17.0 shipped: JVM chunk context, parse retry, shared-state readers
+# HANDOFF — v0.18.0 shipped: opt-in context follow-up (#22 part 1)
 
-**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-25 · **Supersedes** the
-v0.16.0 handoff.
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
+v0.17.0 handoff.
 
-0.17.0 gives a chunk worker Java and Kotlin chunk context (#20): for a changed
-`.java`, `.kt` or `.kts` file, the definitions its added lines reference from
-the rest of that file and the Maven or Gradle versions of what they import, at
-every `PRXREF_REPO_CONTEXT` level. A model reply that cannot be used as a
-review is sent again, up to `PRXREF_LLM_PARSE_RETRIES` times, default 1 (#21).
-At `PRXREF_REPO_CONTEXT=repo` a chunk also sees unchanged code that reads the
-state its added lines write, and a new deterministic check, always on, flags a
-toggle that ships on while the pull request's own test setup pins it off (#22,
-parts 2 and 3). `off` still adds no repository context, but a pull request with
-Java or Kotlin files gets new prompt blocks and forge reads with every setting
-at its default, and a `{}` reply now costs a second call. The user-facing
-account is the `[0.17.0]` section of `CHANGELOG.md`. This file is for whoever
-cuts the next release. The v0.16.0 handoff is in git history.
+0.18.0 adds the context follow-up (#22, part 1). A chunk worker that is not
+shown a symbol's definition is told to ask about it at confidence 0.5 or
+below, so the default floor of 0.6 drops the question however real the bug
+is. With `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo`, prxref
+looks up the definitions of the symbols such a question names and sends the
+chunk once more with them appended; a question the second reply confirms
+posts, and one it does not is dropped with its own reason. The follow-up is
+off by default, and at `off` every prompt and LLM call is the one 0.17.0
+makes; the run record and `--format json` only gain `context_followup`,
+`null`. The user-facing account is the `[0.18.0]` section of
+`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.17.0
+handoff is in git history.
 
 ## What landed
 
-- **#20 Java and Kotlin chunk context, as a module map.** Four new modules,
-  stdlib only, that do no I/O except through a `read(path)` callable:
-  - `jvm_lang`: `jvm_language` (`.java` gives `java`, `.kt` and `.kts` give
-    `kotlin`, in any case), `definition_regexes` (Java types, methods, fields
-    and constants, and enum constants; Kotlin types, `fun`, and `val` and
-    `var`), `annotation_start`, `parse_imports`, `keywords` and `JDK_NAMES`.
-  - `jvm_maven.resolve_pom`: a `pom.xml` through its `<properties>`, its
-    parent chain inside the repository, `<dependencyManagement>` and imported
-    BOMs.
-  - `jvm_gradle.gradle_build`: string-notation dependencies, `platform`,
-    `enforcedPlatform` and `mavenBom` as BOM owners, and the
-    `libs.versions.toml` catalog, probed at `catalog_paths` only when the
-    build file mentions `libs.`.
-  - `jvm_deps.dependency_lines`: finds the nearest build file
-    (`_nearest_manifest`, trying `MANIFEST_NAMES` at each level from the
-    file's directory up to the root), then matches the added lines' imports
-    to its dependencies, skipping `SKIPPED_ROOTS` and the project's own group.
+- **The follow-up, as a module map.** Three new modules, stdlib only, that
+  read files only through the `read` callable they are given.
+  - `repo_followup`, the lookup half. `question_indices` picks a chunk's
+    questions: its findings below the floor, most confident first.
+    `name_tiers` takes the names each one asks about, and `lookup_names` picks
+    the chunk's names from them. `lookup_excerpts` reads their definitions at
+    the pull request head, cut by `definition_body`, and
+    `render_followup_block` renders the prompt block under `FOLLOWUP_HEADER`
+    (`### Definitions referenced by this chunk, looked up for its open
+    questions`) and `FOLLOWUP_NOTE`.
+  - `followup_merge`, the confirm rule. `confirms` decides whether one
+    finding of the second reply confirms one question; `merge_followup` folds
+    the second reply into the first and returns a `MergeOutcome` with the
+    `confirmed`, `unconfirmed` and `discarded` counts. `UNCONFIRMED_PREFIX`
+    starts the new drop reason.
+  - `followup`, the per-chunk driver. `run_chunk_followup` runs the steps in
+    order, makes at most one `invoke`, never mutates the first result and
+    never raises. `skipped_row`, `ROW_KEYS` and `SKIP_REASONS` define the
+    chunk's run-record row.
 
-  How they reach the prompt: `chunk_context._language` now asks
-  `jvm_lang.jvm_language`; `chunk_context.dependency_versions` hands a Java or
-  Kotlin file to `jvm_deps.dependency_lines`, and skips `build.gradle.kts` and
-  `settings.gradle.kts` (`_GRADLE_SCRIPTS`) without a read; and
-  `chunk_context.referenced_definitions` uses `jvm_lang`'s regexes and starts
-  an entry at the annotation lines above a definition. Both run in
-  `orchestrator._context_blocks`, over the reader that
-  `orchestrator._make_file_reader` builds. `orchestrate_review` builds that
-  reader before, and outside, its `repo_context != "off"` gate, so these
-  blocks and their reads happen at every level, `off` included, whenever the
-  forge has `get_file_content` and the pull request has a head sha. The
-  reader is cached per run and is not counted against the repository-context
-  read caps.
-- **#20 in repository context.** `repo_context.language_of` claims `.kt` and
-  `.kts` as `kotlin`, and `repo_context.definition_regexes` gives Kotlin one
-  regex, `jvm_lang.KOTLIN_TYPE_RE`, for type declarations only, as Java has
-  one for its types. Methods, functions and properties stay with chunk
-  context. `repo_context` keeps the 0.16.0 Java names (`_JAVA_DEF_RE`,
-  `_JAVA_KEYWORDS`, `_JDK_NAMES`) as aliases of `jvm_lang`'s objects.
-- **Who shows a chunk file's own definitions.** Chunk context and repository
-  context both serve definitions, and they split by name, not by file
-  (lesson 3). `repo_crosschunk._SAME_FILE_LANGUAGES` is `js`, `python`,
-  `java` and `kotlin`. With a reader, `repo_crosschunk.diff_definitions`
-  searches a chunk file in one of those languages only for the wanted names
-  that are not identifiers on that file's own added lines, because
-  `chunk_context.referenced_definitions` already shows those. A name that
-  only another file of the chunk references is still found there, as a
-  `diff-file` entry, and a file with no name left is skipped without a read.
-- **#21 `PRXREF_LLM_PARSE_RETRIES`.** `reviewer._invoke_and_parse` holds the
-  whole mechanism, for chunks and the sweep alike.
-  - `_read_reply` classifies a reply and `_may_retry` spends one shared
-    budget, N. Retried: an empty reply, one that does not parse, one that is
-    not a JSON object and, at N of 1 or more only, an object without a
-    `findings` list (`_NO_FINDINGS_ERROR`). An empty reply keeps 0.16.0's one
-    retry even at N = 0.
-  - Never retried: a reply the provider stopped at the budget
-    (`_TRUNCATION_FINISH_REASONS`, `length` or `max_tokens`) and a call that
-    raised.
-  - A unit makes at most `1 + max(N, 1)` calls, so with the orchestrator's
-    timeout retry a chunk tops out at `2 * (1 + max(N, 1))`: 4 at the
-    default, as in 0.16.0.
-  - `_fold_retry_usage` sums every call's tokens and time, and the unit's
-    `model` is the last call's. A traced unit that retried keeps
-    `<label>.attempt<K>.response.json` for each discarded reply, and its meta
-    gains `parse_retries` and `first_error`, which `orchestrator._retry_meta`
-    carries into the worker result.
-  - `orchestrate_review` (`llm_parse_retries`), `review_chunk` and
-    `review_systemic` default to 0 for library callers. `cli._run_review`
-    passes the config value, so `prxref review`, the webhook server and
-    `prxref eval run` get 1.
-- **#21 recording and the judge.**
-  - The run record and `--format json` gain `parse_retries`, right after
-    `repo_context` (`cli._build_json_result`): `null` at N = 0, otherwise
-    `orchestrator._parse_retry_total` over every chunk and the sweep.
-  - `eval_judge.judge_case` retries on any `JudgeParseError`, truncation
-    included, up to N times, and `JudgeOutcome.parse_retries` counts them. At
-    N = 0 an empty judge reply gets no retry. `score.json`'s `judge` block
-    gains `parse_retries` after `llm_calls`, and `score.md`'s cost line names
-    the retries only when there were any.
-  - `evals.RUN_CONFIG_KEYS` gains `llm_parse_retries`, 17 keys in all.
-- **#22 part 2, shared-state readers.** `repo_readers` is new and pure.
-  - `shared_state_keys` takes the keys the added lines write: subscript
-    stores, and calls of a `WRITE_VERBS` verb, through a local alias. A key
-    the added lines assign a new value is skipped.
-  - `reader_candidates` orders the listed, unchanged, same-language files by
-    shared leading directories; `reader_matches` finds the reads (`.key`,
-    `["key"]`, or `key.<method>(` with a method that is not a write verb);
-    `reader_entries` runs the search and cuts each excerpt from the enclosing
-    definition down to the read.
-  - `repo_unit.build_unit_context` calls it at `repo` only, with a file
-    listing, after the resolver, on the reads the other sources leave.
-    `repo_context.KINDS` gains `reader`, and `REASONS` gains `shared-state`,
-    ranked last so the budget cuts it first.
-  - `chunk_context.render_context_blocks` takes `reader_lines` and renders
-    them last, under `READER_HEADER` (`### Code elsewhere that reads state
-    this chunk writes`). With it empty, the output is unchanged.
-- **#22 part 3, the pinned-off toggle.**
-  `heuristics.toggle_pinned_off_findings(files)` is pure and always on. It
-  posts one `warning` at confidence 1.0 on a toggle the pull request adds
-  with a default of on, when the pull request also adds a line to
-  `conftest.py`, `setupTests.*`, `jest.setup.*` or `vitest.setup.*` that pins
-  it off. The body ends `(deterministic check, no model)`. `orchestrate_review`
-  folds it in beside the release-shape finding, on the main path and on the
-  path for a diff with no chunks, so it goes through every quality pass.
-- **Caps**, each read from its constant.
-  - Chunk context, unchanged: `chunk_context.MAX_DEFINITION_ENTRIES` (40),
-    `MAX_LINES_PER_DEFINITION` (6, annotation lines included),
-    `MAX_DEFINITION_CHARS` (8,000) and `MAX_FILE_BYTES` (512 KiB).
-    `jvm_lang.MAX_ANNOTATION_LINES` (2) bounds the annotation lines an entry
-    starts at.
-  - Maven: `jvm_maven.MAX_POM_BYTES` (512 KiB), `MAX_POM_PARENTS` (5),
-    `MAX_PROPERTY_PASSES` (5) and `MAX_INTERPOLATED_CHARS` (1,024). A
-    `pom.xml` that holds `<!DOCTYPE` or `<!ENTITY` is refused before the XML
-    parser runs.
-  - Dependency matching: `jvm_deps.MIN_GROUP_PREFIX_SEGMENTS` (2) and
-    `MIN_SHARED_SEGMENTS` (3).
-  - Readers: `repo_readers.MAX_READER_ENTRIES` (6), `MAX_READER_SCAN` (24)
-    and `MAX_READER_LINES` (8), within `repo_reader.MAX_CHUNK_READS` (16) and
-    `MAX_RUN_READS` (200). They are module constants with no config key, and
-    setting `MAX_READER_ENTRIES` to 0 turns readers off with no read.
-- **Config went from 67 to 68 keys.** The one new key is
-  `PRXREF_LLM_PARSE_RETRIES` (integer, at least 0, no upper bound, default 1).
-  No existing config default changed.
+  How they reach a review: `orchestrate_review` takes
+  `context_followup="off"|"on"` (`FOLLOWUP_MODES`), which `cli._run_review`
+  passes from the config, so `prxref review` and the webhook server get it.
+  `orchestrator._run_worker` calls `_chunk_followup` after a chunk's first
+  attempt, and the re-run is `_invoke_chunk` with the block as
+  `extra_blocks`, joined after every other context block by a blank line.
+- **The gate.** The follow-up is active only when the key is `on`, the level
+  is `repo` and the repository-context plan has a reader (the forge or
+  `--repo-dir`). The check sits in `orchestrate_review` right after
+  `_plan_repo_context`, and the confidence floor is resolved only when it
+  passes. Otherwise the run logs `FOLLOWUP_INACTIVE_WARNING` once,
+  `PRXREF_CONTEXT_FOLLOWUP=on needs PRXREF_REPO_CONTEXT=repo and a repository
+  reader; the context follow-up is off for this run`, records `active: false`
+  and makes no extra call. That is not a configuration error; a value other
+  than `off` or `on` is, and exits 2.
+- **The trigger.** A chunk gets a follow-up when its first result has no
+  error, it did not take the timeout retry (`_run_worker` records
+  `skipped_row("timeout-retry")` instead of calling the driver), and at least
+  one finding without a `drop_reason` is below the floor. It is then skipped,
+  with the reason in the row, when no name is left (`no-names`) or no excerpt
+  is admitted (`no-excerpts`); with no excerpt there is no call. The sweep
+  never gets one.
+- **Names.** `name_tiers` reads the backtick spans of a question's title and
+  body first, then its plain text for names shaped like code: both halves of
+  a dotted access or call (`table.recent(`), a bare call (`name(`), a
+  snake_case or UPPER_SNAKE identifier, and a type-like word. A source file
+  name (`history.py`) and any part of a path give nothing. Every name has at
+  least 3 characters and is not a receiver, a literal, a Python, JS/TS, Java
+  or Kotlin keyword, a capitalised Python builtin (`TypeError`), or a bare
+  lowercase one (`len(`); after a dot a lowercase builtin name is kept as a
+  repository attribute. Type-like names rank first, then names after a dot,
+  then the rest, and plain-text names come after every backtick name.
+  `lookup_names` drops the names the pull request defines
+  (`diff_defined_names`) and gives every question one slot before any
+  question gets a second: first each question's best name, most confident
+  question first, then the remaining slots tier by tier.
+- **The one call.** The re-run keeps the first call's token budget, context
+  lines and prompt context, and gets `parse_retries=0` (an empty reply is
+  still retried once, as at 0.17.0's `N = 0`) and no timeout retry, so it
+  adds at most 2 calls to a chunk. Nothing it returns triggers another
+  follow-up.
+- **Confirmation.** `confirms`: the second-reply finding is at or above the
+  floor, in the same file, and within `quality.DEFAULT_LINE_TOLERANCE` (5)
+  lines of the question (both lines positive), or has the same normalized
+  title, or mentions a name resolved for the question at a word boundary.
+  The names resolved for a question are its own `finding_names` that an
+  admitted excerpt defines or covers. Questions settle in index order, and
+  each takes the most confident unused confirming finding, which replaces it
+  and then runs every quality pass. A question with resolved names and no
+  confirmation gets `not confirmed by context follow-up (confidence C below
+  floor F)`, which `apply_quality_gate` keeps instead of its own reason. A
+  question with no resolved name is left to the floor.
+- **Discards.** Every other finding of the second reply is dropped, never
+  posted: `discarded = len(rerun) - confirmed`, counted per chunk and per run.
+- **Failure.** A re-run that errors, times out, is truncated or raises keeps
+  the first findings, logs `context follow-up failed (keeping the first
+  review)` at WARNING and fills the row's `error`. `_chunk_followup` handles
+  a failure outside the driver the same way.
+- **The record.** The run record and `--format json` carry
+  `context_followup` right after `parse_retries` (`cli._build_json_result`):
+  `null` at `off`; at `on`, `{active, calls, confirmed, unconfirmed,
+  discarded, input_tokens, output_tokens, chunks}`
+  (`orchestrator._followup_record`). `chunks` is `null` when not active, and
+  otherwise holds one `ROW_KEYS` row per chunk (`null` for a chunk whose
+  worker left none): `questions`, `names`, each excerpt's `path`, `line`,
+  `symbol`, `source` and `chars` (never its text), `called`, `error`, the
+  three counts, the tokens and `skipped`. A run whose follow-up is on but
+  inactive, or that exits before its workers finish, records
+  `active: false`, zero counts and `chunks: null`.
+  `evals.RUN_CONFIG_KEYS` gains `context_followup` before `repo_context`, 18
+  keys in all.
+- **Traces.** Per chunk, `followup` events `start`, `ok`, `fail`, and `skip`
+  when the chunk had at least one question; one run-level `context_followup
+  ok` event with the totals, emitted only when the follow-up is active. With
+  `PRXREF_TRACE_DIR`, the re-run's files are `chunk<i>.followup.system.md`,
+  `.user.md`, `.response.json` and `.meta.json`, beside the chunk's own.
+- **Cost.** `followup._fold_usage` adds the re-run's tokens and time to the
+  chunk's, makes the chunk's `model` the re-run's when it answered, and folds
+  the costs through `costs.combine_reported`, so the cost is unknown when
+  either is. `parse_retries` and `first_error` stay the first call's. A
+  re-run that returned an error still counts its billed tokens.
+- **Caps**, each read from its constant in `repo_followup` when the function
+  runs, so a test can patch it: `MAX_FOLLOWUP_NAMES` (3) names per chunk,
+  `MAX_FOLLOWUP_READS` (8) reads, cached ones included, `MAX_FOLLOWUP_EXCERPTS`
+  (4) excerpts, `MAX_FOLLOWUP_EXCERPT_LINES` (30) lines per excerpt, ending
+  `… N more lines` when cut, and `MAX_FOLLOWUP_CHARS` (4,000) characters.
+  The reads go through a fresh `_routed_read`, so the follow-up has its own
+  per-chunk read cap; a file the pull request changes and an excluded path
+  are never read. There is no config key for any cap.
+- **Config went from 68 to 69 keys.** The one new key is
+  `PRXREF_CONTEXT_FOLLOWUP` (choice, `off` or `on`, default `off`). No
+  existing config default changed.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **A golden "from the released version" can silently be the tree.** Run
-   inside the checkout, `uv run --no-project --with prxref==0.16.0` imported
-   the working tree's prxref, whose `__version__` read 0.16.0 until this
-   commit bumped it. The first cross-check of the parse retry against 0.16.0
-   therefore compared the tree with itself, and its 0 differences meant
-   nothing. Only `prxref.__file__`, `src/` rather than `site-packages`,
-   showed it. The fix is in `tests/fixtures/issue20/make_golden.py`: run from
-   outside the repository with `uv run --isolated --no-project --with
-   prxref==0.16.0`, and refuse to write unless `prxref.__file__` is under
-   `/site-packages/` as well as the version matching. Assert where the module
-   came from, never only its version string.
-2. **"Off is byte-identical" was a claim about prompts, and #17's test also
-   pinned forge reads.** Java and Kotlin chunk context added 23 `off` reads
-   to the #17 fixture, 21 build-file probes over 7 directory levels and its
-   two Java files, while every `off` prompt stayed byte-identical to
-   0.15.0's. `TestOffMatchesTheReleased015` in
-   `tests/test_issue_17_acceptance.py` went red 12 times, on the read pins
-   alone. It now compares the prompts with the 0.15.0 golden byte for byte
-   and the reads only after leaving out JVM paths (`_is_jvm`);
-   `test_off_jvm_reads_are_the_pinned_list` pins those reads literally
-   (`JVM_READS`), and `test_the_golden_reads_no_jvm_path` proves the filter
-   hides nothing the golden holds. When a feature adds reads on purpose,
-   split the pin by what changed; regenerating the golden would stop it
-   being a 0.15.0 oracle.
-3. **Two sources that serve definitions must split by name, not by file.**
-   Chunk context now shows a Java or Kotlin file's own definitions, so
-   repository context had to stop repeating them. Leaving every chunk file in
-   a same-file language out of `repo_crosschunk.diff_definitions` did that,
-   but it also lost a definition that one file of a chunk references and
-   another file of the same chunk holds outside its hunks, and 7 tests beyond
-   the #17 read pins went red. The rule that shipped leaves out only the
-   names on a file's own added lines (What landed). `TestTheChunksOwnFiles`
-   in `tests/test_repo_context_crosschunk.py` pins it for Java, Kotlin,
-   Python and JavaScript, and it fixed the same gap in 0.16.0's Python and
-   JavaScript handling (CHANGELOG `[0.17.0]`, Fixed).
-4. **The parse retry changes behaviour at its default, and `0` is exactly
-   0.16.0.** At `PRXREF_LLM_PARSE_RETRIES=1` a `{}` reply costs a second call,
-   and the unit fails if that reply has no `findings` list either, where
-   0.16.0 counted a clean review. `TestZeroIsTheOldBehaviour` in
-   `tests/test_issue_21_acceptance.py` pins `0`. A one-off cross-check ran 6
-   reply scenarios through the tree at `0` and through the released 0.16.0,
-   installed as lesson 1 says, and found 0 differences in exit code, calls
-   per unit, request bodies and JSON output. The control, the tree at `1`,
-   differed in 5 of the 6. A custom worker or systemic template whose reply
-   drops `findings` now fails every unit, and no template check catches it.
-5. **The reader block made a missed bug an asserted one, once.** On issue
-   #22's own fixture through GLM 5.3 Flash (N=3 per arm, interleaved, one
-   factor varied), the shared-state reader block turned the serialization
-   bug from absent or dropped under the confidence floor (0 of 3 active)
-   into an active error-severity finding (3 of 3), for 216 more input tokens
-   per review. The history-window bug surfaced in 3 of 3 runs with readers,
-   but always under the 0.60 floor. The toggle check fired in all 6 runs.
-   Three runs an arm on one fixture is a first measurement, not a verdict on
-   the feature (Live checks).
-6. **A pass that runs over every finding runs over the deterministic ones
-   too.** The toggle check has no model, yet its finding was posted as an
-   `error` in 2 of arm B's 3 live runs and as a `warning` in the third
-   (Live checks). Severity consistency had raised it: a model `error` in the
-   same file shared a rare code token with it. Those two runs logged
-   `severity consistency: raised 1 finding(s) via shared rare code
-   token(s)`, binding on `true` in one and on `assistant_progress_notes` in
-   the other, and the third run logged no such line. Only the variation gave
-   it away, because a check with no model should post the same severity on
-   every run. A finding that `heuristics.is_deterministic` marks now takes no
-   part in severity consistency. `TestDeterministicFindingsKeepTheirSeverity`
-   in `tests/test_quality.py` and `tests/test_deterministic_severity.py`,
-   through the local review path on #22's fixture, pin it, each with a
-   control that shows the raise without the exemption. Finding grouping,
-   which is opt-in, can still raise one (`docs/quality.md`).
+1. **A feature can pass every mocked acceptance test and do nothing live.**
+   The first live run made 0 follow-up calls in 3 runs with the follow-up
+   on: every question was skipped `no-names`, because the model wrote the
+   identifiers it asked about (`model_history`, `table.recent(`,
+   `session_id`) without backticks, and name extraction read backtick spans
+   only. Every acceptance reply had been written by people, who use
+   backticks. `name_tiers` now also reads plain-text code shapes, and
+   `TestPlainTextNames::test_a_question_without_backticks_is_confirmed` in
+   `tests/test_issue_22_followup_acceptance.py` pins a reply with no
+   backticks at all. Write at least one fixture reply the way the model
+   under test writes, not the way the author would.
+2. **A shared cap needs a fairness rule.** In the second live run the
+   follow-up fired and confirmed a real serialization finding the first
+   reply had left under the floor, but a second question, the history-window
+   one, got no lookup: `lookup_names` merged tier by tier across questions,
+   so the first question's names filled the 3 slots, one of them
+   with the builtin exception name `TypeError`. Now every question gets one
+   slot before any gets two, and Python builtin classes and bare builtins are
+   skipped. `test_every_question_gets_a_slot_before_any_gets_two` and
+   `test_a_second_question_gets_a_name_and_builtins_get_none` in
+   `tests/test_repo_followup.py`, and
+   `TestPlainTextNames::test_a_second_question_still_gets_a_name`, pin it.
+   In the third live run the history question's names reached the lookup
+   both times it appeared.
+3. **A per-chunk call ceiling that looks like it rises does not.** The
+   follow-up adds at most 2 calls, but only to a chunk that took no timeout
+   retry, so the ceiling stays `2 * (1 + max(N, 1))`, 4 at the default: a
+   follow-up chunk makes at most `3 + max(N, 1)`, and `1 + max(N, 1)` is at
+   least 2. `test_a_timeout_retried_chunk_is_skipped_without_the_driver` in
+   `tests/test_orchestrator_followup.py` pins the half that keeps it there.
+4. **Off-identity was pinned against the released tree.**
+   `tests/test_context_followup_off_identity.py` records, as literals
+   captured from the `v0.17.0` commit, the request count and the sha256 of
+   every request's `messages` on #22's fixture at `PRXREF_REPO_CONTEXT=repo`,
+   with a sub-floor question in every chunk reply, exactly what the
+   follow-up keys on. The key unset and `off` must both match those literals
+   and give the same `--format json` payload, with `context_followup` null.
+   The golden pins prompts and calls, not forge reads. That `off` never
+   resolves the floor and never calls the driver, the only path to a
+   follow-up read, is pinned separately, by
+   `test_off_never_resolves_the_floor_or_calls_the_driver` in
+   `tests/test_orchestrator_followup.py`.
+5. **The mechanism works live; the model still did not assert the second
+   bug.** In the third live run the history-window question appeared in 2 of
+   3 runs with the follow-up on, and both times its definitions were looked
+   up and sent, yet GLM 5.3 Flash did not re-assert it at or above the
+   floor, so both landed as "not confirmed". That is a model judgment with
+   the definition in view, not a starved pipeline. The named confound: a
+   confirmation mixes the new excerpt with a second sample of the same
+   chunk, so N=3 cannot separate "the excerpt helped" from "resampling
+   helped" (Live checks).
 
 ## The coupling that will catch the next person adding a config key
 
@@ -235,61 +207,50 @@ together:
 A key that feeds `orchestrate_review` needs one more step. `tests/test_cli.py`
 (`test_run_review_passes_every_configured_orchestrate_kwarg`) requires
 `cli._run_review` to pass every orchestrator kwarg whose name equals a config
-key. The one key 0.17.0 added, `llm_parse_retries`, feeds it this way, and
-`prxref eval score` also reads it for the judge. Current values: **68** keys,
-**1** legacy alias, **69** accepted names.
+key. The one key 0.18.0 added, `context_followup`, feeds it this way, and
+`prxref eval run` records it in `run.json` (`evals.RUN_CONFIG_KEYS`). Current
+values: **69** keys, **1** legacy alias, **70** accepted names.
 
 ## Release shape (follow this next time)
 
-How 0.17.0 was built:
+How 0.18.0 was built:
 
-1. **One survey and one decisions file first.** A read-only survey of the
-   code #20, #21 and #22 would touch came first, down to the test pins each
-   change would move. A decisions file then settled every open question
-   before any code was written: keep the 0.15.0 `off` golden and re-scope
-   its read check rather than regenerate it; put the JVM parsing in new
-   stdlib leaf modules, because `chunk_context` cannot import `repo_context`
-   without a cycle; the groupId matching rule; one shared parse-retry budget
-   that keeps 0.16.0's empty-reply retry, with library callers at 0; readers
-   inside repository context, at `repo` only and ranked last; the toggle as a
-   deterministic check rather than a prompt hint; and #22 part 1 deferred.
-   It also gave each new module one owner.
-2. **Foundation.** One task landed `PRXREF_LLM_PARSE_RETRIES` on every config
-   surface, and it merged first, before the wiring that reads it.
-3. **Pure modules first, wiring last.** Tasks ran in rounds of parallel
-   agents, each agent in its own worktree against a pinned base commit. Each
-   task was rated at most 5 of 10 for complexity, and each code task brought
-   its own tests. 20 tasks merged in five rounds:
-   - 7: the config key, the JVM language module, the Maven parser, the Gradle
-     parser, the reviewer's parse retry, the shared-state reader search, and
-     the toggle check
-   - 4: the JVM dependency matcher, the orchestrator and CLI threading of the
-     retry budget with its record key, the judge's retry, and the reader
-     wiring into the unit context
-   - 5: the chunk-context JVM wiring with the own-file rule, Kotlin in
-     repository context, the eval recording, the #21 acceptance tests, and
-     the toggle wiring
+1. **One design pass first.** Before any code, a read-only design settled
+   every open question: the follow-up is opt-in with a choice key, active
+   only at `repo` with a reader; one call per chunk with no parse retry and
+   no timeout retry, never for the sweep; names from structure, never from
+   phrase lists; whole definitions under fixed caps with no config key; the
+   confirm rule and the one new drop reason; an always-present record key,
+   `null` when off, following the `parse_retries` precedent; and an
+   off-identity golden taken from the released tree. It also gave each new
+   module one owner and wrote down the rewording of the single-shot rule in
+   `CLAUDE.md` and `docs/llm.md`.
+2. **Pure modules first, wiring last.** Tasks ran in rounds of parallel
+   agents, each in its own worktree against a pinned base commit, and each
+   code task brought its own tests. 10 tasks merged:
+   - 4: the config key, the lookup module, the confirm rule, and the
+     off-identity golden
+   - 2: the per-chunk driver, and the user documentation with the CHANGELOG
+     section
+   - 1: the orchestrator and CLI wiring with the record key
    - 1: the #22 acceptance tests over the issue's own fixture
-   - 3: the #17 acceptance re-scope (lesson 2), the #20 acceptance tests
-     against a golden from the released 0.16.0 (lesson 1), and the user
-     documentation with the CHANGELOG section
-4. **One integration gate per merge.** Each branch merged into `release/X.Y.Z`
-   on its own, and the 0.16.0 release commit was merged in after the first.
-   A merge stayed only if the full `uv run pytest` and
-   `uv run ruff check src tests` passed on the merged tree, with one
-   exception. The chunk-context JVM wiring was first held at 19 failures
-   (lesson 3), came back with 12, every one an `off` read pin in
-   `tests/test_issue_17_acceptance.py` with every prompt intact (lesson 2),
-   and merged with those 12 known, because the next round's re-scope owned
-   them. That re-scope turned them green: 8,660 passed, 0 failed. Over the 20
-   merges the passing count rose from 7,675 at 0.16.0 to 8,695 and never
-   fell; the documentation merge added no tests.
-5. **One read-only live check**, once the reader and toggle wiring merged:
-   the reader block against no reader on #22's fixture, through one model
-   and one lane, with a guard that blocked forge writes (Live checks).
-6. **Release.** This commit bumps the version, dates the CHANGELOG, corrects
-   the `PRXREF_REPO_CONTEXT` row of `docs/env-vars.md` and rewrites this
-   file, after the documentation task wrote the CHANGELOG section.
+   - 2 fixes, each sent back by a live check: plain-text names (lesson 1),
+     then slot fairness with the builtin filter (lesson 2)
+3. **One integration gate per merge.** Each branch merged into
+   `release/X.Y.Z` on its own, and a merge stayed only if the full
+   `uv run pytest` and `uv run ruff check src tests` passed on the merged
+   tree. The wiring task's own branch had one red test, the README key list
+   for `--format json`, which only the documentation task could fix; the
+   documentation merged first, so the wiring merged green. Over the 10
+   merges the passing count rose from 8,703 at 0.17.0 through 8,729, 8,751,
+   8,781, 8,797, 8,837, 8,848 and 8,856 to 8,865, and never fell; the
+   documentation merge added no tests.
+4. **Three read-only live checks**, once the wiring merged: the
+   follow-up off against on, on #22's fixture, through one model and one
+   lane. The first two each sent a fix back before release (Live checks).
+5. **Release.** This commit bumps the version, dates the CHANGELOG, states
+   the live result in its intro, corrects one README sentence about which
+   names are looked up, and rewrites this file.
 
 Cutting the release:
 
@@ -315,9 +276,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-8703 passed                                   uv run pytest -q
+8865 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.17.0                                        uv run prxref --version
+0.18.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -325,44 +286,61 @@ updated this file.
 
 ### Live checks
 
-- **Shared-state readers on issue #22's own fixture**, GLM 5.3 Flash through
-  llm-ferry (`domestic.flash`), on the local CLI path (`--diff-file`,
-  `--repo-dir`, `--description-file`) at `PRXREF_REPO_CONTEXT=repo`,
-  `PRXREF_LLM_MAX_TOKENS=32768` and `PRXREF_LLM_TIMEOUT=900`. One factor
-  varied: arm A set `repo_readers.MAX_READER_ENTRIES` to 0, and arm B kept
-  the default of 6. The runs were interleaved, A B A B A B, N=3 per arm, with
-  no re-rolls.
-  - The reader block reached a prompt only in B: 1 of each run's 3 prompts,
-    the chunk holding `progress.py`.
-  - The serialization bug went from absent or dropped under the 0.60
-    confidence floor (0 of 3 active in A; dropped at 0.50 in 2) to an active
-    error-severity finding in 3 of 3 B runs.
-  - The history-window bug surfaced in 3 of 3 B runs and in none of A's,
-    always dropped at 0.50 under the 0.60 floor: the block made the model see
-    it, not assert it (Still open).
-  - The toggle check fired in all 6 runs, on the same line.
-  - Cost: 216 more input tokens per review (+2.8%). Output tokens overlap
-    between the arms.
-  - The parse retry never fired: 0 retries and 0 failed chunks in 6 runs,
-    with no malformed reply seen.
-  - GLM served every run. llm-ferry's log shows no fallback in the run
-    window, and a probe after the runs reported 0 attempted fallbacks. No
-    probe was taken before the runs; the log window stands in for it.
-  - The write guard was active in all 6 runs.
+- **Context follow-up on issue #22's own fixture**, GLM 5.3 Flash through
+  llm-ferry (`domestic.flash`), `prxref review --no-post` at
+  `PRXREF_REPO_CONTEXT=repo`. One factor varied: arm A had
+  `PRXREF_CONTEXT_FOLLOWUP=off`, arm B `on`. Each check ran A B A B A B,
+  interleaved, N=3 per arm. Three checks ran; the first two each sent a fix
+  back. In every check GLM served with 0 fallbacks in a probe before and a
+  probe after the runs.
+  - **Before the plain-text names fix:** B made 0 follow-up calls in 3 runs.
+    Each run with a sub-floor question skipped it `no-names`, because the
+    model wrote the identifiers without backticks (lesson 1).
+  - **After it:** the follow-up fired in 1 of 3 B runs, 1 call, and
+    confirmed the serialization finding at `progress.py:47` (error,
+    confidence 0.9), for 2,937 more input and 9,687 more output tokens. The
+    history-window question (`README.md:7`, 0.50) got no lookup, because the
+    serialization question's names filled the 3 slots (lesson 2). The other
+    B runs had no sub-floor question, and so no call. Verdicts: mechanism
+    PASS; history-window bug FAIL, starved of slots.
+  - **After slot fairness (the released code):** the history-window
+    question appeared in 2 of 3 B runs (`progress.py:40` and `README.md:6`,
+    both 0.50). Both times its names reached the lookup and its definitions
+    were sent (`assistant/history.py:9` `model_history` and
+    `assistant/messages.py:19` `recent` in one run; `recent` beside
+    `StateStore` and `Frame` in the other). In neither did GLM re-assert it
+    at or above the floor, so both were dropped as `not confirmed by context
+    follow-up (confidence 0.50 below floor 0.60)`. One re-run confirmed a
+    serialization-side finding instead (`progress.py:31`, error, 0.85).
+    Verdicts: mechanism PASS; history-window bug asserted by the model FAIL
+    on GLM 5.3 Flash, 0 of 2; off arm unchanged.
+  - Cost when it fired: 2,903 and 3,027 more input tokens, about 36% of this
+    8,060-token review, plus the second reply's output tokens.
+  - The serialization bug was active in all 6 runs of the last check. In
+    the second check A missed it in 2 of 3 runs (Approved); N=3 cannot
+    separate an arm effect on it from GLM's variance, so none is claimed.
+  - The toggle check fired in all 6 runs of each check. The last check had
+    0 parse retries and 0 failed chunks.
+  - Named confound: a confirmation is a second sample of the chunk plus the
+    excerpt, so these runs cannot separate the excerpt's effect from
+    resampling.
 
 ## Still open — not part of this release
 
-- **#22 part 1 is not built, and #22 stays open.** Its follow-up lookup, one
-  bounded extra call that looks up the symbol a below-floor finding says it
-  could not see, is deferred. It would be the first time a model's output
-  chooses the next input, which crosses the project's single-shot,
-  pre-gathered-context rule, so it needs a decision on that rule first.
-- **The history-window bug stays under the floor.** With readers, #22's
-  second bug surfaced in 3 of 3 live runs, always at confidence 0.50 under
-  the 0.60 floor, so it was never posted. Nothing in 0.17.0 raises it.
+- **The history-window bug is still not asserted.** With the follow-up on,
+  #22's second bug surfaced in 2 of 3 live runs, and both times its
+  definitions were looked up and sent, but GLM 5.3 Flash did not re-assert
+  it at or above the 0.60 floor, so it was dropped as "not confirmed". On
+  that model, nothing in 0.18.0 posts it. A stronger model, or more runs, is
+  the next measurement (Live checks).
+- **The follow-up's effect is one single-factor measurement.** Three live
+  checks at N=3 per arm on one fixture, through one model. A confirmation is
+  a second sample of the chunk plus the excerpt, and N=3 cannot separate the
+  two (lesson 5). Measure with `prxref eval` over more runs before changing
+  the default from `off`.
 - **Repository context's effect on findings is measured for readers only.**
   - The reader block has one single-factor measurement, at N=3 per arm on one
-    fixture (Live checks).
+    fixture (the v0.17.0 handoff's Live checks).
   - #17's definitions and contract excerpts are still unmeasured. On the #17
     fixture, at 3 runs a level, one label matched in 0 of 3 runs at `off` and
     1 of 3 at `repo`, and the other in none; sampling noise explains that as
@@ -375,7 +353,40 @@ updated this file.
   Measure with `prxref eval` over more runs a level before changing the
   default from `off`.
 
-0.17.0's known limitations, in full in its CHANGELOG section:
+0.18.0's known limitations of the context follow-up:
+
+- **Confirmation needs the same file.** `followup_merge.confirms` rejects a
+  second-reply finding in another file, whatever it says. Live, the first
+  reply pinned the history-window question to `README.md:7` in one check and
+  to `README.md:6` in another, and in that run the re-run re-stated it at
+  `progress.py:40`: even at or above the floor it could only have landed as
+  "not confirmed", its re-statement discarded.
+- **Only code-shaped names are looked up.** A plain lowercase word with no
+  backticks, `.`, `(` or `_` gives no name, and a file path is never looked
+  up (`name_tiers`). A dotted name that is not a source file splits:
+  `pyproject.toml` gives `toml` and `pyproject`, `example.com` gives `com`
+  and `example`.
+- **The keyword sets are shared across languages.** Every name is checked
+  against the Python, JS/TS, Java and Kotlin keywords together, so a
+  repository symbol named like any of them is never looked up in any
+  language: `get`, `set` and `type` (JavaScript), and `open` (Kotlin), even
+  after a dot, as in `session.open(`. The builtin filter is Python's only;
+  JavaScript and Java builtins are not filtered beyond their keywords, and a
+  repository that defines its own `TypeError`, or a bare function named like
+  a Python builtin, does not get it looked up.
+- **One follow-up, chunks only, with no retries of its own.** A chunk that
+  took the timeout retry, the whole-PR sweep, and a question in the second
+  reply get no follow-up. The re-run has no parse retry (only the empty-reply
+  retry) and no timeout retry, so a failed re-run leaves the first findings
+  to the floor.
+- **The caps have no setting.** 3 names, 8 reads, 4 excerpts, 30 lines and
+  4,000 characters are module constants in `repo_followup`. With more
+  questions than name slots, the least confident questions get none.
+- **The follow-up costs about a third more input when it fires.** Live, a
+  re-run added 2,903 to 3,027 input tokens to an 8,060-token review, plus a
+  second reply's output tokens, which reached 9,687.
+
+0.17.0's known limitations, still true, in full in its CHANGELOG section:
 
 - **Java and Kotlin files cost forge reads at every level.** For a changed
   JVM file with an import outside `jvm_deps.SKIPPED_ROOTS`, the dependency
@@ -415,9 +426,6 @@ Found while building 0.17.0, not in the CHANGELOG:
   the default `PRXREF_DEDUP_SIMILARITY` (unset), both are kept, as any two
   chunk findings on one line are. With the similarity set, the reworded tier
   keeps one copy (`docs/quality.md`).
-- **The toggle finding's posted severity varied live.** The check emits
-  `warning`, but the live check recorded its finding at `error` in 2 of the
-  3 reader runs. The pass that raised it was not traced.
 - **A status-added chunk file is read for nothing.** With a reader,
   `repo_crosschunk.diff_definitions` still reads an added chunk file when
   another file of the chunk wants a name the added file's own lines lack.
@@ -479,12 +487,13 @@ Listing, retry and cost notes:
   reports no cost, the unit's cost is unknown, and `costs.run_cost`
   estimates it from the summed tokens at the rate of the unit's `model`,
   the last call's, even when another model in the fallback chain answered
-  an earlier call.
+  an earlier call. A context follow-up folds the same way: the chunk's
+  `model` becomes the re-run's when it answered.
 - **prxref's defaults are too small for a thinking model.**
   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
   thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
   and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
-  changed in 0.16.0 or 0.17.0; raise both for such a model. The recipe under
+  changed in 0.16.0, 0.17.0 or 0.18.0; raise both for such a model. The recipe under
   "Measuring repository context" in `tests/evals/README.md` sets neither, so
   run verbatim against such a model it cuts the replies off.
 
@@ -682,12 +691,14 @@ Follow-ups a maintainer can act on:
   always reads the systemic template. So the sweep's example title is in force
   even on a run whose sweep never runs.
 
-The v0.16.0 handoff's #20 bullet is **done** (Java and Kotlin chunk context),
-and so is its #21 bullet (the parse retry).
+The v0.17.0 handoff's #22 part 1 bullet is **done**: the follow-up lookup is
+built, opt-in, and the single-shot rule in `CLAUDE.md` and `docs/llm.md` now
+names it as its one bounded exception. The history-window bug it was meant to
+raise is still not posted on the model measured (Still open).
 
 | Item | Value |
 |---|---|
-| Released version | `0.17.0` (minor: Java and Kotlin chunk context, at every level; one new config key, `PRXREF_LLM_PARSE_RETRIES`, default `1`, which changes behaviour: a `{}` reply now costs a second call and can fail its unit, and `0` restores 0.16.0; one new run-record and `--format json` key, `parse_retries`, `null` at `0`; a new context block at `repo`, `### Code elsewhere that reads state this chunk writes`; one new always-on deterministic check, the pinned-off toggle; no new CLI flag; no existing config default changed) |
+| Released version | `0.18.0` (minor: the opt-in context follow-up, #22 part 1; one new config key, `PRXREF_CONTEXT_FOLLOWUP`, choice `off` or `on`, default `off`, no behaviour change at the defaults; one new run-record and `--format json` key, `context_followup`, `null` when off; three new modules, `repo_followup`, `followup_merge` and `followup`; one new drop reason, `not confirmed by context follow-up`, only when on; no new CLI flag; no existing config default changed) |
 | Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
