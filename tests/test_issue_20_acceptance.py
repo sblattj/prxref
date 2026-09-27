@@ -64,7 +64,9 @@ JVM_CHANGED = (ORDER_MAPPER, PRICE_CALCULATOR, LEGACY_EXPORT, STOCK_CLIENT, STOC
 BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts", "libs.versions.toml")
 
 JACKSON_MAVEN = "com.fasterxml.jackson.core:jackson-databind@2.17.2"
-SLF4J_MANAGED = "org.slf4j:slf4j-api@(managed by org.springframework.boot:spring-boot-dependencies@3.3.4)"
+SLF4J_MANAGED = (
+    "org.slf4j:slf4j-api@(managed by org.springframework.boot:spring-boot-dependencies@3.3.4) (group match only)"
+)
 JACKSON_GRADLE = "com.fasterxml.jackson.core:jackson-databind@2.16.1"
 
 PRICE_ENTRIES = [
