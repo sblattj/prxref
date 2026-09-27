@@ -292,6 +292,16 @@ LLM / pipeline:
                                 repository reader, the run logs one WARNING
                                 and the follow-up stays off for that run. Any
                                 other value is a configuration error
+  PRXREF_SUGGESTIONS            Code suggestions (#30): "off" (the default)
+                                leaves every prompt, call and finding as
+                                before, and the run record's "suggestions"
+                                is null. "on" asks each chunk worker (never
+                                the sweep) for an optional replacement text
+                                per finding, keeps only the ones that pass a
+                                deterministic check against the diff, and
+                                counts them in the run record. Matched
+                                exactly, like PRXREF_FAIL_ON; any other value
+                                is a configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -467,6 +477,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context": "off",
     "repo_context_max_chars": 12000,
     "context_followup": "off",
+    "suggestions": "off",
     # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
     # it rather than adding to it, and an empty value reads as unset (the
@@ -533,6 +544,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
+    "suggestions": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
