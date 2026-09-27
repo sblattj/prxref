@@ -204,12 +204,14 @@ from .forges.base import (
     Thread,
 )
 from .forges.repo_dir import RepoDir
+from .formatter import SUGGESTION_STYLE_GITHUB, format_suggestion_block, suggestion_range
 from .llm import LLMClient
 from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
 from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
 from .quality import (
     GROUPED_INTO_PREFIX,
     RULE_CAP_PREFIX,
+    SUGGESTION_CLEAR_REASONS,
     _resolve_confidence_floor,
     active,
     apply_containment_note,
@@ -226,6 +228,7 @@ from .quality import (
     apply_severity_consistency,
     apply_severity_map,
     apply_spec_grounding,
+    apply_suggestion_validation,
     apply_sweep_dedup,
     apply_thread_dedup,
     finding_rank_key,
@@ -463,6 +466,7 @@ def orchestrate_review(
     repo_dir: RepoDir | None = None,
     llm_parse_retries: int = 0,
     context_followup: str = "off",
+    suggestions: str = "off",
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -470,10 +474,11 @@ def orchestrate_review(
     chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
-    rule_counts, repo_context, parse_retries, context_followup}``, plus
+    rule_counts, repo_context, parse_retries, context_followup,
+    suggestions}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
-    :func:`_run_record`, so the last twelve keys are always present and are
+    :func:`_run_record`, so the last thirteen keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``; ``parse_retries``: ``0`` before any review unit when the
     parse retry is on) when their feature is off or the run never reached it.
@@ -790,6 +795,28 @@ def orchestrate_review(
     lists one row per chunk in chunk order (see
     :data:`prxref.followup.ROW_KEYS`), or ``None`` for a chunk whose worker
     left no row; one ``context_followup ok`` trace event carries the totals.
+
+    ``suggestions`` (``PRXREF_SUGGESTIONS``, issue #30) is ``"off"`` (the
+    default) or ``"on"``; any other value raises ``ValueError`` before any
+    forge call, a guard for a library caller only. Off, every prompt, call,
+    log line and trace event is exactly a run without it, every finding's
+    ``suggestion`` is ``None`` (:func:`_enforce_suggestion`), and the
+    record's ``suggestions`` key is ``None``. On, every chunk (never the
+    sweep) is asked for an optional suggestion
+    (:data:`reviewer.SUGGESTION_REQUEST`, through the one
+    :class:`reviewer.PromptContext`, so the context follow-up's re-send
+    carries it too); a ``worker`` override in ``prompts`` with no
+    ``{suggestion_example}`` slot after its ``## Review Context`` marker
+    still gets the request, and one WARNING per run names it. After the
+    per-rule cap and before the quality gate,
+    :func:`quality.apply_suggestion_validation` clears every suggestion
+    that is not safe to render, against the line each finding had before
+    :func:`quality.apply_line_align`, and keeps the finding. The
+    ``suggestions`` key, when on, is ``{"kept": n, "cleared": {<reason>:
+    n, ...}}``, one ``cleared`` entry per
+    :data:`quality.SUGGESTION_CLEAR_REASONS` reason in that order, counted
+    over the ACTIVE findings of the run (a dropped finding is not counted);
+    it is all zeros on an exit reached before the passes.
     """
     if repo_context not in repo_unit.MODES:
         raise ValueError(
@@ -798,6 +825,10 @@ def orchestrate_review(
     if context_followup not in FOLLOWUP_MODES:
         raise ValueError(
             f"context_followup must be one of {FOLLOWUP_MODES}, got {context_followup!r}"
+        )
+    if suggestions not in SUGGESTION_MODES:
+        raise ValueError(
+            f"suggestions must be one of {SUGGESTION_MODES}, got {suggestions!r}"
         )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -823,6 +854,7 @@ def orchestrate_review(
             0 if isinstance(llm_parse_retries, int) and llm_parse_retries >= 1 else None
         ),
         "context_followup": _followup_record() if context_followup == "on" else None,
+        "suggestions": _suggestion_record() if suggestions == "on" else None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -1121,11 +1153,14 @@ def orchestrate_review(
         worker_template=prompts.override("worker") if prompts is not None else "",
         systemic_template=prompts.override("systemic") if prompts is not None else "",
         rule_request=reviewer.RULE_REQUEST if rule_active else "",
+        suggestion_request=reviewer.SUGGESTION_REQUEST if suggestions == "on" else "",
     )
     if rule_active and prompts is not None:
         _warn_missing_rule_slot(
             prompts, feature="finding grouping" if group_findings else "the per-rule cap",
         )
+    if suggestions == "on" and prompts is not None:
+        _warn_missing_suggestion_slot(prompts)
     reader = _make_file_reader(forge, ref, pr, repo_dir=repo_dir)
     repo_plan: _RepoPlan | None = None
     unit_records: list[dict[str, Any] | None] | None = None
@@ -1229,6 +1264,7 @@ def orchestrate_review(
     findings = [f for r in results if not r["error"] for f in r["findings"]]
     findings = _enforce_scope(findings, ticket_active)
     findings = _enforce_rule(findings, rule_active)
+    findings = _enforce_suggestion(findings, suggestions == "on", sweep_start=sweep_start)
 
     # Futures were submitted in chunk order, so results[i] is chunk[i]'s
     # outcome for i < len(chunks): the zip pairs each failed review with the
@@ -1341,6 +1377,7 @@ def orchestrate_review(
     # The same reader the chunk context uses serves the full-file lines that
     # name the section when the anchor's own hunk starts below its header.
     findings = apply_manifest_claim_check(findings, files, read=reader)
+    model_lines = [f.line for f in findings]
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
     findings = apply_thread_dedup(findings, threads)
     findings = apply_settled_thread_suppression(findings, threads)
@@ -1368,6 +1405,16 @@ def orchestrate_review(
             findings, cap=max_findings_per_rule, confidence_floor=confidence_floor,
             sweep_start=sweep_start, tracer=tracer,
         )
+    cleared_suggestions: list[tuple[Finding, str]] = []
+    if suggestions == "on":
+        findings, suggestion_reasons = apply_suggestion_validation(
+            findings, files, model_lines=model_lines,
+        )
+        cleared_suggestions = [
+            (f, reason)
+            for f, reason in zip(findings, suggestion_reasons, strict=True)
+            if reason is not None
+        ]
     # The sweep boundary is positional, and the gate returns its findings in
     # content order, so _split_at_sweep re-derives the boundary from finding
     # identity and the gate's stable sort rather than carrying it across the
@@ -1396,6 +1443,8 @@ def orchestrate_review(
     findings_dropped = sorted(
         (f for f in findings if f.drop_reason is not None), key=finding_sort_key
     )
+    if suggestions == "on":
+        run_inputs["suggestions"] = _suggestion_record(findings_active, cleared_suggestions)
 
     verdict = (
         "Request-Changes"
@@ -1450,12 +1499,11 @@ def orchestrate_review(
                 *finding_rank_key(f),
             ),
         )
+        suggestion_style = getattr(forge, "suggestion_style", None)
+        if not isinstance(suggestion_style, str):
+            suggestion_style = None
         comments = [
-            InlineComment(
-                path=f.file,
-                line=f.line,
-                body=_format_finding(f, model),
-            )
+            _inline_comment(f, model, suggestion_style)
             for f in ordered[:max_inline_comments]
         ]
         inline_attempted = len(comments)
@@ -2203,6 +2251,90 @@ def _repo_context_record(
     }
 
 
+SUGGESTION_MODES = ("off", "on")
+
+
+def _suggestion_record(
+    findings_active: Sequence[Finding] = (),
+    cleared: Sequence[tuple[Finding, str]] = (),
+) -> dict[str, Any]:
+    """The ``suggestions`` record of a run with ``PRXREF_SUGGESTIONS=on`` (#30).
+
+    ``{"kept": n, "cleared": {<reason>: n, ...}}``, with one ``cleared``
+    entry per :data:`quality.SUGGESTION_CLEAR_REASONS` reason, in that
+    order, zeros included. ``kept`` counts the active findings that still
+    carry a suggestion. ``cleared`` pairs each finding
+    :func:`quality.apply_suggestion_validation` cleared with its reason;
+    the passes after it only drop and re-sort, and never touch ``file``,
+    ``line`` or ``title``, so a pair counts once for one active finding
+    without a suggestion on those three, and a pair whose finding was
+    dropped later counts nowhere. No arguments gives the all-zero record.
+    """
+    counts = dict.fromkeys(SUGGESTION_CLEAR_REASONS, 0)
+    pending: dict[tuple[str, int, str], list[str]] = {}
+    for f, reason in cleared:
+        pending.setdefault((f.file, f.line, f.title), []).append(reason)
+    kept = 0
+    for f in findings_active:
+        if f.suggestion is not None:
+            kept += 1
+            continue
+        reasons = pending.get((f.file, f.line, f.title))
+        if reasons:
+            counts[reasons.pop(0)] += 1
+    return {"kept": kept, "cleared": counts}
+
+
+def _enforce_suggestion(
+    findings: Sequence[Finding], active: bool, *, sweep_start: int,
+) -> list[Finding]:
+    """Hold every finding's code suggestion to what the run asked the model for (#30).
+
+    The ``suggestion`` twin of :func:`_enforce_rule`. Only chunk workers are
+    asked, and only when ``active``, so a sweep finding (at or after
+    ``sweep_start``) and, when not active, every finding has its
+    ``suggestion`` reset to ``None`` and ``suggestion_end_line`` to 0,
+    whatever a test double, a library reviewer or a backend that bypasses
+    the reviewer's own gate supplied. Returns a new list in the same order;
+    only a finding that changes is replaced, with
+    :func:`dataclasses.replace`.
+    """
+    out: list[Finding] = []
+    for index, f in enumerate(findings):
+        keep = active and index < sweep_start
+        if keep or (f.suggestion is None and f.suggestion_end_line == 0):
+            out.append(f)
+        else:
+            out.append(replace(f, suggestion=None, suggestion_end_line=0))
+    return out
+
+
+def _warn_missing_suggestion_slot(prompts: PromptTemplates) -> None:
+    """Warn once when suggestions are on and a worker override has no ``{suggestion_example}``.
+
+    The ``suggestion`` twin of :func:`_warn_missing_rule_slot`, for the
+    ``worker`` template only, because the sweep is never asked. Such an
+    override still gets :data:`reviewer.SUGGESTION_REQUEST` and its answers
+    are still read, but its ``## Output Format`` example finding shows no
+    ``"suggestion"`` key. One WARNING names the file and points at
+    ``prxref prompts export``; nothing is raised.
+    """
+    missing = [
+        f.path
+        for f in getattr(prompts, "overrides", ())
+        if f.name == "worker"
+        and "suggestion_example" not in placeholders(f.text.partition(CONTEXT_MARKER)[2])
+    ]
+    if missing:
+        logger.warning(
+            "PRXREF_SUGGESTIONS is on, but prompt template override(s) %s have no "
+            "{suggestion_example} slot after %r, so their example finding shows no "
+            "\"suggestion\" key; re-export with `prxref prompts export DIR --force` "
+            "and re-apply your edits to pick the slot up",
+            ", ".join(missing), CONTEXT_MARKER,
+        )
+
+
 FOLLOWUP_MODES = ("off", "on")
 
 FOLLOWUP_INACTIVE_WARNING = (
@@ -2485,6 +2617,7 @@ def _invoke_chunk(
         finding = _coerce_finding(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
+            accept_suggestion=prompt_context.suggestion_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -2786,10 +2919,14 @@ def _run_sweep(
 
 def _coerce_finding(
     item, *, accept_scope: bool = False, accept_rule: bool = False,
+    accept_suggestion: bool = False,
 ) -> Finding | None:
     if isinstance(item, Finding):
         return item
     if isinstance(item, dict):
+        suggestion, suggestion_end_line = (
+            reviewer.parse_suggestion(item) if accept_suggestion else (None, 0)
+        )
         try:
             return Finding(
                 file=str(item["file"]),
@@ -2803,6 +2940,8 @@ def _coerce_finding(
                     else SCOPE_UNKNOWN
                 ),
                 rule=normalize_rule(item.get("rule")) if accept_rule else None,
+                suggestion=suggestion,
+                suggestion_end_line=suggestion_end_line,
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)
@@ -3104,12 +3243,31 @@ def _summary_bullets(findings: Sequence[Finding]) -> str:
     )
 
 
-def _format_finding(f: Finding, model: str) -> str:
+def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
+    block = format_suggestion_block(f, suggestion_style)
+    suggestion = f"{block}\n\n" if block else ""
     return (
         f"{inline_header(f)}\n\n"
         f"{f.body}\n\n"
+        f"{suggestion}"
         f"---\n*Reviewed by prxref · model={model}*"
     )
+
+
+def _inline_comment(f: Finding, model: str, suggestion_style: str | None) -> InlineComment:
+    """Build one finding's inline comment for a forge's ``suggestion_style``.
+
+    GitHub applies a suggestion to the comment's whole line range, so a
+    multi-line suggestion there is anchored at its last line with
+    ``start_line`` at its first. Every other style anchors at the finding's
+    line, and a finding without a renderable suggestion is the exact comment
+    it was before suggestions existed.
+    """
+    span = suggestion_range(f)
+    body = _format_finding(f, model, suggestion_style)
+    if suggestion_style == SUGGESTION_STYLE_GITHUB and span is not None and span[1] > span[0]:
+        return InlineComment(path=f.file, line=span[1], body=body, start_line=span[0])
+    return InlineComment(path=f.file, line=f.line, body=body)
 
 
 def _trace_post_begin(

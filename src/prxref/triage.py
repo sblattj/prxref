@@ -111,8 +111,13 @@ class Finding:
     lists, in the same order) or on the best finding
     :func:`prxref.quality.apply_rule_cap` kept for a rule (every location it
     folded in, across files, sorted), and is ``()`` on every other finding.
-    It is not part of any identity or dedup key. The new fields trail the old ones, so
-    every positional construction keeps working.
+    It is not part of any identity or dedup key. ``suggestion`` is replacement
+    text for the new-file lines ``line`` through ``suggestion_end_line``
+    (``0`` means ``line`` alone), lines joined by newlines, ``""`` deleting
+    them; it is ``None`` unless suggestions are on and the suggestion passed
+    validation, so a non-``None`` value is safe to render. Neither is part of
+    any identity or dedup key. The new fields trail the old ones, so every
+    positional construction keeps working.
     """
 
     file: str
@@ -125,6 +130,8 @@ class Finding:
     scope: str = SCOPE_UNKNOWN
     rule: str | None = None
     locations: tuple[tuple[str, int], ...] = ()
+    suggestion: str | None = None
+    suggestion_end_line: int = 0
 
 
 @dataclass

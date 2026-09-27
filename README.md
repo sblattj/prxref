@@ -333,6 +333,18 @@ Findings inside the ticket (`in`) and findings the reviewer could not place (`un
 
 Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every run, and 🟦 means only "outside the ticket".
 
+## Code Suggestions
+
+With `PRXREF_SUGGESTIONS=on` (off by default), an inline comment can carry replacement code for the lines it flags. Each forge gets the form it can apply:
+
+| Forge | What the comment carries |
+|---|---|
+| GitHub (Cloud and Enterprise) | A `suggestion` block with the **Commit suggestion** button. A multi-line suggestion is posted as a comment on the whole line range. |
+| GitLab (Cloud and self-managed) | A `suggestion:-0+N` block with the **Apply suggestion** button, anchored at the first line it replaces. |
+| Bitbucket Cloud, Bitbucket Server / Data Center, Azure DevOps | A **Suggested change** label naming the line or lines, then a plain code block to copy. No apply button. |
+
+An empty suggestion deletes the lines: an empty `suggestion` block on GitHub and GitLab, and the sentence `Suggested change: delete line N` elsewhere. A suggestion replaces at most 20 lines, all inside one diff hunk. A suggestion that fails a check is dropped and the finding posts as a plain comment. The summary's findings list never shows suggestions.
+
 ## CLI Flags
 
 `prxref review` takes:
@@ -351,7 +363,7 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
 - `-v, --verbose` — output run timing, token counts, cost, and finding breakdowns to stdout, plus one line each for the rules file, the scoped rules files, the prompt templates, the ticket context (with the active findings' scope counts), the spec sources, and the repository context when they are configured. The repository-context line reads, for example, `repo context: mode=repo reader=forge listing=120(partial) reads=16 cap_hit=yes entries=3 omitted=3`, and is absent while `PRXREF_REPO_CONTEXT` is `off`. In text mode this also prints finding bodies and dropped findings, same as `--no-post`. These lines are text output only: with `--format json`, stdout holds the JSON object alone.
 - `--format {text,json}` — output format for `review` (default `text`). `json` prints exactly one JSON object to stdout, with these keys in this order:
   - `verdict`;
-  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `rule` (the rule the finding names; `null` when it names none, and always `null` with finding grouping off and the per-rule cap inactive), `locations` (on a grouped finding, the other places its `Also at:` list names, in that order, as `{"file", "line"}` objects; on the best finding of a rule the per-rule cap folded, every location folded into it, across files, even past the five its `Also at:` list shows; `null` on every other row, including each member dropped as `grouped into <file>:<line>`, which keeps its own rule; see [docs/quality.md](docs/quality.md)), `title`, `body`, `drop_reason`;
+  - `findings`: active first, then dropped, each with `file`, `line`, `severity`, `confidence`, `scope` (`in`, `out`, or `unknown` against the ticket context; always `unknown` without one), `rule` (the rule the finding names; `null` when it names none, and always `null` with finding grouping off and the per-rule cap inactive), `suggestion` (the kept replacement text, `""` deleting the lines; `null` when there is none, and always `null` with `PRXREF_SUGGESTIONS=off`), `suggestion_end_line` (the last line it replaces, `0` meaning `line` alone; always `0` when `suggestion` is `null`), `locations` (on a grouped finding, the other places its `Also at:` list names, in that order, as `{"file", "line"}` objects; on the best finding of a rule the per-rule cap folded, every location folded into it, across files, even past the five its `Also at:` list shows; `null` on every other row, including each member dropped as `grouped into <file>:<line>`, which keeps its own rule; see [docs/quality.md](docs/quality.md)), `title`, `body`, `drop_reason`;
   - `chunk_count`, `chunks_reviewed`, `chunks_failed`, `elapsed_ms`, `input_tokens`, `output_tokens`;
   - `cost_usd`: the run's cost in USD, `null` when no source could price it (never `0` for an unknown cost), and `cost_estimated`: `true` when any part of it came from `PRXREF_PRICE_TABLE`. See [Cost accounting](docs/llm.md#cost-accounting);
   - `posted`;
@@ -362,6 +374,7 @@ Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every
   - `repo_context`: the repository context in force (`mode`, `max_chars`, `contract_globs` and `exclude_globs`; `reader`, which is `forge`, `repo-dir` or `null`; `listing`, `{"paths", "complete"}` or `null`; `reads` and `read_cap_hit`; and `units`, `{"chunks": [...]}` holding one `{"entries", "omitted", "retry_dropped"}` row per chunk in chunk order, whose entries carry `path`, `line`, `symbol`, `kind`, `reason` and `chars`; never the file text). Always present, and `null` when `PRXREF_REPO_CONTEXT` is `off`. See [docs/env-vars.md](docs/env-vars.md);
   - `parse_retries`: how many times the run re-sent a request whose reply could not be used as a review (empty, not JSON, not a JSON object, or an object without a `findings` list), summed over every chunk and the whole-PR sweep. Always present: `0` when nothing was re-sent, and `null` when `PRXREF_LLM_PARSE_RETRIES` is `0`. With `--trace-dir`, each unit that retried has `parse_retries` and `first_error` in its meta file. See [docs/env-vars.md](docs/env-vars.md);
   - `context_followup`: the context follow-up's tally. Always present, and `null` while `PRXREF_CONTEXT_FOLLOWUP` is `off`; when it is `on`, `active` (`false` below `PRXREF_REPO_CONTEXT=repo` or without a repository reader), the run's `calls`, `confirmed`, `unconfirmed` and `discarded` counts and `input_tokens` and `output_tokens`, and `chunks`, one row per chunk with the names looked up, each excerpt's `path`, `line`, `symbol`, `source` and `chars` (never the file text), and why a chunk was `skipped`, `null` when not active. See [Context follow-up](docs/llm.md#context-follow-up-opt-in);
+  - `suggestions`: the code-suggestion tally (#30). Always present, and `null` while `PRXREF_SUGGESTIONS` is `off`; when it is `on`, `{"kept": n, "cleared": {"<reason>": n, ...}}` over the posted findings, one `cleared` entry per reason a suggestion was withheld (see [docs/llm.md](docs/llm.md));
   - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
   - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`, `description`, `as_of`, `as_of_source`), on replay runs only.
 

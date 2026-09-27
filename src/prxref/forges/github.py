@@ -214,6 +214,7 @@ class ForgeImpl:
     """GitHub and GitHub Enterprise forge implementation."""
 
     name: str = "github"
+    suggestion_style: str = "github"
 
     def __init__(self, session: requests.Session | None = None) -> None:
         self.session = session or _create_default_session()
@@ -591,6 +592,9 @@ class ForgeImpl:
                 "side": comment.side or "RIGHT",
                 "commit_id": commit_id,
             }
+            if comment.start_line is not None:
+                payload["start_line"] = comment.start_line
+                payload["start_side"] = comment.side or "RIGHT"
             resp = self.session.post(
                 url, json=payload, headers=headers, timeout=_REQUEST_TIMEOUT
             )
@@ -628,6 +632,14 @@ class ForgeImpl:
                 for item in data:
                     path = item.get("path")
                     line = item.get("line") or item.get("original_line") or item.get("position")
+                    start_line = item.get("start_line")
+                    if not (
+                        isinstance(start_line, int)
+                        and not isinstance(start_line, bool)
+                        and isinstance(line, int)
+                        and 0 < start_line < line
+                    ):
+                        start_line = None
                     user = item.get("user") or {}
                     author = user.get("login", "") if isinstance(user, dict) else ""
                     body = item.get("body") or ""
@@ -639,6 +651,7 @@ class ForgeImpl:
                             resolved=False,
                             author=author,
                             body_snippet=snippet,
+                            start_line=start_line,
                         )
                     )
         except FeedReadError as e:

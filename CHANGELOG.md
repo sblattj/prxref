@@ -8,6 +8,74 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.21.0] — 2026-09-27
+
+Apply-able code suggestions (#30). With the new key `PRXREF_SUGGESTIONS=on`,
+a chunk worker may attach the exact replacement code for a finding's lines,
+and the inline comment carries it in the form the forge can apply: a
+`suggestion` block with GitHub's **Commit suggestion** button, a
+`suggestion:-0+N` block with GitLab's **Apply suggestion** button, and a
+labelled, copyable code block on Bitbucket Cloud, Bitbucket Server / Data
+Center and Azure DevOps. The key is off by default, and at the default every
+prompt, LLM call and forge read is the same as in 0.20.0. The issue proposed
+an opt-out flag; this release ships the feature opt-in instead, because a
+new request to the model stays off until its effect on reviews is measured.
+
+### Added
+
+- **`PRXREF_SUGGESTIONS` (`off`|`on`, default `off`) (#30).** When `on`,
+  every chunk worker's system prompt gains a `## Code suggestions` block, and
+  the worker template's reply example gains a `"suggestion"` key through a
+  new optional `{suggestion_example}` slot. A finding may then carry
+  `suggestion`, the exact replacement text for the new-file lines `line`
+  through `suggestion_end_line`. The whole-PR sweep is never asked and never
+  keeps one. At `off` the worker prompt renders byte-identical and a
+  suggestion a model volunteers anyway is ignored. A worker template override
+  without the slot still gets the request block, and the run logs one
+  WARNING naming the file. Any other value exits 2 naming the variable.
+- **A suggestion validation pass (#30).** After the other quality passes and
+  before the gate, a suggestion that fails the first of these checks is
+  cleared and the finding is kept, so it posts as a plain comment: `grouped`
+  (the finding stands for several places), `line_moved` (line alignment
+  moved it off the model's line), `file_level`, `range` (reversed, or over
+  20 lines), `outside_hunk` (not all new-side lines of one diff hunk),
+  `fence` (holds a triple-backtick fence), `too_long` (over 4,000
+  characters) and `no_op` (equal to the current lines).
+- **Per-forge rendering (#30).** GitHub gets a `suggestion` block, and a
+  multi-line suggestion posts as a ranged review comment (`start_line` and
+  `start_side`, ending at the last replaced line). GitLab gets
+  `suggestion:-0+N`, anchored at the first replaced line. Bitbucket Cloud,
+  Bitbucket Server / Data Center and Azure DevOps get a **Suggested change**
+  label naming the lines and a plain code block, or a delete sentence when
+  the replacement is empty. A suggestion with a fence, an inverted range or
+  no line posts as a plain comment. `README.md` has a new Code Suggestions
+  section.
+
+### Changed
+
+- **`--format json` finding rows gain `suggestion` and
+  `suggestion_end_line` (#30),** right after `rule`. A finding without a
+  suggestion, including every finding of a run with suggestions off, has
+  them as `null` and `0`; `""` is a suggestion that deletes the lines.
+- **The run record gains `suggestions` (#30),** also in `--format json`:
+  `null` when suggestions are off, else `{"kept": n, "cleared": {<reason>:
+  n, ...}}` over the active findings, one `cleared` count per validation
+  reason, in the order above. The eval run record's `config` allowlist gains
+  `suggestions`, so `run.json` records the setting.
+- **GitHub thread dedup treats a multi-line comment as its whole line range
+  (#30).** A finding anywhere from the comment's first line to its last is at
+  distance 0 from it, and one outside is measured from the nearer end.
+  Before, only the last line counted. This is a superset of the old
+  matching, and single-line threads get exactly the verdicts they got
+  before. `Thread` gains an optional `start_line`, and `InlineComment` an
+  optional `start_line`, both `None` by default.
+- **With suggestions on, the completion budget defaults to 8192 (#30).** When
+  `PRXREF_SUGGESTIONS=on` and `PRXREF_LLM_MAX_TOKENS` is left unset, the
+  budget is 8192 instead of 4096, because a suggestion lengthens the reply
+  and the 4096 default truncated every suggestions-on run in a live check.
+  An explicit value is always used as given, even below 8192. With
+  suggestions off nothing changes.
+
 ## [0.20.0] — 2026-09-27
 
 One fix. #29: a review of a local diff, `--diff-file` with `--repo-dir` and
@@ -2148,7 +2216,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/sblattj/prxref/releases/tag/v0.21.0
 [0.20.0]: https://github.com/sblattj/prxref/releases/tag/v0.20.0
 [0.19.0]: https://github.com/sblattj/prxref/releases/tag/v0.19.0
 [0.18.0]: https://github.com/sblattj/prxref/releases/tag/v0.18.0

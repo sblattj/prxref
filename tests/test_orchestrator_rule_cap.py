@@ -559,6 +559,8 @@ def _record(res: dict) -> dict:
 
 def _json_payload(res: dict) -> dict:
     payload = cli._build_json_result(res)
+    for row in payload["findings"]:
+        assert (row.pop("suggestion"), row.pop("suggestion_end_line")) == (None, 0)
     return {key: payload[key] for key in A81_JSON_KEYS}
 
 
@@ -605,12 +607,14 @@ class TestOffPathMatchesBase:
     def test_cap_zero_with_rules_is_byte_identical_to_base(self, name):
         text, res = rules_capture(name, max_findings_per_rule=0)
         assert _sha(text) == RULES_GOLDEN[name]
-        assert set(res) == set(A81_RECORD_KEYS) | {"rule_counts", "repo_context", "parse_retries", "context_followup"}
+        assert set(res) == set(A81_RECORD_KEYS) | {
+            "rule_counts", "repo_context", "parse_retries", "context_followup", "suggestions",
+        }
         assert res["rule_counts"] is None
         assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
         assert payload == [*A81_JSON_KEYS[:-1], "rule_counts", "repo_context", "parse_retries",
-                           "context_followup", "sampling"]
+                           "context_followup", "suggestions", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

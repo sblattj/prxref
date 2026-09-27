@@ -31,23 +31,37 @@ class PRRef:
 
 @dataclass
 class InlineComment:
-    """A comment anchored to one line of the new file."""
+    """A comment anchored to one line of the new file.
+
+    ``start_line`` is set only for a multi-line comment on a forge that
+    anchors a range at its last line (GitHub): it is the first new-file line
+    of the range and ``line`` is the last. ``None`` means a single-line
+    comment, and adapters that anchor at one line ignore it.
+    """
 
     path: str
     line: int  # line in the NEW file
     body: str
     side: str = "RIGHT"
+    start_line: int | None = None
 
 
 @dataclass
 class Thread:
-    """An existing discussion thread on a PR (for dedup against re-review)."""
+    """An existing discussion thread on a PR (for dedup against re-review).
+
+    ``line`` is the thread's anchor line: the last line of a multi-line
+    thread. ``start_line`` is the first line of a multi-line thread, and
+    ``None`` for a single-line or file-level thread or on a forge that does
+    not report one.
+    """
 
     path: str | None
     line: int | None
     resolved: bool
     author: str
     body_snippet: str
+    start_line: int | None = None
 
 
 @dataclass
