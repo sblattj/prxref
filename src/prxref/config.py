@@ -336,6 +336,24 @@ LLM / pipeline:
                                 summary, plus a compare diff read when the
                                 head has moved. Matched exactly; any
                                 other value is a configuration error
+  PRXREF_FALLBACK               Where the review goes when a post fails
+                                (#48): "auto" (the default) acts only when a
+                                summary or inline post fails (a read-only
+                                token, a fork PR): prxref review then emits
+                                the review through the CI it runs under --
+                                GitHub Actions annotations and the job
+                                summary, Azure Pipelines logging commands, a
+                                GitLab Code Quality report
+                                (gl-code-quality-report.json in the working
+                                directory) -- and logs it at WARNING
+                                everywhere, Bitbucket Pipelines and local runs
+                                included. Under --format json, annotations and
+                                logging commands are skipped so stdout stays
+                                one JSON document. "off" emits nothing. Either
+                                way the run record's "degraded" says which
+                                posts failed and why; the exit code never
+                                changes. Matched exactly; any other value is a
+                                configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -518,6 +536,7 @@ _DEFAULTS: dict[str, object] = {
     "context_followup": "off",
     "suggestions": "off",
     "incremental": "off",
+    "fallback": "auto",
     # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
     # it rather than adding to it, and an empty value reads as unset (the
@@ -586,6 +605,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "context_followup": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
+    "fallback": frozenset({"auto", "off"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
