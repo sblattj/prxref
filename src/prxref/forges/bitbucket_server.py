@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from urllib.parse import quote, urlparse
 
 import requests
@@ -440,6 +440,43 @@ class ForgeImpl:
             f"({_MAX_PAGES * _PAGE_LIMIT} entries) without reaching the end"
         )
 
+    def _find_summary(self, ref: PRRef) -> dict | None:
+        """Return the summary comment ``post_summary`` overwrites, or ``None``.
+
+        The one lookup both ``post_summary`` and ``get_summary`` run, so the
+        two cannot pick different comments. The walk stops at the first
+        unanchored comment carrying ``SUMMARY_MARKER``; that comment is
+        returned only when it has an ``id``, since without one
+        ``post_summary`` posts a new comment instead. The whole comment comes
+        back because the update needs its ``version`` as well as its ``id``.
+        ``FeedReadError`` from the page walk propagates.
+        """
+        existing: dict | None = None
+        for entries in self._iter_activity_pages(ref):
+            for item in entries:
+                comment = item.get("comment") or {}
+                if comment.get("anchor"):
+                    continue
+                if SUMMARY_MARKER in (comment.get("text") or ""):
+                    existing = comment
+                    break
+            if existing is not None:
+                break
+        if existing is not None and existing.get("id") is not None:
+            return existing
+        return None
+
+    def get_summary(self, ref: PRRef) -> str | None:
+        """Return the raw body of the summary comment ``post_summary`` would update.
+
+        Reads the activity feed through the same lookup ``post_summary`` runs
+        and returns that comment's ``text``, or ``None`` when there is none.
+        Raises ``FeedReadError`` when the feed cannot be read to the end.
+        Makes no write request.
+        """
+        existing = self._find_summary(ref)
+        return None if existing is None else existing.get("text")
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 
@@ -456,19 +493,9 @@ class ForgeImpl:
         url = self._pr_url(ref, "/comments")
         body = with_summary_marker(body)
 
-        existing: dict | None = None
-        for entries in self._iter_activity_pages(ref):
-            for item in entries:
-                comment = item.get("comment") or {}
-                if comment.get("anchor"):
-                    continue
-                if SUMMARY_MARKER in (comment.get("text") or ""):
-                    existing = comment
-                    break
-            if existing is not None:
-                break
+        existing = self._find_summary(ref)
 
-        if existing is not None and existing.get("id") is not None:
+        if existing is not None:
             resp = self._session.put(
                 f"{url}/{existing['id']}",
                 json={"text": body, "version": existing.get("version", 0)},
@@ -694,7 +721,9 @@ class ForgeImpl:
         )
         return PathListing(paths=tuple(sorted(paths)), complete=False)
 
-    def prune_inline_comments(self, ref: PRRef) -> int:
+    def prune_inline_comments(
+        self, ref: PRRef, *, paths: Collection[str] | None = None,
+    ) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
 
         A re-review updates the summary in place, but the previous run's
@@ -713,7 +742,13 @@ class ForgeImpl:
         and skipped, and a feed that cannot be read ends the prune with what
         it already removed: best-effort, because a cleanup must never abort
         the review that follows it.
+
+        ``paths=None`` prunes every candidate. With a collection, only a
+        candidate whose ``anchor.path`` is in ``paths`` is deleted; one with
+        no path is kept, because deleting a finding that will not be
+        re-raised loses it for good.
         """
+        wanted = None if paths is None else frozenset(paths)
         headers, auth = self._get_auth()
         base = self._pr_url(ref, "/comments")
         removed = 0
@@ -729,6 +764,11 @@ class ForgeImpl:
                     version = comment.get("version")
                     if comment_id is None or version is None:
                         continue
+                    if wanted is not None:
+                        anchor = comment.get("anchor")
+                        path = anchor.get("path") if isinstance(anchor, dict) else None
+                        if not (isinstance(path, str) and path in wanted):
+                            continue
                     resp = self._session.delete(
                         f"{base}/{comment_id}",
                         params={"version": version},
