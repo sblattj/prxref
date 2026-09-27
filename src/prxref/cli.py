@@ -313,6 +313,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--full-review",
+        action="store_true",
+        help="review every file even when PRXREF_INCREMENTAL=on",
+    )
+    rev.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -775,7 +780,8 @@ def _build_json_result(result: Any) -> dict:
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``repo_context``, ``parse_retries``, ``context_followup``,
-    ``suggestions``, then ``sampling`` and ``replay`` when present.
+    ``suggestions``, ``incremental``, then ``sampling`` and ``replay`` when
+    present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -792,7 +798,10 @@ def _build_json_result(result: Any) -> dict:
     ``PRXREF_CONTEXT_FOLLOWUP`` is ``off``; otherwise the follow-up record
     of :func:`prxref.orchestrator.orchestrate_review`), and so is
     ``suggestions`` (#30: ``null`` whenever ``PRXREF_SUGGESTIONS`` is
-    ``off``; otherwise ``{"kept", "cleared"}`` over the active findings);
+    ``off``; otherwise ``{"kept", "cleared"}`` over the active findings),
+    and so is ``incremental`` (#34: ``null`` whenever ``PRXREF_INCREMENTAL``
+    is ``off`` or turned off for the run; otherwise ``{"mode", "reason",
+    "since_sha", "files_total", "files_reviewed", "marker_sha"}``);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -832,6 +841,7 @@ def _build_json_result(result: Any) -> dict:
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),
         "suggestions": result.get("suggestions"),
+        "incremental": result.get("incremental"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1288,6 +1298,7 @@ def _run_review(
     description_file: str | None = None,
     no_description: bool = False,
     repo_dir: str | None = None,
+    full_review: bool = False,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1399,6 +1410,16 @@ def _run_review(
         forge = make_forge(ref)
         if replay is not None:
             forge = _replay_forge(forge, ref, replay)
+    incremental = cfg["incremental"]
+    if incremental == "on" and full_review:
+        logger.info("--full-review: reviewing every file although PRXREF_INCREMENTAL=on")
+        incremental = "off"
+    elif incremental == "on" and cfg["fail_on"] != "never":
+        logger.info(
+            "PRXREF_FAIL_ON=%s: reviewing every file although PRXREF_INCREMENTAL=on, "
+            "because a gate's verdict must see the whole PR", cfg["fail_on"],
+        )
+        incremental = "off"
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
     return orchestrate(
@@ -1460,6 +1481,7 @@ def _run_review(
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
         suggestions=cfg["suggestions"],
+        incremental=incremental,
     )
 
 
@@ -1558,6 +1580,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             description_file=args.description_file,
             no_description=args.no_description,
             repo_dir=args.repo_dir,
+            full_review=args.full_review,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

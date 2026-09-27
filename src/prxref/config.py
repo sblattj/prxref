@@ -307,6 +307,26 @@ LLM / pipeline:
                                 budget (see PRXREF_LLM_MAX_TOKENS) when that is
                                 left unset; an explicit budget is respected as
                                 given
+  PRXREF_INCREMENTAL            Incremental re-review on push (#34): "off"
+                                (the default) reviews every file on every run
+                                and writes no marker. "on" stamps each summary
+                                with the PR head it reviewed and, when the PR
+                                already carries such a summary, chunks and
+                                reviews only the files changed since that
+                                head; the systemic sweep still sees the whole
+                                PR. The verdict and findings then cover only
+                                the re-reviewed files, while earlier inline
+                                comments on the other files stay standing. It
+                                applies only with PRXREF_POST_MODE summary or
+                                summary+inline; the run reviews every file on
+                                a first review, when the forge cannot read its
+                                summary, when that read fails, when the
+                                summary has no reviewed-head marker, when the
+                                compare diff fails (a force-push), with
+                                --full-review, with PRXREF_FAIL_ON other than
+                                "never", and on every replay. Costs one extra
+                                forge read per run. Matched exactly; any other
+                                value is a configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -488,6 +508,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_chars": 12000,
     "context_followup": "off",
     "suggestions": "off",
+    "incremental": "off",
     # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
     # it rather than adding to it, and an empty value reads as unset (the
@@ -555,6 +576,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
+    "incremental": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
