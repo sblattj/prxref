@@ -8,6 +8,65 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.19.0] — 2026-09-27
+
+Two fixes. #25: a version-less Maven or Gradle dependency in the
+`### Dependency versions` block is no longer attributed to the first imported
+BOM, whether or not that BOM manages it; prxref names an owner only when it
+can know or reasonably guess one, and marks a dependency matched to an import
+by its group alone. #26: the litellm backend forwards
+`PRXREF_LLM_REASONING_EFFORT`, and `PRXREF_LLM_SEED=off` sends no seed, for
+providers such as Bedrock that reject the parameter. No config key is added:
+`PRXREF_LLM_SEED` gains one value, `off`. Nothing changes at the defaults
+except the dependency-version lines of Java and Kotlin files: a pull request
+with no version-less JVM dependency under 2 or more candidate owners and no
+group-only match gets the same prompts as in 0.18.0, byte for byte, and every
+LLM call, forge read and run-record value is unchanged.
+
+### Added
+
+- **`reasoning_effort` on the litellm backend (#26).**
+  `PRXREF_LLM_REASONING_EFFORT` is now passed to `litellm.completion` as
+  `reasoning_effort=`, unvalidated, and litellm maps it to each provider's
+  own effort parameter. Unset or empty, the request is unchanged.
+- **`PRXREF_LLM_SEED=off` (#26).** On `openai-compat` and `litellm`, `off`
+  (lowercase) sends no seed at all: neither a configured one nor the
+  per-process fallback. The run record's `sampling.seed` is then `null`.
+  Unset still derives one seed per process, as before, and any other word
+  still exits `2` naming the variable.
+
+### Changed
+
+- **Group-only JVM matches are marked (#25).** A Java or Kotlin dependency
+  matched to an import only by its group, with no artifactId token naming a
+  segment of the import, now ends in ` (group match only)`, as in
+  `org.slf4j:slf4j-api@2.0.13 (group match only)` for
+  `import org.slf4j.Logger`. Such lines are still listed, and an artifact
+  another import of the file matches by name renders once, unmarked.
+- **Docs for strict providers (#26).** The litellm section of `docs/llm.md`
+  explains the Bedrock fixes (`PRXREF_LLM_SEED=off`, or litellm's own
+  `LITELLM_DROP_PARAMS=true`) and that a model accepting only
+  `temperature=1` needs `PRXREF_LLM_TEMPERATURE=1`.
+
+### Fixed
+
+- **The owner of a BOM-managed JVM version (#25).** One rule now serves
+  Maven's imported BOMs and external parent and Gradle's platforms. A single
+  candidate owner is named as before, `g:a@(managed by bg:ba@bv)`. Among
+  several, the one whose groupId shares at least 2 leading segments with the
+  dependency's, and strictly more than every other, is named as a guess,
+  `g:a@(likely managed by bg:ba@bv)`. Otherwise no owner is named and up to
+  3 candidates are listed in declared order, then `+N more`:
+  `@(managed by one of 2 imported BOMs: jackson-bom,
+  spring-boot-dependencies)`, `@(managed by the parent or an imported BOM:
+  ...)`, or `@(managed by one of 2 platforms: ...)`.
+
+### Known limitations
+
+- **The owner is a guess from groupIds.** prxref does not download a BOM, so
+  it never reads what a BOM manages; the likely owner is the one whose
+  groupId is closest to the dependency's, and it can be wrong.
+
 ## [0.18.0] — 2026-09-27
 
 An opt-in context follow-up (#22, part 1). A chunk worker that cannot see a
@@ -2064,7 +2123,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/sblattj/prxref/releases/tag/v0.19.0
 [0.18.0]: https://github.com/sblattj/prxref/releases/tag/v0.18.0
 [0.17.0]: https://github.com/sblattj/prxref/releases/tag/v0.17.0
 [0.16.0]: https://github.com/sblattj/prxref/releases/tag/v0.16.0
