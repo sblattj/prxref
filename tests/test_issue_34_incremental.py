@@ -15,8 +15,12 @@ while the systemic sweep still sees the whole PR. What is pinned:
   nothing;
 - each full-review fallback carries its reason;
 - off is identity: no summary read, no marker, ``prune(ref)``, a null record;
-- the CLI turns it off for ``--full-review`` and a ``PRXREF_FAIL_ON`` gate,
-  a ``--diff-file`` replay runs full, and a bad value exits 2.
+- a forced full review (``--full-review`` or a ``PRXREF_FAIL_ON`` gate)
+  reads no summary, reviews every file and still stamps the head, so the
+  next push is incremental; a failed unit in a forced run stamps nothing;
+- the CLI forces a full review for ``--full-review`` and a ``PRXREF_FAIL_ON``
+  gate with incremental still on, a ``--diff-file`` replay runs full, and a
+  bad value exits 2.
 """
 from __future__ import annotations
 
@@ -389,6 +393,72 @@ class TestFullFallbacks:
         assert res["incremental"]["reason"] == "first review"
 
 
+class TestForcedFullReview:
+    def _forced(self, *, fail_paths=(), reason="--full-review"):
+        forge = IncForge(multi_chunk_diff(3), head=HEAD_2)
+        forge.stored = f"old\n\n{reviewed_head_line(HEAD_1)}"
+        forge.compare_diff = _added_file_diff(FILE_B, 5)
+        llm = CountingLLM(fail_paths=fail_paths)
+        res = _review(forge, llm, full_review=True, full_review_reason=reason)
+        return forge, llm, res
+
+    def test_it_reviews_every_file_reads_nothing_and_stamps_the_head(self, digests):
+        forge, llm, res = self._forced()
+        assert llm.chunk_calls == 3
+        assert forge.summary_reads == 0
+        assert forge.compare_calls == []
+        assert forge.prune_calls == [{}]
+        assert res["incremental"] == {
+            "mode": "full", "reason": "--full-review", "since_sha": None,
+            "files_total": 3, "files_reviewed": 3, "marker_sha": HEAD_2,
+        }
+        (body,) = forge.summaries
+        assert "Incremental review" not in body
+        assert body.endswith(reviewed_head_line(HEAD_2))
+        assert _markers(forge) == [HEAD_2]
+
+    def test_the_gate_reason_is_recorded(self, digests):
+        _, _, res = self._forced(reason="PRXREF_FAIL_ON=error")
+        assert res["incremental"]["reason"] == "PRXREF_FAIL_ON=error"
+        assert res["incremental"]["marker_sha"] == HEAD_2
+
+    def test_a_missing_reason_has_a_default(self, digests):
+        forge = IncForge(multi_chunk_diff(3))
+        res = _review(forge, CountingLLM(), full_review=True)
+        assert res["incremental"]["reason"] == "full review requested"
+        assert forge.summary_reads == 0
+
+    def test_the_next_push_is_incremental(self, digests):
+        forge = IncForge(multi_chunk_diff(3))
+        _review(forge, CountingLLM(), full_review=True, full_review_reason="--full-review")
+        forge.push(HEAD_2, _added_file_diff(FILE_B, 5))
+        forge.summaries.clear()
+        llm = CountingLLM()
+        res = _review(forge, llm)
+        assert llm.chunk_calls == 1
+        assert forge.compare_calls == [(HEAD_1, HEAD_2)]
+        assert res["incremental"] == {
+            "mode": "incremental", "reason": None, "since_sha": HEAD_1,
+            "files_total": 3, "files_reviewed": 1, "marker_sha": HEAD_2,
+        }
+
+    def test_a_failed_unit_stamps_no_marker(self, digests):
+        forge, _, res = self._forced(fail_paths={FILE_A})
+        assert res["chunks_failed"] == 1
+        assert res["incremental"]["marker_sha"] is None
+        assert forge.summaries
+        assert _markers(forge) == []
+
+    def test_off_ignores_it(self, digests):
+        forge = IncForge(multi_chunk_diff(3))
+        res = orchestrate_review(
+            forge, REF, CountingLLM(), max_workers=1,
+            full_review=True, full_review_reason="--full-review",
+        )
+        assert res["incremental"] is None
+        assert all("prxref-reviewed-head" not in body for body in forge.summaries)
+
+
 class TestOffIsIdentity:
     def test_off_reads_nothing_stamps_nothing_and_prunes_whole(self, digests):
         forge = IncForge(multi_chunk_diff(3))
@@ -452,30 +522,47 @@ class TestCli:
         monkeypatch.setenv("PRXREF_INCREMENTAL", "on")
         assert main(["review", "--pr-url", _CLI_REF.url, "--no-post"]) == 0
         assert calls[0]["incremental"] == "on"
+        assert calls[0]["full_review"] is False
+        assert calls[0]["full_review_reason"] is None
 
     def test_the_default_is_off(self, monkeypatch):
         calls = self._capture(monkeypatch)
         monkeypatch.delenv("PRXREF_INCREMENTAL", raising=False)
         assert main(["review", "--pr-url", _CLI_REF.url, "--no-post"]) == 0
         assert calls[0]["incremental"] == "off"
+        assert calls[0]["full_review"] is False
 
-    def test_full_review_turns_it_off(self, monkeypatch, caplog):
+    def test_full_review_forces_a_full_run_that_keeps_incremental_on(self, monkeypatch, caplog):
         calls = self._capture(monkeypatch)
         monkeypatch.setenv("PRXREF_INCREMENTAL", "on")
         with caplog.at_level(logging.INFO, logger="prxref"):
             assert main(["review", "--pr-url", _CLI_REF.url, "--no-post", "--full-review"]) == 0
-        assert calls[0]["incremental"] == "off"
+        assert calls[0]["incremental"] == "on"
+        assert calls[0]["full_review"] is True
+        assert calls[0]["full_review_reason"] == "--full-review"
         assert any("--full-review" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("gate", ["error", "any"])
-    def test_a_fail_on_gate_turns_it_off(self, monkeypatch, caplog, gate):
+    def test_a_fail_on_gate_forces_a_full_run_that_keeps_incremental_on(
+        self, monkeypatch, caplog, gate,
+    ):
         calls = self._capture(monkeypatch)
         monkeypatch.setenv("PRXREF_INCREMENTAL", "on")
         monkeypatch.setenv("PRXREF_FAIL_ON", gate)
         with caplog.at_level(logging.INFO, logger="prxref"):
             assert main(["review", "--pr-url", _CLI_REF.url, "--no-post"]) == 0
-        assert calls[0]["incremental"] == "off"
+        assert calls[0]["incremental"] == "on"
+        assert calls[0]["full_review"] is True
+        assert calls[0]["full_review_reason"] == f"PRXREF_FAIL_ON={gate}"
         assert any(f"PRXREF_FAIL_ON={gate}" in r.getMessage() for r in caplog.records)
+
+    def test_full_review_with_incremental_off_forces_nothing(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        monkeypatch.delenv("PRXREF_INCREMENTAL", raising=False)
+        assert main(["review", "--pr-url", _CLI_REF.url, "--no-post", "--full-review"]) == 0
+        assert calls[0]["incremental"] == "off"
+        assert calls[0]["full_review"] is False
+        assert calls[0]["full_review_reason"] is None
 
     def test_a_diff_file_replay_runs_full(self, monkeypatch, tmp_path, capsys, digests):
         path = tmp_path / "change.diff"
