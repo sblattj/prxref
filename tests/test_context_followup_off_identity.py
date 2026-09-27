@@ -21,6 +21,14 @@ payload (minus ``elapsed_ms``) is compared between the unset run and the
 ``=off`` run directly, rather than against a third copy of the same literal,
 so the two configurations are asserted equal to each other as well as to the
 recorded shape.
+
+One value was re-recorded at 0.20.0: issue #29 gives this diff-file plus
+repo-dir replay chunk context, so one worker prompt gains exactly the
+definition line ``assistant/engine.py:12: class Step:``. Its recorded sha
+changed from ``8e0aa4c7...`` to ``92ed30e3...``; every other value is still
+the 0.17.0 recording. ``test_the_29_delta_is_exactly_one_definition_line``
+pins that delta: the prompt holds the line, and with the line removed it
+hashes to the 0.17.0 value again.
 """
 from __future__ import annotations
 
@@ -56,10 +64,16 @@ SWEEP_CONTENT = json.dumps({"findings": []})
 # Recorded at 43ec560 with PRXREF_REPO_CONTEXT=repo, PRXREF_CONTEXT_FOLLOWUP
 # unset, over tests/fixtures/issue22/pr.patch against the route below.
 EXPECTED_REQUEST_COUNT = 3
+PRE_29_SHA = "8e0aa4c77130ee263f3b3d05746d9c0d1976ce29501ec42fa6fd2c702e64e9a8"
+POST_29_SHA = "92ed30e38adf8f9ec7886bb1ed2ac63605c753903522c2b105272bbbd634bd7b"
+ISSUE_29_LINE = "assistant/engine.py:12: class Step:\n"
 EXPECTED_MESSAGE_SHAS = [
     "058306f7b8a3cf8f8e744a6393745bd31c124805790530e0e00314afdac7b1aa",
     "575f52b819508bf9d596f44d9226f8ba7e0ee4724f7bf926572d81b4ce20847a",
-    "8e0aa4c77130ee263f3b3d05746d9c0d1976ce29501ec42fa6fd2c702e64e9a8",
+    # Re-recorded at 0.20.0: issue #29 gives this diff-file plus repo-dir
+    # replay chunk context, so this prompt gains exactly
+    # ``assistant/engine.py:12: class Step:``; it was PRE_29_SHA at 0.17.0.
+    POST_29_SHA,
 ]
 
 
@@ -153,6 +167,19 @@ class TestOffIdentity:
         assert sorted(_messages_sha(r) for r in requests_unset) == sorted(
             _messages_sha(r) for r in requests_off
         )
+
+    def test_the_29_delta_is_exactly_one_definition_line(self, review):
+        """Issue #29 adds one same-file definition line; without it the prompt is the 0.17.0 recording."""
+        _, requests = review({"PRXREF_CONTEXT_FOLLOWUP": None})
+        (changed,) = [r for r in requests if _messages_sha(r) == POST_29_SHA]
+        messages = changed["payload"]["messages"]
+        holding = [i for i, m in enumerate(messages) if ISSUE_29_LINE in m["content"]]
+        assert len(holding) == 1
+        assert messages[holding[0]]["content"].count(ISSUE_29_LINE) == 1
+        stripped = [dict(m) for m in messages]
+        stripped[holding[0]]["content"] = stripped[holding[0]]["content"].replace(ISSUE_29_LINE, "")
+        blob = json.dumps(stripped, sort_keys=True).encode("utf-8")
+        assert hashlib.sha256(blob).hexdigest() == PRE_29_SHA
 
     def test_the_key_is_absent_or_none(self, review):
         """At 43ec560 the run.json config has no such key at all; once it lands it is None when off."""
