@@ -759,7 +759,10 @@ MAIN_DIFF = _added_file_diff("src/app.py", 30) + _added_file_diff("src/other.py"
 
 def _override_text(name: str) -> str:
     head, marker, tail = load_prompt(name).partition(CONTEXT_MARKER)
-    return "TEAM OVERRIDE: style-guide findings are welcome.\n\n" + head + marker + tail.replace("{rule_example}", "")
+    return (
+        "TEAM OVERRIDE: style-guide findings are welcome.\n\n" + head + marker
+        + tail.replace("{rule_example}", "").replace("{suggestion_example}", "")
+    )
 
 
 def _override_templates() -> PromptTemplates:

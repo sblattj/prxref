@@ -141,6 +141,12 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     decoration, run on active and dropped findings alike, that never
     changes ``drop_reason`` or severity.
 
+With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
+runs after pass 13 (after line alignment and every fold, so ``locations``
+is final) and before the gate. It drops nothing: a code suggestion (#30)
+that fails one of its rules is cleared and the finding is kept, so it posts
+as a plain comment.
+
 Every dropped finding retains its identity with ``drop_reason`` populated,
 so review runstores and logs can explain every filter decision. Use
 ``active(findings)`` to obtain the subset that should actually post.
@@ -2534,3 +2540,105 @@ def apply_example_echo_check(
             else replace(f, drop_reason=f'{EXAMPLE_ECHO_PREFIX}"{example}"')
         )
     return out
+
+
+MAX_SUGGESTION_LINES: int = 20
+MAX_SUGGESTION_CHARS: int = 4000
+SUGGESTION_CLEAR_REASONS: tuple[str, ...] = (
+    "grouped", "line_moved", "file_level", "range", "outside_hunk", "fence", "too_long", "no_op",
+)
+
+
+def suggestion_clear_reason(
+    finding: Finding, files: Mapping[str, FileDiff], *, model_line: int | None = None,
+) -> str | None:
+    """Why ``finding``'s code suggestion (#30) cannot be rendered, or ``None`` when it can.
+
+    ``files`` maps a diff path to its parsed :class:`FileDiff`; ``model_line``
+    is the line the model gave before :func:`apply_line_align` (``None``
+    skips that rule). A finding with no suggestion returns ``None``. The
+    rules run in :data:`SUGGESTION_CLEAR_REASONS` order and the first that
+    fails names the reason: ``grouped`` (the finding carries ``locations``,
+    so it stands for several places), ``line_moved`` (alignment moved
+    ``line`` away from ``model_line``, and the range was relative to the
+    model's line), ``file_level`` (``line`` is 0), ``range`` (the end,
+    ``suggestion_end_line`` or ``line`` when that is 0, is before ``line``
+    or the range spans more than :data:`MAX_SUGGESTION_LINES` lines),
+    ``outside_hunk`` (some line of the range is not an added or context
+    line inside ONE hunk of the file's diff), ``fence`` (the text holds
+    three backticks), ``too_long`` (over :data:`MAX_SUGGESTION_CHARS`
+    characters) and ``no_op`` (the text, less one trailing newline, equals
+    the range's current new-side lines joined by newlines).
+    """
+    text = finding.suggestion
+    if text is None:
+        return None
+    if finding.locations:
+        return "grouped"
+    if model_line is not None and model_line != finding.line:
+        return "line_moved"
+    start = finding.line
+    if start <= 0:
+        return "file_level"
+    end = finding.suggestion_end_line or start
+    if end < start or end - start + 1 > MAX_SUGGESTION_LINES:
+        return "range"
+    current = _hunk_new_side(files.get(finding.file), start, end)
+    if current is None:
+        return "outside_hunk"
+    if "```" in text:
+        return "fence"
+    if len(text) > MAX_SUGGESTION_CHARS:
+        return "too_long"
+    body = text[:-1] if text.endswith("\n") else text
+    if body == "\n".join(current):
+        return "no_op"
+    return None
+
+
+def _hunk_new_side(diff: FileDiff | None, start: int, end: int) -> list[str] | None:
+    if diff is None:
+        return None
+    for hunk in diff.hunks:
+        lines = {
+            ln.new_line: ln.text
+            for ln in hunk.lines
+            if ln.kind in ("+", " ") and ln.new_line is not None
+        }
+        if all(n in lines for n in range(start, end + 1)):
+            return [lines[n] for n in range(start, end + 1)]
+    return None
+
+
+def apply_suggestion_validation(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff],
+    *,
+    model_lines: Sequence[int] | None = None,
+) -> tuple[list[Finding], list[str | None]]:
+    """Clear every code suggestion (#30) that cannot be rendered, keeping the finding.
+
+    Returns ``(findings, reasons)``, both the length of the input and in its
+    order. A suggestion that fails :func:`suggestion_clear_reason` is set to
+    ``None`` with ``suggestion_end_line`` 0 through
+    :func:`dataclasses.replace`, and ``reasons`` holds the rule that failed
+    at its position; every other position holds ``None`` and its finding is
+    passed through as the same object. Nothing is dropped and no other field
+    changes. ``model_lines``, when given, holds each finding's line as the
+    model wrote it, before :func:`apply_line_align`, position by position;
+    a length that differs from ``findings`` raises ``ValueError``.
+    """
+    if model_lines is not None and len(model_lines) != len(findings):
+        raise ValueError(
+            f"model_lines has {len(model_lines)} entries for {len(findings)} findings"
+        )
+    by_path = {f.path: f for f in files}
+    out: list[Finding] = []
+    reasons: list[str | None] = []
+    for index, f in enumerate(findings):
+        reason = suggestion_clear_reason(
+            f, by_path, model_line=None if model_lines is None else model_lines[index],
+        )
+        reasons.append(reason)
+        out.append(f if reason is None else replace(f, suggestion=None, suggestion_end_line=0))
+    return out, reasons

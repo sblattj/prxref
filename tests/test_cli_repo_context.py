@@ -237,7 +237,9 @@ class TestJsonKey:
         keys = list(cli._build_json_result({"verdict": "Approved", "repo_context": SAMPLE,
                                             "sampling": {"seed": 1}, "replay": {}}))
         assert keys.index("repo_context") == keys.index("rule_counts") + 1
-        assert keys[keys.index("repo_context") + 1:] == ["parse_retries", "context_followup", "sampling", "replay"]
+        assert keys[keys.index("repo_context") + 1:] == [
+            "parse_retries", "context_followup", "suggestions", "sampling", "replay",
+        ]
 
     @pytest.mark.parametrize("result", [{}, None, {"verdict": "Approved"}, {"repo_context": None}])
     def test_a_result_without_it_emits_null(self, result):
