@@ -122,6 +122,7 @@ from pathlib import Path
 from typing import Any
 
 import prxref
+from prxref import ci_fallback
 from prxref.config import load_config, make_forge
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
@@ -780,8 +781,8 @@ def _build_json_result(result: Any) -> dict:
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``repo_context``, ``parse_retries``, ``context_followup``,
-    ``suggestions``, ``incremental``, then ``sampling`` and ``replay`` when
-    present.
+    ``suggestions``, ``incremental``, ``degraded``, then ``sampling`` and
+    ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -801,7 +802,10 @@ def _build_json_result(result: Any) -> dict:
     ``off``; otherwise ``{"kept", "cleared"}`` over the active findings),
     and so is ``incremental`` (#34: ``null`` whenever ``PRXREF_INCREMENTAL``
     is ``off``; otherwise ``{"mode", "reason",
-    "since_sha", "files_total", "files_reviewed", "marker_sha"}``);
+    "since_sha", "files_total", "files_reviewed", "marker_sha"}``), and so
+    is ``degraded`` (#48: ``null`` when every attempted post succeeded or
+    nothing was posted; otherwise ``{"cause", "failed", "fallback",
+    "annotations"}``, see :func:`_emit_fallback`);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -842,6 +846,7 @@ def _build_json_result(result: Any) -> dict:
         "context_followup": result.get("context_followup"),
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
+        "degraded": result.get("degraded"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1550,6 +1555,98 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     )
 
 
+def _emit_fallback(
+    result: Any, *, json_format: bool, environ: Any = None,
+) -> None:
+    """Emit a degraded review through the CI it runs under (issue #48).
+
+    Does nothing unless ``result["degraded"]`` is a dict, i.e. a post
+    failed. The CI is :func:`prxref.ci_fallback.detect_ci` of ``environ``
+    (``os.environ`` by default), and only the active findings are emitted:
+
+    - GitHub Actions: the annotation lines on stdout (``github-annotations``,
+      text format only), and the summary markdown appended to the file named
+      by ``GITHUB_STEP_SUMMARY`` when that is set (``github-step-summary``);
+    - Azure Pipelines: the ``##vso`` logging commands on stdout
+      (``azure-logging``, text format only);
+    - GitLab CI: :data:`prxref.ci_fallback.GITLAB_REPORT_FILE` written in the
+      working directory, replacing any existing file (``gitlab-codequality``);
+    - Bitbucket Pipelines and no CI: the summary markdown logged at WARNING
+      (``log``).
+
+    Under ``--format json`` the stdout lines are skipped so stdout stays one
+    JSON document, and are left out of ``fallback``. Every CI then logs one
+    WARNING line naming the cause. ``degraded["fallback"]`` lists what was
+    emitted and ``degraded["annotations"]`` counts the stdout lines or report
+    entries. Never raises: a failed write is logged at WARNING and left out
+    of ``fallback``, and any other failure is logged and stops the emission.
+    """
+    try:
+        _emit_fallback_unguarded(result, json_format=json_format, environ=environ)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not emit the review through the CI fallback: %s", e)
+
+
+def _emit_fallback_unguarded(result: Any, *, json_format: bool, environ: Any) -> None:
+    degraded = result.get("degraded") if isinstance(result, dict) else None
+    if not isinstance(degraded, dict):
+        return
+    env = os.environ if environ is None else environ
+    ci = ci_fallback.detect_ci(env)
+    findings = [
+        f for f in result.get("findings_active") or []
+        if getattr(f, "drop_reason", None) is None
+    ]
+    markdown = ci_fallback.step_summary_markdown(
+        str(result.get(ci_fallback.DEGRADED_SUMMARY_KEY) or ""),
+    )
+    emitted: list[str] = []
+    degraded["fallback"] = emitted
+    degraded["annotations"] = 0
+    if ci == ci_fallback.CI_GITHUB:
+        if not json_format:
+            lines = ci_fallback.github_annotations(findings)
+            _print_lines(lines)
+            emitted.append("github-annotations")
+            degraded["annotations"] += len(lines)
+        summary_path = env.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            try:
+                with open(summary_path, "a", encoding="utf-8") as fh:
+                    fh.write(markdown)
+                emitted.append("github-step-summary")
+            except OSError as e:
+                logger.warning("could not append the review to GITHUB_STEP_SUMMARY: %s", e)
+    elif ci == ci_fallback.CI_AZURE:
+        if not json_format:
+            lines = ci_fallback.azure_log_issues(findings)
+            _print_lines(lines)
+            emitted.append("azure-logging")
+            degraded["annotations"] += len(lines)
+    elif ci == ci_fallback.CI_GITLAB:
+        entries = ci_fallback.gitlab_codequality(findings)
+        try:
+            Path(ci_fallback.GITLAB_REPORT_FILE).write_text(
+                json.dumps(entries, indent=2) + "\n", encoding="utf-8",
+            )
+            emitted.append("gitlab-codequality")
+            degraded["annotations"] += len(entries)
+        except OSError as e:
+            logger.warning("could not write %s: %s", ci_fallback.GITLAB_REPORT_FILE, e)
+    else:
+        logger.warning("%s", markdown.rstrip("\n"))
+        emitted.append("log")
+    logger.warning(
+        "prxref could not post (%s); the review is in this log", degraded.get("cause"),
+    )
+
+
+def _print_lines(lines: list[str]) -> None:
+    for line in lines:
+        print(line)
+    sys.stdout.flush()
+
+
 def _cmd_review(args: argparse.Namespace) -> int:
     t0 = time.perf_counter()
     # The policy is resolved before the run, not taken from _run_review's
@@ -1559,7 +1656,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
     # _run_review loads it again with the flag overrides — within one process
     # the two cannot disagree.
     try:
-        fail_on = load_config()["fail_on"]
+        policy = load_config()
+        fail_on = policy["fail_on"]
+        fallback = policy["fallback"]
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
@@ -1614,6 +1713,8 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 0
 
     elapsed = time.perf_counter() - t0
+    if fallback == "auto":
+        _emit_fallback(result, json_format=args.format == "json")
     if args.format == "json":
         print(json.dumps(_build_json_result(result)))
     else:

@@ -195,6 +195,7 @@ from . import (
     specs,
     systemic,
 )
+from .ci_fallback import DEGRADED_SUMMARY_KEY
 from .forges.base import (
     ATTRIBUTION_MARKER,
     Forge,
@@ -490,10 +491,10 @@ def orchestrate_review(
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions, incremental}``, plus
+    suggestions, incremental, degraded}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
-    :func:`_run_record`, so the last fourteen keys are always present and are
+    :func:`_run_record`, so the last fifteen keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``; ``parse_retries``: ``0`` before any review unit when the
     parse retry is on) when their feature is off or the run never reached it.
@@ -869,6 +870,21 @@ def orchestrate_review(
     marker at all rather than carrying the previous head forward, so the
     next push is a full review. With ``incremental="off"`` both keywords are
     ignored.
+
+    ``degraded`` (issue #48) records the posts that failed. It is ``None``
+    when every attempted post succeeded or nothing was posted; otherwise it
+    is ``{"cause", "failed", "fallback", "annotations"}``: ``failed`` lists
+    ``"summary"`` and/or ``"inline"`` (a failed summary re-post counts as
+    ``"summary"``), ``cause`` is ``"permission"`` when any failed post raised
+    an exception whose ``response.status_code`` is 401 or 403 (the
+    ``requests.HTTPError`` of a read-only token), else ``"error"``, and
+    ``fallback`` is ``[]`` and ``annotations`` ``0`` here; the CLI fills
+    those two after it emits the review through the CI fallback
+    (:mod:`prxref.ci_fallback`). A degraded run's result also carries
+    :data:`DEGRADED_SUMMARY_KEY`, the summary markdown the post would have
+    carried (rendered for the fallback when the post mode posts no summary),
+    which is not part of the ``--format json`` record. A run in which no post
+    failed never carries that key.
     """
     if repo_context not in repo_unit.MODES:
         raise ValueError(
@@ -912,6 +928,7 @@ def orchestrate_review(
         "context_followup": _followup_record() if context_followup == "on" else None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
+        "degraded": None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -1545,6 +1562,8 @@ def orchestrate_review(
     incremental_note = _incremental_note(scope, len(files))
     posted = False
     inline_posted = 0
+    post_failures: list[tuple[str, str]] = []
+    fallback_summary: str | None = None
     post_summary_wanted = post and post_mode in POST_SUMMARY_MODES
     post_inline_wanted = post and post_mode in POST_INLINE_MODES
     if not post:
@@ -1572,11 +1591,13 @@ def orchestrate_review(
             summary_template=summary_template,
             incremental_note=incremental_note,
         )
+        fallback_summary = summary
         try:
             forge.post_summary(ref, _with_reviewed_head(summary, reviewed_head))
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary failed: %s", e)
+            post_failures.append(("summary", post_failure_cause(e)))
     # A summary-mode run still requires the summary to have landed before the
     # inline batch rides on it; an inline-mode run has no summary to gate on.
     inline_attempted = 0
@@ -1604,6 +1625,7 @@ def orchestrate_review(
         except Exception as e:  # noqa: BLE001
             logger.error("post_inline_comments failed: %s", e)
             inline_failed = True
+            post_failures.append(("inline", post_failure_cause(e)))
 
     # The summary itemizes every active finding, so when the inline pass left
     # some of them without an anchor the summary has to say so — otherwise it
@@ -1631,10 +1653,28 @@ def orchestrate_review(
             ),
             incremental_note=incremental_note,
         )
+        fallback_summary = refreshed
         try:
             forge.post_summary(ref, _with_reviewed_head(refreshed, reviewed_head))
         except Exception as e:  # noqa: BLE001
             logger.error("summary re-post with inline accounting failed: %s", e)
+            post_failures.append(("summary", post_failure_cause(e)))
+
+    degraded = _degraded_record(post_failures)
+    if degraded is not None and fallback_summary is None:
+        fallback_summary = _render_summary(
+            pr, files, verdict, findings_active, model,
+            input_tokens, output_tokens, elapsed_ms,
+            chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
+            failed_chunks=failed_chunks,
+            include_verdict=post_verdict,
+            spec_note=spec_note,
+            ticket_note=ticket_note,
+            cost_label=cost_label,
+            size_advisory_line=size_advisory_line,
+            summary_template=summary_template,
+            incremental_note=incremental_note,
+        )
 
     if post and (post_summary_wanted or post_inline_wanted):
         tracer.event(
@@ -1649,7 +1689,7 @@ def orchestrate_review(
         **_cost_meta(run_inputs),
         **(_scope_counts(findings_active) if ticket_active else {}),
     )
-    return _run_record({
+    return _run_record(_with_degraded({
         "verdict": verdict,
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
@@ -1661,7 +1701,7 @@ def orchestrate_review(
         "output_tokens": output_tokens,
         "posted": posted,
         "sampling": _sampling(llm),
-    }, run_inputs)
+    }, degraded, fallback_summary), run_inputs)
 
 
 def _origin_key(finding: Finding) -> tuple:
@@ -1962,6 +2002,51 @@ def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
                 result.setdefault(key, True)
         else:
             result.setdefault(key, value)
+    return result
+
+
+PERMISSION_STATUSES = frozenset({401, 403})
+"""HTTP statuses a failed post is classified as ``"permission"`` for."""
+
+
+def post_failure_cause(exc: BaseException) -> str:
+    """Classify one failed forge post: ``"permission"`` or ``"error"``.
+
+    ``"permission"`` when the exception carries a ``response`` whose
+    ``status_code`` is 401 or 403, which is how every forge adapter's
+    ``raise_for_status`` reports a token that may read but not write;
+    ``"error"`` for anything else, a transport failure or a 5xx included.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return "permission" if status in PERMISSION_STATUSES else "error"
+
+
+def _degraded_record(failures: Sequence[tuple[str, str]]) -> dict | None:
+    """The run record's ``degraded`` value from ``(post, cause)`` failures.
+
+    ``None`` when nothing failed. ``failed`` keeps each post kind once, in
+    the order it first failed; ``cause`` is ``"permission"`` when any failure
+    was. ``fallback`` and ``annotations`` start empty for the CLI to fill.
+    """
+    if not failures:
+        return None
+    failed: list[str] = []
+    for kind, _ in failures:
+        if kind not in failed:
+            failed.append(kind)
+    cause = "permission" if any(c == "permission" for _, c in failures) else "error"
+    return {"cause": cause, "failed": failed, "fallback": [], "annotations": 0}
+
+
+def _with_degraded(result: dict, degraded: dict | None, summary: str | None) -> dict:
+    """Stamp a degraded exit with ``degraded`` and :data:`DEGRADED_SUMMARY_KEY`.
+
+    A run with no failed post is returned untouched, so it takes the
+    ``None`` default from :func:`_run_record`. Returns ``result`` itself.
+    """
+    if degraded is not None:
+        result["degraded"] = degraded
+        result[DEGRADED_SUMMARY_KEY] = summary or ""
     return result
 
 
@@ -3611,6 +3696,8 @@ def _summary_only_run(
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
+    degraded: dict | None = None
+    summary: str | None = None
 
     findings = list(release_shape_findings or []) + list(toggle_findings or [])
     if findings:
@@ -3650,8 +3737,9 @@ def _summary_only_run(
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary failed: %s", e)
+            degraded = _degraded_record([("summary", post_failure_cause(e))])
     _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
-    return {
+    return _with_degraded({
         "verdict": verdict,
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
@@ -3663,7 +3751,7 @@ def _summary_only_run(
         "output_tokens": 0,
         "posted": posted,
         "sampling": sampling if sampling is not None else _sampling(None),
-    }
+    }, degraded, summary)
 
 
 def _error_run(
@@ -3702,6 +3790,8 @@ def _error_run(
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
     posted = False
+    degraded: dict | None = None
+    body: str | None = None
     wanted = post and post_mode in POST_SUMMARY_MODES
     _trace_post_begin(
         tracer, wanted=wanted, mode=post_mode, kind="error notice",
@@ -3726,8 +3816,9 @@ def _error_run(
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary (error notice) failed: %s", e)
+            degraded = _degraded_record([("summary", post_failure_cause(e))])
     _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
-    return {
+    return _with_degraded({
         "verdict": "Error",
         "findings_active": [],
         "findings_dropped": [],
@@ -3739,4 +3830,4 @@ def _error_run(
         "output_tokens": output_tokens,
         "posted": posted,
         "sampling": sampling if sampling is not None else _sampling(None),
-    }
+    }, degraded, body)
