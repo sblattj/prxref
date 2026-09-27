@@ -381,3 +381,45 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   outside the PR. On 2026-09-24 it was run live, read-only and with no token, against a
   public Azure DevOps Services project, and returned exactly the files of a raw walk of
   that endpoint. Azure DevOps Server is untested, as above.
+
+## When prxref cannot post
+
+Some setups give prxref a token that can read a pull request but not comment on it: a
+plain `pull_request` workflow on a fork PR, or a pipeline whose job token is read-only.
+The review still runs; only the posts fail. `prxref review` stays non-blocking (the exit
+code never changes, and still follows `PRXREF_FAIL_ON`), and with `PRXREF_FALLBACK=auto`,
+the default, it delivers the review through the CI job itself instead (issue #48). A
+run whose posts succeed is unaffected.
+
+What happens on a failed post:
+
+1. The run record's `degraded` key (also in `--format json`) says which posts failed
+   (`summary`, `inline`) and why: `permission` when the forge answered HTTP 401 or 403,
+   `error` for anything else (a 5xx, a timeout). It is `null` when no post failed.
+2. The CI is detected from the environment (`GITHUB_ACTIONS`, `TF_BUILD`, `GITLAB_CI`,
+   `BITBUCKET_BUILD_NUMBER`, in that order) and the active findings are emitted in its
+   native format, listed in `degraded.fallback`, with `degraded.annotations` counting
+   the lines or report entries emitted.
+3. Every run logs one WARNING: `prxref could not post (<cause>); the review is in this log`.
+
+Under `--format json`, the annotations and logging commands that would go to stdout are
+skipped, so stdout stays one parseable JSON document; files are still written. A write
+that fails (an unwritable job summary, say) is logged and left out of `fallback`.
+`PRXREF_FALLBACK=off` emits nothing, and `degraded` still records the failure. The
+webhook daemon records `degraded` but never emits.
+
+| Setup | What is posted | What the fallback emits | What the pipeline must configure | What shows in the record |
+|---|---|---|---|---|
+| GitHub Actions, `pull_request` from a fork | Nothing: the fork's `GITHUB_TOKEN` is read-only, so the summary is refused with 403 and the inline comments, which wait on it, are not attempted | One `::error` / `::warning` / `::notice` annotation per active finding on stdout (at most 50, errors first; text format only), and the summary appended to the job summary | Nothing; the job summary needs `$GITHUB_STEP_SUMMARY`, which the runner sets | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["github-annotations", "github-step-summary"], ...}` |
+| GitHub Actions, `pull_request_target` (the shipped workflow) | The summary and the inline comments, as on any same-repository PR: the token can write | Nothing | Nothing beyond `pull-requests: write`, which the shipped workflow grants | `degraded`: `null` |
+| GitLab CI with a read-only token | Nothing: the summary note is refused with 401 or 403 | `gl-code-quality-report.json` in the working directory, one entry per active finding (`major` for errors, `minor` for warnings, `info` otherwise), replacing any existing file | `artifacts: reports: codequality: gl-code-quality-report.json` on the job, so the merge request widget shows the report | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["gitlab-codequality"], ...}` |
+| Bitbucket Pipelines | Nothing, when the token cannot write: the summary comment is refused | The summary markdown in the job log at WARNING; Bitbucket has no tokenless annotation channel | Nothing | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["log"], ...}` |
+| Azure Pipelines | Nothing, when the job token cannot write: the summary thread is refused | One `##vso[task.logissue]` logging command per active finding on stdout (`type=error` for errors, `type=warning` otherwise; text format only), which the run summary lists as errors and warnings | Nothing | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["azure-logging"], ...}` |
+| A local run | Whatever the token allows | The summary markdown on stderr at WARNING | Nothing | `degraded` names the failed posts, with `"fallback": ["log"]` |
+
+The `failed` list above assumes the default `PRXREF_POST_MODE=summary+inline`, in which a
+refused summary means the inline comments are never attempted. With
+`PRXREF_POST_MODE=inline`, only GitHub reports a refused inline comment as a failure:
+the Bitbucket Cloud, Bitbucket Server, GitLab and Azure DevOps adapters skip each
+comment a 4xx rejects, as they do for a line outside the diff, so an inline-only run on
+those forges does not detect a read-only token and records no degradation.

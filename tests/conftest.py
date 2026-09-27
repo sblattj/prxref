@@ -37,10 +37,23 @@ def clear_prxref_env(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return names
 
 
+CI_ENV_NAMES = (
+    "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY", "TF_BUILD", "GITLAB_CI", "BITBUCKET_BUILD_NUMBER",
+)
+"""The CI variables the post-failure fallback reads (issue #48)."""
+
+
 @pytest.fixture(autouse=True)
 def _clear_prxref_env(monkeypatch):
-    """No ambient PRXREF_* reaches any test; every test sets what it needs."""
+    """No ambient PRXREF_* or CI variable reaches any test; each sets what it needs.
+
+    The suite itself runs under GitHub Actions, where a failed post in a CLI
+    test would otherwise print annotations and append to the runner's real
+    job summary.
+    """
     clear_prxref_env(monkeypatch)
+    for name in CI_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
