@@ -505,7 +505,7 @@ class TestTheCli:
         record = {**INACTIVE, "active": True, "chunks": []}
         keys = list(cli._build_json_result({"verdict": "Approved", "context_followup": record,
                                             "sampling": {"seed": 1}, "replay": {}}))
-        assert keys[keys.index("parse_retries") + 1:] == ["context_followup", "sampling", "replay"]
+        assert keys[keys.index("parse_retries") + 1:] == ["context_followup", "suggestions", "sampling", "replay"]
         assert cli._build_json_result({"context_followup": record})["context_followup"] == record
 
     @pytest.mark.parametrize("result", [{}, None, {"verdict": "Approved"}])

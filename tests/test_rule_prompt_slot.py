@@ -260,7 +260,8 @@ class TestPackagedSlot:
     def test_the_slot_follows_the_scope_slot_once(self, name):
         template = load_prompt(name)
         assert template.count("{rule_example}") == 1
-        assert template.count("{scope_example}{rule_example}\n    }") == 1
+        after = "{suggestion_example}" if name == "worker.md" else ""
+        assert template.count("{scope_example}{rule_example}" + after + "\n    }") == 1
 
     @pytest.mark.parametrize("name", ["worker", "systemic"])
     def test_the_slot_is_below_the_marker_and_optional(self, name):

@@ -66,6 +66,7 @@ from .costs import combine_reported, valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
 from .parser import loads_lenient
+from .quality import MAX_SUGGESTION_LINES
 from .triage import (
     RULE_MAX_CHARS,
     SCOPE_IN,
@@ -109,6 +110,28 @@ RULE_REQUEST = "\n\n".join((
 # way: the comma travels with the key, so a run that does not ask for a rule
 # renders the example unchanged.
 _RULE_EXAMPLE = ',\n      "rule": "no-bare-except"'
+
+# The SYSTEM-prompt block that asks for an optional per-finding code
+# suggestion (#30), passed as ``PromptContext.suggestion_request`` to chunk
+# workers only when ``PRXREF_SUGGESTIONS`` is on. What comes back is checked
+# by :func:`prxref.quality.apply_suggestion_validation` before anything
+# renders it.
+SUGGESTION_REQUEST = "\n\n".join((
+    "## Code suggestions",
+    "When the fix for a finding is local and certain, add a \"suggestion\" key to it: the "
+    "exact replacement text for the new-file lines \"line\" through \"suggestion_end_line\", "
+    "lines joined by newlines. Add \"suggestion_end_line\" (the last replaced new-file line) "
+    "only when the replacement covers more than one line; omit it for one line. Replace at "
+    f"most {MAX_SUGGESTION_LINES} lines. Otherwise leave both keys out.",
+    "Never include unchanged lines outside that range, never wrap the text in markdown fences, "
+    "and keep the file's indentation.",
+    '"suggestion" never changes "severity" or "confidence".',
+))
+
+# Fills the worker template's ``{suggestion_example}`` slot that follows
+# ``{rule_example}``, the same way: the comma travels with the key, so a run
+# that does not ask for a suggestion renders the example unchanged.
+_SUGGESTION_EXAMPLE = ',\n      "suggestion": "    return total / size if size else 0"'
 
 _MAX_TOKENS_ENV = "PRXREF_LLM_MAX_TOKENS"
 
@@ -276,6 +299,14 @@ class PromptContext:
     model-supplied ``rule`` and a ``"rule"`` key in the example; an override
     template without the optional ``{rule_example}`` slot still gets the
     request, only not the example key.
+
+    ``suggestion_request`` (:data:`SUGGESTION_REQUEST` when
+    ``PRXREF_SUGGESTIONS`` is on) is appended after ``rule_request`` to
+    chunk units only; the sweep never gets it. :attr:`suggestion_active`
+    alone decides whether a model-supplied ``suggestion`` and
+    ``suggestion_end_line`` are read and whether the worker example finding
+    shows a ``"suggestion"`` key through the optional
+    ``{suggestion_example}`` slot.
     """
 
     rules_worker: str = ""
@@ -286,6 +317,7 @@ class PromptContext:
     worker_template: str = ""
     systemic_template: str = ""
     rule_request: str = ""
+    suggestion_request: str = ""
 
     @property
     def scope_active(self) -> bool:
@@ -296,6 +328,11 @@ class PromptContext:
     def rule_active(self) -> bool:
         """True when the prompt asks for ``rule``, so the answer may be kept."""
         return bool(self.rule_request)
+
+    @property
+    def suggestion_active(self) -> bool:
+        """True when the worker prompt asks for ``suggestion``, so the answer may be kept."""
+        return bool(self.suggestion_request)
 
 
 NO_PROMPT_CONTEXT = PromptContext()
@@ -317,6 +354,10 @@ def _scope_example_value(prompt_context: PromptContext) -> str:
 
 def _rule_example_value(prompt_context: PromptContext) -> str:
     return _RULE_EXAMPLE if prompt_context.rule_active else ""
+
+
+def _suggestion_example_value(prompt_context: PromptContext) -> str:
+    return _SUGGESTION_EXAMPLE if prompt_context.suggestion_active else ""
 
 
 def _render_file(f: FileDiff, context_lines: int | None = None) -> str:
@@ -383,10 +424,12 @@ def _render_prompt(
         "diff": render_chunk(chunk, context_lines) or "(empty chunk)",
         "scope_example": _scope_example_value(prompt_context),
         "rule_example": _rule_example_value(prompt_context),
+        "suggestion_example": _suggestion_example_value(prompt_context),
     })
     system = _append_block(head.strip(), prompt_context.rules_worker)
     system = _append_block(system, prompt_context.ticket_scope)
     system = _append_block(system, prompt_context.rule_request)
+    system = _append_block(system, prompt_context.suggestion_request)
     return system, user.strip()
 
 
@@ -445,6 +488,7 @@ def _render_systemic_prompt(
         "digest": digest.strip() or "(empty digest)",
         "scope_example": _scope_example_value(prompt_context),
         "rule_example": _rule_example_value(prompt_context),
+        "suggestion_example": "",
     })
     discussion = _render_discussion_block(threads)
     user = user.strip()
@@ -463,8 +507,27 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def parse_suggestion(raw: Mapping[str, Any]) -> tuple[str | None, int]:
+    """Read a raw finding's ``(suggestion, suggestion_end_line)`` (#30).
+
+    ``suggestion`` is kept only when it is a string, else ``None``;
+    ``suggestion_end_line`` only when it is an ``int`` (not a ``bool``) of 0
+    or more, else 0, and it is 0 whenever ``suggestion`` is ``None``.
+    Nothing is validated against the diff here; that is
+    :func:`prxref.quality.apply_suggestion_validation`'s job.
+    """
+    text = raw.get("suggestion")
+    if not isinstance(text, str):
+        return None, 0
+    end = raw.get("suggestion_end_line")
+    if isinstance(end, bool) or not isinstance(end, int) or end < 0:
+        end = 0
+    return text, end
+
+
 def _finding_from(
     raw: Any, *, accept_scope: bool = False, accept_rule: bool = False,
+    accept_suggestion: bool = False,
 ) -> Finding | None:
     if not isinstance(raw, dict):
         return None
@@ -475,6 +538,7 @@ def _finding_from(
         confidence = float(raw.get("confidence", DEFAULT_CONFIDENCE))
     except (TypeError, ValueError):
         confidence = DEFAULT_CONFIDENCE
+    suggestion, suggestion_end_line = parse_suggestion(raw) if accept_suggestion else (None, 0)
     return Finding(
         file=file,
         line=_as_int(raw.get("line")),
@@ -484,6 +548,8 @@ def _finding_from(
         body=str(raw.get("body") or "").strip(),
         scope=normalize_scope(raw.get("scope")) if accept_scope else SCOPE_UNKNOWN,
         rule=normalize_rule(raw.get("rule")) if accept_rule else None,
+        suggestion=suggestion,
+        suggestion_end_line=suggestion_end_line,
     )
 
 
@@ -620,7 +686,7 @@ def _may_retry(result: Any, problem: str, retries: int, parse_retries: int) -> b
 def _invoke_and_parse(
     llm: LLMClient, system: str, user: str, *, budget: int, label: str,
     trace_dir: str = "", trace_label: str = "", accept_scope: bool = False,
-    accept_rule: bool = False, parse_retries: int = 0,
+    accept_rule: bool = False, parse_retries: int = 0, accept_suggestion: bool = False,
 ) -> tuple[list[Finding], dict]:
     """One single-shot invoke plus lenient JSON parse, shared by both reviewers.
 
@@ -642,6 +708,10 @@ def _invoke_and_parse(
     ``accept_rule`` does the same for ``rule`` (through
     :func:`prxref.triage.normalize_rule`); false, the default, leaves every
     finding's ``rule`` at ``None``.
+
+    ``accept_suggestion`` does the same for ``suggestion`` and
+    ``suggestion_end_line`` (through :func:`parse_suggestion`); false, the
+    default, leaves them at ``None`` and 0 whatever the model volunteered.
 
     ``parse_retries`` (N, default 0) is one retry budget shared by every
     kind of reply that cannot be used as a review. The same request, with
@@ -788,7 +858,10 @@ def _invoke_and_parse(
         raw_findings = []
     findings = [
         f for f in (
-            _finding_from(r, accept_scope=accept_scope, accept_rule=accept_rule)
+            _finding_from(
+                r, accept_scope=accept_scope, accept_rule=accept_rule,
+                accept_suggestion=accept_suggestion,
+            )
             for r in raw_findings
         )
         if f is not None
@@ -897,7 +970,8 @@ def review_chunk(
     severity. A finding's ``scope`` is read from the response only when
     :attr:`PromptContext.scope_active`; otherwise it is ``unknown``. Its
     ``rule`` is read only when :attr:`PromptContext.rule_active`; otherwise
-    it is ``None``. The
+    it is ``None``. Its ``suggestion`` and ``suggestion_end_line`` are read
+    only when :attr:`PromptContext.suggestion_active`. The
     default :data:`NO_PROMPT_CONTEXT` injects nothing. The orchestrator
     always passes this keyword too, so any test double must accept it.
     """
@@ -918,6 +992,7 @@ def review_chunk(
         accept_scope=prompt_context.scope_active,
         accept_rule=prompt_context.rule_active,
         parse_retries=parse_retries,
+        accept_suggestion=prompt_context.suggestion_active,
     )
 
 
