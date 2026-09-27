@@ -8,6 +8,59 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.23.0] — 2026-09-27
+
+Graceful degradation when the token cannot post (#48). When prxref can read a
+pull request but not comment on it, the review now reaches the author through
+the CI job itself instead of only a log line. The new key `PRXREF_FALLBACK` is
+on by default but acts only on a failed post, so when every post succeeds (or
+nothing is posted) every prompt, forge read, forge write and stdout byte is the
+same as in 0.22.0; the run record and `--format json` gain one key,
+`degraded`, which is `null` then.
+
+### Added
+
+- **`PRXREF_FALLBACK` (`auto`|`off`, default `auto`) (#48).** When a summary
+  or inline post fails (a fork PR under a plain `pull_request` workflow, or a
+  read-only pipeline token), `prxref review` emits the review through the CI
+  it runs under, detected from the environment:
+  - GitHub Actions (`GITHUB_ACTIONS=true`): one `::error`, `::warning` or
+    `::notice` annotation per active finding on stdout, errors first, at most
+    50, and the summary appended to the job summary (`$GITHUB_STEP_SUMMARY`);
+  - Azure Pipelines (`TF_BUILD=True`): one `##vso[task.logissue]` logging
+    command per active finding on stdout;
+  - GitLab CI (`GITLAB_CI=true`): a Code Quality report,
+    `gl-code-quality-report.json`, in the working directory (declare it under
+    `artifacts: reports: codequality:`);
+  - Bitbucket Pipelines (`BITBUCKET_BUILD_NUMBER`) and outside CI: the
+    summary in the log at WARNING.
+
+  Every CI also logs one WARNING line naming the cause. Under `--format json`
+  the stdout annotations and logging commands are skipped, so stdout stays one
+  JSON document; the job summary and the GitLab report are still written.
+  `off` emits nothing. The emission never raises, and the exit code never
+  changes: it still follows `PRXREF_FAIL_ON`. The webhook daemon records the
+  failure but never emits. Any other value exits 2 naming the variable.
+- **The run record and `--format json` gain `degraded` (#48),** right after
+  `incremental`: `null` when no post failed, otherwise `{"cause", "failed",
+  "fallback", "annotations"}`. `cause` is `permission` when a failed post was
+  refused with HTTP 401 or 403, else `error`; `failed` lists `summary` and/or
+  `inline`; `fallback` lists what was emitted instead, and `annotations`
+  counts the stdout lines or report entries.
+- **docs/forges.md has a per-forge "When prxref cannot post" matrix (#48).**
+
+### Known limitations
+
+- **With `PRXREF_POST_MODE=inline`, a read-only token is detected on GitHub
+  only.** Bitbucket Cloud, Bitbucket Server, GitLab and Azure DevOps skip a
+  refused inline comment without raising, so an inline-only run there records
+  no degradation and emits nothing. The default post mode is covered, because
+  the summary post fails first and the inline comments are not attempted.
+- **The fallback formats are tested, not yet seen on a live runner.** The
+  annotations, logging commands and Code Quality report follow each CI's
+  documented syntax and are checked against fakes and mocked 401/403
+  responses; no live CI run has shown them yet.
+
 ## [0.22.0] — 2026-09-27
 
 Incremental re-review on push (#34). With the new key `PRXREF_INCREMENTAL=on`,
@@ -2297,7 +2350,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/sblattj/prxref/releases/tag/v0.23.0
 [0.22.0]: https://github.com/sblattj/prxref/releases/tag/v0.22.0
 [0.21.1]: https://github.com/sblattj/prxref/releases/tag/v0.21.1
 [0.21.0]: https://github.com/sblattj/prxref/releases/tag/v0.21.0
