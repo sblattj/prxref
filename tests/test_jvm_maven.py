@@ -520,14 +520,13 @@ class TestDependencies:
                                 MavenCoordinate("com.fasterxml.jackson", "jackson-bom", "2.17.1"))
         assert project.external_parent == MavenCoordinate("com.example", "corporate-parent", "7")
         assert project.lines() == [
-            "com.fasterxml.jackson.core:jackson-databind@(managed by com.example:corporate-parent@7)",
+            "com.fasterxml.jackson.core:jackson-databind@(likely managed by com.fasterxml.jackson:jackson-bom@2.17.1)",
         ]
         files["pom.xml"] = parent_pom.replace(parent("com.example", "corporate-parent", "7", ""), "")
         project = resolve_pom("api/pom.xml", CountingReader(files))
         assert project.external_parent is None
         assert project.lines() == [
-            "com.fasterxml.jackson.core:jackson-databind"
-            "@(managed by org.springframework.boot:spring-boot-dependencies@3.3.4)",
+            "com.fasterxml.jackson.core:jackson-databind@(likely managed by com.fasterxml.jackson:jackson-bom@2.17.1)",
         ]
 
     def test_a_managed_version_wins_over_every_owner(self):
