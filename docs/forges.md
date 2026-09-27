@@ -1,6 +1,6 @@
 # Forge Integrations & Webhooks
 
-`prxref` provides unified pull/merge request reviews across Bitbucket (Cloud and Server / Data Center), GitHub (Cloud and Enterprise Server), GitLab (SaaS and self-hosted), and Azure DevOps (Services and Server).
+`prxref` provides unified pull/merge request reviews across Bitbucket (Cloud and Server / Data Center), GitHub (Cloud and Enterprise Server), GitLab (SaaS and self-hosted), Gitea and Forgejo (any host, including Codeberg), and Azure DevOps (Services and Server).
 
 ## Supported Hosts
 
@@ -9,9 +9,10 @@
 | **Bitbucket** | `bitbucket.org` | Supported — Bitbucket Server / Data Center, any host, including a deployment context path |
 | **GitHub** | `github.com` | Supported — GitHub Enterprise Server, any host |
 | **GitLab** | `gitlab.com` | Supported — any host, including nested subgroups |
+| **Gitea / Forgejo** | `codeberg.org`, `gitea.com` | Supported — any Gitea or Forgejo host |
 | **Azure DevOps** | `dev.azure.com`, `*.visualstudio.com` | Supported, untested live — Azure DevOps Server, any host; the URL must include the collection and the project |
 
-Every host is covered, but not by the same means. GitHub and GitLab are host-agnostic within one adapter each, because their self-hosted products speak the same REST API as their SaaS ones, differing only in base URL (`/api/v3` for GHES, `/api/v4` for every GitLab). Bitbucket is not: Server / Data Center exposes a different API surface (`/rest/api/1.0`) with different resource shapes, so it is a fourth adapter rather than a base-URL setting, selected automatically from the URL. See [Bitbucket Server / Data Center](#4-bitbucket-server--data-center). Azure DevOps is the fifth adapter, and like GitHub and GitLab it serves both products: Services and Server speak the same REST API and differ only in where the collection sits in the URL. See [Azure DevOps Services & Server](#5-azure-devops-services--server).
+Every host is covered, but not by the same means. GitHub and GitLab are host-agnostic within one adapter each, because their self-hosted products speak the same REST API as their SaaS ones, differing only in base URL (`/api/v3` for GHES, `/api/v4` for every GitLab). Bitbucket is not: Server / Data Center exposes a different API surface (`/rest/api/1.0`) with different resource shapes, so it is a fourth adapter rather than a base-URL setting, selected automatically from the URL. See [Bitbucket Server / Data Center](#4-bitbucket-server--data-center). Azure DevOps is the fifth adapter, and like GitHub and GitLab it serves both products: Services and Server speak the same REST API and differ only in where the collection sits in the URL. See [Azure DevOps Services & Server](#5-azure-devops-services--server). Gitea and Forgejo share one more adapter: Forgejo is a fork of Gitea that keeps its `/api/v1` REST API, so a Codeberg, gitea.com or self-hosted instance differs only in base URL. See [Gitea / Forgejo](#6-gitea--forgejo).
 
 ---
 
@@ -382,6 +383,99 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   public Azure DevOps Services project, and returned exactly the files of a raw walk of
   that endpoint. Azure DevOps Server is untested, as above.
 
+---
+
+## 6. Gitea / Forgejo
+
+Forgejo is a fork of Gitea that keeps Gitea's REST API (`/api/v1`) and its webhook
+format, so one adapter serves both, on any host: Codeberg, gitea.com, or a
+self-hosted instance.
+
+- **Forge Identifier:** `gitea`
+- **Supported URL Shapes:**
+  - `https://{host}/{owner}/{repo}/pulls/{number}`, on any host, e.g.
+    `https://codeberg.org/{owner}/{repo}/pulls/{number}`
+- **Detection Order:** `detect_forge` asks this parser after GitLab and before Azure
+  DevOps.
+- **Authentication:** `PRXREF_GITEA_TOKEN`, an access token created under
+  **Settings → Applications**. Without one, requests are anonymous, which reads a
+  public repository but cannot post. Observed on live Gitea 1.24 and Forgejo 11
+  instances, identically:
+  - `read:repository` reads the pull request and its diff;
+  - `write:repository` is needed to post inline review comments;
+  - `write:issue` is needed to post a comment on the pull request's conversation,
+    which is where a summary goes, because Gitea files pull request comments under
+    issues.
+
+  So a token that posts the full review needs `write:repository` and `write:issue`.
+- **API Endpoints & Behavior:** the adapter speaks `{scheme}://{host}/api/v1`, the
+  API that Gitea and Forgejo share.
+- **Webhook Integration:**
+  - **Setup:** in the repository's **Settings → Webhooks**, add a webhook of type
+    **Forgejo** or **Gitea** with target URL `https://<host>/webhook`, content type
+    `application/json`, and a secret equal to `PRXREF_GITEA_WEBHOOK_SECRET`. Under
+    **Custom events**, **Pull Request** is the only event that is reviewed. The PR URL
+    comes from the payload's `pull_request.html_url`, which the instance builds from its
+    `ROOT_URL`, so that setting must be the address prxref can reach.
+  - **Event Header:** `X-Forgejo-Event` or `X-Gitea-Event`, which must equal
+    `pull_request`. Every other event is acknowledged with `202` and not reviewed.
+  - **Accepted Actions:** `opened`, `synchronized` (a push to the source branch; not
+    GitHub's `synchronize`), and `reopened`.
+  - **Signature Header:** `X-Forgejo-Signature` or `X-Gitea-Signature`: the HMAC-SHA256
+    of the raw body as bare hex, with no `sha256=` prefix, validated against
+    `PRXREF_GITEA_WEBHOOK_SECRET`. An unset secret rejects every Gitea or Forgejo
+    webhook with `401` unless `PRXREF_ALLOW_UNSIGNED=1`.
+  - **GitHub-compatible headers:** both forges also send `X-GitHub-Event`,
+    `X-Hub-Signature-256` and a `X-Gogs-*` family on every delivery. prxref checks the
+    Forgejo and Gitea event headers first, so such a delivery is never verified as a
+    GitHub one; a delivery carrying only GitHub headers is still a GitHub delivery.
+  - **Observed headers.** A Gitea 1.24 delivery carries the `X-Gitea-`, `X-Gogs-` and
+    `X-GitHub-` families (`-Delivery`, `-Event`, `-Event-Type`, plus
+    `-Hook-Installation-Target-Type` for Gitea and GitHub), `X-Gitea-Signature`,
+    `X-Gogs-Signature`, `X-Hub-Signature` (`sha1=`) and `X-Hub-Signature-256`
+    (`sha256=`). A Forgejo 11 delivery adds the `X-Forgejo-` family and
+    `X-Forgejo-Signature` and sends no `-Hook-Installation-Target-Type` headers. The
+    `X-Forgejo-`, `X-Gitea-` and `X-Gogs-Signature` values are the same bare hex. `X-Gitea-Event-Type` is
+    `pull_request_sync` for a push to the source branch while `X-Gitea-Event` stays
+    `pull_request`. Both instances' deliveries are kept, scrubbed, as test fixtures.
+- **CI recipe (Forgejo Actions / Gitea Actions):** both run GitHub-Actions-style
+  workflows. Save this as `.forgejo/workflows/prxref.yml` on Forgejo, or
+  `.gitea/workflows/prxref.yml` on Gitea, and add the secrets it names in the
+  repository's **Settings → Actions → Secrets**:
+
+  ```yaml
+  # pull_request_target runs in the base repository, so the secrets are available
+  # for a fork's pull request too. That is safe only because the job never checks
+  # out or runs the pull request's code: prxref reads the diff over the API.
+  on:
+    pull_request_target:
+      types: [opened, synchronize, reopened]
+
+  jobs:
+    review:
+      runs-on: docker          # your runner's label; Gitea's act_runner uses ubuntu-latest
+      container:
+        image: python:3.12-slim
+      steps:
+        - run: pip install --quiet prxref
+        - run: >-
+            prxref review --pr-url
+            "${{ github.server_url }}/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}"
+          env:
+            PRXREF_GITEA_TOKEN: ${{ secrets.PRXREF_GITEA_TOKEN }}
+            PRXREF_LLM_BASE_URL: ${{ secrets.PRXREF_LLM_BASE_URL }}
+            PRXREF_LLM_API_KEY: ${{ secrets.PRXREF_LLM_API_KEY }}
+            PRXREF_LLM_MODELS: ${{ secrets.PRXREF_LLM_MODELS }}
+  ```
+
+  The workflow's event types are GitHub's names (`synchronize`), which both forges map
+  onto their own. `github.server_url` is the instance's own address, so the same file
+  works on Codeberg and on a self-hosted instance. prxref exits `0` on every review
+  error, so the job never fails a pull request unless you set `PRXREF_FAIL_ON`.
+- **Webhook daemon:** as for the other forges, run `prxref serve` with the
+  [Docker Compose or Docker CLI setup](deploy.md#1-docker-deployment-recommended), and put
+  `PRXREF_GITEA_TOKEN` and `PRXREF_GITEA_WEBHOOK_SECRET` in its env file.
+
 ## When prxref cannot post
 
 Some setups give prxref a token that can read a pull request but not comment on it: a
@@ -413,6 +507,7 @@ webhook daemon records `degraded` but never emits.
 | GitHub Actions, `pull_request` from a fork | Nothing: the fork's `GITHUB_TOKEN` is read-only, so the summary is refused with 403 and the inline comments, which wait on it, are not attempted | One `::error` / `::warning` / `::notice` annotation per active finding on stdout (at most 50, errors first; text format only), and the summary appended to the job summary | Nothing; the job summary needs `$GITHUB_STEP_SUMMARY`, which the runner sets | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["github-annotations", "github-step-summary"], ...}` |
 | GitHub Actions, `pull_request_target` (the shipped workflow) | The summary and the inline comments, as on any same-repository PR: the token can write | Nothing | Nothing beyond `pull-requests: write`, which the shipped workflow grants | `degraded`: `null` |
 | GitLab CI with a read-only token | Nothing: the summary note is refused with 401 or 403 | `gl-code-quality-report.json` in the working directory, one entry per active finding (`major` for errors, `minor` for warnings, `info` otherwise), replacing any existing file | `artifacts: reports: codequality: gl-code-quality-report.json` on the job, so the merge request widget shows the report | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["gitlab-codequality"], ...}` |
+| Forgejo Actions or Gitea Actions, with a token that cannot write | Nothing: the summary comment is refused | The same as GitHub Actions, because the runner sets `GITHUB_ACTIONS=true` (Forgejo documents every `FORGEJO_*` variable as also set under its `GITHUB_*` name): `::error` / `::warning` / `::notice` lines on stdout, and the summary appended to `$GITHUB_STEP_SUMMARY` when the runner sets it. Whether either forge renders those annotations or a job summary in its UI is **not verified**; the lines are always in the job log | Nothing | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["github-annotations", ...], ...}` |
 | Bitbucket Pipelines | Nothing, when the token cannot write: the summary comment is refused | The summary markdown in the job log at WARNING; Bitbucket has no tokenless annotation channel | Nothing | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["log"], ...}` |
 | Azure Pipelines | Nothing, when the job token cannot write: the summary thread is refused | One `##vso[task.logissue]` logging command per active finding on stdout (`type=error` for errors, `type=warning` otherwise; text format only), which the run summary lists as errors and warnings | Nothing | `degraded`: `{"cause": "permission", "failed": ["summary"], "fallback": ["azure-logging"], ...}` |
 | A local run | Whatever the token allows | The summary markdown on stderr at WARNING | Nothing | `degraded` names the failed posts, with `"fallback": ["log"]` |
