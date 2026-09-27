@@ -1,4 +1,4 @@
-"""Webhook receiver for GitHub, Bitbucket, GitLab, and Azure DevOps PR events.
+"""Webhook receiver for GitHub, Bitbucket, GitLab, Gitea/Forgejo, and Azure DevOps PR events.
 
 POST /webhook verifies the forge-specific signature, extracts the PR URL
 from the payload, and enqueues it; a single background daemon worker
@@ -27,6 +27,7 @@ _GITHUB_SECRET_ENV = "PRXREF_GITHUB_WEBHOOK_SECRET"
 _BITBUCKET_SECRET_ENV = "PRXREF_BITBUCKET_WEBHOOK_SECRET"
 _GITLAB_SECRET_ENV = "PRXREF_GITLAB_WEBHOOK_SECRET"
 _AZURE_DEVOPS_SECRET_ENV = "PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET"
+_GITEA_SECRET_ENV = "PRXREF_GITEA_WEBHOOK_SECRET"
 _ALLOW_UNSIGNED_ENV = "PRXREF_ALLOW_UNSIGNED"
 _UNSIGNED_PREFIX = "unsigned:"
 
@@ -47,13 +48,22 @@ _GITLAB_ACTIONS = ("open", "update")
 _AZURE_DEVOPS_PUBLISHER = "tfs"
 _AZURE_DEVOPS_EVENTS = ("git.pullrequest.created", "git.pullrequest.updated")
 _AZURE_DEVOPS_REVIEWABLE_STATUS = "active"
+# Gitea and Forgejo also send GitHub-compatible headers (X-GitHub-Event,
+# X-Hub-Signature-256) with every delivery, so their own event headers must
+# be checked before the GitHub one.
+_GITEA_EVENT_HEADERS = ("x-forgejo-event", "x-gitea-event")
+_GITEA_SIGNATURE_HEADERS = ("x-forgejo-signature", "x-gitea-signature")
+_GITEA_ACTIONS = ("opened", "synchronized", "reopened")
 
 
 def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
     """Verify a webhook from any supported forge and extract its PR URL.
 
-    The source forge is detected from its event header (X-GitHub-Event,
-    X-Event-Key, or X-Gitlab-Event; header names are case-insensitive).
+    The source forge is detected from its event header (X-Forgejo-Event or
+    X-Gitea-Event, then X-GitHub-Event, X-Event-Key, or X-Gitlab-Event; header
+    names are case-insensitive). Gitea and Forgejo also send GitHub-compatible
+    headers, so their own event header is checked first; a delivery carrying
+    only GitHub headers is still verified as GitHub.
     Bitbucket Cloud and Bitbucket Server are both recognized by X-Event-Key
     and share one verification path; their event names and payload shapes
     differ and both are accepted. Azure DevOps service hooks carry no event
@@ -61,11 +71,14 @@ def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
     body (``publisherId == "tfs"``); the header-based forges always win.
     Signature is checked per forge: GitHub HMAC-SHA256 in X-Hub-Signature-256,
     Bitbucket HMAC-SHA256 in X-Hub-Signature, GitLab plain token in
-    X-Gitlab-Token, Azure DevOps the password of the Authorization: Basic
-    header (the user name is ignored) — each against its
-    PRXREF_<FORGE>_WEBHOOK_SECRET env var. Only PR-open/update events are
-    reviewable (for Azure DevOps, git.pullrequest.created/updated on a PR
-    whose status is active); anything else is ignored.
+    X-Gitlab-Token, Gitea/Forgejo bare-hex HMAC-SHA256 in X-Forgejo-Signature
+    or X-Gitea-Signature (secret PRXREF_GITEA_WEBHOOK_SECRET), Azure DevOps
+    the password of the Authorization: Basic header (the user name is
+    ignored) — each against its PRXREF_<FORGE>_WEBHOOK_SECRET env var. Only
+    PR-open/update events are reviewable (for Gitea/Forgejo, pull_request
+    opened, synchronized or reopened; for Azure DevOps,
+    git.pullrequest.created/updated on a PR whose status is active);
+    anything else is ignored.
 
     Returns (True, pr_url) on success. When PRXREF_ALLOW_UNSIGNED=1 and no
     secret/signature is available, returns (True, "unsigned:<pr_url>") so
@@ -75,6 +88,8 @@ def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
     unreviewable events; everything else maps to 400.
     """
     normalized = {str(key).lower(): value for key, value in headers.items()}
+    if any(name in normalized for name in _GITEA_EVENT_HEADERS):
+        return _verify_gitea(body, normalized)
     if "x-github-event" in normalized:
         return _verify_github(body, normalized)
     if "x-event-key" in normalized:
@@ -284,6 +299,38 @@ def _verify_gitlab(body: bytes, h: dict) -> tuple[bool, str]:
     url = attrs.get("url")
     if not url:
         return False, "gitlab payload missing object_attributes.url"
+    return _result("unsigned" if unsigned else "ok", url)
+
+
+def _verify_gitea(body: bytes, h: dict) -> tuple[bool, str]:
+    signature = next((h[name] for name in _GITEA_SIGNATURE_HEADERS if h.get(name)), "")
+    secret = os.environ.get(_GITEA_SECRET_ENV)
+    unsigned = False
+    if not signature or not secret:
+        if not _allow_unsigned():
+            if not secret:
+                return False, "gitea secret not configured"
+            return False, "missing gitea signature header"
+        unsigned = True
+    else:
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, str(signature).strip().lower()):
+            return False, "gitea signature mismatch"
+    event = next((h[name] for name in _GITEA_EVENT_HEADERS if h.get(name)), "")
+    if event != "pull_request":
+        return False, f"ignored: gitea event {event!r} is not pull_request"
+    payload = _parse_json(body)
+    if payload is None:
+        return False, "invalid JSON payload"
+    action = payload.get("action", "")
+    if action not in _GITEA_ACTIONS:
+        return False, f"ignored: gitea pull_request action {action!r} is not reviewable"
+    pull_request = payload.get("pull_request")
+    if not isinstance(pull_request, dict):
+        pull_request = {}
+    url = _http_url_without_userinfo(pull_request.get("html_url"))
+    if not url or url != str(pull_request.get("html_url")).strip():
+        return False, "gitea payload missing a valid pull_request.html_url"
     return _result("unsigned" if unsigned else "ok", url)
 
 
