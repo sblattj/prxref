@@ -266,6 +266,22 @@ class Forge(Protocol):
         """List existing threads so re-reviews skip already-discussed findings."""
         ...
 
+    def get_summary(self, ref: PRRef) -> str | None:
+        """Return the raw body of the summary comment ``post_summary`` would update.
+
+        Optional: callers resolve it with ``getattr(forge, "get_summary",
+        None)``, so a Forge without it is still valid, and its absence means
+        the previous summary cannot be read. The lookup is the one
+        ``post_summary`` runs, shared through one private helper per adapter,
+        so the comment returned is exactly the one a later ``post_summary``
+        would overwrite. The body comes back as the forge stores it, marker
+        included. Returns ``None`` when there is no such comment, meaning
+        ``post_summary`` would create one. Raises ``FeedReadError`` wherever
+        that lookup does, when the feed cannot be read to the end. It never
+        writes.
+        """
+        ...
+
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
         """Return the text of ``path`` at commit ``sha``.
 
