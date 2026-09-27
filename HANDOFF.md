@@ -1,78 +1,110 @@
-# HANDOFF — v0.21.1 shipped: one retry at a larger budget for a truncated reply (#52)
+# HANDOFF — v0.22.0 shipped: incremental re-review on push (#34)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.21.0 handoff.
+v0.21.1 handoff.
 
-0.21.1 is one fix. #52: a worker or sweep reply that the provider stopped at
-the completion budget (`finish_reason` `length` or `max_tokens`) before it
-was usable is now retried once, automatically, at double the budget, after
-one WARNING. That retry costs one extra LLM call, walking the model's
-fallback chain again, only for a reply that could not be used; a reply that
-is truncated but still usable is kept as before, with its existing warning,
-and is not retried; a budget already at the retry ceiling is not retried
-either. No new config key and no new run-record key. The user-facing
-account is the `[0.21.1]` section of `CHANGELOG.md`. This file is for
-whoever cuts the next release. The v0.21.0 handoff is in git history.
+0.22.0 is one feature. #34: with the new key `PRXREF_INCREMENTAL=on`, each
+summary prxref posts records the PR head it reviewed, and a later push
+chunks and reviews only the PR's files touched since that head, pruning only
+their earlier prxref inline comments. The whole-PR systemic sweep, the size
+advisory and the deterministic checks still see every file. The key is off
+by default, and at the default every prompt, LLM call, forge read, forge
+write and run-record value is the same as in 0.21.1, apart from the one new
+run-record key `incremental`, which is `null`. One new config key, one new
+CLI flag (`--full-review`), one new run-record and `--format json` key, and
+one new optional `Forge` method (`get_summary`). The user-facing account is
+the `[0.22.0]` section of `CHANGELOG.md`. This file is for whoever cuts the
+next release. The v0.21.1 handoff is in git history.
 
 ## What landed
 
-- **The change, in `_invoke_and_parse`.** A budget-retry branch fires before
-  `_may_retry`, when the reply's `finish_reason` names a budget stop
-  (`length` or `max_tokens`), the reply is not usable, no budget retry has
-  already run for this call, and the call's budget is below the new
-  constant `TRUNCATION_RETRY_MAX_TOKENS = 16384`. On that branch, the same
-  request is sent again at `min(2 * call_budget, TRUNCATION_RETRY_MAX_TOKENS)`,
-  after one WARNING naming both budgets. A later reply that is truncated
-  again ends the unit with the truncation error naming the larger budget.
-  If the retry call itself raises, the unit keeps the original truncation
-  error with `(a retry at max_tokens=<B2> failed: <ExcType>)` appended. A
-  reply that is truncated but still usable is kept, never retried, exactly
-  as before. `meta` gains `budget_retry` (the larger budget) only when the
-  retry ran, after the eight base keys and before `parse_retries` /
-  `first_error` when both are present; `orchestrator._retry_meta` and
-  `_write_trace_files` both whitelist their keys, so `budget_retry` reaches
-  neither the run record, `--format json`, nor a unit's trace `meta.json`.
-- **Worst-case call counts**, from `_invoke_and_parse`'s docstring, with N
-  as `PRXREF_LLM_PARSE_RETRIES`. Per unit the worst case is now
-  `2 * (2 + max(N, 1))` `invoke` calls for a chunk (the first call,
-  `max(N, 1)` parse retries and one budget retry, times the orchestrator's
-  one timeout retry of the whole chunk) and `2 + max(N, 1)` for the
-  systemic sweep, which has no timeout retry; each `invoke` may still walk
-  the backend's model fallback chain.
-- **Docs.** `docs/env-vars.md` and `docs/llm.md` got accuracy fixes that the
-  new retry made necessary: the `review_chunk` and `_may_retry` docstrings,
-  and one `docs/llm.md` sentence ("a retry sends... the same max_tokens",
-  now "a parse retry", because a budget retry changes `max_tokens`).
-- **Tests.** One new file, `tests/test_issue_52_budget_retry.py`. Existing
-  pins moved in five files that encoded the old "a budget stop is never
-  retried" contract: `tests/test_reviewer.py`, `tests/test_parse_retry_reviewer.py`
-  (renamed to a `TestTheBudgetStopNeverDrawsOnTheParseRetries` class),
-  `tests/test_empty_reply_retry.py` (renamed to `TestTruncationIsNotTheEmptyReplyRetry`),
-  `tests/test_issue_21_acceptance.py` (renamed to `TestTruncationIsNotAParseRetry`)
-  and `tests/test_integration.py` — 27 existing tests in all.
+- **The key and the flag.** `PRXREF_INCREMENTAL` (`off`|`on`, default
+  `off`) is a `_CHOICE_KEYS` key that `cli._run_review` passes to
+  `orchestrate_review(incremental=)`. `prxref review --full-review` forces a
+  full review of an incremental-on run, and so does any `PRXREF_FAIL_ON`
+  other than `never`, because a gate's verdict must see the whole PR; the
+  CLI passes `full_review=True` with `full_review_reason` `--full-review` or
+  `PRXREF_FAIL_ON=<value>`. With the key off both keywords are ignored.
+- **The marker.** `orchestrator.reviewed_head_line(sha)` writes
+  `<!-- prxref-reviewed-head: <sha> -->` and `REVIEWED_HEAD_RE` reads it
+  back; both are built from `REVIEWED_HEAD_PREFIX` and
+  `REVIEWED_HEAD_SUFFIX`, so the writer and the reader cannot drift.
+  `_with_reviewed_head` appends it after a blank line at all four post sites
+  (the summary, the refreshed summary, `_summary_only_run` and
+  `_error_run`), and `_mark_reviewed_head` picks the SHA: the PR head when
+  every review unit succeeded, else the previous marker's SHA, else none.
+- **Scope resolution, `_resolve_incremental_scope`,** runs right after the
+  diff is parsed and never raises. Its full-review reasons, from the code:
+  `PRXREF_POST_MODE=<mode> never writes the reviewed-head marker` (checked
+  first, so an inline-only run reads nothing), `forge cannot read its
+  summary`, `previous summary could not be read` (a WARNING), `first
+  review`, `previous summary has no reviewed-head marker`, `PR head is
+  unknown`, `forge cannot compare commits` and `compare diff failed` (a
+  WARNING). A forced run records `--full-review`, `PRXREF_FAIL_ON=<value>`
+  or, with no reason given, `full review requested`, and an exit taken
+  before scope resolution records `review ended before scope resolution`.
+- **The delta** is the compare diff from the marked head to the PR head,
+  intersected with the PR's own diff: the members of the parsed PR files
+  whose path or old path the compare diff touches. So inline positions stay
+  those of the PR diff, and a merge from the base branch or a rebase cannot
+  widen the set. `build_chunks` and `_plan_repo_context` get the delta;
+  `_run_sweep`, `_size_advisory`, the heuristics, location validation, line
+  alignment and each chunk's sibling-file summary (`all_files`) keep every
+  file. A marker equal to the head, an empty compare diff, or a compare that
+  touches none of the PR's files gives an empty delta, which runs the sweep
+  alone (`sweep_alone`), prunes nothing and posts the summary. The summary
+  of an incremental run carries one note line (`_incremental_note`).
+- **Forge reads.** Every adapter's summary lookup moved verbatim into a
+  private `_find_summary`, now shared by `post_summary` and the new
+  `get_summary(ref) -> str | None` on all five adapters, so the read finds
+  exactly the comment the post would update. `get_summary` is an optional
+  `Forge` Protocol method, resolved with `getattr`; the replay forges lack
+  it, so a replay runs full.
+- **Prune by path.** `prune_inline_comments(ref, *, paths=None)` on all five
+  adapters deletes only prxref's comments on those paths when `paths` is
+  given; a renamed GitLab file matches under either name, and a comment
+  whose file cannot be told is kept. It is not in the Protocol. An
+  incremental run calls it with the delta's new and old paths, and a full
+  run calls `prune(ref)` exactly as before.
+- **The run-record key.** `incremental`, after `suggestions` in the record
+  and in `--format json`: `null` while the key is off, else `{"mode",
+  "reason", "since_sha", "files_total", "files_reviewed", "marker_sha"}`.
+  It is not in `evals.RUN_CONFIG_KEYS`, so `run.json` does not record it.
+- **Tests.** Two new files, `tests/test_issue_34_forge_summary.py` and
+  `tests/test_issue_34_incremental.py`. Existing pins moved only where they
+  list record or JSON keys, plus one new entry in the GitHub timeout test
+  (lesson 4).
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **The truncation this fixes is hidden reasoning spending the whole
-   budget, not a large reply running past it.** The live probe's traced
-   chunk used all 4096 output tokens and returned a 2-character reply.
-   Lowering `PRXREF_LLM_REASONING_EFFORT` to `low` at the same budget did
-   not prevent it: 1 of 3 runs still truncated.
-2. **A truncation rate measured in one batch is not stable.** At the 4096
-   default with suggestions off, the same configuration gave 0 of 3
-   truncated in one batch and 3 of 3 in another (5 of 10 pooled across both
-   batches). Judge a fix against the pooled count, not a single batch.
-3. **A test fixture that picks its reply by request count silently shifts
-   when a new retry consumes a reply.** The end-to-end partial-failure route
-   in `tests/test_integration.py` hands out replies in a fixed sequence
-   keyed on call count. The new budget retry consumes one of those replies,
-   so the reply meant for the sweep instead landed on chunk 2: one assert
-   went red while a sibling test ("the surviving chunk still succeeds")
-   stayed green for the wrong reason. Grepping the existing suite for
-   `never retried|truncat` did not catch this fixture, because it named
-   neither; only a full-suite run surfaced it.
+1. **A cleanup that deletes the tool's own earlier comments becomes data
+   loss the moment a run stops covering every file.** A full run prunes all
+   of prxref's stale inline comments before it posts; an incremental run
+   that did the same would delete the comments on every file it did not
+   re-review and post nothing in their place. Scoping the prune to the
+   re-reviewed paths (`prune_inline_comments(paths=)`,
+   `TestPruneScope` in `tests/test_issue_34_incremental.py`) was the
+   load-bearing half of the feature, not a refinement of it.
+2. **`all([])` is `True`, so "every unit failed" over an empty unit list
+   needs an explicit guard.** The empty-delta path runs the sweep with no
+   chunks, and the total-failure check `all(r["error"] for r in
+   results[:-1])` (every result but the sweep's) is `True` there, so every
+   such run would have been an Error. The check now falls back to the
+   sweep's own error when there are no chunks (`TestEmptyDelta`).
+3. **A switch that turns a feature off for one run can silently break the
+   next run.** `--full-review` and a `PRXREF_FAIL_ON` gate first passed
+   `incremental="off"`, so that run's summary carried no marker and
+   overwrote the old one, and the push after it reviewed everything again.
+   The fix keeps the feature on and forces the scope instead
+   (`full_review=`), so a forced run still stamps the head
+   (`TestForcedFullReview::test_the_next_push_is_incremental`).
+4. **A test that enumerates every public adapter method must grow whenever
+   an adapter gains one.** `tests/test_forge_github.py`'s
+   `test_every_request_the_adapter_sends_carries_the_timeout` walks the
+   GitHub adapter's public methods by design, so `get_summary` needed a
+   `drive` entry there. That is the test working, not a regression.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -99,12 +131,14 @@ key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
 `.env.example` and `docs/env-vars.md` to describe it, and a value that is
 not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
 Current values, counted from `config._DEFAULTS` and
-`config._LEGACY_ENV_ALIASES` at this release: **70** keys, **1** legacy
-alias, **71** accepted names, unchanged since 0.21.0: 0.21.1 adds no config
-key. The most recent new key is `suggestions` (`PRXREF_SUGGESTIONS`), added
-in 0.21.0, and it took every surface above: the `_CHOICE_KEYS` table, the
-docstring, `.env.example`, both counts and the LLM / Pipeline heading of
-`docs/env-vars.md`, and the `cli._run_review` pass-through.
+`config._LEGACY_ENV_ALIASES` at this release: **71** keys, **1** legacy
+alias, **72** accepted names, up from 70 and 71 in 0.21.1. The most recent
+new key is `incremental` (`PRXREF_INCREMENTAL`), added in 0.22.0, and it took
+every surface above: the `_CHOICE_KEYS` table, the docstring,
+`.env.example`, both counts and the LLM / Pipeline heading of
+`docs/env-vars.md`, and the `cli._run_review` pass-through. It is left out
+of `evals.RUN_CONFIG_KEYS`, and a test pins that. The key before it,
+`suggestions` (`PRXREF_SUGGESTIONS`, 0.21.0), took the same surfaces.
 `config.SUGGESTIONS_MAX_TOKENS` is a module constant, not a key. 0.21.0 also
 changes one default conditionally:
 `llm_max_tokens` is 8192 instead of 4096 when suggestions are on and the
@@ -114,15 +148,24 @@ sources for every default; it now keeps an explicit set of supplied keys.
 
 ## Release shape (follow this next time)
 
-How 0.21.1 was built:
+How 0.22.0 was built:
 
-1. **One code task, in its own worktree from a pinned commit, its tests in
-   a new file, merged behind a full gate.** `uv run pytest` rose from 9067
-   to 9106, and `uv run ruff check src tests` stayed clean throughout.
-2. **Live checks** before the code task (establishing the truncation rate
-   at the 4096 default) and after it (confirming the retry recovers it).
-3. **Release.** This commit bumps the version, adds the CHANGELOG section
-   and rewrites this file.
+1. **Two code tasks in parallel, each in its own worktree from one pinned
+   commit, its tests in a new file, merged behind a full gate.** The forge
+   task added `get_summary` and `prune_inline_comments(paths=)` to the five
+   adapters; the core task added the key, the flag, scope resolution and
+   the marker to the config, the CLI and the orchestrator. Neither task's
+   base held the other's work, so the seam between them (the optional
+   `get_summary`, resolved with `getattr`, and the `paths` keyword) was
+   fixed in advance. `uv run pytest` rose from 9106 to 9173 (forge) and to
+   9215 (core), and `uv run ruff check src tests` stayed clean throughout.
+2. **One follow-up fix,** which the core task flagged as open: a forced full
+   review keeps the feature on and still stamps the head (lesson 3). 9215 to
+   9222.
+3. **Live checks,** read-only, at the merged tip.
+4. **Release.** This commit bumps the version, adds the CHANGELOG section,
+   rewrites this file and tightens the README section; it adds no test,
+   so the count stays at 9222.
 
 Cutting the release:
 
@@ -148,9 +191,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9106 passed                                   uv run pytest -q
+9222 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.21.1                                        uv run prxref --version
+0.22.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -158,43 +201,50 @@ updated this file.
 
 ### Live checks
 
-Setup: GLM 5.3 Flash through an OpenAI-compatible gateway, running `prxref
-review --no-post --diff-file
-tests/evals/case-002-session-token-logging/diff.patch --format json`, with
-the runs interleaved by arm, 4 runs each. A run counts as truncated when the
-reply stopped at the budget (`finish_reason=length`, verdict `Error`, 0
-findings) before the retry.
+Read-only, at the merged tip, against this repository's own pull requests,
+whose CI job runs the released prxref.
 
-- **At the release code, suggestions off (budget 4096):** in 4 of 4 runs the
-  chunk reply stopped at the budget before it was usable. The single retry
-  at 8192 recovered every one. All 4 reviews completed with 4–5 active
-  findings, and the log carried one retry WARNING per run.
-- **At the release code, suggestions on (budget 8192):** 4 of 4 completed
-  with no truncation and 0–3 kept suggestions.
-- **Control, the same off configuration on 0.21.0:** truncations at the
-  4096 default were 5 of 10 across earlier batches, ranging from 0 of 3 in
-  one batch to 3 of 3 in another. Each was a failed review (verdict `Error`,
-  0 findings, exit 0).
-- **Reasoning effort:** `PRXREF_LLM_REASONING_EFFORT=low` at 4096 still
-  truncated 1 of 3, before the retry.
-- **Trace:** a traced truncated chunk reported 4096 output tokens and a
-  2-character reply.
+- **`get_summary` on GitHub,** against sblattj/prxref#54 and #53: both
+  found the prxref summary (it carries the summary marker), and neither has
+  a reviewed-head marker. That is expected, because the released version
+  that posted them predates the marker.
+- **A `--no-post` review of #54 with `PRXREF_INCREMENTAL=on`,** through GLM
+  5.3 Flash: the record was `{"mode": "full", "reason": "previous summary
+  has no reviewed-head marker", "files_total": 14, "files_reviewed": 14,
+  "marker_sha": null}`. 2 of the 4 review units failed: their replies
+  stopped at 4096, and the one retry at 8192 was cut off too. So no marker
+  would have been written, which is what the failed-unit rule requires. The
+  failures are the model's reasoning budget, not the feature.
 
-What this shows: the retry recovers, on this model and this fixture, every
-truncation that the 0.21.0 control hit; the 4096 default itself still stops
-the first call at the same rate as before; the fix is the second call, not
-a change to when the first one stops. No run posted to a forge, so the
-per-forge rendering is unaffected and covered by the mocked suite only.
+What this shows: the read path finds the summary a real run posted, and a
+summary without the marker falls back to a full review with the right
+reason. It does not show the incremental path live. Posting was not
+exercised, because verification never writes to a forge, so the marker
+round-trip is covered by the mocked suite only.
 
 ## Still open — not part of this release
 
+- **The incremental marker round-trip has not been exercised live with
+  posting.** Verification never posts, so no live run has written a marker
+  and read it back on the next push. The first real multi-push use will be
+  the first live proof; watch its `incremental` record and the summary's
+  note line.
+- **5-file chunks on GLM 5.3 Flash can exhaust even the 8192 retry
+  budget.** In the live check above, 2 of 4 units stopped at 4096 and again
+  at 8192. Raising the default budget stays with the head-to-head
+  measurement in the next bullet.
+- **With incremental on, the verdict can be Approved over files with open
+  findings.** The chunk findings, and so the verdict, cover only the
+  re-reviewed files, plus the sweep's and the deterministic checks'. Earlier
+  inline comments on the other files stand, and the summary says so, but
+  the verdict does not count them.
 - **Raising the default budget itself (option 1 of #52) is left to a
-  head-to-head measurement across many cases.** This release adds a second
+  head-to-head measurement across many cases.** 0.21.1 added a second
   call for a reply that is unusable at the budget stop; it does not
   establish whether a higher default budget would avoid that extra call in
   the common case, or what a higher default costs on models that do not
   need it. Measure both before changing `PRXREF_LLM_MAX_TOKENS`'s default.
-- **Suggestions are unmeasured for quality.** The live checks show the path
+- **Suggestions are unmeasured for quality.** 0.21.0's live checks show the path
   works and how often a suggestion survives validation, not whether the
   suggestions are right or whether asking for them changes the findings.
   The eval harness does not score suggestions; `run.json` records only the
@@ -340,8 +390,10 @@ per-forge rendering is unaffected and covered by the mocked suite only.
   Lombok, JUnit 4, Spring Boot starters and kotlinx among them). Gradle map
   notation is not read, and a version set through a variable or
   `gradle.properties` is not resolved.
-- **A truncated review reply is not retried**, by design: its error already
-  names `PRXREF_LLM_MAX_TOKENS`, whatever `PRXREF_LLM_PARSE_RETRIES` says.
+- **A truncated review reply never draws on the parse retries**, by design,
+  whatever `PRXREF_LLM_PARSE_RETRIES` says; since 0.21.1 an unusable one
+  gets the single budget retry instead (#52), and its error still names
+  `PRXREF_LLM_MAX_TOKENS`.
 - **`score.json` does not total the reviews' parse retries.** It counts the
   judge's; each case's own run record carries its review's.
 - **The shared-state search matches names, not types.** Any line that reads
@@ -425,8 +477,9 @@ Listing, retry and cost notes:
   thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
   and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
   changed in 0.16.0 through 0.20.0, and 0.21.0 raises the token budget to
-  8192 only when suggestions are on (#52 tracks the rest); raise both for
-  such a model. The
+  8192 only when suggestions are on (#52 tracks the rest). 0.21.1 retries
+  an unusable truncated reply once at double the budget, which the 0.22.0
+  live check shows is not always enough; raise both for such a model. The
   recipe under "Measuring repository context" in `tests/evals/README.md` sets
   neither, so run verbatim against such a model it cuts the replies off.
 
@@ -623,8 +676,8 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.21.1` (patch: a worker or sweep reply stopped at the completion budget before it was usable is retried once, at double the budget, capped at 16384, #52; no new config key; no new run-record key; no new `--format json` key; no new CLI flag; no new module; a usable truncated reply is still kept without a retry) |
-| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Released version | `0.22.0` (minor: incremental re-review on push, #34, off by default; one new config key, `PRXREF_INCREMENTAL`; one new CLI flag, `--full-review`; one new run-record and `--format json` key, `incremental`, `null` while off; one new optional `Forge` method, `get_summary`; `prune_inline_comments` gains an optional `paths` keyword on every adapter; no new module) |
+| Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
