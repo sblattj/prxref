@@ -81,6 +81,14 @@ PLAIN_CONFIRMATION = {
         "so each announce pushes one real turn out of the window."
     ),
 }
+SERIALIZATION_QUESTION = {
+    "file": PROGRESS, "line": 47, "severity": "warning", "confidence": 0.55,
+    "title": "The progress ledger may not survive state serialization",
+    "body": (
+        "engine.run_turn calls store.save, which json.dumps the ProgressLedger; if StateStore.save "
+        "serializes run.root() data with JSONEncoder, it raises TypeError on the live ProgressLedger object."
+    ),
+}
 FLOOR_REASON = "confidence 0.50 below floor 0.60"
 UNCONFIRMED_REASON = f"{UNCONFIRMED_PREFIX} (confidence 0.50 below floor 0.60)"
 
@@ -106,7 +114,8 @@ def _messages(payload: dict, role: str) -> str:
 class _Route:
     """The scripted server's callable route; ``followup`` selects the follow-up reply.
 
-    ``question`` is the first reply's question on ``assistant/progress.py``.
+    ``question`` is the first reply's question on ``assistant/progress.py``,
+    or a tuple of such questions.
     """
 
     def __init__(self) -> None:
@@ -121,7 +130,8 @@ class _Route:
         if FOLLOWUP_HEADER in user:
             return FOLLOWUP_REPLIES[self.followup]
         if PROGRESS_DIFF in user:
-            return _findings(self.question)
+            questions = self.question if isinstance(self.question, tuple) else (self.question,)
+            return _findings(*questions)
         return _findings()
 
 
@@ -330,6 +340,23 @@ class TestPlainTextNames:
         assert {"model_history", "recent"} & set(row["names"])
         assert "assistant/history.py" in {excerpt["path"] for excerpt in row["excerpts"]}
         assert [f["title"] for f in run.at(PROGRESS, 40)] == [PLAIN_CONFIRMATION["title"]]
+
+    def test_a_second_question_still_gets_a_name(self, review, llm_server, monkeypatch):
+        monkeypatch.setattr(llm_server[2], "question", (SERIALIZATION_QUESTION, PLAIN_QUESTION))
+        run = review("confirm-plain")
+        assert run.code == 0
+        record = run.record()
+        assert record["calls"] == 1 and record["confirmed"] >= 1
+        assert len(run.of_kind("followup")) == 1
+        row = run.row()
+        assert row["questions"] == 2
+        assert row["names"][0] == "StateStore"
+        assert {"model_history", "recent"} & set(row["names"])
+        assert "TypeError" not in row["names"]
+        assert {"model_history", "recent"} & {excerpt["symbol"] for excerpt in row["excerpts"]}
+        (history,) = run.at(PROGRESS, 40)
+        assert history["title"] == PLAIN_CONFIRMATION["title"]
+        assert history["drop_reason"] is None
 
 
 class TestControls:
