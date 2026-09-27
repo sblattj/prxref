@@ -95,7 +95,8 @@ class LocalDiffForge:
     """A read-only Forge over a diff file: no network, no threads, no file reads, never posts.
 
     It deliberately has no ``get_file_content``, and its PR has no head sha,
-    so the orchestrator skips context injection. ``get_diff`` raises on a
+    so the orchestrator reads chunk context from ``--repo-dir`` when one is
+    given and otherwise skips context injection. ``get_diff`` raises on a
     blank diff, which the orchestrator turns into an ``Error`` run: an empty
     replay input almost always means the wrong file, never a clean PR.
     ``description``, when given (``--description-file`` or
