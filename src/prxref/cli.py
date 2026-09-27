@@ -47,11 +47,15 @@ daemon never replays.
 With ``PRXREF_REPO_CONTEXT`` at ``diff`` or ``repo``, repository context
 reads files there (and, at ``repo``, lists them) instead of calling the
 forge, so a ``--diff-file`` review gets repository context with no network.
+Whatever ``PRXREF_REPO_CONTEXT`` says, a review with no forge file reader,
+such as ``--diff-file`` without ``--pr-url``, also reads its chunk context
+(dependency versions, definitions) there (issue #29); a forge that can read
+files at the PR head is still preferred for chunk context.
 It is not a replay flag: on its own it neither stops posting nor stamps
 ``replay``. The directory is checked before any network call, so a path that
 is not an existing directory exits 2 naming ``--repo-dir``; it is checked and
-passed even when ``PRXREF_REPO_CONTEXT`` is ``off``, which ignores it. The
-webhook daemon never takes one.
+passed even when ``PRXREF_REPO_CONTEXT`` is ``off``. The webhook daemon never
+takes one.
 
 A ``--pr-url`` replay also pins the PR's title and description by default
 (issue #16): it shows the ones in force at a cutoff, which is ``--as-of
@@ -275,7 +279,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "a local checkout of the repository at the PR head; with "
             "PRXREF_REPO_CONTEXT=repo, repository context reads and lists "
-            "files there instead of calling the forge"
+            "files there instead of calling the forge; a review with no forge "
+            "file reader, such as --diff-file without --pr-url, also reads its "
+            "chunk context (dependency versions, definitions) there"
         ),
     )
     rev.add_argument(
