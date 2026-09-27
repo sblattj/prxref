@@ -60,7 +60,7 @@ PROSE_ERROR = "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
 LIST_ERROR = "worker review JSON is not an object: list"
 NO_FINDINGS_ERROR = "worker review JSON has no findings list"
 BUDGET_ERROR = (
-    "response truncated at max_tokens=4096 (finish_reason=length); "
+    "response truncated at max_tokens=8192 (finish_reason=length); "
     "raise PRXREF_LLM_MAX_TOKENS"
 )
 LEDGER_FINDING = (LEDGER, "Amount is added without validation")
@@ -360,15 +360,18 @@ class TestTheWrongShapeRetriesTheSameWay:
         assert run.response("ledger", attempt=1) == REPLIES[name]
 
 
-class TestTruncationIsNotRetried:
-    def test_a_length_stop_makes_one_call_and_names_the_budget(self, review):
-        run = review(UnitScript(ledger=[("truncated", "length")]), retries=UNSET)
-        assert run.calls == {"ledger": 1, "export": 1, "sweep": 1}
+class TestTruncationIsNotAParseRetry:
+    def test_a_length_stop_takes_one_budget_retry_and_names_the_larger_budget(self, review):
+        """The budget retry (#52) doubles ``max_tokens`` and never counts as a parse retry."""
+        script = UnitScript(ledger=[("truncated", "length"), ("truncated", "length")])
+        run = review(script, retries=UNSET)
+        assert run.calls == {"ledger": 2, "export": 1, "sweep": 1}
+        assert [p["max_tokens"] for p in script.payloads["ledger"]] == [4096, 8192]
         assert run.result["chunks_failed"] == 1
         meta = run.meta("ledger")
         assert meta["error"] == BUDGET_ERROR
         assert list(meta) == BASE_META_KEYS
-        assert run.attempt_files() == []
+        assert run.attempt_files() == ["chunk0.attempt1.response.json"]
         assert run.result["parse_retries"] == 0
 
     def test_control_the_same_bytes_with_an_honest_stop_are_retried(self, review):

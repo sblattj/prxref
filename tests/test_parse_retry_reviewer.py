@@ -3,8 +3,10 @@
 ``parse_retries`` (N) is one budget shared by every kind of unusable reply:
 empty, unparseable, not a JSON object, and, at N of 1 or more, an object
 without a ``findings`` list. The same request is sent again while fewer than
-N retries have run; an empty reply keeps its single retry at N=0. A reply the
-provider stopped at the budget, and a call that raised, are never retried.
+N retries have run; an empty reply keeps its single retry at N=0. A call that
+raised is never retried, and a reply the provider stopped at the budget never
+draws on N: when unusable it gets its own single retry at a larger budget
+(#52), and when usable it is kept.
 N=0, the library default, behaves exactly as 0.16.0 did.
 
 Every behaviour is checked through both reviewers, ``review_chunk`` and
@@ -57,6 +59,10 @@ NO_FINDINGS_ERROR = "worker review JSON has no findings list"
 LIST_ERROR = "worker review JSON is not an object: list"
 BUDGET_ERROR = (
     "response truncated at max_tokens=512 (finish_reason=length); "
+    "raise PRXREF_LLM_MAX_TOKENS"
+)
+BUDGET_RETRY_ERROR = (
+    "response truncated at max_tokens=1024 (finish_reason=length); "
     "raise PRXREF_LLM_MAX_TOKENS"
 )
 
@@ -282,28 +288,36 @@ class TestWrongShape:
         assert meta["error"] == ""
 
 
-class TestTheBudgetStopIsNeverRetried:
+class TestTheBudgetStopNeverDrawsOnTheParseRetries:
     @pytest.mark.parametrize("text", [
         pytest.param(CUT_OFF, id="unparseable"),
         pytest.param("", id="empty"),
         pytest.param("[1]", id="list"),
         pytest.param("{}", id="no-findings"),
     ])
-    def test_one_call_and_the_budget_message(self, unit, text, tmp_path):
-        llm = ScriptedLLM(reply(text, finish_reason="length"))
+    def test_one_budget_retry_and_the_larger_budget_message(self, unit, text, tmp_path):
+        llm = ScriptedLLM(
+            reply(text, finish_reason="length"), reply(text, finish_reason="length"),
+        )
         findings, meta = _traced(unit, llm, tmp_path, parse_retries=3, max_tokens=512)
-        assert len(llm.calls) == 1
+        assert [c["max_tokens"] for c in llm.calls] == [512, 1024]
         assert findings == []
-        assert meta["error"] == BUDGET_ERROR
-        assert list(meta) == BASE_META_KEYS
-        assert _files(tmp_path) == _base_files(unit.trace_label)
+        assert meta["error"] == BUDGET_RETRY_ERROR
+        assert list(meta) == [*BASE_META_KEYS, "budget_retry"]
+        assert _files(tmp_path) == sorted(
+            _base_files(unit.trace_label) + [f"{unit.trace_label}.attempt1.response.json"],
+        )
 
     def test_a_retry_stopped_at_the_budget_ends_the_retries(self, unit):
-        llm = ScriptedLLM(reply(GARBAGE), reply(CUT_OFF, finish_reason="length"))
+        llm = ScriptedLLM(
+            reply(GARBAGE),
+            reply(CUT_OFF, finish_reason="length"),
+            reply(CUT_OFF, finish_reason="length"),
+        )
         findings, meta = unit.review(llm, parse_retries=3, max_tokens=512)
-        assert len(llm.calls) == 2
+        assert [c["max_tokens"] for c in llm.calls] == [512, 512, 1024]
         assert findings == []
-        assert meta["error"] == BUDGET_ERROR
+        assert meta["error"] == BUDGET_RETRY_ERROR
         assert meta["parse_retries"] == 1
         assert meta["first_error"] == GARBAGE_ERROR
 

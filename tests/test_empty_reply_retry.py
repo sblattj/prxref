@@ -3,8 +3,9 @@
 0.15.0 and earlier failed the unit at parse time (``no parseable content``)
 on a reply with no text and ``finish_reason=stop``, although the provider had
 billed it. The reviewer now repeats that one call, once. It does not repeat a
-reply the provider stopped at the budget, a non-empty reply that fails to
-parse, or a call that raised.
+non-empty reply that fails to parse, or a call that raised; a reply the
+provider stopped at the budget is not this retry, but the separate one at a
+larger budget (#52).
 """
 from __future__ import annotations
 
@@ -162,16 +163,18 @@ class TestEmptyThenEmpty:
         assert len(_retry_warnings(caplog)) == 1
 
 
-class TestTruncationIsNotRetried:
+class TestTruncationIsNotTheEmptyReplyRetry:
     @pytest.mark.parametrize("reason", ["length", "max_tokens", " LENGTH "])
-    def test_an_empty_reply_at_the_budget_is_one_call_and_the_budget_error(self, reason, caplog):
-        llm = ScriptedLLM(reply("", finish_reason=reason))
+    def test_an_empty_reply_at_the_budget_takes_the_budget_retry_not_this_one(self, reason, caplog):
+        llm = ScriptedLLM(
+            reply("", finish_reason=reason), reply("", finish_reason=reason),
+        )
         with caplog.at_level(logging.WARNING, logger="prxref"):
             findings, meta = review_chunk(llm, _chunk(), max_tokens=512)
         assert findings == []
-        assert len(llm.calls) == 1
+        assert [c["max_tokens"] for c in llm.calls] == [512, 1024]
         assert meta["error"] == (
-            f"response truncated at max_tokens=512 (finish_reason={reason.strip()}); "
+            f"response truncated at max_tokens=1024 (finish_reason={reason.strip()}); "
             "raise PRXREF_LLM_MAX_TOKENS"
         )
         assert _retry_warnings(caplog) == []
