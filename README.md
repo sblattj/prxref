@@ -1,8 +1,8 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps — Cloud and self-hosted.
+Fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and Azure DevOps — Cloud and self-hosted.
 
-prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, and Azure DevOps in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary. Give it the spec or ticket a change implements with `--spec` (a web page, a local file or directory, or a Jira ticket URL) and the review also checks the diff against that spec.
+prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, Gitea/Forgejo (including Codeberg), and Azure DevOps in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary. Give it the spec or ticket a change implements with `--spec` (a web page, a local file or directory, or a Jira ticket URL) and the review also checks the diff against that spec.
 
 ```
                   ┌──────────────────────┐
@@ -128,6 +128,10 @@ prxref review --pr-url https://github.com/owner/repository/pull/108
 # GitLab & Self-Hosted GitLab (including nested subgroups)
 prxref review --pr-url https://gitlab.com/group/subgroup/project/-/merge_requests/15
 
+# Gitea & Forgejo, on any host (including Codeberg)
+prxref review --pr-url https://codeberg.org/owner/repository/pulls/7
+prxref review --pr-url https://git.example.com/owner/repository/pulls/7
+
 # Azure DevOps Services (dev.azure.com or the legacy *.visualstudio.com host)
 prxref review --pr-url https://dev.azure.com/organization/project/_git/repository/pullrequest/42
 prxref review --pr-url https://organization.visualstudio.com/project/_git/repository/pullrequest/42
@@ -136,7 +140,7 @@ prxref review --pr-url https://organization.visualstudio.com/project/_git/reposi
 prxref review --pr-url https://ado.corp.example/tfs/DefaultCollection/project/_git/repository/pullrequest/42
 ```
 
-**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. Azure DevOps Services and Server share one adapter. It has no diff endpoint to call, so it rebuilds the PR's diff from the changed files; a public project can be reviewed with no token at all. Posting to Azure DevOps is not yet verified against a live server, and Azure DevOps Server is untested. See [docs/forges.md](docs/forges.md).
+**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. Gitea and Forgejo share one adapter on any host, Codeberg included, authenticated by `PRXREF_GITEA_TOKEN`; a public repository can be reviewed with no token. Azure DevOps Services and Server share one adapter. It has no diff endpoint to call, so it rebuilds the PR's diff from the changed files; a public project can be reviewed with no token at all. Posting to Azure DevOps is not yet verified against a live server, and Azure DevOps Server is untested. See [docs/forges.md](docs/forges.md).
 
 ## LLM Configuration
 
@@ -183,6 +187,7 @@ Configure the authentication token matching your forge:
 | **GitHub** | `PRXREF_GITHUB_TOKEN` | Personal Access Token (PAT) or GitHub App token |
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
+| **Gitea / Forgejo** | `PRXREF_GITEA_TOKEN` | Access token: `read:repository` to review, `write:repository` plus `write:issue` to post. With none set, public repositories are read anonymously |
 | **Azure DevOps** | `PRXREF_AZURE_DEVOPS_TOKEN` | Personal access token: Code (Read) to review, Code (Read & write) to post |
 | **Azure DevOps (Pipelines)** | `SYSTEM_ACCESSTOKEN` | The job token, used when no PAT is set; map it into the step with `env: SYSTEM_ACCESSTOKEN: $(System.AccessToken)`. With neither set, public projects are read anonymously |
 
@@ -192,14 +197,14 @@ When the token can read a PR but not comment on it (a fork PR under a plain `pul
 
 ## Webhook Server
 
-Run prxref as a persistent daemon to handle webhook events from GitHub, Bitbucket, GitLab, and Azure DevOps:
+Run prxref as a persistent daemon to handle webhook events from GitHub, Bitbucket, GitLab, Gitea/Forgejo, and Azure DevOps:
 
 ```bash
 prxref serve --port 8080 --host 0.0.0.0
 ```
 
 The service exposes:
-- `POST /webhook` — verifies HMAC or token signatures per forge (for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
+- `POST /webhook` — verifies HMAC or token signatures per forge (for Gitea and Forgejo, the `X-Forgejo-Signature` or `X-Gitea-Signature` HMAC against `PRXREF_GITEA_WEBHOOK_SECRET`, checked before the GitHub-compatible headers those forges also send; for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
 ## Review Against a Spec or Ticket
@@ -363,7 +368,7 @@ A run reviews every file on a first review, when the forge cannot read its summa
 
 `prxref review` takes:
 
-- `--pr-url URL` — full web URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure DevOps. Required unless `--diff-file` is given.
+- `--pr-url URL` — full web URL of the PR or MR on Bitbucket, GitHub, GitLab, Gitea/Forgejo, or Azure DevOps. Required unless `--diff-file` is given.
 - `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge. In text mode this also prints every active finding's location, title, and body, and every dropped finding with its drop reason.
 - `--max-chunks N` — override maximum diff chunks evaluated (default `8`).
 - `--timeout SECONDS` — override the per-model request deadline (default `45.0`, or `PRXREF_LLM_TIMEOUT` when set); the flag wins for the current invocation only.
