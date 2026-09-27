@@ -725,10 +725,15 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     (``in``, ``out`` or ``unknown``); a finding object without the attribute
     reports ``unknown``.
 
-    ``rule`` and ``locations`` follow ``scope`` and are always present. ``rule``
-    is the rule the finding names, or ``null`` (never ``""``) when it names
-    none, which is every finding of a run with finding grouping off and the
-    per-rule cap inactive.
+    ``rule``, ``suggestion``, ``suggestion_end_line`` and ``locations`` follow
+    ``scope`` and are always present. ``rule`` is the rule the finding names,
+    or ``null`` (never ``""``) when it names none, which is every finding of a
+    run with finding grouping off and the per-rule cap inactive.
+    ``suggestion`` is the finding's validated replacement text (``""``
+    deletes its lines), or ``null`` when it carries none, which is every
+    finding of a run with suggestions off; ``suggestion_end_line`` is the last
+    line it replaces (``0`` meaning ``line`` alone), and ``0`` whenever
+    ``suggestion`` is ``null``.
     ``locations`` is set only on the representative of a grouped finding, or
     on the best finding the per-rule cap kept for a rule, whose locations can
     span files: a list of ``{"file": ..., "line": ...}`` objects for the
@@ -739,10 +744,12 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     its ``Also at:`` names the first five. It is ``null`` on every other
     row, a member row dropped as ``grouped into <file>:<line>`` or ``rule
     cap exceeded (max <n>): listed at <file>:<line>`` included (that row
-    still carries its own ``rule``). A finding object without either
-    attribute reports ``null`` for it.
+    still carries its own ``rule``). A finding object without ``rule`` or
+    ``locations`` reports ``null`` for it, and one without ``suggestion``
+    reports ``null`` and ``0``.
     """
     locations = getattr(f, "locations", None) or ()
+    suggestion = getattr(f, "suggestion", None)
     return {
         "file": f.file,
         "line": f.line,
@@ -750,6 +757,8 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "confidence": f.confidence,
         "scope": getattr(f, "scope", "unknown"),
         "rule": getattr(f, "rule", None) or None,
+        "suggestion": suggestion,
+        "suggestion_end_line": getattr(f, "suggestion_end_line", 0) if suggestion is not None else 0,
         "locations": [{"file": path, "line": line} for path, line in locations] or None,
         "title": f.title,
         "body": f.body,
@@ -765,8 +774,8 @@ def _build_json_result(result: Any) -> dict:
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
-    ``repo_context``, ``parse_retries``, ``context_followup``, then
-    ``sampling`` and ``replay`` when present.
+    ``repo_context``, ``parse_retries``, ``context_followup``,
+    ``suggestions``, then ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -781,7 +790,9 @@ def _build_json_result(result: Any) -> dict:
     of parse retries over every chunk and the sweep, ``0`` when none ran),
     and so is 0.18's ``context_followup`` (``null`` whenever
     ``PRXREF_CONTEXT_FOLLOWUP`` is ``off``; otherwise the follow-up record
-    of :func:`prxref.orchestrator.orchestrate_review`);
+    of :func:`prxref.orchestrator.orchestrate_review`), and so is
+    ``suggestions`` (#30: ``null`` whenever ``PRXREF_SUGGESTIONS`` is
+    ``off``; otherwise ``{"kept", "cleared"}`` over the active findings);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -820,6 +831,7 @@ def _build_json_result(result: Any) -> dict:
         "repo_context": result.get("repo_context"),
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),
+        "suggestions": result.get("suggestions"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1447,6 +1459,7 @@ def _run_review(
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
+        suggestions=cfg["suggestions"],
     )
 
 

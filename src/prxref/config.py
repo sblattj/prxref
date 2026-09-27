@@ -21,7 +21,8 @@ LLM / pipeline:
                                 disable reasoning; provider-specific string,
                                 passed through unvalidated; empty = omit
   PRXREF_LLM_MAX_TOKENS         Completion-token budget per worker review
-                                call; positive int (default 4096)
+                                call; positive int (default 4096; 8192 when
+                                PRXREF_SUGGESTIONS=on and this is left unset)
   PRXREF_LLM_TIMEOUT            Wall-clock deadline for one model's review
                                 call, in seconds; the chain then tries the
                                 next model, so a run can exceed it. Must be
@@ -292,6 +293,20 @@ LLM / pipeline:
                                 repository reader, the run logs one WARNING
                                 and the follow-up stays off for that run. Any
                                 other value is a configuration error
+  PRXREF_SUGGESTIONS            Code suggestions (#30): "off" (the default)
+                                leaves every prompt, call and finding as
+                                before, and the run record's "suggestions"
+                                is null. "on" asks each chunk worker (never
+                                the sweep) for an optional replacement text
+                                per finding, keeps only the ones that pass a
+                                deterministic check against the diff, and
+                                counts them in the run record. Matched
+                                exactly, like PRXREF_FAIL_ON; any other value
+                                is a configuration error. Suggestions lengthen
+                                the reply, so "on" raises the completion-token
+                                budget (see PRXREF_LLM_MAX_TOKENS) when that is
+                                left unset; an explicit budget is respected as
+                                given
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -402,6 +417,11 @@ from .triage import (
 
 _ENV_PREFIX = "PRXREF_"
 
+#: Completion-token budget applied when suggestions are on and the operator
+#: left ``llm_max_tokens`` unset (issue #30, part D): the reference-model
+#: measurement showed the 4096 default truncating every suggestions-on run.
+SUGGESTIONS_MAX_TOKENS = 8192
+
 _DEFAULTS: dict[str, object] = {
     "llm_backend": "openai-compat",
     "llm_base_url": "",
@@ -467,6 +487,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context": "off",
     "repo_context_max_chars": 12000,
     "context_followup": "off",
+    "suggestions": "off",
     # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
     # it rather than adding to it, and an empty value reads as unset (the
@@ -533,6 +554,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
+    "suggestions": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
@@ -784,6 +806,11 @@ def load_config(
     # change one, and a built-in default is never out of range anyway.
     sources: dict[str, str] = {key: _ENV_PREFIX + key.upper() for key in _DEFAULTS}
     labels = source_labels or {}
+    # Keys an operator actually supplied (env, its legacy alias, or an
+    # override), as opposed to a key merely present in ``sources`` because
+    # every default is pre-attributed to its env var name. Used below to
+    # decide whether the suggestions token-budget bump may apply.
+    supplied: set[str] = set()
     for key in _DEFAULTS:
         name = _ENV_PREFIX + key.upper()
         raw = os.environ.get(name)
@@ -796,6 +823,7 @@ def load_config(
             continue
         cfg[key] = _coerce_env(key, raw, name)
         sources[key] = name
+        supplied.add(key)
     for key, value in overrides.items():
         if key not in _DEFAULTS:
             raise ValueError(f"unknown config key: {key!r}")
@@ -803,6 +831,13 @@ def load_config(
             continue
         cfg[key] = value
         sources[key] = labels.get(key, key)
+        supplied.add(key)
+    if cfg["suggestions"] == "on" and "llm_max_tokens" not in supplied:
+        # Issue #30 part D: at the default budget, GLM 5.3 Flash truncated
+        # every suggestions-on reference run. An explicit value (env, its
+        # legacy alias, or an override) always wins, even when lower than
+        # SUGGESTIONS_MAX_TOKENS.
+        cfg["llm_max_tokens"] = max(cfg["llm_max_tokens"], SUGGESTIONS_MAX_TOKENS)
     _check_ranges(cfg, sources)
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
