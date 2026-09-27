@@ -157,6 +157,13 @@ _TRUNCATED_ERROR = (
     "raise " + _MAX_TOKENS_ENV
 )
 
+# The ceiling for the one automatic retry of a reply the provider stopped at
+# the completion budget before it was usable (#52). A reasoning model can spend
+# the whole budget on hidden reasoning and return nothing, so the retry asks
+# for double the budget, capped here, once; a budget already at or above this
+# ceiling is never retried, and a usable truncated reply never is.
+TRUNCATION_RETRY_MAX_TOKENS = 16384
+
 
 def _budget_stop_reason(result: Any) -> str:
     """The provider's stop reason, when it says generation hit the token budget.
@@ -674,7 +681,8 @@ def _may_retry(result: Any, problem: str, retries: int, parse_retries: int) -> b
     while ``retries < max(parse_retries, 1)``, so it gets one retry even at
     ``parse_retries=0``; every other unusable reply only while
     ``retries < parse_retries``. A usable reply is never retried, and the
-    caller keeps budget stops away from here, because those never are.
+    caller keeps budget stops away from here, because it handles those
+    itself (:func:`_invoke_and_parse`).
     """
     if not problem:
         return False
@@ -722,11 +730,28 @@ def _invoke_and_parse(
     list. An EMPTY reply is asked for again once even at N=0, after one
     WARNING ``<label>: empty model reply (finish_reason=<reason>); retrying
     once`` (``-`` when no reason was reported), so a unit makes at most
-    ``1 + max(N, 1)`` calls here. At N=0 nothing else is retried and an
-    object without ``findings`` is a clean review with none, exactly as in
-    0.16.0. Never retried at any N: a reply the provider stopped at the
-    budget (``finish_reason`` ``length`` or ``max_tokens``, the truncation
-    path, which already names the budget lever) and a call that raised.
+    ``1 + max(N, 1)`` parse-path calls here. At N=0 nothing else is retried
+    and an object without ``findings`` is a clean review with none, exactly
+    as in 0.16.0. A call that raised is never retried at any N.
+
+    A reply the provider stopped at the budget (``finish_reason`` ``length``
+    or ``max_tokens``) never draws on ``parse_retries``. When it is usable it
+    is kept, never retried. When it cannot be used, it is retried once per
+    call of this function at double the budget, capped at
+    :data:`TRUNCATION_RETRY_MAX_TOKENS`, unless the budget is already at
+    that ceiling, after one WARNING ``<label>: reply stopped at the
+    completion budget (max_tokens=<B>, finish_reason=<reason>) before it was
+    usable; retrying once at max_tokens=<B2>`` (#52). That retry walks the
+    backend's model fallback chain again, and ``meta`` gains
+    ``budget_retry`` (the larger budget) after its eight base keys. With
+    N of 1 or more the discarded reply is kept as an attempt, exactly like
+    a parse retry's. The loop then carries on as before: a later reply that
+    cannot be used for another reason may still use the parse retries, and
+    a later reply stopped at the budget ends it with the truncation error
+    naming the larger budget. When the budget retry itself raises, the unit
+    fails with the first reply's truncation error, which names the original
+    budget and the lever, followed by ``(a retry at max_tokens=<B2> failed:
+    <ExcType>)``.
 
     At N of 1 or more each retry logs one WARNING, ``<label>: empty model
     reply (finish_reason=<reason>); parse retry <k> of <N>`` or ``<label>:
@@ -745,12 +770,13 @@ def _invoke_and_parse(
     reply that still cannot be used fails the unit with ITS error, worded
     as in 0.16.0, and an object without ``findings`` fails it with
     ``worker review JSON has no findings list``. A retry that raises fails
-    the unit with that exception, keeping the earlier calls' tokens. Per
-    unit the worst case is ``2 * (1 + max(N, 1))`` ``invoke`` calls for a
-    chunk (these, times the orchestrator's one timeout retry of the whole
-    chunk) and ``1 + max(N, 1)`` for the systemic sweep, which has no
-    timeout retry; each ``invoke`` may still walk the backend's model
-    fallback chain.
+    the unit with that exception, keeping the earlier calls' tokens, unless
+    it was the budget retry (above). Per unit the worst case is
+    ``2 * (2 + max(N, 1))`` ``invoke`` calls for a chunk (the first call,
+    ``max(N, 1)`` parse retries and one budget retry, times the
+    orchestrator's one timeout retry of the whole chunk) and
+    ``2 + max(N, 1)`` for the systemic sweep, which has no timeout retry;
+    each ``invoke`` may still walk the backend's model fallback chain.
     """
     t0 = time.perf_counter()
     meta = {
@@ -765,6 +791,10 @@ def _invoke_and_parse(
     }
     attempts: list[str | None] | None = [] if parse_retries >= 1 else None
     retries = 0
+    calls = 0
+    call_budget = budget
+    budget_retry_error = ""
+    pending_budget_retry = False
 
     # The invoke and the parse are caught separately on purpose: only the
     # invoke's result knows WHY generation stopped, and the parse failure is
@@ -775,17 +805,29 @@ def _invoke_and_parse(
             result = llm.invoke(
                 system=system,
                 user=user,
-                max_tokens=budget,
+                max_tokens=call_budget,
                 json_mode=True,
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning("worker review failed for %s: %s", label, e)
-            meta["error"] = f"{type(e).__name__}: {e}"
+            if pending_budget_retry:
+                logger.warning(
+                    "worker review failed for %s: the retry at max_tokens=%d raised %s: %s",
+                    label, call_budget, type(e).__name__, e,
+                )
+                meta["error"] = (
+                    f"{budget_retry_error} (a retry at max_tokens={call_budget} "
+                    f"failed: {type(e).__name__})"
+                )
+            else:
+                logger.warning("worker review failed for %s: %s", label, e)
+                meta["error"] = f"{type(e).__name__}: {e}"
             meta["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
             _write_trace_files(trace_dir, trace_label, system, user, None, meta, attempts=attempts)
             return [], meta
 
-        if retries:
+        pending_budget_retry = False
+        calls += 1
+        if calls > 1:
             _fold_retry_usage(meta, result)
         else:
             meta["input_tokens"] = result.input_tokens
@@ -795,6 +837,23 @@ def _invoke_and_parse(
 
         stop_reason = _budget_stop_reason(result)
         parsed, problem, unparseable = _read_reply(result, require_findings=attempts is not None)
+        if (
+            stop_reason and problem and not budget_retry_error
+            and call_budget < TRUNCATION_RETRY_MAX_TOKENS
+        ):
+            larger = min(2 * call_budget, TRUNCATION_RETRY_MAX_TOKENS)
+            logger.warning(
+                "%s: reply stopped at the completion budget (max_tokens=%d, "
+                "finish_reason=%s) before it was usable; retrying once at max_tokens=%d",
+                label, call_budget, stop_reason, larger,
+            )
+            budget_retry_error = _TRUNCATED_ERROR.format(budget=call_budget, reason=stop_reason)
+            if attempts is not None:
+                attempts.append(result.text)
+            meta["budget_retry"] = larger
+            call_budget = larger
+            pending_budget_retry = True
+            continue
         if stop_reason or not _may_retry(result, problem, retries, parse_retries):
             break
         retries += 1
@@ -818,7 +877,7 @@ def _invoke_and_parse(
                 label, problem, retries, parse_retries,
             )
 
-    truncated_error = _TRUNCATED_ERROR.format(budget=budget, reason=stop_reason)
+    truncated_error = _TRUNCATED_ERROR.format(budget=call_budget, reason=stop_reason)
 
     if unparseable:
         # A truncated completion and a model that simply refused to emit JSON
@@ -850,7 +909,7 @@ def _invoke_and_parse(
             "worker review for %s hit the completion budget "
             "(max_tokens=%d, finish_reason=%s); findings may be incomplete — "
             "raise %s",
-            label, budget, stop_reason, _MAX_TOKENS_ENV,
+            label, call_budget, stop_reason, _MAX_TOKENS_ENV,
         )
 
     raw_findings = parsed.get("findings")
@@ -904,15 +963,17 @@ def review_chunk(
     yields ``([], meta)`` with ``meta["error"]`` set to the failure reason;
     this layer never raises, and the only retries it makes re-send the same
     prompt for a reply that cannot be used (:func:`_invoke_and_parse`), so a
-    chunk costs at most ``1 + max(parse_retries, 1)`` ``invoke`` calls here
+    chunk costs at most ``2 + max(parse_retries, 1)`` ``invoke`` calls here
     and twice that with the orchestrator's timeout retry. ``meta["error"]``
     is the empty string on success.
 
     When the response cannot be parsed and the backend reported
-    ``finish_reason == "length"``, ``meta["error"]`` names the budget that was
-    in force and the variable that raises it — the operator's lever — instead
-    of a ``JSONDecodeError`` that looks like a model-quality problem, and it
-    is not retried, empty or not. A clean empty response (any other finish
+    ``finish_reason == "length"``, it is retried once at double the budget,
+    capped at :data:`TRUNCATION_RETRY_MAX_TOKENS` (#52). When that fails
+    too, or the budget was already at the cap, ``meta["error"]`` names the
+    budget that was in force and the variable that raises it — the
+    operator's lever — instead of a ``JSONDecodeError`` that looks like a
+    model-quality problem. A clean empty response (any other finish
     reason) is retried; when the last retry is empty too, it keeps the parse
     error verbatim and is never mislabelled as truncation. A response that
     parses to the wrong SHAPE is treated the same way: unusable is unusable,
