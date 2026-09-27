@@ -314,21 +314,27 @@ LLM / pipeline:
                                 already carries such a summary, chunks and
                                 reviews only the files changed since that
                                 head; the systemic sweep still sees the whole
-                                PR. The verdict and findings then cover only
-                                the re-reviewed files, while earlier inline
+                                PR. The chunk findings, and so the verdict,
+                                then cover only the re-reviewed files (plus
+                                what the sweep and the deterministic checks
+                                find anywhere in the PR), while earlier inline
                                 comments on the other files stay standing. It
                                 applies only with PRXREF_POST_MODE summary or
                                 summary+inline; the run reviews every file on
                                 a first review, when the forge cannot read its
                                 summary, when that read fails, when the
                                 summary has no reviewed-head marker, when the
-                                compare diff fails (a force-push), with
+                                PR head is unknown, when the forge cannot
+                                compare commits, when the compare diff fails
+                                (a force-push), with
                                 --full-review, with PRXREF_FAIL_ON other than
                                 "never", and on every replay. --full-review
                                 and a PRXREF_FAIL_ON gate read no previous
                                 summary but still record the head, so the
                                 following push is incremental again. Costs one
-                                extra forge read per run. Matched exactly; any
+                                extra forge read per run for the previous
+                                summary, plus a compare diff read when the
+                                head has moved. Matched exactly; any
                                 other value is a configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
