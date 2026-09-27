@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from urllib.parse import quote, urlparse
 
 import requests
@@ -379,6 +379,43 @@ class ForgeImpl:
             f"({_MAX_PAGES * _PAGE_SIZE} entries) without reaching the end"
         )
 
+    def _find_summary(
+        self, ref: PRRef, notes_url: str, headers: dict[str, str],
+    ) -> tuple[int | None, str | None]:
+        """Return the id and body of the summary note ``post_summary`` overwrites.
+
+        The one lookup both ``post_summary`` and ``get_summary`` run, so the
+        two cannot pick different notes. ``(None, None)`` means there is
+        none. ``FeedReadError`` from the page walk propagates.
+        """
+        existing_note_id: int | None = None
+        existing_body: str | None = None
+        for notes in self._iter_pages(
+            ref, notes_url, headers, what="note feed", extra_params=_NOTE_ORDER,
+        ):
+            for note in notes:
+                if SUMMARY_MARKER in (note.get("body") or ""):
+                    existing_note_id = note.get("id")
+                    existing_body = note.get("body")
+                    break
+            if existing_note_id is not None:
+                break
+        if existing_note_id is None:
+            return None, None
+        return existing_note_id, existing_body
+
+    def get_summary(self, ref: PRRef) -> str | None:
+        """Return the raw body of the summary note ``post_summary`` would update.
+
+        Reads the MR's note feed through the same lookup ``post_summary``
+        runs and returns that note's ``body``, or ``None`` when there is
+        none. Raises ``FeedReadError`` when the feed cannot be read to the
+        end. Makes no write request.
+        """
+        notes_url = f"{self._api_base(ref)}/merge_requests/{ref.number}/notes"
+        _, body = self._find_summary(ref, notes_url, self._get_auth_headers())
+        return body
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 
@@ -392,16 +429,7 @@ class ForgeImpl:
         notes_url = f"{base}/merge_requests/{ref.number}/notes"
         body = with_summary_marker(body)
 
-        existing_note_id: int | None = None
-        for notes in self._iter_pages(
-            ref, notes_url, headers, what="note feed", extra_params=_NOTE_ORDER,
-        ):
-            for note in notes:
-                if SUMMARY_MARKER in (note.get("body") or ""):
-                    existing_note_id = note.get("id")
-                    break
-            if existing_note_id is not None:
-                break
+        existing_note_id, _ = self._find_summary(ref, notes_url, headers)
 
         if existing_note_id is not None:
             update_url = f"{notes_url}/{existing_note_id}"
@@ -779,7 +807,9 @@ class ForgeImpl:
         )
         return PathListing(paths=tuple(sorted(paths)), complete=False)
 
-    def prune_inline_comments(self, ref: PRRef) -> int:
+    def prune_inline_comments(
+        self, ref: PRRef, *, paths: Collection[str] | None = None,
+    ) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
 
         A re-review updates the summary in place, but the previous run's
@@ -797,7 +827,14 @@ class ForgeImpl:
         cannot be read ends the prune with what it already removed:
         best-effort, because a cleanup must never abort the review that
         follows it.
+
+        ``paths=None`` prunes every candidate. With a collection, only a
+        candidate whose position ``new_path`` or ``old_path`` is in ``paths``
+        is deleted, so a renamed file matches under either name; one with
+        neither is kept, because deleting a finding that will not be
+        re-raised loses it for good.
         """
+        wanted = None if paths is None else frozenset(paths)
         headers = self._get_auth_headers()
         base = self._api_base(ref)
         url = f"{base}/merge_requests/{ref.number}/discussions"
@@ -818,6 +855,14 @@ class ForgeImpl:
                         note_id = note.get("id")
                         if note_id is None:
                             continue
+                        if wanted is not None:
+                            pos = note.get("position")
+                            names = (
+                                (pos.get("new_path"), pos.get("old_path"))
+                                if isinstance(pos, dict) else ()
+                            )
+                            if not any(isinstance(n, str) and n in wanted for n in names):
+                                continue
                         # A diff note is deleted through the discussion that
                         # holds it; the top-level notes route would also
                         # accept the id, but this URL names where it was

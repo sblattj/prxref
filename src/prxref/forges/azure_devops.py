@@ -22,7 +22,7 @@ import functools
 import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 from urllib.parse import quote, unquote, urlsplit
@@ -771,6 +771,37 @@ class ForgeImpl:
             )
         return threads
 
+    def _find_summary(self, ref: PRRef) -> tuple[dict, dict] | None:
+        """Return the ``(thread, root comment)`` of the summary ``post_summary`` overwrites.
+
+        The one lookup both ``post_summary`` and ``get_summary`` run, so the
+        two cannot pick different threads: the first usable PR-level thread
+        (no ``threadContext``) whose root comment carries ``SUMMARY_MARKER``
+        and has both a thread id and a comment id. ``None`` means there is
+        none. ``FeedReadError`` from the thread read propagates.
+        """
+        for thread in self._read_threads(ref):
+            if not self._usable(thread) or thread.get("threadContext"):
+                continue
+            root = self._root(thread)
+            if SUMMARY_MARKER not in (root.get("content") or ""):
+                continue
+            if thread.get("id") is None or root.get("id") is None:
+                continue
+            return thread, root
+        return None
+
+    def get_summary(self, ref: PRRef) -> str | None:
+        """Return the raw body of the summary comment ``post_summary`` would update.
+
+        Reads the PR's threads through the same lookup ``post_summary`` runs
+        and returns the summary thread's root comment ``content``, or
+        ``None`` when there is none. Raises ``FeedReadError`` when the
+        threads cannot be read. Makes no write request.
+        """
+        found = self._find_summary(ref)
+        return None if found is None else found[1].get("content")
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 
@@ -781,14 +812,9 @@ class ForgeImpl:
         post a second summary.
         """
         body = with_summary_marker(body)
-        for thread in self._read_threads(ref):
-            if not self._usable(thread) or thread.get("threadContext"):
-                continue
-            root = self._root(thread)
-            if SUMMARY_MARKER not in (root.get("content") or ""):
-                continue
-            if thread.get("id") is None or root.get("id") is None:
-                continue
+        found = self._find_summary(ref)
+        if found is not None:
+            thread, root = found
             resp = self._session.patch(
                 self._pr_api(ref, f"/threads/{thread['id']}/comments/{root['id']}"),
                 params={"api-version": _API_VERSION},
@@ -893,7 +919,9 @@ class ForgeImpl:
                 logger.warning("inline comment on %s:%s failed: %s", comment.path, comment.line, e)
         return posted
 
-    def prune_inline_comments(self, ref: PRRef) -> int:
+    def prune_inline_comments(
+        self, ref: PRRef, *, paths: Collection[str] | None = None,
+    ) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
 
         Only the root comment of a file-anchored thread whose body carries the
@@ -902,7 +930,14 @@ class ForgeImpl:
         A delete the token may not perform (403 on another identity's comment)
         is logged and skipped, and an unreadable feed ends the pass:
         best-effort, because a cleanup must never abort the review.
+
+        ``paths=None`` prunes every candidate. With a collection, only a
+        candidate whose ``threadContext.filePath``, with its leading ``/``
+        stripped as ``list_threads`` strips it, is in ``paths`` is deleted;
+        one with no path is kept, because deleting a finding that will not be
+        re-raised loses it for good.
         """
+        wanted = None if paths is None else frozenset(paths)
         try:
             threads = self._read_threads(ref)
         except FeedReadError as e:
@@ -917,6 +952,12 @@ class ForgeImpl:
                 continue
             if thread.get("id") is None or root.get("id") is None:
                 continue
+            if wanted is not None:
+                context = thread.get("threadContext")
+                file_path = context.get("filePath") if isinstance(context, dict) else None
+                path = file_path.lstrip("/") if isinstance(file_path, str) else ""
+                if not (path and path in wanted):
+                    continue
             try:
                 resp = self._session.delete(
                     self._pr_api(ref, f"/threads/{thread['id']}/comments/{root['id']}"),
