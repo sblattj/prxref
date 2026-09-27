@@ -8,6 +8,31 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.20.0] — 2026-09-27
+
+One fix. #29: a review of a local diff, `--diff-file` with `--repo-dir` and
+no `--pr-url`, now builds the same chunk context a forge review gets, read
+from the `--repo-dir` checkout. No config key, run-record key, CLI flag or
+module is added. Forge-backed reviews (`--pr-url`, the webhook service, the
+GitHub Action) are unchanged: every LLM call, forge read and run-record value
+is the same as in 0.19.0. Only a `--diff-file` review that also passes
+`--repo-dir`, including an eval diff-file case with a `repo_dir`, gets new
+prompt lines.
+
+### Fixed
+
+- **Chunk context for a local diff (#29).** `prxref review --diff-file` with
+  `--repo-dir` and no `--pr-url` now builds chunk context (the
+  `### Dependency versions` block and same-file definitions) from the
+  `--repo-dir` checkout, at any `PRXREF_REPO_CONTEXT` level, `off` included.
+  Before, a review with no forge file reader built none. A forge that can
+  read files at the PR head still serves chunk context when `--repo-dir` is
+  also given, so forge-backed reviews are unchanged. The manifest check's
+  full-file section lookup uses the same reader, so it also reads
+  `--repo-dir` in such a run. Eval diff-file cases with a `repo_dir` get the
+  same context. The `--repo-dir` help text, `README.md` and `docs/evals.md`
+  no longer say that repository context `off` ignores the directory.
+
 ## [0.19.0] — 2026-09-27
 
 Two fixes. #25: a version-less Maven or Gradle dependency in the
@@ -2123,7 +2148,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/sblattj/prxref/releases/tag/v0.20.0
 [0.19.0]: https://github.com/sblattj/prxref/releases/tag/v0.19.0
 [0.18.0]: https://github.com/sblattj/prxref/releases/tag/v0.18.0
 [0.17.0]: https://github.com/sblattj/prxref/releases/tag/v0.17.0
