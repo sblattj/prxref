@@ -276,6 +276,63 @@ def test_plain_text_fallback_keeps_type_like_names_only():
     assert names == ["StateStore", "Engine"]
 
 
+HISTORY_BODY = "history.py builds model_history from table.recent(session_id, HISTORY_WINDOW)"
+
+
+def test_plain_text_code_shapes_become_names():
+    assert name_tiers("t", HISTORY_BODY) == (
+        (),
+        ("recent",),
+        ("model_history", "table", "session_id", "HISTORY_WINDOW"),
+    )
+
+
+def test_plain_text_dotted_call_and_bare_call():
+    assert name_tiers("t", "It calls store.save_all(run) and then flush() on the Ledger.")[1:] == (
+        ("save_all",),
+        ("store", "flush"),
+    )
+    assert name_tiers("t", "Ledger.append(x) runs.") == (("Ledger",), ("append",), ())
+
+
+def test_source_file_names_are_not_split():
+    assert name_tiers("t", "See history.py, Foo.java and x.ts for the cause.") == ((), (), ())
+    assert name_tiers("t", "Compare assistant/history.py with the loader.") == ((), (), ())
+    assert "history" not in finding_names("t", HISTORY_BODY)
+    assert "py" not in finding_names("t", HISTORY_BODY)
+
+
+def test_plain_english_gives_no_names():
+    prose = (
+        "The reader may skip a row when the store is closed, so the result looks wrong. "
+        "Does the loader retry? It seems (maybe) untested, e.g. on restart."
+    )
+    assert name_tiers("Possible data loss", prose) == ((), (), ())
+
+
+def test_backtick_names_come_before_plain_names():
+    tiers = name_tiers("`run_turn` may drop rows", "It passes `run` to table.recent(session_id) and to Loader.")
+    assert tiers == ((), (), ("run_turn", "run", "Loader", "recent", "table", "session_id"))
+    assert finding_names("`Engine` drops rows", "via table.recent(x)")[:1] == ["Engine"]
+
+
+def test_plain_history_names_survive_diff_defined_names(pr, texts):
+    files, chunks = pr
+    defined = diff_defined_names(files, chunks[0], CountingReader(texts))
+    names = lookup_names([name_tiers("History window", HISTORY_BODY)], defined=defined)
+    assert {"model_history", "recent"} & set(names)
+
+
+def test_plain_history_names_find_their_definitions(pr, texts):
+    files, chunks = pr
+    defined = diff_defined_names(files, chunks[0], CountingReader(texts))
+    names = lookup_names([name_tiers("History window", HISTORY_BODY)], defined=defined)
+    excerpts, _ = _lookup(pr, texts, names, shown="")
+    found = {(e.path, e.line, e.symbol) for e in excerpts}
+    assert ("assistant/history.py", 9, "model_history") in found
+    assert ("assistant/messages.py", 19, "recent") in found
+
+
 def test_lookup_names_merges_tiers_across_questions_and_caps(monkeypatch):
     first = name_tiers("q1", "`a_helper` and `Alpha` and `x.beta`")
     second = name_tiers("q2", "`Gamma` and `y.delta`")
