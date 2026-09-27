@@ -493,9 +493,9 @@ Listing, retry and cost notes:
   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
   thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
   and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
-  changed in 0.16.0, 0.17.0 or 0.18.0; raise both for such a model. The recipe under
-  "Measuring repository context" in `tests/evals/README.md` sets neither, so
-  run verbatim against such a model it cuts the replies off.
+  changed in 0.16.0, 0.17.0 or 0.18.0; raise both for such a model. The
+  recipe under "Measuring repository context" in `tests/evals/README.md` sets
+  neither, so run verbatim against such a model it cuts the replies off.
 
 Sizing, recall and GitHub notes:
 
