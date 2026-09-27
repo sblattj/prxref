@@ -1,4 +1,4 @@
-r"""Off-identity golden test for issue #22 part 2, the context follow-up.
+r"""Off-identity golden test for issue #22 part 1, the context follow-up.
 
 With ``PRXREF_CONTEXT_FOLLOWUP`` unset or ``off``, a run must be byte-identical
 to 0.17.0: the same requests, in the same shape, and the same
