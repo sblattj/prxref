@@ -167,8 +167,8 @@ How 0.19.0 was built:
    `uv run pytest` and `uv run ruff check src tests` passed on the merged
    tree. The passing count rose from 8,865 at 0.18.0 to 8,900 after the
    effort and seed fix and 8,926 after the BOM-owner fix, and never fell.
-3. **Two offline end-to-end checks**, once both merged, one per issue (Live
-   checks). No live model run: nothing model-facing changed except the JVM
+3. **Two offline end-to-end checks**, one per issue, each once its fix
+   merged (Live checks). No live model run: nothing model-facing changed except the JVM
    dependency lines.
 4. **Release.** This commit bumps the version, adds the CHANGELOG section,
    and rewrites this file.
