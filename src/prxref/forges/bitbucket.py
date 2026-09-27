@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
@@ -306,6 +306,44 @@ class ForgeImpl:
             f"({_MAX_PAGES * _PAGE_SIZE} comments) without reaching the end"
         )
 
+    def _find_summary(self, ref: PRRef) -> tuple[object, str | None]:
+        """Return the id and ``content.raw`` of the summary ``post_summary`` overwrites.
+
+        The one lookup both ``post_summary`` and ``get_summary`` run, so the
+        two cannot pick different comments. Inline and deleted comments are
+        skipped: an inline comment quoting the marker is not the summary, and
+        a deleted comment is a slot nobody can read an update in.
+        ``(None, None)`` means there is none. ``FeedReadError`` from the page
+        walk propagates.
+        """
+        existing_id = None
+        existing_raw: str | None = None
+        for page in self._iter_comment_pages(ref):
+            for item in page:
+                if item.get("inline") or _is_deleted(item):
+                    continue
+                raw = (item.get("content") or {}).get("raw") or ""
+                if SUMMARY_MARKER in raw:
+                    existing_id = item.get("id")
+                    existing_raw = raw
+                    break
+            if existing_id is not None:
+                break
+        if existing_id is None:
+            return None, None
+        return existing_id, existing_raw
+
+    def get_summary(self, ref: PRRef) -> str | None:
+        """Return the raw body of the summary comment ``post_summary`` would update.
+
+        Reads the comment feed through the same lookup ``post_summary`` runs
+        and returns that comment's ``content.raw``, or ``None`` when there is
+        none. Raises ``FeedReadError`` when the feed cannot be read to the
+        end. Makes no write request.
+        """
+        _, raw = self._find_summary(ref)
+        return raw
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 
@@ -323,19 +361,7 @@ class ForgeImpl:
         url = self._pr_url(ref, "/comments")
         body = with_summary_marker(body)
 
-        existing_id = None
-        for page in self._iter_comment_pages(ref):
-            for item in page:
-                # An inline comment quoting the marker is not the summary, and
-                # a deleted comment is a slot nobody can read an update in.
-                if item.get("inline") or _is_deleted(item):
-                    continue
-                raw = (item.get("content") or {}).get("raw") or ""
-                if SUMMARY_MARKER in raw:
-                    existing_id = item.get("id")
-                    break
-            if existing_id is not None:
-                break
+        existing_id, _ = self._find_summary(ref)
 
         payload = {"content": {"raw": body}}
         if existing_id is not None:
@@ -576,7 +602,9 @@ class ForgeImpl:
             return None
         return body
 
-    def prune_inline_comments(self, ref: PRRef) -> int:
+    def prune_inline_comments(
+        self, ref: PRRef, *, paths: Collection[str] | None = None,
+    ) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
 
         A re-review updates the summary in place, but the previous run's
@@ -594,7 +622,13 @@ class ForgeImpl:
         skipped, and a feed that cannot be read ends the prune with what it
         already removed: best-effort, because a cleanup must never abort the
         review that follows it.
+
+        ``paths=None`` prunes every candidate. With a collection, only a
+        candidate whose ``inline.path`` is in ``paths`` is deleted; one with
+        no path is kept, because deleting a finding that will not be
+        re-raised loses it for good.
         """
+        wanted = None if paths is None else frozenset(paths)
         headers, auth = self._get_auth()
         base = self._pr_url(ref, "/comments")
         removed = 0
@@ -609,6 +643,11 @@ class ForgeImpl:
                     comment_id = comment.get("id")
                     if comment_id is None:
                         continue
+                    if wanted is not None:
+                        inline = comment.get("inline")
+                        path = inline.get("path") if isinstance(inline, dict) else None
+                        if not (isinstance(path, str) and path in wanted):
+                            continue
                     resp = self._session.delete(
                         f"{base}/{comment_id}",
                         headers=headers,

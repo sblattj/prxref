@@ -795,6 +795,10 @@ def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
             ref, "src/app.py", sha=HEAD_SHA
         ) == "x = 1\n",
         "prune_inline_comments": lambda: forge.prune_inline_comments(ref) == 1,
+        "get_summary": lambda: (
+            forge.get_summary(ref) is None
+            and ForgeImpl(session=existing).get_summary(ref) == f"{MARKER}\nold"
+        ),
         "get_pr_history": lambda: forge.get_pr_history(ref).complete,
         "list_paths": lambda: getattr(
             forge.list_paths(ref, sha=HEAD_SHA), "paths", None
