@@ -328,14 +328,14 @@ def _github_threads(items):
     return github.ForgeImpl(session=session).list_threads(_ref(github, GITHUB_URL))
 
 
-def test_github_thread_on_a_range_is_read_at_its_first_line():
+def test_github_thread_on_a_range_keeps_its_end_line_and_records_its_first():
     threads = _github_threads([
         {"id": 1, "path": "src/app.py", "start_line": 10, "line": 13,
          "user": {"login": "reviewer"}, "body": "unbounded"},
         {"id": 2, "path": "src/app.py", "start_line": None, "line": 20,
          "user": {"login": "reviewer"}, "body": "single"},
     ])
-    assert [t.line for t in threads] == [10, 20]
+    assert [(t.start_line, t.line) for t in threads] == [(10, 13), (None, 20)]
 
 
 def test_a_re_review_recognises_its_own_multi_line_suggestion_thread():

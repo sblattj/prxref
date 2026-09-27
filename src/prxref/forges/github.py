@@ -631,12 +631,15 @@ class ForgeImpl:
             for data in self._iter_pages(ref, url, headers, what="comment feed"):
                 for item in data:
                     path = item.get("path")
-                    line = (
-                        item.get("start_line")
-                        or item.get("line")
-                        or item.get("original_line")
-                        or item.get("position")
-                    )
+                    line = item.get("line") or item.get("original_line") or item.get("position")
+                    start_line = item.get("start_line")
+                    if not (
+                        isinstance(start_line, int)
+                        and not isinstance(start_line, bool)
+                        and isinstance(line, int)
+                        and 0 < start_line < line
+                    ):
+                        start_line = None
                     user = item.get("user") or {}
                     author = user.get("login", "") if isinstance(user, dict) else ""
                     body = item.get("body") or ""
@@ -648,6 +651,7 @@ class ForgeImpl:
                             resolved=False,
                             author=author,
                             body_snippet=snippet,
+                            start_line=start_line,
                         )
                     )
         except FeedReadError as e:

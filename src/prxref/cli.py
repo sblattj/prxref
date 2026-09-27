@@ -725,10 +725,15 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     (``in``, ``out`` or ``unknown``); a finding object without the attribute
     reports ``unknown``.
 
-    ``rule`` and ``locations`` follow ``scope`` and are always present. ``rule``
-    is the rule the finding names, or ``null`` (never ``""``) when it names
-    none, which is every finding of a run with finding grouping off and the
-    per-rule cap inactive.
+    ``rule``, ``suggestion``, ``suggestion_end_line`` and ``locations`` follow
+    ``scope`` and are always present. ``rule`` is the rule the finding names,
+    or ``null`` (never ``""``) when it names none, which is every finding of a
+    run with finding grouping off and the per-rule cap inactive.
+    ``suggestion`` is the finding's validated replacement text (``""``
+    deletes its lines), or ``null`` when it carries none, which is every
+    finding of a run with suggestions off; ``suggestion_end_line`` is the last
+    line it replaces (``0`` meaning ``line`` alone), and ``0`` whenever
+    ``suggestion`` is ``null``.
     ``locations`` is set only on the representative of a grouped finding, or
     on the best finding the per-rule cap kept for a rule, whose locations can
     span files: a list of ``{"file": ..., "line": ...}`` objects for the
@@ -739,10 +744,12 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     its ``Also at:`` names the first five. It is ``null`` on every other
     row, a member row dropped as ``grouped into <file>:<line>`` or ``rule
     cap exceeded (max <n>): listed at <file>:<line>`` included (that row
-    still carries its own ``rule``). A finding object without either
-    attribute reports ``null`` for it.
+    still carries its own ``rule``). A finding object without ``rule`` or
+    ``locations`` reports ``null`` for it, and one without ``suggestion``
+    reports ``null`` and ``0``.
     """
     locations = getattr(f, "locations", None) or ()
+    suggestion = getattr(f, "suggestion", None)
     return {
         "file": f.file,
         "line": f.line,
@@ -750,6 +757,8 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "confidence": f.confidence,
         "scope": getattr(f, "scope", "unknown"),
         "rule": getattr(f, "rule", None) or None,
+        "suggestion": suggestion,
+        "suggestion_end_line": getattr(f, "suggestion_end_line", 0) if suggestion is not None else 0,
         "locations": [{"file": path, "line": line} for path, line in locations] or None,
         "title": f.title,
         "body": f.body,

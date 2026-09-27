@@ -924,6 +924,11 @@ def is_duplicate_of_existing(
     - Same line (distance 0): 1 distinctive shared token is enough.
     - Within line_window: min_shared_tokens (default 2).
     - Beyond window or unknown/file-level line: distant threshold (default 4+).
+
+    A multi-line thread (``start_line`` a positive line below ``line``) is
+    measured as a range: a finding anywhere from ``start_line`` through
+    ``line`` is at distance 0, and one outside it is measured from the nearer
+    end. A single-line thread is measured exactly as before.
     """
     finding_tokens = _tokens(f"{finding.title} {finding.body}")
     if not finding_tokens:
@@ -944,6 +949,12 @@ def is_duplicate_of_existing(
 
         if f_line is not None and t_line is not None:
             distance = abs(t_line - f_line)
+            t_start = getattr(t, "start_line", None)
+            if isinstance(t_start, int) and 0 < t_start < t_line:
+                if t_start <= f_line <= t_line:
+                    distance = 0
+                else:
+                    distance = min(distance, abs(t_start - f_line))
             if distance == 0:
                 required = 1
             elif distance <= line_window:
