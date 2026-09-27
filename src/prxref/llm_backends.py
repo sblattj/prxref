@@ -465,7 +465,11 @@ class LiteLLMClient(LLMClient):
     ``""``.     ``temperature`` and ``seed`` are omitted entirely when ``None``,
     never defaulted here; the factory resolves both before this client is
     built — temperature's configured default of 0.0 and, when no seed is
-    configured, the once-per-process :func:`_auto_run_seed`.
+    configured, the once-per-process :func:`_auto_run_seed` (a seed of
+    ``off`` builds the client with ``seed=None``, so none is sent).
+    ``reasoning_effort`` is forwarded as ``reasoning_effort=`` when set and
+    omitted when empty or ``None``, like :class:`OpenAICompatClient`;
+    litellm maps it to each provider's own effort parameter.
     A model litellm reports as permanently gone (a 4xx-shaped exception
     naming it deprovisioned, renamed, or never enabled) is cached in-memory
     for the client's lifetime, mirroring :class:`OpenAICompatClient`: it is
@@ -480,6 +484,7 @@ class LiteLLMClient(LLMClient):
         default_timeout: float = DEFAULT_TIMEOUT,
         temperature: float | None = None,
         seed: int | None = None,
+        reasoning_effort: str | None = None,
     ):
         if not models:
             raise ValueError("models must be a non-empty list")
@@ -494,6 +499,7 @@ class LiteLLMClient(LLMClient):
         self.default_timeout = default_timeout
         self.temperature = temperature
         self.seed = seed
+        self.reasoning_effort = reasoning_effort or None
         self._completion = litellm.completion
         # Same run-lifetime memory as OpenAICompatClient (see its __init__),
         # keyed on litellm's own exception shape instead of a status code.
@@ -539,6 +545,8 @@ class LiteLLMClient(LLMClient):
             kwargs["temperature"] = self.temperature
         if self.seed is not None:
             kwargs["seed"] = self.seed
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         t0 = time.perf_counter()
         try:
             response = self._completion(**kwargs)
@@ -671,6 +679,11 @@ def _int_setting(raw: str | None, env: str, *, minimum: int) -> int | None:
 _run_seed: int | None = None
 _run_seed_lock = threading.Lock()
 
+# The PRXREF_LLM_SEED value that sends no seed at all (issue #26: Bedrock
+# rejects the parameter). Lowercase only, like config's other word values;
+# restated in prxref.config, which is a leaf module.
+SEED_OFF = "off"
+
 
 def _auto_run_seed() -> int:
     """The once-per-process fallback seed, shared by every client built without PRXREF_LLM_SEED."""
@@ -707,8 +720,10 @@ def create_llm_client(
     and may be empty for a local no-auth server.
     PRXREF_LLM_REASONING_EFFORT is passed through unvalidated to the
     openai-compat client for models that cannot disable reasoning
-    (e.g. GLM-5.3-Flash's ``low``/``high``/``max``) and to claude-cli as its
-    effort setting; empty omits it, and litellm and kiro-cli ignore it.
+    (e.g. GLM-5.3-Flash's ``low``/``high``/``max``), to the litellm client
+    as ``reasoning_effort=`` (litellm maps it per provider), and to
+    claude-cli as its effort setting; empty omits it, and kiro-cli ignores
+    it.
     PRXREF_LLM_TIMEOUT (seconds, default 45.0, must be > 0) becomes the
     client's ``default_timeout``. PRXREF_LLM_TEMPERATURE is parsed to a
     float (finite, >= 0 — no upper bound, since the maximum is
@@ -722,7 +737,10 @@ def create_llm_client(
     inference, so the factory derives ONE random seed per process
     (:func:`_auto_run_seed`) and stamps it on every client it builds —
     all LLM calls within a run share one seed, and the client's ``seed``
-    attribute carries it into the run record's ``sampling``. A malformed
+    attribute carries it into the run record's ``sampling``. The value
+    ``off`` (:data:`SEED_OFF`, lowercase only) sends no seed at all: no
+    configured seed and no fallback, for providers that reject the
+    parameter, and the client's ``seed`` is ``None``. A malformed
     or out-of-range value for any of
     these raises :class:`~prxref.llm.ConfigError` naming the variable, so
     the CLI exits 2 rather than degrading the review.
@@ -790,11 +808,13 @@ def create_llm_client(
     )
     if temperature is None:
         temperature = DEFAULT_TEMPERATURE
-    seed = _int_setting(
-        _get("LLM_SEED", "PRXREF_LLM_SEED"), "PRXREF_LLM_SEED", minimum=0
-    )
-    if seed is None:
-        seed = _auto_run_seed()
+    raw_seed = _get("LLM_SEED", "PRXREF_LLM_SEED")
+    if raw_seed is not None and str(raw_seed).strip() == SEED_OFF:
+        seed = None
+    else:
+        seed = _int_setting(raw_seed, "PRXREF_LLM_SEED", minimum=0)
+        if seed is None:
+            seed = _auto_run_seed()
     if backend in OPENAI_COMPAT_BACKENDS:
         return OpenAICompatClient(
             base_url=base_url,
@@ -813,7 +833,11 @@ def create_llm_client(
         )
     if backend == "litellm":
         return LiteLLMClient(
-            models=models, default_timeout=timeout, temperature=temperature, seed=seed
+            models=models,
+            default_timeout=timeout,
+            temperature=temperature,
+            seed=seed,
+            reasoning_effort=_get("LLM_REASONING_EFFORT", "PRXREF_LLM_REASONING_EFFORT"),
         )
     unapplied = [
         env
