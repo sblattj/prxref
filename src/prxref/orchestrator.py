@@ -1126,7 +1126,7 @@ def orchestrate_review(
         _warn_missing_rule_slot(
             prompts, feature="finding grouping" if group_findings else "the per-rule cap",
         )
-    reader = _make_file_reader(forge, ref, pr)
+    reader = _make_file_reader(forge, ref, pr, repo_dir=repo_dir)
     repo_plan: _RepoPlan | None = None
     unit_records: list[dict[str, Any] | None] | None = None
     if repo_context != "off":
@@ -1967,17 +1967,32 @@ def _inline_accounting(
 HEARTBEAT_SECONDS = 30.0
 
 
-def _make_file_reader(forge: Forge, ref: PRRef, pr: PRData):
+def _make_file_reader(
+    forge: Forge, ref: PRRef, pr: PRData, *, repo_dir: RepoDir | None = None,
+):
     """A cached ``read(path) -> str | None`` over the forge's optional reader.
 
-    Returns ``None`` when the forge has no ``get_file_content`` or the PR has
-    no head sha, which is the signal to skip context injection entirely.
-    Otherwise every path is fetched at most once per run at ``pr.source_sha``,
-    and any exception from the adapter degrades to ``None``.
+    The forge is used when it has ``get_file_content`` and the PR has a head
+    sha, even when ``repo_dir`` is also given. Otherwise ``repo_dir`` (a
+    :class:`prxref.forges.repo_dir.RepoDir`, the ``--repo-dir`` checkout) is
+    the fallback, so a forge-less review such as ``--diff-file`` without
+    ``--pr-url`` still gets chunk context (issue #29). With neither,
+    ``None`` is returned, which is the signal to skip context injection
+    entirely. Either way every path is fetched at most once per run, no
+    exclusion is applied, and any exception from the source degrades to
+    ``None``.
     """
-    reader = getattr(forge, "get_file_content", None)
+    forge_reader = getattr(forge, "get_file_content", None)
     sha = getattr(pr, "source_sha", "") or ""
-    if reader is None or not sha:
+    if forge_reader is not None and sha:
+        source = "get_file_content"
+
+        def fetch(path: str):
+            return forge_reader(ref, path, sha=sha)
+    elif repo_dir is not None:
+        source = "repo_dir.read"
+        fetch = repo_dir.read
+    else:
         return None
 
     cache: dict[tuple[str, str], str | None] = {}
@@ -1989,9 +2004,9 @@ def _make_file_reader(forge: Forge, ref: PRRef, pr: PRData):
             if key in cache:
                 return cache[key]
         try:
-            value = reader(ref, path, sha=sha)
+            value = fetch(path)
         except Exception as e:  # noqa: BLE001 - context is never worth a failed review
-            logger.debug("get_file_content(%s) failed: %s", path, e)
+            logger.debug("%s(%s) failed: %s", source, path, e)
             value = None
         if not isinstance(value, str):
             value = None
