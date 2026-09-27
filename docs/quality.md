@@ -11,6 +11,12 @@ identity and gains a `drop_reason`, so a run store, a `--no-post` dry run, or
 `--format json` can explain every filter decision. `active(findings)` is the
 subset that actually posts.
 
+One drop reason rests on a model reply: with the opt-in context follow-up
+(`PRXREF_CONTEXT_FOLLOWUP=on`), a below-floor question that a second call
+does not confirm is dropped as `not confirmed by context follow-up` before
+the passes run (see [Drop reasons](#drop-reasons)). The rule that decides
+confirmation is deterministic; the re-run's findings are not.
+
 ## Deterministic checks (findings prxref computes itself)
 
 **Release-shaped PRs.** When a PR changes at least 2 files and at least 80% of
@@ -305,6 +311,7 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 
 | `drop_reason` | Pass | Meaning |
 | --- | --- | --- |
+| `not confirmed by context follow-up (confidence <x> below floor <y>)` | `merge_followup` (context follow-up) | Only with `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo` (#22). The chunk worker's finding was below `PRXREF_CONFIDENCE_FLOOR`, a definition it names was looked up and sent to the model once more, and no finding of that re-run confirmed it: none in the same file at or above the floor that sits within 5 lines of it, has the same normalized title, or names a looked-up symbol. The reason is set in the chunk worker, before every pass on this page, and `apply_quality_gate` keeps it instead of writing its own `confidence <x> below floor <y>`. A confirmed finding is replaced by the re-run's finding, which then runs every pass; the re-run's other findings are discarded, never posted, and counted in the run record's `context_followup`. |
 | `echoes the prompt's example: "<title>"` | `apply_example_echo_check` | The finding's title, normalized, is the title of the example finding in the worker or sweep template the run used. `<title>` is the example's title as the template writes it. |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
 | `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |
