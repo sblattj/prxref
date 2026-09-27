@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -532,6 +532,41 @@ class ForgeImpl:
             f"({_MAX_PAGES * _PAGE_SIZE} entries) without reaching the end"
         )
 
+    def _find_summary(
+        self, ref: PRRef, list_url: str, headers: dict[str, str],
+    ) -> tuple[int | None, str | None]:
+        """Return the id and body of the summary comment ``post_summary`` overwrites.
+
+        The one lookup both ``post_summary`` and ``get_summary`` run, so the
+        two cannot pick different comments. ``(None, None)`` means there is
+        none. ``FeedReadError`` from the page walk propagates.
+        """
+        existing_comment_id: int | None = None
+        existing_body: str | None = None
+        for comments in self._iter_pages(ref, list_url, headers, what="comment feed"):
+            for c in comments:
+                if SUMMARY_MARKER in (c.get("body") or ""):
+                    existing_comment_id = c.get("id")
+                    existing_body = c.get("body")
+                    break
+            if existing_comment_id is not None:
+                break
+        if existing_comment_id is None:
+            return None, None
+        return existing_comment_id, existing_body
+
+    def get_summary(self, ref: PRRef) -> str | None:
+        """Return the raw body of the summary comment ``post_summary`` would update.
+
+        Reads the issue-comment feed through the same lookup ``post_summary``
+        runs and returns that comment's ``body``, or ``None`` when there is
+        none. Raises ``FeedReadError`` when the feed cannot be read to the
+        end. Makes no write request.
+        """
+        list_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/issues/{ref.number}/comments"
+        _, body = self._find_summary(ref, list_url, self._headers(ref.host))
+        return body
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 
@@ -544,14 +579,7 @@ class ForgeImpl:
         headers = self._headers(ref.host)
         body = with_summary_marker(body)
 
-        existing_comment_id: int | None = None
-        for comments in self._iter_pages(ref, list_url, headers, what="comment feed"):
-            for c in comments:
-                if SUMMARY_MARKER in (c.get("body") or ""):
-                    existing_comment_id = c.get("id")
-                    break
-            if existing_comment_id is not None:
-                break
+        existing_comment_id, _ = self._find_summary(ref, list_url, headers)
 
         if existing_comment_id is not None:
             patch_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/issues/comments/{existing_comment_id}"
@@ -757,7 +785,9 @@ class ForgeImpl:
         }
         return PathListing(paths=tuple(sorted(paths)), complete=not bool(body.get("truncated")))
 
-    def prune_inline_comments(self, ref: PRRef) -> int:
+    def prune_inline_comments(
+        self, ref: PRRef, *, paths: Collection[str] | None = None,
+    ) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
 
         A re-review updates the summary in place, but the previous run's
@@ -772,7 +802,13 @@ class ForgeImpl:
         is logged and skipped, and a feed that cannot be read ends the prune
         with what it already removed: best-effort, because a cleanup must
         never abort the review that follows it.
+
+        ``paths=None`` prunes every candidate. With a collection, only a
+        candidate whose ``path`` is in ``paths`` is deleted; one with no path
+        is kept, because deleting a finding that will not be re-raised loses
+        it for good.
         """
+        wanted = None if paths is None else frozenset(paths)
         list_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
         headers = self._headers(ref.host)
         removed = 0
@@ -784,6 +820,10 @@ class ForgeImpl:
                     comment_id = comment.get("id")
                     if comment_id is None:
                         continue
+                    if wanted is not None:
+                        path = comment.get("path")
+                        if not (isinstance(path, str) and path in wanted):
+                            continue
                     # The delete route lives outside the pull-number
                     # namespace — /pulls/comments/{id}, not /pulls/N/
                     # comments/{id} — so the listing URL and the delete URL
