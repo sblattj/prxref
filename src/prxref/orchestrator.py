@@ -267,6 +267,18 @@ POST_MODES = frozenset({"summary+inline", "summary", "inline"})
 POST_SUMMARY_MODES = frozenset({"summary+inline", "summary"})
 POST_INLINE_MODES = frozenset({"summary+inline", "inline"})
 
+#: ``PRXREF_INCREMENTAL``'s vocabulary (issue #34), restated in config._CHOICE_KEYS.
+INCREMENTAL_MODES = frozenset({"off", "on"})
+
+#: The reviewed-head marker an incremental-capable run stamps on its summary:
+#: :func:`reviewed_head_line` writes it and :data:`REVIEWED_HEAD_RE` reads it
+#: back, both from these two halves.
+REVIEWED_HEAD_PREFIX = "<!-- prxref-reviewed-head: "
+REVIEWED_HEAD_SUFFIX = " -->"
+REVIEWED_HEAD_RE = re.compile(
+    re.escape(REVIEWED_HEAD_PREFIX) + r"([0-9a-f]{7,64})" + re.escape(REVIEWED_HEAD_SUFFIX)
+)
+
 # How many failed chunks the partial-review banner itemizes — each with its
 # file list and redacted reason — before it starts counting the rest. Three is
 # enough to show a mixed failure (say, a starved budget plus a timeout) without
@@ -467,6 +479,7 @@ def orchestrate_review(
     llm_parse_retries: int = 0,
     context_followup: str = "off",
     suggestions: str = "off",
+    incremental: str = "off",
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -475,10 +488,10 @@ def orchestrate_review(
     posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions}``, plus
+    suggestions, incremental}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
-    :func:`_run_record`, so the last thirteen keys are always present and are
+    :func:`_run_record`, so the last fourteen keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``; ``parse_retries``: ``0`` before any review unit when the
     parse retry is on) when their feature is off or the run never reached it.
@@ -497,9 +510,10 @@ def orchestrate_review(
     ``ValueError`` before any forge call (see below).
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
-    the systemic sweep, which runs whenever at least one chunk exists (an
-    empty diff returns before any review unit runs). ``chunks_reviewed`` +
-    ``chunks_failed`` always equals it.
+    the systemic sweep, which runs whenever at least one chunk exists, and on
+    an incremental run whose delta chunks to nothing (an empty diff returns
+    before any review unit runs). ``chunks_reviewed`` + ``chunks_failed``
+    always equals it.
 
     ``max_tokens`` is the per-chunk completion budget handed to every worker;
     ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. ``token_budget`` sizes
@@ -817,6 +831,28 @@ def orchestrate_review(
     :data:`quality.SUGGESTION_CLEAR_REASONS` reason in that order, counted
     over the ACTIVE findings of the run (a dropped finding is not counted);
     it is all zeros on an exit reached before the passes.
+
+    ``incremental`` (``PRXREF_INCREMENTAL``, issue #34) is ``"off"`` (the
+    default) or ``"on"``; any other value raises ``ValueError`` before any
+    forge call. Off, the run makes no extra forge read, every prompt, call,
+    summary and prune is exactly a run without it, and the record's
+    ``incremental`` key is ``None``. On, every summary body the run posts
+    ends with :func:`reviewed_head_line` of the PR head when every review
+    unit succeeded, else of the previous marker's SHA (no line when there is
+    none), and with ``post_mode`` in :data:`POST_SUMMARY_MODES` the scope is
+    resolved right after the diff is parsed (:func:`_resolve_incremental_scope`):
+    the files of the PR's own diff touched since the previous summary's
+    marker are chunked, get repository context and have their prxref inline
+    comments pruned, while the systemic sweep, the size advisory and the
+    deterministic checks still see every file. An empty delta runs the sweep
+    alone, prunes nothing and posts the summary. An incremental run's summary
+    carries one note line (:func:`_incremental_note`). The record's
+    ``incremental`` key is ``{"mode", "reason", "since_sha", "files_total",
+    "files_reviewed", "marker_sha"}``: ``mode`` ``"incremental"`` or
+    ``"full"``, ``reason`` why a run is full (``None`` when incremental),
+    ``since_sha`` the marker SHA an incremental run compared from,
+    ``marker_sha`` the SHA the run's summary is stamped with (``None`` when
+    none is, and whenever ``post_mode`` posts no summary).
     """
     if repo_context not in repo_unit.MODES:
         raise ValueError(
@@ -829,6 +865,10 @@ def orchestrate_review(
     if suggestions not in SUGGESTION_MODES:
         raise ValueError(
             f"suggestions must be one of {SUGGESTION_MODES}, got {suggestions!r}"
+        )
+    if incremental not in INCREMENTAL_MODES:
+        raise ValueError(
+            f"incremental must be one of {INCREMENTAL_MODES}, got {incremental!r}"
         )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
@@ -855,6 +895,7 @@ def orchestrate_review(
         ),
         "context_followup": _followup_record() if context_followup == "on" else None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
+        "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -944,6 +985,13 @@ def orchestrate_review(
             cost_label=_cost_label(run_inputs, post_cost),
         ), run_inputs)
 
+    scope: _IncrementalScope | None = None
+    if incremental == "on":
+        scope = _resolve_incremental_scope(forge, ref, pr, files, post_mode=post_mode)
+        run_inputs["incremental"] = _incremental_record(scope, len(files), None)
+    review_files = list(scope.delta) if scope is not None and scope.active else files
+    sweep_alone = scope is not None and scope.active and bool(files)
+
     # Sized once, from the parsed files (never the raw diff), so every later
     # exit carries the same stats and the size line can reach all three
     # summary renders. Advisory only: a failure here is logged and the review
@@ -961,7 +1009,7 @@ def orchestrate_review(
     try:
         with tracer.span("build_chunks") as sp:
             chunks = build_chunks(
-                files, max_chunks=max_chunks, token_budget=token_budget,
+                review_files, max_chunks=max_chunks, token_budget=token_budget,
                 max_files_per_chunk=max_files_per_chunk,
             )
             sp["chunks"] = len(chunks)
@@ -972,9 +1020,12 @@ def orchestrate_review(
             forge, ref, post, 0, f"build_chunks failed: {e}", t0,
             post_mode=post_mode, tracer=tracer, sampling=sampling,
             cost_label=_cost_label(run_inputs, post_cost),
+            reviewed_head=_mark_reviewed_head(
+                run_inputs, scope, pr, post_mode=post_mode, complete=False,
+            ),
         ), run_inputs)
 
-    if not chunks:
+    if not chunks and not sweep_alone:
         # No chunk survived build_chunks — an empty diff, or every file
         # binary — but the release-shape and pinned-toggle heuristics are
         # pure and need no chunk to fire on: computed here so a release PR
@@ -1003,6 +1054,9 @@ def orchestrate_review(
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            reviewed_head=_mark_reviewed_head(
+                run_inputs, scope, pr, post_mode=post_mode, complete=True,
+            ),
         ), run_inputs)
 
     # Planned once the chunks are final and before anything is written to the
@@ -1021,6 +1075,9 @@ def orchestrate_review(
                 forge, ref, post, 0, f"scoped rules failed: {e}", t0,
                 post_mode=post_mode, tracer=tracer, sampling=sampling,
                 cost_label=_cost_label(run_inputs, post_cost),
+                reviewed_head=_mark_reviewed_head(
+                    run_inputs, scope, pr, post_mode=post_mode, complete=False,
+                ),
             ), run_inputs)
         run_inputs["scoped_rules"] = {
             **run_inputs["scoped_rules"],
@@ -1038,7 +1095,10 @@ def orchestrate_review(
     # ahead of the dispatch because the sweep needs the discussion in its
     # prompt, and a review that never starts has nothing to say either way.
     if post and post_mode in POST_INLINE_MODES:
-        _prune_stale_inline_comments(forge, ref)
+        if scope is None or not scope.active:
+            _prune_stale_inline_comments(forge, ref)
+        elif scope.paths:
+            _prune_stale_inline_comments(forge, ref, paths=scope.paths)
 
     # Fetched BEFORE the review units run, not after: the sweep needs the
     # existing discussion in its own prompt, and the same list serves the
@@ -1166,7 +1226,8 @@ def orchestrate_review(
     unit_records: list[dict[str, Any] | None] | None = None
     if repo_context != "off":
         repo_plan = _plan_repo_context(
-            repo_context, forge, ref, pr, files, run_inputs["repo_context"], repo_dir=repo_dir,
+            repo_context, forge, ref, pr, review_files, run_inputs["repo_context"],
+            repo_dir=repo_dir,
         )
         unit_records = [None] * len(chunks)
     followup_floor: float | None = None
@@ -1241,8 +1302,11 @@ def orchestrate_review(
     # pattern digest, so a sweep success on a dead worker pool is one unit of
     # pattern coverage over a review that never happened — it must not turn
     # that into an "Approved, no findings" run.
-    if all(r["error"] for r in results[:-1]):
-        reason = f"all {len(chunks)} worker reviews failed ({results[0]['error']})"
+    if all(r["error"] for r in results[:-1]) if chunks else results[-1]["error"]:
+        if chunks:
+            reason = f"all {len(chunks)} worker reviews failed ({results[0]['error']})"
+        else:
+            reason = f"the only review unit failed ({results[-1]['error']})"
         logger.error("Total LLM failure: %s", reason)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
         return _run_record(_error_run(
@@ -1250,6 +1314,9 @@ def orchestrate_review(
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
             post_mode=post_mode, sampling=sampling, cost_label=cost_label,
             chunks_reviewed=sum(1 for r in results if not r["error"]),
+            reviewed_head=_mark_reviewed_head(
+                run_inputs, scope, pr, post_mode=post_mode, complete=False,
+            ),
         ), run_inputs)
 
     chunks_failed = sum(1 for r in results if r["error"])
@@ -1453,6 +1520,10 @@ def orchestrate_review(
     )
 
     elapsed_ms = _elapsed_ms(t0)
+    reviewed_head = _mark_reviewed_head(
+        run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
+    )
+    incremental_note = _incremental_note(scope, len(files))
     posted = False
     inline_posted = 0
     post_summary_wanted = post and post_mode in POST_SUMMARY_MODES
@@ -1480,9 +1551,10 @@ def orchestrate_review(
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            incremental_note=incremental_note,
         )
         try:
-            forge.post_summary(ref, summary)
+            forge.post_summary(ref, _with_reviewed_head(summary, reviewed_head))
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary failed: %s", e)
@@ -1538,9 +1610,10 @@ def orchestrate_review(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
             ),
+            incremental_note=incremental_note,
         )
         try:
-            forge.post_summary(ref, refreshed)
+            forge.post_summary(ref, _with_reviewed_head(refreshed, reviewed_head))
         except Exception as e:  # noqa: BLE001
             logger.error("summary re-post with inline accounting failed: %s", e)
 
@@ -1963,7 +2036,9 @@ def _attribution(
     return f"{line} · {cost_label}" if cost_label else line
 
 
-def _prune_stale_inline_comments(forge: Forge, ref: PRRef) -> None:
+def _prune_stale_inline_comments(
+    forge: Forge, ref: PRRef, *, paths: frozenset[str] | None = None,
+) -> None:
     """Call the forge's optional stale-inline cleanup, before dedup reads threads.
 
     The order is load-bearing: pruning after ``list_threads`` would let the
@@ -1972,18 +2047,195 @@ def _prune_stale_inline_comments(forge: Forge, ref: PRRef) -> None:
     from the PR entirely. The capability is optional — forges without it and
     the duck-typed test fakes are skipped via getattr — and best-effort: a
     prune failure is logged, never raised, because cleanup must not abort the
-    review that follows it.
+    review that follows it. ``paths`` (an incremental run's re-reviewed files,
+    issue #34) is passed as the keyword ``paths`` so only those files'
+    comments go; ``None`` calls ``prune(ref)`` exactly as before.
     """
     prune = getattr(forge, "prune_inline_comments", None)
     if not callable(prune):
         return
     try:
-        removed = prune(ref)
+        removed = prune(ref) if paths is None else prune(ref, paths=paths)
     except Exception as e:  # noqa: BLE001
         logger.warning("prune_inline_comments failed (best-effort): %s", e)
         return
     if removed:
         logger.info("pruned %d stale inline comment(s) before posting", removed)
+
+
+@dataclass(frozen=True)
+class _IncrementalScope:
+    """What a ``PRXREF_INCREMENTAL=on`` run reviews (issue #34).
+
+    ``mode`` is ``"incremental"`` or ``"full"``; ``reason`` says why a run is
+    full and is ``None`` when it is incremental. ``since_sha`` is the marker
+    SHA an incremental run compared from. ``previous_sha`` is the marker SHA
+    read from the previous summary, whatever the mode, so a run whose review
+    units did not all succeed can carry it forward. ``delta`` is the PR diff's
+    files touched since the marker (empty on a full run) and ``paths`` their
+    new and old paths.
+    """
+
+    mode: str
+    reason: str | None = None
+    since_sha: str | None = None
+    previous_sha: str | None = None
+    delta: tuple = ()
+    paths: frozenset[str] = frozenset()
+
+    @property
+    def active(self) -> bool:
+        """True when only ``delta`` is chunked."""
+        return self.mode == "incremental"
+
+
+def reviewed_head_line(sha: str) -> str:
+    """The reviewed-head marker line for ``sha``, which :data:`REVIEWED_HEAD_RE` reads back."""
+    return f"{REVIEWED_HEAD_PREFIX}{sha}{REVIEWED_HEAD_SUFFIX}"
+
+
+def _with_reviewed_head(body: str, sha: str | None) -> str:
+    """``body`` with :func:`reviewed_head_line` appended after a blank line, or unchanged for ``None``."""
+    return body if sha is None else f"{body}\n\n{reviewed_head_line(sha)}"
+
+
+def _full_scope(reason: str, previous_sha: str | None = None) -> _IncrementalScope:
+    """A full-review scope, with its reason logged at INFO."""
+    logger.info("PRXREF_INCREMENTAL=on: reviewing every file (%s)", reason)
+    return _IncrementalScope("full", reason=reason, previous_sha=previous_sha)
+
+
+def _resolve_incremental_scope(
+    forge: Forge, ref: PRRef, pr: PRData, files: Sequence[Any], *, post_mode: str,
+) -> _IncrementalScope:
+    """Decide what a ``PRXREF_INCREMENTAL=on`` run reviews; never raises.
+
+    Incremental only with ``post_mode`` in :data:`POST_SUMMARY_MODES` (an
+    inline-only run never writes the marker). The previous summary is read
+    through the forge's optional ``get_summary``; a forge without it, a read
+    that raises (a WARNING naming the exception type), no summary ("first
+    review") and a summary without a :data:`REVIEWED_HEAD_RE` marker each
+    give a full review. A marker equal to the PR head gives an empty delta.
+    Otherwise ``get_compare_diff(ref, base_sha=<marker>, head_sha=<head>)``
+    supplies the set of new and old paths touched since the marker; a
+    failure there (a force-push can make the old SHA unknown) gives a full
+    review with a WARNING, and ``""`` an empty delta. The delta is the
+    members of ``files`` (the PR's own diff, so inline positions stay right)
+    whose path or old path is in that set, which keeps a merge from the base
+    branch or a rebase from widening it.
+    """
+    if post_mode not in POST_SUMMARY_MODES:
+        return _full_scope(f"PRXREF_POST_MODE={post_mode} never writes the reviewed-head marker")
+    get_summary = getattr(forge, "get_summary", None)
+    if not callable(get_summary):
+        return _full_scope("forge cannot read its summary")
+    try:
+        body = get_summary(ref)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "PRXREF_INCREMENTAL=on: reading the previous summary failed (%s); "
+            "reviewing every file", e.__class__.__name__,
+        )
+        return _IncrementalScope("full", reason="previous summary could not be read")
+    if body is None:
+        return _full_scope("first review")
+    match = REVIEWED_HEAD_RE.search(body) if isinstance(body, str) else None
+    if match is None:
+        return _full_scope("previous summary has no reviewed-head marker")
+    since = match.group(1)
+    head = (getattr(pr, "source_sha", "") or "").lower()
+    if not head:
+        return _full_scope("PR head is unknown", since)
+    if head == since or head.startswith(since):
+        logger.info("PRXREF_INCREMENTAL=on: nothing changed since %s", since[:7])
+        return _IncrementalScope("incremental", since_sha=since, previous_sha=since)
+    compare = getattr(forge, "get_compare_diff", None)
+    if not callable(compare):
+        return _full_scope("forge cannot compare commits", since)
+    try:
+        raw = compare(ref, base_sha=since, head_sha=pr.source_sha)
+        touched = parse_unified_diff(raw) if raw else []
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "PRXREF_INCREMENTAL=on: the compare diff since %s failed (%s: %s); "
+            "reviewing every file", since[:7], e.__class__.__name__, e,
+        )
+        return _IncrementalScope("full", reason="compare diff failed", previous_sha=since)
+    changed = {p for f in touched for p in (f.path, f.old_path) if p}
+    delta = tuple(f for f in files if f.path in changed or (f.old_path or "") in changed)
+    paths = frozenset(p for f in delta for p in (f.path, f.old_path) if p)
+    logger.info(
+        "PRXREF_INCREMENTAL=on: re-reviewing %d of %d changed file(s) since %s",
+        len(delta), len(files), since[:7],
+    )
+    return _IncrementalScope(
+        "incremental", since_sha=since, previous_sha=since, delta=delta, paths=paths,
+    )
+
+
+def _incremental_record(
+    scope: _IncrementalScope | None, files_total: int, marker_sha: str | None,
+) -> dict[str, Any]:
+    """The run record's ``incremental`` value for a ``PRXREF_INCREMENTAL=on`` run.
+
+    ``scope`` ``None`` is an exit taken before the scope was resolved: a full
+    run of no files with the reason ``"review ended before scope
+    resolution"``.
+    """
+    if scope is None:
+        return {
+            "mode": "full", "reason": "review ended before scope resolution",
+            "since_sha": None, "files_total": 0, "files_reviewed": 0,
+            "marker_sha": marker_sha,
+        }
+    return {
+        "mode": scope.mode,
+        "reason": scope.reason,
+        "since_sha": scope.since_sha,
+        "files_total": files_total,
+        "files_reviewed": len(scope.delta) if scope.active else files_total,
+        "marker_sha": marker_sha,
+    }
+
+
+def _mark_reviewed_head(
+    run_inputs: dict[str, Any], scope: _IncrementalScope | None, pr: PRData,
+    *, post_mode: str, complete: bool,
+) -> str | None:
+    """The SHA this exit's summary is stamped with, also written to the record.
+
+    ``None`` whenever ``scope`` is ``None`` (``PRXREF_INCREMENTAL`` off, the
+    record left untouched) or ``post_mode`` posts no summary. Otherwise the
+    PR head, lowercased, when ``complete`` (every review unit of the run
+    succeeded) and the head is a hex SHA :data:`REVIEWED_HEAD_RE` can read
+    back; else the previous marker's SHA, so the files a failed unit covered
+    are re-reviewed on the next push, or ``None`` when there was none.
+    """
+    if scope is None:
+        return None
+    sha: str | None = None
+    if post_mode in POST_SUMMARY_MODES:
+        head = (getattr(pr, "source_sha", "") or "").lower()
+        if complete and REVIEWED_HEAD_RE.fullmatch(reviewed_head_line(head)):
+            sha = head
+        else:
+            sha = scope.previous_sha
+    record = run_inputs.get("incremental")
+    if isinstance(record, dict):
+        run_inputs["incremental"] = {**record, "marker_sha": sha}
+    return sha
+
+
+def _incremental_note(scope: _IncrementalScope | None, files_total: int) -> str:
+    """The summary's one-line note on an incremental run, ``""`` on any other run."""
+    if scope is None or not scope.active:
+        return ""
+    return (
+        f"> Incremental review: {len(scope.delta)} of {files_total} changed "
+        f"{_plural(files_total, 'file')} re-reviewed since `{(scope.since_sha or '')[:7]}`; "
+        "the systemic sweep saw the whole PR, and earlier inline comments on the "
+        "other files still stand.\n\n"
+    )
 
 
 def _inline_accounting(
@@ -2970,6 +3222,7 @@ def _render_summary(
     cost_label: str = "",
     size_advisory_line: str = "",
     summary_template: str = "",
+    incremental_note: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -2989,6 +3242,8 @@ def _render_summary(
     (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
     ``""``) is prepended to the finished body, after the partial-review
     banner, so it is the first thing under the forge's summary marker.
+    ``incremental_note`` (:func:`_incremental_note`, ``""`` on every run that
+    is not incremental) follows it the same way.
     ``summary_template`` is an operator override of ``summary.md``
     (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
     the packaged template through ``reviewer.load_prompt``, and only that
@@ -3055,7 +3310,7 @@ def _render_summary(
         reason_lines = _failure_reason_lines(failed_chunks)
         if reason_lines:
             rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
-    return f"{size_advisory_line}{rendered}"
+    return f"{size_advisory_line}{incremental_note}{rendered}"
 
 
 def _size_advisory(
@@ -3304,7 +3559,7 @@ def _summary_only_run(
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
     ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
-    summary_template: str = "",
+    summary_template: str = "", reviewed_head: str | None = None,
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -3329,8 +3584,10 @@ def _summary_only_run(
 
     ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
     ``summary_template`` are handed to :func:`_render_summary` unchanged; all
-    four default to ``""``, which renders the summary exactly as before. The
-    run-record keys are added by the caller's :func:`_run_record`, not here.
+    four default to ``""``, which renders the summary exactly as before.
+    ``reviewed_head`` is stamped on the body by :func:`_with_reviewed_head`;
+    ``None`` (the default) leaves it as before. The run-record keys are added
+    by the caller's :func:`_run_record`, not here.
     """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -3370,7 +3627,7 @@ def _summary_only_run(
             summary_template=summary_template,
         )
         try:
-            forge.post_summary(ref, summary)
+            forge.post_summary(ref, _with_reviewed_head(summary, reviewed_head))
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary failed: %s", e)
@@ -3406,11 +3663,14 @@ def _error_run(
     *,
     cost_label: str = "",
     chunks_reviewed: int = 0,
+    reviewed_head: str | None = None,
 ) -> dict:
     """The error exit: post the failure notice when asked, return an Error run.
 
     ``cost_label`` becomes the notice attribution's last field
-    (:func:`_attribution`); ``""`` leaves it as before. The notice never
+    (:func:`_attribution`); ``""`` leaves it as before. ``reviewed_head`` is
+    stamped on the notice by :func:`_with_reviewed_head`; ``None`` (the
+    default) leaves it as before. The notice never
     carries a ticket note or a size advisory, and the run-record keys are
     added by the caller's :func:`_run_record`, not here.
 
@@ -3443,7 +3703,7 @@ def _error_run(
             f"{attribution}"
         )
         try:
-            forge.post_summary(ref, body)
+            forge.post_summary(ref, _with_reviewed_head(body, reviewed_head))
             posted = True
         except Exception as e:  # noqa: BLE001
             logger.error("post_summary (error notice) failed: %s", e)
