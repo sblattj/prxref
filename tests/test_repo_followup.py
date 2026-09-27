@@ -401,6 +401,21 @@ def test_name_tiers_never_returns_a_python_builtin():
     assert finding_names("t", "`KeyError` from `print` and `open`") == []
 
 
+def test_a_bare_builtin_call_gives_no_name():
+    assert name_tiers("t", "It calls len(rows) and isinstance(run, Ledger) first.") == (("Ledger",), (), ())
+    assert finding_names("t", "`len()` or `isinstance` or `TypeError`") == []
+
+
+def test_a_builtin_name_after_a_dot_is_a_repository_attribute():
+    tiers = name_tiers("t", "store.filter(rows) and q.sum() fail; x.next is None. It raises TypeError.")
+    assert tiers[1] == ("filter", "sum", "next")
+    flat = [name for tier in tiers for name in tier]
+    assert "TypeError" not in flat
+    span = name_tiers("`store.filter(rows)` and `obj.format`", "")
+    assert span[1] == ("filter", "format")
+    assert "TypeError" not in finding_names("`TypeError.mro`", "raises builtins.TypeError")
+
+
 def test_question_indices_below_floor_best_first():
     findings = [_finding(0.5), _finding(0.9), _finding(0.3), _finding(0.5), _finding(0.6)]
     assert question_indices(findings, 0.6) == [0, 3, 2]

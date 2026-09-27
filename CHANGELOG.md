@@ -34,9 +34,11 @@ The run record and `--format json` gain one key, `context_followup`, which is
   returned a review, it was not re-run after a timeout, and at least one of
   its findings is below the confidence floor. The names such a question puts
   in backticks are looked up: identifiers of at least 3 characters that are
-  not a receiver, a literal, a language keyword or a Python builtin such as
-  `TypeError` or `len`, type-like names first, then names that follow a
-  `.`, then the rest. Its plain text adds, after them, the names shaped like
+  not a receiver, a literal, a language keyword, a Python builtin class such
+  as `TypeError`, or a bare lowercase Python builtin such as `len(` (after a
+  dot, as in `store.filter(`, it names repository code and is kept),
+  type-like names first, then names that follow a `.`, then the rest. Its
+  plain text adds, after them, the names shaped like
   code: both halves of a dotted access or call (`table.recent(`), a call
   (`name(`), an identifier holding `_` (`model_history`, `HISTORY_WINDOW`)
   and a type-like word; a source file name such as `history.py` is not
