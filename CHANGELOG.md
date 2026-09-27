@@ -32,13 +32,16 @@ The run record and `--format json` gain one key, `context_followup`, which is
   error. There are no tuning knobs: every cap below is fixed.
 - **The context follow-up (#22).** A chunk gets one when its first call
   returned a review, it was not re-run after a timeout, and at least one of
-  its findings is below the confidence floor. Only the names such a question
-  puts in backticks are looked up: identifiers of at least 3 characters that
-  are not a receiver, a literal or a language keyword, type-like names first,
-  then names that follow a `.`, then the rest. A question with no backticks
-  falls back to the type-like words of its text. The chunk looks up at most
-  3 names, skipping any name the pull request defines. Nothing matches
-  phrases in the model's wording.
+  its findings is below the confidence floor. The names such a question puts
+  in backticks are looked up: identifiers of at least 3 characters that are
+  not a receiver, a literal or a language keyword, type-like names first,
+  then names that follow a `.`, then the rest. Its plain text adds, after
+  them, the names shaped like code: both halves of a dotted access or call
+  (`table.recent(`), a call (`name(`), an identifier holding `_`
+  (`model_history`, `HISTORY_WINDOW`) and a type-like word; a source file
+  name such as `history.py` is not split, and a plain English word never
+  counts. The chunk looks up at most 3 names, skipping any name the pull
+  request defines. Nothing matches phrases in the model's wording.
 - **Whole definitions for the follow-up (#22).** Each name is found through
   the chunk's imports, path conventions and file-name search, then in files
   of the same language from the listing. A file the pull request changes and
@@ -91,10 +94,11 @@ The run record and `--format json` gain one key, `context_followup`, which is
 
 ### Known limitations
 
-- **Only backticked names are looked up.** A question that names the symbol
-  it could not see without backticks, and without a type-like word, gets no
-  follow-up. `get`, `set` and `type` are JavaScript keywords to the lookup,
-  so a symbol of one of those names is never looked up.
+- **Only code-shaped names are looked up.** A question that names the
+  symbol it could not see as a plain lowercase word, with no backticks, `.`,
+  `(` or `_`, gets no follow-up, and a file path is never looked up as such.
+  `get`, `set` and `type` are JavaScript keywords to the lookup, so a symbol
+  of one of those names is never looked up.
 - **A confirmation is a second sample.** The follow-up changes two things at
   once: the prompt gains the definitions, and the model answers the chunk a
   second time. A confirmation does not show which of the two moved it.
