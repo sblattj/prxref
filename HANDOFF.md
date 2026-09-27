@@ -1,136 +1,78 @@
-# HANDOFF — v0.21.0 shipped: apply-able code suggestions (#30)
+# HANDOFF — v0.21.1 shipped: one retry at a larger budget for a truncated reply (#52)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.20.0 handoff.
+v0.21.0 handoff.
 
-0.21.0 is one feature. #30: with `PRXREF_SUGGESTIONS=on`, a chunk worker may
-attach the exact replacement code for a finding's lines, prxref checks it
-deterministically, and the inline comment carries it in the form the forge
-can apply: a GitHub `suggestion` block, a GitLab `suggestion:-0+N` block,
-and a copyable code block elsewhere. The key is **off by default**, and at
-the default every prompt, LLM call and forge read is the same as in 0.20.0;
-only the output gains keys, which read `null` (and a finding row's
-`suggestion_end_line` `0`), plus the setting in an eval's `run.json`. The
-issue asked for an opt-out flag. The release ships opt-in, because a new
-request to the model stays off until its effect on reviews is measured. One
-new config key, one new run-record key (`suggestions`, also at the top of
-`--format json`), two new `--format json` finding-row keys, no new CLI flag
-and no new module. The user-facing account is the `[0.21.0]` section of
-`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.20.0
-handoff is in git history.
+0.21.1 is one fix. #52: a worker or sweep reply that the provider stopped at
+the completion budget (`finish_reason` `length` or `max_tokens`) before it
+was usable is now retried once, automatically, at double the budget, after
+one WARNING. That retry costs one extra LLM call, walking the model's
+fallback chain again, only for a reply that could not be used; a reply that
+is truncated but still usable is kept as before, with its existing warning,
+and is not retried; a budget already at the retry ceiling is not retried
+either. No new config key and no new run-record key. The user-facing
+account is the `[0.21.1]` section of `CHANGELOG.md`. This file is for
+whoever cuts the next release. The v0.21.0 handoff is in git history.
 
 ## What landed
 
-- **The change, as a module map.** `git diff --stat v0.20.0..HEAD -- src/`
-  touches 13 files (512 lines in, 27 out) and adds none.
-  - `triage`: `Finding` gains `suggestion: str | None = None` and
-    `suggestion_end_line: int = 0`, trailing the old fields. Neither is part
-    of any identity or dedup key.
-  - `config`: the key `PRXREF_SUGGESTIONS` (`suggestions`, `off`|`on`,
-    default `off`, in `_CHOICE_KEYS`), and the constant
-    `SUGGESTIONS_MAX_TOKENS = 8192`. `load_config` now tracks which keys the
-    operator supplied, and raises `llm_max_tokens` to that constant only
-    when suggestions are on and `PRXREF_LLM_MAX_TOKENS` was not supplied.
-  - `reviewer`, the request. `SUGGESTION_REQUEST`, a `## Code suggestions`
-    system block, reaches chunk workers only, through
-    `PromptContext.suggestion_request`, appended after any rule block.
-    `worker.md` gains the optional `{suggestion_example}` slot (in
-    `prompt_templates.OPTIONAL_PLACEHOLDERS`), which renders a
-    `"suggestion"` key in the example finding when on and nothing when off.
-    `orchestrator._warn_missing_suggestion_slot` logs one WARNING naming
-    each worker override that lacks the slot; the override still gets the
-    request block.
-  - `reviewer`, the parse gate. `parse_suggestion` keeps `suggestion` only
-    when it is a string and `suggestion_end_line` only when it is a non-bool
-    int of 0 or more, and it is read only when `accept_suggestion` is true,
-    which `review_chunk` sets from `PromptContext.suggestion_active`. The
-    sweep never accepts one, and `orchestrator._enforce_suggestion` clears
-    any that reach a sweep finding or a run with suggestions off.
-  - `quality`, the validation pass. `apply_suggestion_validation` runs after
-    the per-rule cap and before the gate, and clears (never drops the
-    finding over) a suggestion that fails the first of
-    `SUGGESTION_CLEAR_REASONS`, in order: `grouped`, `line_moved`,
-    `file_level`, `range` (reversed or over `MAX_SUGGESTION_LINES` = 20),
-    `outside_hunk` (not all added or context lines of one hunk), `fence`,
-    `too_long` (over `MAX_SUGGESTION_CHARS` = 4,000) and `no_op`. The model's
-    line is captured before line alignment and carried by position.
-  - `formatter` and `forges`, the rendering. `suggestion_range` and
-    `format_suggestion_block` render by the forge's optional
-    `suggestion_style` class attribute: `github` gives a `suggestion` block,
-    and `orchestrator._inline_comment` posts a multi-line one as an
-    `InlineComment` ending at the last line with `start_line` at the first,
-    which `forges/github` sends as `start_line` and `start_side`; `gitlab`
-    gives `suggestion:-0+K`, anchored at the first line; a forge without the
-    attribute (Bitbucket Cloud, Bitbucket Server / Data Center, Azure
-    DevOps, the replay forges) gets a **Suggested change** label and a plain
-    fenced block, or a delete sentence. The block goes between the finding's
-    body and the attribution line (`orchestrator._format_finding`).
-  - `quality`, the thread-range dedup. `forges/github.list_threads` keeps a
-    thread's `line` exactly as in 0.20.0 (its end line) and records a
-    multi-line comment's first line as the new `Thread.start_line`.
-    `is_duplicate_of_existing` measures such a thread as a range: distance
-    0 anywhere inside it, else from the nearer end. Only GitHub sets
-    `start_line`.
-  - `cli` and `evals`, the keys. `--format json` finding rows gain
-    `suggestion` and `suggestion_end_line` after `rule` (`null` and `0`
-    without a suggestion, `""` for a deletion); the run record and the
-    `--format json` payload gain `suggestions` (`null` when off, else
-    `{"kept": n, "cleared": {<reason>: n}}` over the active findings, every
-    reason listed); `evals.RUN_CONFIG_KEYS` gains `suggestions` just before
-    `context_followup`, so an eval `run.json` records the setting.
-- **Docs.** `README.md` (a new Code Suggestions section and the two
-  `--format json` key lists), `docs/llm.md` (a Code suggestions section),
-  `docs/env-vars.md` and `.env.example` (the new key, and the 8192 default
-  on `PRXREF_LLM_MAX_TOKENS`), and `docs/evals.md` (the `config` row).
-- **Tests.** Four new files with 127 tests:
-  `tests/test_issue_30_suggestion_request.py` (67),
-  `tests/test_issue_30_suggestion_render.py` (33),
-  `tests/test_issue_30_thread_range.py` (18) and
-  `tests/test_issue_30_suggestion_budget.py` (9). Existing pins moved for
-  the new record key, the new template slot and the new row keys (lesson 2).
+- **The change, in `_invoke_and_parse`.** A budget-retry branch fires before
+  `_may_retry`, when the reply's `finish_reason` names a budget stop
+  (`length` or `max_tokens`), the reply is not usable, no budget retry has
+  already run for this call, and the call's budget is below the new
+  constant `TRUNCATION_RETRY_MAX_TOKENS = 16384`. On that branch, the same
+  request is sent again at `min(2 * call_budget, TRUNCATION_RETRY_MAX_TOKENS)`,
+  after one WARNING naming both budgets. A later reply that is truncated
+  again ends the unit with the truncation error naming the larger budget.
+  If the retry call itself raises, the unit keeps the original truncation
+  error with `(a retry at max_tokens=<B2> failed: <ExcType>)` appended. A
+  reply that is truncated but still usable is kept, never retried, exactly
+  as before. `meta` gains `budget_retry` (the larger budget) only when the
+  retry ran, after the eight base keys and before `parse_retries` /
+  `first_error` when both are present; `orchestrator._retry_meta` and
+  `_write_trace_files` both whitelist their keys, so `budget_retry` reaches
+  neither the run record, `--format json`, nor a unit's trace `meta.json`.
+- **Worst-case call counts**, from `_invoke_and_parse`'s docstring, with N
+  as `PRXREF_LLM_PARSE_RETRIES`. Per unit the worst case is now
+  `2 * (2 + max(N, 1))` `invoke` calls for a chunk (the first call,
+  `max(N, 1)` parse retries and one budget retry, times the orchestrator's
+  one timeout retry of the whole chunk) and `2 + max(N, 1)` for the
+  systemic sweep, which has no timeout retry; each `invoke` may still walk
+  the backend's model fallback chain.
+- **Docs.** `docs/env-vars.md` and `docs/llm.md` got accuracy fixes that the
+  new retry made necessary: the `review_chunk` and `_may_retry` docstrings,
+  and one `docs/llm.md` sentence ("a retry sends... the same max_tokens",
+  now "a parse retry", because a budget retry changes `max_tokens`).
+- **Tests.** One new file, `tests/test_issue_52_budget_retry.py`. Existing
+  pins moved in five files that encoded the old "a budget stop is never
+  retried" contract: `tests/test_reviewer.py`, `tests/test_parse_retry_reviewer.py`
+  (renamed to a `TestTheBudgetStopNeverDrawsOnTheParseRetries` class),
+  `tests/test_empty_reply_retry.py` (renamed to `TestTruncationIsNotTheEmptyReplyRetry`),
+  `tests/test_issue_21_acceptance.py` (renamed to `TestTruncationIsNotAParseRetry`)
+  and `tests/test_integration.py` — 27 existing tests in all.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **Rendering a multi-line suggestion moved GitHub's comment anchor, and
-   that silently changed dedup for human comments.** GitHub applies a
-   suggestion to the comment's whole line range, so a multi-line one must
-   post with `start_line`. The first rendering change also made
-   `github.list_threads` read every multi-line thread at its first line, so
-   that a re-review would find its own suggestion. That anchor feeds
-   `quality.is_duplicate_of_existing` for every thread, a human's
-   included, and so moved default-on dedup for comments prxref never wrote.
-   The fix is a range, not a remap: the thread keeps its old line and gains
-   `start_line`, and dedup measures the range.
-   `tests/test_issue_30_thread_range.py` carries the 0.20.0 function body
-   verbatim (`_old_is_duplicate_of_existing`) and proves the new matching
-   gives the old verdict on every single-line case
-   (`test_single_line_threads_get_exactly_the_old_verdicts`) and is a
-   duplicate wherever the old end-line matching was
-   (`test_a_range_thread_is_a_duplicate_wherever_its_end_line_alone_was`).
-   Check any change to a comment anchor against every reader of that
-   anchor.
-2. **A new run-record or JSON key moves pins all over the suite.** The
-   request commit, which added `suggestions` and the template slot, edited
-   11 existing test files besides its own (`tests/test_run_record.py`,
-   `tests/test_cli_output.py`, `tests/test_cli_repo_context.py`,
-   `tests/test_cli_scoped_rules.py` among them) and the README's
-   `--format json` key list, which a test holds in order. The row-key
-   commit moved key-set pins in `tests/test_cli_finding_rule_json.py` and
-   `tests/test_cli_output.py`, the golden hashes in
-   `tests/test_orchestrator_rule_cap.py`, which hash the JSON rows, and two
-   position pins on `RUN_CONFIG_KEYS`, which is why `suggestions` sits
-   before `context_followup` rather than after it. The rule-cap goldens
-   were not re-recorded: the test asserts the two new keys are `null` and
-   `0`, removes them, and still compares against the 0.20.0 bytes. Plan a
-   full-suite run for any new key, and prefer strip-and-compare to
-   re-recording.
-3. **"No findings, exit 0" can be a total failure.** Read `verdict` and
-   `chunks_failed` before trusting a live comparison. The first live run of
-   this release looked clean and was a 45 s timeout; later, a review cut
-   off at the token budget ended as verdict `Error` with 0 findings, which
-   also exits 0 by design.
+1. **The truncation this fixes is hidden reasoning spending the whole
+   budget, not a large reply running past it.** The live probe's traced
+   chunk used all 4096 output tokens and returned a 2-character reply.
+   Lowering `PRXREF_LLM_REASONING_EFFORT` to `low` at the same budget did
+   not prevent it: 1 of 3 runs still truncated.
+2. **A truncation rate measured in one batch is not stable.** At the 4096
+   default with suggestions off, the same configuration gave 0 of 3
+   truncated in one batch and 3 of 3 in another (5 of 10 pooled across both
+   batches). Judge a fix against the pooled count, not a single batch.
+3. **A test fixture that picks its reply by request count silently shifts
+   when a new retry consumes a reply.** The end-to-end partial-failure route
+   in `tests/test_integration.py` hands out replies in a fixed sequence
+   keyed on call count. The new budget retry consumes one of those replies,
+   so the reply meant for the sweep instead landed on chunk 2: one assert
+   went red while a sibling test ("the surviving chunk still succeeds")
+   stayed green for the wrong reason. Grepping the existing suite for
+   `never retried|truncat` did not catch this fixture, because it named
+   neither; only a full-suite run surfaced it.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -158,12 +100,13 @@ key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
 not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
 Current values, counted from `config._DEFAULTS` and
 `config._LEGACY_ENV_ALIASES` at this release: **70** keys, **1** legacy
-alias, **71** accepted names, one more key than 0.20.0's 69. The new key is
-`suggestions` (`PRXREF_SUGGESTIONS`), and it took every surface above: the
-`_CHOICE_KEYS` table, the docstring, `.env.example`, both counts and the
-LLM / Pipeline heading of `docs/env-vars.md`, and the
-`cli._run_review` pass-through. `config.SUGGESTIONS_MAX_TOKENS` is a module
-constant, not a key. 0.21.0 also changes one default conditionally:
+alias, **71** accepted names, unchanged since 0.21.0: 0.21.1 adds no config
+key. The most recent new key is `suggestions` (`PRXREF_SUGGESTIONS`), added
+in 0.21.0, and it took every surface above: the `_CHOICE_KEYS` table, the
+docstring, `.env.example`, both counts and the LLM / Pipeline heading of
+`docs/env-vars.md`, and the `cli._run_review` pass-through.
+`config.SUGGESTIONS_MAX_TOKENS` is a module constant, not a key. 0.21.0 also
+changes one default conditionally:
 `llm_max_tokens` is 8192 instead of 4096 when suggestions are on and the
 operator left it unset. That needed no new key, but it needed a way to tell
 "unset" from "set to the default", because `load_config` pre-fills its
@@ -171,26 +114,14 @@ sources for every default; it now keeps an explicit set of supplied keys.
 
 ## Release shape (follow this next time)
 
-How 0.21.0 was built:
+How 0.21.1 was built:
 
-1. **A seam commit first.** `Finding` gained the two suggestion fields on
-   the release branch before any code task started, so the two parallel
-   tasks shared only those fields and neither edited `triage.py`.
-2. **Four code tasks, each in its own worktree from a pinned commit, each
-   with its tests in a new file, each merged behind a full gate.** The full
-   `uv run pytest` and `uv run ruff check src tests` passed on every merged
-   tree, and the passing count never fell:
-   - rendering per forge, in parallel with the request task: 8,937 to
-     8,970;
-   - the request, the parse gate, the validation pass and the record key:
-     9,040;
-   - the thread-range dedup (lesson 1), the finding-row keys and the eval
-     allowlist: 9,058;
-   - the 8192 budget default when suggestions are on, added after the live
-     matrix (Live checks): 9,067.
-3. **Live checks** between the third and fourth tasks and after the fourth,
-   on a live model through the real CLI.
-4. **Release.** This commit bumps the version, adds the CHANGELOG section
+1. **One code task, in its own worktree from a pinned commit, its tests in
+   a new file, merged behind a full gate.** `uv run pytest` rose from 9067
+   to 9106, and `uv run ruff check src tests` stayed clean throughout.
+2. **Live checks** before the code task (establishing the truncation rate
+   at the 4096 default) and after it (confirming the retry recovers it).
+3. **Release.** This commit bumps the version, adds the CHANGELOG section
    and rewrites this file.
 
 Cutting the release:
@@ -217,9 +148,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9067 passed                                   uv run pytest -q
+9106 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.21.0                                        uv run prxref --version
+0.21.1                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -230,38 +161,39 @@ updated this file.
 Setup: GLM 5.3 Flash through an OpenAI-compatible gateway, running `prxref
 review --no-post --diff-file
 tests/evals/case-002-session-token-logging/diff.patch --format json`, with
-the runs interleaved by arm. A run counts as truncated when the reply
-stopped at the budget (`finish_reason=length`, verdict `Error`, 0 findings).
+the runs interleaved by arm, 4 runs each. A run counts as truncated when the
+reply stopped at the budget (`finish_reason=length`, verdict `Error`, 0
+findings) before the retry.
 
-- **Before the budget default (the first three code tasks), with an
-  explicit `PRXREF_LLM_MAX_TOKENS`:**
-  - suggestions off at 4096: 2 of 4 runs truncated;
-  - suggestions on at 4096: 4 of 4 truncated;
-  - suggestions on at 8192: 0 of 3 truncated. Each run kept 1 suggestion,
-    none carried a triple-backtick fence, and one run cleared 2 suggestions
-    as `line_moved`.
+- **At the release code, suggestions off (budget 4096):** in 4 of 4 runs the
+  chunk reply stopped at the budget before it was usable. The single retry
+  at 8192 recovered every one. All 4 reviews completed with 4–5 active
+  findings, and the log carried one retry WARNING per run.
+- **At the release code, suggestions on (budget 8192):** 4 of 4 completed
+  with no truncation and 0–3 kept suggestions.
+- **Control, the same off configuration on 0.21.0:** truncations at the
+  4096 default were 5 of 10 across earlier batches, ranging from 0 of 3 in
+  one batch to 3 of 3 in another. Each was a failed review (verdict `Error`,
+  0 findings, exit 0).
+- **Reasoning effort:** `PRXREF_LLM_REASONING_EFFORT=low` at 4096 still
+  truncated 1 of 3, before the retry.
+- **Trace:** a traced truncated chunk reported 4096 output tokens and a
+  2-character reply.
 
-  This is why `SUGGESTIONS_MAX_TOKENS` exists: 8192 when suggestions are on
-  and the budget is unset, and an explicit value always wins.
-- **At the release code, budget unset:**
-  - suggestions on: 2 of 3 runs completed, keeping 1 and 2 suggestions, and
-    one run cleared 2 as `line_moved`. 1 of 3 still truncated at 8192.
-  - suggestions off: 3 of 3 truncated at the 4096 default.
-
-What this shows: the feature works end to end, through the real parser and
-the validation pass, on a live model. The 4096 default truncating a
-reasoning model's review is older than this release and is tracked in #52
-(Still open). No run posted to a forge, so the per-forge rendering is
-covered by the mocked suite only.
+What this shows: the retry recovers, on this model and this fixture, every
+truncation that the 0.21.0 control hit; the 4096 default itself still stops
+the first call at the same rate as before; the fix is the second call, not
+a change to when the first one stops. No run posted to a forge, so the
+per-forge rendering is unaffected and covered by the mocked suite only.
 
 ## Still open — not part of this release
 
-- **The most important open item: the 4096 default truncates reasoning-model
-  reviews (#52).** At the release code, with suggestions off and the budget
-  unset, 3 of 3 live reviews of case-002 through GLM 5.3 Flash stopped at
-  the budget and ended as verdict `Error` with 0 findings, which exits 0.
-  The 8192 default applies only when suggestions are on, and 1 of 3 runs
-  still truncated there.
+- **Raising the default budget itself (option 1 of #52) is left to a
+  head-to-head measurement across many cases.** This release adds a second
+  call for a reply that is unusable at the budget stop; it does not
+  establish whether a higher default budget would avoid that extra call in
+  the common case, or what a higher default costs on models that do not
+  need it. Measure both before changing `PRXREF_LLM_MAX_TOKENS`'s default.
 - **Suggestions are unmeasured for quality.** The live checks show the path
   works and how often a suggestion survives validation, not whether the
   suggestions are right or whether asking for them changes the findings.
@@ -691,7 +623,7 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.21.0` (minor: apply-able code suggestions, #30, opt-in via `PRXREF_SUGGESTIONS=on`, default `off`; one new config key; new run-record key `suggestions`; new `--format json` finding-row keys `suggestion` and `suggestion_end_line`; `PRXREF_LLM_MAX_TOKENS` defaults to 8192 only when suggestions are on; GitHub thread dedup measures multi-line comments as ranges; no new module; no new CLI flag; at the default every prompt and LLM call is unchanged) |
+| Released version | `0.21.1` (patch: a worker or sweep reply stopped at the completion budget before it was usable is retried once, at double the budget, capped at 16384, #52; no new config key; no new run-record key; no new `--format json` key; no new CLI flag; no new module; a usable truncated reply is still kept without a retry) |
 | Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |

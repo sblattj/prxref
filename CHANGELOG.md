@@ -8,6 +8,30 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.21.1] — 2026-09-27
+
+A worker or sweep reply that the provider stopped at the completion budget
+before it was usable is now retried once, automatically, at a larger budget
+(#52).
+
+### Fixed
+
+- **A reply cut off at the completion budget before it was usable is now
+  retried once, at double the budget, capped at 16384 (#52).** A reasoning
+  model can spend its whole completion budget on hidden reasoning and return
+  an empty reply; before this release that reply failed the unit outright.
+  Now, after one WARNING naming the original and the doubled budget, the
+  same request is sent again at the larger budget. This costs one extra LLM
+  call, walking the model fallback chain again, and only for a reply that
+  was unusable at the budget stop; a reply that is merely truncated but
+  still usable is kept as before, with its existing warning, and is not
+  retried. A budget already at 16384 is not retried either. When the retry
+  is truncated too, the error names the larger budget; when it raises, the
+  unit keeps the original truncation error with a note that the retry
+  failed. An operator watching the log sees the new WARNING line naming both
+  budgets, and, on a second failure, the truncation error citing the larger
+  one. No new config key and no new run-record key.
+
 ## [0.21.0] — 2026-09-27
 
 Apply-able code suggestions (#30). With the new key `PRXREF_SUGGESTIONS=on`,
@@ -2216,7 +2240,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/sblattj/prxref/releases/tag/v0.21.1
 [0.21.0]: https://github.com/sblattj/prxref/releases/tag/v0.21.0
 [0.20.0]: https://github.com/sblattj/prxref/releases/tag/v0.20.0
 [0.19.0]: https://github.com/sblattj/prxref/releases/tag/v0.19.0
