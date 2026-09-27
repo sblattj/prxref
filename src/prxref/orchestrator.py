@@ -480,6 +480,8 @@ def orchestrate_review(
     context_followup: str = "off",
     suggestions: str = "off",
     incremental: str = "off",
+    full_review: bool = False,
+    full_review_reason: str | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -853,6 +855,20 @@ def orchestrate_review(
     ``since_sha`` the marker SHA an incremental run compared from,
     ``marker_sha`` the SHA the run's summary is stamped with (``None`` when
     none is, and whenever ``post_mode`` posts no summary).
+
+    ``full_review`` forces a full review of an ``incremental="on"`` run
+    (``prxref review --full-review``, or a ``PRXREF_FAIL_ON`` gate): scope
+    resolution is skipped, so the previous summary is never read and no
+    compare diff is fetched, every file is reviewed and ``prune(ref)`` runs
+    as on any full run, and the summary is still stamped with the PR head
+    by the rule above, so the next push is incremental again. The record's
+    ``incremental`` is ``{"mode": "full", "reason": full_review_reason,
+    ...}``, the reason defaulting to ``"full review requested"`` when
+    ``full_review_reason`` is ``None``. Because a forced run never reads the
+    previous marker, a forced run in which a review unit fails stamps no
+    marker at all rather than carrying the previous head forward, so the
+    next push is a full review. With ``incremental="off"`` both keywords are
+    ignored.
     """
     if repo_context not in repo_unit.MODES:
         raise ValueError(
@@ -987,7 +1003,10 @@ def orchestrate_review(
 
     scope: _IncrementalScope | None = None
     if incremental == "on":
-        scope = _resolve_incremental_scope(forge, ref, pr, files, post_mode=post_mode)
+        scope = (
+            _full_scope(full_review_reason or "full review requested") if full_review
+            else _resolve_incremental_scope(forge, ref, pr, files, post_mode=post_mode)
+        )
         run_inputs["incremental"] = _incremental_record(scope, len(files), None)
     review_files = list(scope.delta) if scope is not None and scope.active else files
     sweep_alone = scope is not None and scope.active and bool(files)

@@ -800,7 +800,7 @@ def _build_json_result(result: Any) -> dict:
     ``suggestions`` (#30: ``null`` whenever ``PRXREF_SUGGESTIONS`` is
     ``off``; otherwise ``{"kept", "cleared"}`` over the active findings),
     and so is ``incremental`` (#34: ``null`` whenever ``PRXREF_INCREMENTAL``
-    is ``off`` or turned off for the run; otherwise ``{"mode", "reason",
+    is ``off``; otherwise ``{"mode", "reason",
     "since_sha", "files_total", "files_reviewed", "marker_sha"}``);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
@@ -1411,15 +1411,16 @@ def _run_review(
         if replay is not None:
             forge = _replay_forge(forge, ref, replay)
     incremental = cfg["incremental"]
+    full_review_reason: str | None = None
     if incremental == "on" and full_review:
         logger.info("--full-review: reviewing every file although PRXREF_INCREMENTAL=on")
-        incremental = "off"
+        full_review_reason = "--full-review"
     elif incremental == "on" and cfg["fail_on"] != "never":
         logger.info(
             "PRXREF_FAIL_ON=%s: reviewing every file although PRXREF_INCREMENTAL=on, "
             "because a gate's verdict must see the whole PR", cfg["fail_on"],
         )
-        incremental = "off"
+        full_review_reason = f"PRXREF_FAIL_ON={cfg['fail_on']}"
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
     return orchestrate(
@@ -1482,6 +1483,8 @@ def _run_review(
         context_followup=cfg["context_followup"],
         suggestions=cfg["suggestions"],
         incremental=incremental,
+        full_review=full_review_reason is not None,
+        full_review_reason=full_review_reason,
     )
 
 

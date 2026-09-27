@@ -324,9 +324,12 @@ LLM / pipeline:
                                 summary has no reviewed-head marker, when the
                                 compare diff fails (a force-push), with
                                 --full-review, with PRXREF_FAIL_ON other than
-                                "never", and on every replay. Costs one extra
-                                forge read per run. Matched exactly; any other
-                                value is a configuration error
+                                "never", and on every replay. --full-review
+                                and a PRXREF_FAIL_ON gate read no previous
+                                summary but still record the head, so the
+                                following push is incremental again. Costs one
+                                extra forge read per run. Matched exactly; any
+                                other value is a configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
