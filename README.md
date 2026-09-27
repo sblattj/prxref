@@ -333,6 +333,18 @@ Findings inside the ticket (`in`) and findings the reviewer could not place (`un
 
 Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every run, and 🟦 means only "outside the ticket".
 
+## Code Suggestions
+
+With `PRXREF_SUGGESTIONS=on` (off by default), an inline comment can carry replacement code for the lines it flags. Each forge gets the form it can apply:
+
+| Forge | What the comment carries |
+|---|---|
+| GitHub (Cloud and Enterprise) | A `suggestion` block with the **Commit suggestion** button. A multi-line suggestion is posted as a comment on the whole line range. |
+| GitLab (Cloud and self-managed) | A `suggestion:-0+N` block with the **Apply suggestion** button, anchored at the first line it replaces. |
+| Bitbucket Cloud, Bitbucket Server / Data Center, Azure DevOps | A **Suggested change** label naming the line or lines, then a plain code block to copy. No apply button. |
+
+An empty suggestion deletes the lines: an empty `suggestion` block on GitHub and GitLab, and the sentence `Suggested change: delete line N` elsewhere. A suggestion replaces at most 20 lines, all inside one diff hunk. A suggestion that fails a check is dropped and the finding posts as a plain comment. The summary's findings list never shows suggestions.
+
 ## CLI Flags
 
 `prxref review` takes:

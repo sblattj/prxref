@@ -163,6 +163,55 @@ def format_inline_comment(f: Finding, attribution: str) -> str:
     return f"{marker} **{title}**\n\n{f.body}\n\n*{attribution}*"
 
 
+SUGGESTION_STYLE_GITHUB = "github"
+SUGGESTION_STYLE_GITLAB = "gitlab"
+
+
+def suggestion_range(f: Finding) -> tuple[int, int] | None:
+    """Return the ``(first, last)`` new-file lines a suggestion replaces.
+
+    ``None`` when the finding carries no renderable suggestion: none at all,
+    a file-level finding, text holding a triple-backtick fence (it would
+    close the block early), or an end line before the start. Every caller
+    treats ``None`` as "render the finding exactly as if it had no
+    suggestion", so a malformed one can never post a broken block.
+    """
+    text = f.suggestion
+    if text is None or "```" in text or f.line <= 0:
+        return None
+    end = f.suggestion_end_line or f.line
+    if end < f.line:
+        return None
+    return f.line, end
+
+
+def format_suggestion_block(f: Finding, style: str | None) -> str:
+    """Render a finding's suggestion for a forge's ``suggestion_style``.
+
+    ``"github"`` gives a ```` ```suggestion ```` block, which GitHub applies
+    to the comment's whole line range. ``"gitlab"`` gives
+    ```` ```suggestion:-0+K ````, anchored at the first line and reaching
+    ``K`` lines below it. Any other style gives a copyable fallback with no
+    apply button: a ``**Suggested change**`` label naming the lines, then a
+    plain fenced block, or a delete sentence when the replacement is empty.
+    Returns ``""`` when :func:`suggestion_range` finds nothing to render.
+    """
+    span = suggestion_range(f)
+    if span is None:
+        return ""
+    first, last = span
+    text = f.suggestion or ""
+    content = f"{text}\n" if text else ""
+    if style == SUGGESTION_STYLE_GITHUB:
+        return f"```suggestion\n{content}```"
+    if style == SUGGESTION_STYLE_GITLAB:
+        return f"```suggestion:-0+{last - first}\n{content}```"
+    where = f"line {first}" if first == last else f"lines {first}–{last}"
+    if not text:
+        return f"**Suggested change:** delete {where}"
+    return f"**Suggested change** ({where})\n\n```\n{content}```"
+
+
 def format_summary(
     verdict: str,
     findings_active: list[Finding],
