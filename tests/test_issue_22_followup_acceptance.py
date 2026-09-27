@@ -64,6 +64,23 @@ ELSEWHERE = {
     "title": "save cannot serialize arbitrary frame data",
     "body": "`json.dumps(asdict(run))` raises on any object that is not JSON-serializable.",
 }
+PLAIN_QUESTION = {
+    "file": PROGRESS, "line": 40, "severity": "warning", "confidence": 0.5,
+    "title": "Progress notes may push real turns out of the model history",
+    "body": (
+        "Every announce appends one more progress row for the session. If history.py builds "
+        "model_history from table.recent(session_id, HISTORY_WINDOW), these rows count against "
+        "the window and can evict user and assistant turns. That code is not shown here."
+    ),
+}
+PLAIN_CONFIRMATION = {
+    "file": PROGRESS, "line": 40, "severity": "error", "confidence": 0.9,
+    "title": "Progress notes evict turns from the model history",
+    "body": (
+        "model_history reads table.recent(session_id, HISTORY_WINDOW), which counts progress rows, "
+        "so each announce pushes one real turn out of the window."
+    ),
+}
 FLOOR_REASON = "confidence 0.50 below floor 0.60"
 UNCONFIRMED_REASON = f"{UNCONFIRMED_PREFIX} (confidence 0.50 below floor 0.60)"
 
@@ -78,6 +95,7 @@ FOLLOWUP_REPLIES = {
     "http-500": (500, {"error": "error 500"}),
     "not-json": (200, _completion("I could not decide; the definition looks fine to me.", "stop")),
     "another-file": _findings(ELSEWHERE),
+    "confirm-plain": _findings(PLAIN_CONFIRMATION),
 }
 
 
@@ -86,10 +104,14 @@ def _messages(payload: dict, role: str) -> str:
 
 
 class _Route:
-    """The scripted server's callable route; ``followup`` selects the follow-up reply."""
+    """The scripted server's callable route; ``followup`` selects the follow-up reply.
+
+    ``question`` is the first reply's question on ``assistant/progress.py``.
+    """
 
     def __init__(self) -> None:
         self.followup = "refute"
+        self.question = QUESTION
 
     def __call__(self, payload: dict) -> tuple[int, dict]:
         system = _messages(payload, "system")
@@ -99,7 +121,7 @@ class _Route:
         if FOLLOWUP_HEADER in user:
             return FOLLOWUP_REPLIES[self.followup]
         if PROGRESS_DIFF in user:
-            return _findings(QUESTION)
+            return _findings(self.question)
         return _findings()
 
 
@@ -290,6 +312,24 @@ class TestTrace:
         assert FOLLOWUP_HEADER in user
         assert PROGRESS_DIFF in user
         assert not any(".followup" in n for n in names if not n.startswith("chunk0."))
+
+
+class TestPlainTextNames:
+    """A question that names the code without backticks still gets its follow-up."""
+
+    def test_a_question_without_backticks_is_confirmed(self, review, llm_server, monkeypatch):
+        assert "`" not in PLAIN_QUESTION["title"] + PLAIN_QUESTION["body"]
+        monkeypatch.setattr(llm_server[2], "question", PLAIN_QUESTION)
+        run = review("confirm-plain")
+        assert run.code == 0
+        record = run.record()
+        assert (record["calls"], record["confirmed"], record["unconfirmed"]) == (1, 1, 0)
+        assert len(run.of_kind("followup")) == 1
+        row = run.row()
+        assert row["skipped"] is None and row["error"] == ""
+        assert {"model_history", "recent"} & set(row["names"])
+        assert "assistant/history.py" in {excerpt["path"] for excerpt in row["excerpts"]}
+        assert [f["title"] for f in run.at(PROGRESS, 40)] == [PLAIN_CONFIRMATION["title"]]
 
 
 class TestControls:
