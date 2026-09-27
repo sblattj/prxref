@@ -813,10 +813,11 @@ class TestTruncationIsLegibleEndToEnd:
             result = harness.review(post=True)
 
             assert server.requests[0]["payload"]["max_tokens"] == 256
+            assert {r["payload"]["max_tokens"] for r in server.requests} == {256, 512}
             assert result["verdict"] == "Error"
             assert len(harness.forge.summaries) == 1
             notice = harness.forge.summaries[0]
-            assert "response truncated at max_tokens=256" in notice
+            assert "response truncated at max_tokens=512" in notice
             assert "finish_reason=length" in notice
             assert "PRXREF_LLM_MAX_TOKENS" in notice
         finally:
@@ -910,9 +911,11 @@ class TestPartialFailureIsExplainedOnThePR:
     def _run(self, monkeypatch, second_finish_reason: str):
         """First chunk answers cleanly, second stops with the given reason.
 
-        The third request is the systemic-sweep digest review, answered clean:
-        this class pins the CHUNK truncation banner, and a sweep failure here
-        would only repeat the same finding under a second reason.
+        The second chunk's retry at the doubled budget (#52), sent only after
+        a budget stop, stops the same way. The systemic-sweep digest review
+        is answered clean: this class pins the CHUNK truncation banner, and a
+        sweep failure here would only repeat the same finding under a second
+        reason.
         """
         state = {"n": 0}
 
@@ -920,9 +923,9 @@ class TestPartialFailureIsExplainedOnThePR:
             state["n"] += 1
             if state["n"] == 1:
                 return 200, _completion(_good_content("src/one.py"), "stop")
-            if state["n"] >= 3:
-                return 200, _completion(json.dumps({"findings": []}), "stop")
-            return 200, _completion(_TRUNCATED_CONTENT, second_finish_reason)
+            if state["n"] == 2 or payload["max_tokens"] > 256:
+                return 200, _completion(_TRUNCATED_CONTENT, second_finish_reason)
+            return 200, _completion(json.dumps({"findings": []}), "stop")
 
         server = MockOpenAIServer(routes={"fast": route})
         base_url = server.start()
@@ -950,15 +953,15 @@ class TestPartialFailureIsExplainedOnThePR:
     def test_the_truncation_reason_lands_on_the_pr(self, monkeypatch):
         forge, result, server = self._run(monkeypatch, "length")
 
-        # 2 chunk reviews + 1 systemic-sweep review.
-        assert len(server.requests) == 3
+        # 2 chunk reviews + 1 budget retry + 1 systemic-sweep review.
+        assert len(server.requests) == 4
         assert result["chunks_reviewed"] == 2
         assert result["chunks_failed"] == 1
         summary = forge.summaries[0]
         assert "⚠️ Partial review: 2 of 3 chunks were reviewed" in summary
         assert (
             "> - chunk of 1 file (src/two.py): response truncated at "
-            "max_tokens=256 (finish_reason=length); "
+            "max_tokens=512 (finish_reason=length); "
             "raise PRXREF_LLM_MAX_TOKENS" in summary
         )
 
