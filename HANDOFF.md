@@ -1,95 +1,136 @@
-# HANDOFF — v0.20.0 shipped: chunk context for local diff replays (#29)
+# HANDOFF — v0.21.0 shipped: apply-able code suggestions (#30)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.19.0 handoff.
+v0.20.0 handoff.
 
-0.20.0 is one fix. #29: a review of a local diff, `prxref review
---diff-file <patch> --repo-dir <checkout>` with no `--pr-url`, built no
-chunk context: no `### Dependency versions` block and no same-file
-definitions, although the checkout held every file that context needs. It
-now reads them from `--repo-dir`. No config key, run-record key, CLI flag or
-module was added. Forge-backed reviews (`--pr-url`, the webhook service, the
-GitHub Action) are unchanged, because a forge that can read files at the PR
-head is still asked first. The user-facing account is the `[0.20.0]` section
-of `CHANGELOG.md`. This file is for whoever cuts the next release. The
-v0.19.0 handoff is in git history.
+0.21.0 is one feature. #30: with `PRXREF_SUGGESTIONS=on`, a chunk worker may
+attach the exact replacement code for a finding's lines, prxref checks it
+deterministically, and the inline comment carries it in the form the forge
+can apply: a GitHub `suggestion` block, a GitLab `suggestion:-0+N` block,
+and a copyable code block elsewhere. The key is **off by default**, and at
+the default every prompt, LLM call and forge read is the same as in 0.20.0;
+only the output gains keys, which read `null` (and a finding row's
+`suggestion_end_line` `0`), plus the setting in an eval's `run.json`. The
+issue asked for an opt-out flag. The release ships opt-in, because a new
+request to the model stays off until its effect on reviews is measured. One
+new config key, one new run-record key (`suggestions`, also at the top of
+`--format json`), two new `--format json` finding-row keys, no new CLI flag
+and no new module. The user-facing account is the `[0.21.0]` section of
+`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.20.0
+handoff is in git history.
 
 ## What landed
 
-- **The change, as a module map.** `git diff --stat v0.19.0..HEAD -- src/`
-  touches three files and adds none.
-  - `orchestrator`, the fix. `_make_file_reader(forge, ref, pr, *,
-    repo_dir=None)` gained the `repo_dir` keyword. It uses the forge's
-    `get_file_content` at `pr.source_sha` when the forge has the method and
-    the PR has a head sha, even when `repo_dir` is also given; otherwise it
-    falls back to `repo_dir.read`; with neither it returns `None`, the
-    signal to skip chunk context, as before. Both sources share one body:
-    the per-run cache, the lock, and the rule that any exception degrades to
-    `None`. The debug log names the source that failed. `orchestrate_review`
-    passes `repo_dir=repo_dir` at its one call site.
-  - `cli`, the words. The `--repo-dir` help text and the module docstring
-    now say that a review with no forge file reader, such as `--diff-file`
-    without `--pr-url`, reads its chunk context there, and no longer say
-    that `PRXREF_REPO_CONTEXT=off` ignores the directory.
-  - `forges/replay`, a docstring. `LocalDiffForge` still has no
-    `get_file_content`; its docstring now says the orchestrator reads chunk
-    context from `--repo-dir` when one is given.
-- **The precedence rule: the forge first.** `repo_dir` is only a fallback,
-  so a `--pr-url` review that also passes `--repo-dir` reads chunk context
-  from the forge exactly as in 0.19.0
-  (`test_forge_is_read_and_repo_dir_content_is_not_shown`). The fallback
-  applies no exclusion, as the forge reader applies none;
-  `PRXREF_CONTEXT_EXCLUDE_GLOBS` stays scoped to repository context.
-- **At every level.** Chunk context is built at every `PRXREF_REPO_CONTEXT`
-  level, `off` included, so the fallback is too. `cli._open_repo_dir`
-  already checked and opened the directory at `off`; nothing used it there
-  before.
-- **A second surface.** `apply_manifest_claim_check(findings, files,
-  read=reader)` in `orchestrate_review` takes the same reader, so in a
-  `--diff-file` run with `--repo-dir` the manifest check's full-file section
-  lookup now reads the checkout too. `eval` passes a case's `repo_dir` to
-  the same review, so an eval diff-file case with a `repo_dir` gets the same
-  context.
-- **Docs.** `README.md` (the `--repo-dir` bullet and the `--diff-file`
-  bullet), `docs/evals.md` (the `repo_dir` field row and the diff-file case
-  bullet) and `docs/llm.md` (the best-effort paragraph of the chunk context
-  section) say the new behaviour.
-- **Tests.** One new file, `tests/test_issue_29_diff_file_repo_dir_context.py`,
-  with 10 tests: an end-to-end run through `cli._run_review` against a mock
-  LLM server with and without `--repo-dir`, the same-file definition, forge
-  precedence, an empty checkout and a raising read, the no-source case, the
-  cache, and a JSON payload check. One existing golden moved (lesson 3).
+- **The change, as a module map.** `git diff --stat v0.20.0..HEAD -- src/`
+  touches 13 files (512 lines in, 27 out) and adds none.
+  - `triage`: `Finding` gains `suggestion: str | None = None` and
+    `suggestion_end_line: int = 0`, trailing the old fields. Neither is part
+    of any identity or dedup key.
+  - `config`: the key `PRXREF_SUGGESTIONS` (`suggestions`, `off`|`on`,
+    default `off`, in `_CHOICE_KEYS`), and the constant
+    `SUGGESTIONS_MAX_TOKENS = 8192`. `load_config` now tracks which keys the
+    operator supplied, and raises `llm_max_tokens` to that constant only
+    when suggestions are on and `PRXREF_LLM_MAX_TOKENS` was not supplied.
+  - `reviewer`, the request. `SUGGESTION_REQUEST`, a `## Code suggestions`
+    system block, reaches chunk workers only, through
+    `PromptContext.suggestion_request`, appended after any rule block.
+    `worker.md` gains the optional `{suggestion_example}` slot (in
+    `prompt_templates.OPTIONAL_PLACEHOLDERS`), which renders a
+    `"suggestion"` key in the example finding when on and nothing when off.
+    `orchestrator._warn_missing_suggestion_slot` logs one WARNING naming
+    each worker override that lacks the slot; the override still gets the
+    request block.
+  - `reviewer`, the parse gate. `parse_suggestion` keeps `suggestion` only
+    when it is a string and `suggestion_end_line` only when it is a non-bool
+    int of 0 or more, and it is read only when `accept_suggestion` is true,
+    which `review_chunk` sets from `PromptContext.suggestion_active`. The
+    sweep never accepts one, and `orchestrator._enforce_suggestion` clears
+    any that reach a sweep finding or a run with suggestions off.
+  - `quality`, the validation pass. `apply_suggestion_validation` runs after
+    the per-rule cap and before the gate, and clears (never drops the
+    finding over) a suggestion that fails the first of
+    `SUGGESTION_CLEAR_REASONS`, in order: `grouped`, `line_moved`,
+    `file_level`, `range` (reversed or over `MAX_SUGGESTION_LINES` = 20),
+    `outside_hunk` (not all added or context lines of one hunk), `fence`,
+    `too_long` (over `MAX_SUGGESTION_CHARS` = 4,000) and `no_op`. The model's
+    line is captured before line alignment and carried by position.
+  - `formatter` and `forges`, the rendering. `suggestion_range` and
+    `format_suggestion_block` render by the forge's optional
+    `suggestion_style` class attribute: `github` gives a `suggestion` block,
+    and `orchestrator._inline_comment` posts a multi-line one as an
+    `InlineComment` ending at the last line with `start_line` at the first,
+    which `forges/github` sends as `start_line` and `start_side`; `gitlab`
+    gives `suggestion:-0+K`, anchored at the first line; a forge without the
+    attribute (Bitbucket Cloud, Bitbucket Server / Data Center, Azure
+    DevOps, the replay forges) gets a **Suggested change** label and a plain
+    fenced block, or a delete sentence. The block goes between the finding's
+    body and the attribution line (`orchestrator._format_finding`).
+  - `quality`, the thread-range dedup. `forges/github.list_threads` keeps a
+    thread's `line` exactly as in 0.20.0 (its end line) and records a
+    multi-line comment's first line as the new `Thread.start_line`.
+    `is_duplicate_of_existing` measures such a thread as a range: distance
+    0 anywhere inside it, else from the nearer end. Only GitHub sets
+    `start_line`.
+  - `cli` and `evals`, the keys. `--format json` finding rows gain
+    `suggestion` and `suggestion_end_line` after `rule` (`null` and `0`
+    without a suggestion, `""` for a deletion); the run record and the
+    `--format json` payload gain `suggestions` (`null` when off, else
+    `{"kept": n, "cleared": {<reason>: n}}` over the active findings, every
+    reason listed); `evals.RUN_CONFIG_KEYS` gains `suggestions` just before
+    `context_followup`, so an eval `run.json` records the setting.
+- **Docs.** `README.md` (a new Code Suggestions section and the two
+  `--format json` key lists), `docs/llm.md` (a Code suggestions section),
+  `docs/env-vars.md` and `.env.example` (the new key, and the 8192 default
+  on `PRXREF_LLM_MAX_TOKENS`), and `docs/evals.md` (the `config` row).
+- **Tests.** Four new files with 127 tests:
+  `tests/test_issue_30_suggestion_request.py` (67),
+  `tests/test_issue_30_suggestion_render.py` (33),
+  `tests/test_issue_30_thread_range.py` (18) and
+  `tests/test_issue_30_suggestion_budget.py` (9). Existing pins moved for
+  the new record key, the new template slot and the new row keys (lesson 2).
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **The input mode decides the context, not the machine.** Chunk context
-   depends only on whether the review has a file reader: a forge with
-   `get_file_content` and a head sha, or, since 0.20.0, a `--repo-dir`
-   checkout (`orchestrator._make_file_reader`). A laptop and a CI runner
-   running the same command get the same prompt. The split that mattered
-   was a forge-backed review against a local diff, and before 0.20.0 a local
-   diff got no chunk context wherever it ran.
-2. **An end-to-end check through the CLI needs the CLI's input mode to carry
-   the context.** 0.19.0's #25 check could not run through `prxref review
-   --no-post --diff-file ... --repo-dir ...`, because that path built no
-   dependency block at either version, so it called
-   `jvm_deps.dependency_lines` directly. At 0.20.0 the same repro runs
-   through the real CLI (Live checks), and the chunk prompt carries the #25
-   lines, while v0.19.0, the control, carries none.
-3. **A golden that is itself a replay run pins this exact path.**
-   `tests/test_context_followup_off_identity.py` runs `--diff-file` with
-   `--repo-dir`, so "goldens never change" was the wrong expectation for
-   this fix: one of its three recorded message hashes moved. The fix was to
-   re-record that one value, keeping both as `PRE_29_SHA` and `POST_29_SHA`,
-   and to prove the delta:
-   `test_the_29_delta_is_exactly_one_definition_line` finds the request that
-   hashes to `POST_29_SHA`, checks that the one new line,
-   `assistant/engine.py:12: class Step:`, appears in exactly one message
-   exactly once, removes it, and asserts the messages then hash to
-   `PRE_29_SHA`. The other two hashes, the request count and the other
-   acceptance goldens did not move.
+1. **Rendering a multi-line suggestion moved GitHub's comment anchor, and
+   that silently changed dedup for human comments.** GitHub applies a
+   suggestion to the comment's whole line range, so a multi-line one must
+   post with `start_line`. The first rendering change also made
+   `github.list_threads` read every multi-line thread at its first line, so
+   that a re-review would find its own suggestion. That anchor feeds
+   `quality.is_duplicate_of_existing` for every thread, a human's
+   included, and so moved default-on dedup for comments prxref never wrote.
+   The fix is a range, not a remap: the thread keeps its old line and gains
+   `start_line`, and dedup measures the range.
+   `tests/test_issue_30_thread_range.py` carries the 0.20.0 function body
+   verbatim (`_old_is_duplicate_of_existing`) and proves the new matching
+   gives the old verdict on every single-line case
+   (`test_single_line_threads_get_exactly_the_old_verdicts`) and is a
+   duplicate wherever the old end-line matching was
+   (`test_a_range_thread_is_a_duplicate_wherever_its_end_line_alone_was`).
+   Check any change to a comment anchor against every reader of that
+   anchor.
+2. **A new run-record or JSON key moves pins all over the suite.** The
+   request commit, which added `suggestions` and the template slot, edited
+   11 existing test files besides its own (`tests/test_run_record.py`,
+   `tests/test_cli_output.py`, `tests/test_cli_repo_context.py`,
+   `tests/test_cli_scoped_rules.py` among them) and the README's
+   `--format json` key list, which a test holds in order. The row-key
+   commit moved key-set pins in `tests/test_cli_finding_rule_json.py` and
+   `tests/test_cli_output.py`, the golden hashes in
+   `tests/test_orchestrator_rule_cap.py`, which hash the JSON rows, and two
+   position pins on `RUN_CONFIG_KEYS`, which is why `suggestions` sits
+   before `context_followup` rather than after it. The rule-cap goldens
+   were not re-recorded: the test asserts the two new keys are `null` and
+   `0`, removes them, and still compares against the 0.20.0 bytes. Plan a
+   full-suite run for any new key, and prefer strip-and-compare to
+   re-recording.
+3. **"No findings, exit 0" can be a total failure.** Read `verdict` and
+   `chunks_failed` before trusting a live comparison. The first live run of
+   this release looked clean and was a 45 s timeout; later, a review cut
+   off at the token budget ended as verdict `Error` with 0 findings, which
+   also exits 0 by design.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -116,30 +157,41 @@ key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
 `.env.example` and `docs/env-vars.md` to describe it, and a value that is
 not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
 Current values, counted from `config._DEFAULTS` and
-`config._LEGACY_ENV_ALIASES` at this release: **69** keys, **1** legacy
-alias, **70** accepted names, unchanged from 0.18.0. 0.20.0 changed no config
-key, value or default.
+`config._LEGACY_ENV_ALIASES` at this release: **70** keys, **1** legacy
+alias, **71** accepted names, one more key than 0.20.0's 69. The new key is
+`suggestions` (`PRXREF_SUGGESTIONS`), and it took every surface above: the
+`_CHOICE_KEYS` table, the docstring, `.env.example`, both counts and the
+LLM / Pipeline heading of `docs/env-vars.md`, and the
+`cli._run_review` pass-through. `config.SUGGESTIONS_MAX_TOKENS` is a module
+constant, not a key. 0.21.0 also changes one default conditionally:
+`llm_max_tokens` is 8192 instead of 4096 when suggestions are on and the
+operator left it unset. That needed no new key, but it needed a way to tell
+"unset" from "set to the default", because `load_config` pre-fills its
+sources for every default; it now keeps an explicit set of supplied keys.
 
 ## Release shape (follow this next time)
 
-How 0.20.0 was built:
+How 0.21.0 was built:
 
-1. **One code task from the 0.19.0 merge.** It ran in its own worktree
-   against the pinned 0.19.0 merge commit, brought its tests in a new test
-   file, and kept to `orchestrator.py`, `cli.py`, the `LocalDiffForge`
-   docstring, `README.md` and `docs/evals.md`. It stopped to ask before
-   touching a golden when the off-identity hash moved (lesson 3), and the
-   re-record landed as its own commit.
-2. **One integration gate for the merge.** The branch merged into
-   `release/X.Y.Z`, and the merge stayed only because the full
-   `uv run pytest` and `uv run ruff check src tests` passed on the merged
-   tree. The passing count rose from 8,926 at 0.19.0 to 8,937 after the fix
-   (10 new tests and the delta test of lesson 3), and never fell.
-3. **One offline end-to-end check** once the fix merged (Live checks). No
-   live model run: nothing model-facing changed for a forge-backed review.
-4. **Release.** This commit bumps the version, adds the CHANGELOG section,
-   fixes one `docs/llm.md` sentence the fix made wrong, and rewrites this
-   file.
+1. **A seam commit first.** `Finding` gained the two suggestion fields on
+   the release branch before any code task started, so the two parallel
+   tasks shared only those fields and neither edited `triage.py`.
+2. **Four code tasks, each in its own worktree from a pinned commit, each
+   with its tests in a new file, each merged behind a full gate.** The full
+   `uv run pytest` and `uv run ruff check src tests` passed on every merged
+   tree, and the passing count never fell:
+   - rendering per forge, in parallel with the request task: 8,937 to
+     8,970;
+   - the request, the parse gate, the validation pass and the record key:
+     9,040;
+   - the thread-range dedup (lesson 1), the finding-row keys and the eval
+     allowlist: 9,058;
+   - the 8192 budget default when suggestions are on, added after the live
+     matrix (Live checks): 9,067.
+3. **Live checks** between the third and fourth tasks and after the fourth,
+   on a live model through the real CLI.
+4. **Release.** This commit bumps the version, adds the CHANGELOG section
+   and rewrites this file.
 
 Cutting the release:
 
@@ -165,9 +217,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-8937 passed                                   uv run pytest -q
+9067 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.20.0                                        uv run prxref --version
+0.21.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -175,29 +227,69 @@ updated this file.
 
 ### Live checks
 
-0.20.0 changes no model-facing behaviour for a forge-backed review, so no
-live model run was made for it. One offline end-to-end check ran instead:
+Setup: GLM 5.3 Flash through an OpenAI-compatible gateway, running `prxref
+review --no-post --diff-file
+tests/evals/case-002-session-token-logging/diff.patch --format json`, with
+the runs interleaved by arm. A run counts as truncated when the reply
+stopped at the budget (`finish_reason=length`, verdict `Error`, 0 findings).
 
-- **#29 on #25's repro, through the real CLI.** The v0.19.0 handoff's #25
-  repro, built on disk: a root pom importing `jackson-bom`, then
-  `spring-boot-dependencies`, and a Java file adding the `MeterRegistry` and
-  `ObjectMapper` imports. `prxref review --no-post --diff-file <patch>
-  --repo-dir <checkout> --trace-dir <dir>` ran against a dead LLM endpoint,
-  so the trace holds the prompts only.
-  - At 0.20.0, the chunk prompt carries
-    `com.fasterxml.jackson.core:jackson-databind@(likely managed by
-    com.fasterxml.jackson:jackson-bom@2.21.5)` and
-    `io.micrometer:micrometer-registry-dynatrace@(managed by one of 2
-    imported BOMs: jackson-bom, spring-boot-dependencies) (group match
-    only)`.
-  - At v0.19.0, the control, the same command gives no dependency-version
-    lines: the prompt's only headers are `### Spec constraints` and
-    `### Diff`.
-- The last live model result is 0.18.0's, the context follow-up on #22's
-  fixture through GLM 5.3 Flash: see the intro of the `[0.18.0]` section of
-  `CHANGELOG.md`.
+- **Before the budget default (the first three code tasks), with an
+  explicit `PRXREF_LLM_MAX_TOKENS`:**
+  - suggestions off at 4096: 2 of 4 runs truncated;
+  - suggestions on at 4096: 4 of 4 truncated;
+  - suggestions on at 8192: 0 of 3 truncated. Each run kept 1 suggestion,
+    none carried a triple-backtick fence, and one run cleared 2 suggestions
+    as `line_moved`.
+
+  This is why `SUGGESTIONS_MAX_TOKENS` exists: 8192 when suggestions are on
+  and the budget is unset, and an explicit value always wins.
+- **At the release code, budget unset:**
+  - suggestions on: 2 of 3 runs completed, keeping 1 and 2 suggestions, and
+    one run cleared 2 as `line_moved`. 1 of 3 still truncated at 8192.
+  - suggestions off: 3 of 3 truncated at the 4096 default.
+
+What this shows: the feature works end to end, through the real parser and
+the validation pass, on a live model. The 4096 default truncating a
+reasoning model's review is older than this release and is tracked in #52
+(Still open). No run posted to a forge, so the per-forge rendering is
+covered by the mocked suite only.
 
 ## Still open — not part of this release
+
+- **The most important open item: the 4096 default truncates reasoning-model
+  reviews (#52).** At the release code, with suggestions off and the budget
+  unset, 3 of 3 live reviews of case-002 through GLM 5.3 Flash stopped at
+  the budget and ended as verdict `Error` with 0 findings, which exits 0.
+  The 8192 default applies only when suggestions are on, and 1 of 3 runs
+  still truncated there.
+- **Suggestions are unmeasured for quality.** The live checks show the path
+  works and how often a suggestion survives validation, not whether the
+  suggestions are right or whether asking for them changes the findings.
+  The eval harness does not score suggestions; `run.json` records only the
+  setting. Measure before changing the default from `off`.
+
+0.21.0's known limitations:
+
+- **Azure DevOps has a native suggestion UI that prxref does not use.**
+  Azure DevOps documents suggested changes in pull request comments, with
+  an apply button; whether a comment posted through the API gets that
+  button is unverified, so Azure DevOps gets the copyable fallback block.
+- **Bitbucket Server / Data Center native suggestions are unverified**, so
+  it also gets the fallback block, as Bitbucket Cloud does.
+- **GitLab's position fallback loses the apply target.** When GitLab refuses
+  an inline position with a 400, the existing fallback reposts the body as
+  a general merge request note, where a `suggestion` block cannot be
+  applied.
+- **Only GitHub threads carry a range.** `Thread.start_line` is set by the
+  GitHub adapter only; every other forge's multi-line threads are still
+  measured at one line.
+- **The model's line reaches the validation pass by position.** The
+  orchestrator captures each finding's line before line alignment and
+  hands it to `apply_suggestion_validation` as a list, which relies on the
+  passes between them keeping findings one to one and in order. A new pass
+  there that drops, splits or reorders findings raises `ValueError` on a
+  length mismatch at best, and misattributes `line_moved` at worst.
+- **The summary never shows suggestions**, only inline comments do.
 
 - **The history-window bug is still not asserted.** With the follow-up on,
   #22's second bug surfaced in 2 of 3 live runs, and both times its
@@ -400,7 +492,9 @@ Listing, retry and cost notes:
   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
   thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
   and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
-  changed in 0.16.0 through 0.20.0; raise both for such a model. The
+  changed in 0.16.0 through 0.20.0, and 0.21.0 raises the token budget to
+  8192 only when suggestions are on (#52 tracks the rest); raise both for
+  such a model. The
   recipe under "Measuring repository context" in `tests/evals/README.md` sets
   neither, so run verbatim against such a model it cuts the replies off.
 
@@ -597,7 +691,7 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.20.0` (minor: chunk context from `--repo-dir` for a `--diff-file` review with no `--pr-url`, #29; no new config key or value; no new run-record or `--format json` key; no new module; no new CLI flag; no existing config default changed; forge-backed reviews unchanged) |
+| Released version | `0.21.0` (minor: apply-able code suggestions, #30, opt-in via `PRXREF_SUGGESTIONS=on`, default `off`; one new config key; new run-record key `suggestions`; new `--format json` finding-row keys `suggestion` and `suggestion_end_line`; `PRXREF_LLM_MAX_TOKENS` defaults to 8192 only when suggestions are on; GitHub thread dedup measures multi-line comments as ranges; no new module; no new CLI flag; at the default every prompt and LLM call is unchanged) |
 | Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
