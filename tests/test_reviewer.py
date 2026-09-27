@@ -339,11 +339,14 @@ class TestTruncationIsNamedInsteadOfDecoded:
         return parse_unified_diff(MINI_DIFF)
 
     def test_cut_off_json_names_the_budget_and_the_lever(self):
+        """Truncated again after the one budget retry (#52): the budget named
+        is the doubled one that was in force for the last call."""
         llm = FakeLLM(TRUNCATED_RESPONSE, finish_reason="length")
         findings, meta = review_chunk(llm, self._chunk(), max_tokens=512)
         assert findings == []
+        assert [c["max_tokens"] for c in llm.calls] == [512, 1024]
         assert meta["error"] == (
-            "response truncated at max_tokens=512 (finish_reason=length); "
+            "response truncated at max_tokens=1024 (finish_reason=length); "
             "raise PRXREF_LLM_MAX_TOKENS"
         )
 
@@ -353,7 +356,7 @@ class TestTruncationIsNamedInsteadOfDecoded:
         llm = FakeLLM("", finish_reason="length")
         findings, meta = review_chunk(llm, self._chunk(), max_tokens=4096)
         assert findings == []
-        assert "max_tokens=4096" in meta["error"]
+        assert "max_tokens=8192" in meta["error"]
         assert "PRXREF_LLM_MAX_TOKENS" in meta["error"]
 
     def test_a_clean_empty_response_is_not_mislabelled_as_truncated(self):
@@ -375,13 +378,14 @@ class TestTruncationIsNamedInsteadOfDecoded:
     def test_the_budget_named_is_the_one_actually_sent(self):
         llm = FakeLLM("", finish_reason="length")
         _findings, meta = review_chunk(llm, self._chunk(), max_tokens=777)
-        assert llm.calls[0]["max_tokens"] == 777
-        assert "max_tokens=777" in meta["error"]
+        assert [c["max_tokens"] for c in llm.calls] == [777, 1554]
+        assert "max_tokens=1554" in meta["error"]
 
     def test_the_module_default_is_named_when_no_budget_was_passed(self):
         llm = FakeLLM("", finish_reason="length")
         _findings, meta = review_chunk(llm, self._chunk())
-        assert f"max_tokens={MAX_TOKENS}" in meta["error"]
+        assert llm.calls[0]["max_tokens"] == MAX_TOKENS
+        assert f"max_tokens={2 * MAX_TOKENS}" in meta["error"]
 
     @pytest.mark.parametrize("raw", ["length", "LENGTH", " Length "])
     def test_the_stop_reason_is_matched_case_and_space_insensitively(self, raw):
@@ -424,11 +428,13 @@ class TestTruncationIsNamedInsteadOfDecoded:
 
     def test_telemetry_survives_the_truncation_branch(self):
         """The response arrived, so its token counts are real and must be kept:
-        they are how an operator sees the budget being consumed."""
+        they are how an operator sees the budget being consumed. Both the
+        first call and its budget retry were billed, so both count."""
         llm = FakeLLM("", finish_reason="length")
         _findings, meta = review_chunk(llm, self._chunk())
-        assert meta["input_tokens"] == 100
-        assert meta["output_tokens"] == 50
+        assert len(llm.calls) == 2
+        assert meta["input_tokens"] == 200
+        assert meta["output_tokens"] == 100
         assert meta["model"] == "fake-model"
 
 
@@ -470,7 +476,7 @@ class TestOtherProviderTruncationSpellings:
     def test_the_native_budget_spellings_are_recognised(self, raw):
         llm = FakeLLM("", finish_reason=raw)
         _findings, meta = review_chunk(llm, self._chunk(), max_tokens=64)
-        assert "response truncated at max_tokens=64" in meta["error"]
+        assert "response truncated at max_tokens=128" in meta["error"]
         assert "PRXREF_LLM_MAX_TOKENS" in meta["error"]
 
     def test_the_message_quotes_what_the_provider_actually_said(self):
@@ -509,7 +515,7 @@ class TestTruncationSurvivesAWrongShapedResponse:
         llm = FakeLLM("[1, 2, 3]", finish_reason="length")
         findings, meta = review_chunk(llm, self._chunk(), max_tokens=128)
         assert findings == []
-        assert "response truncated at max_tokens=128" in meta["error"]
+        assert "response truncated at max_tokens=256" in meta["error"]
 
     def test_a_clean_non_object_keeps_the_shape_message(self):
         """The discriminating control: same bytes, honest stop reason."""
@@ -644,7 +650,7 @@ class TestReviewSystemic:
     def test_a_truncated_digest_review_names_the_budget(self):
         llm = FakeLLM("", finish_reason="length")
         _findings, meta = review_systemic(llm, self.DIGEST, max_tokens=256)
-        assert "response truncated at max_tokens=256" in meta["error"]
+        assert "response truncated at max_tokens=512" in meta["error"]
         assert "PRXREF_LLM_MAX_TOKENS" in meta["error"]
 
     def test_a_wrong_shaped_response_keeps_the_shape_message(self):
