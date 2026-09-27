@@ -1,191 +1,126 @@
-# HANDOFF — v0.18.0 shipped: opt-in context follow-up (#22 part 1)
+# HANDOFF — v0.19.0 shipped: JVM BOM owners and litellm effort/seed (#25, #26)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.17.0 handoff.
+v0.18.0 handoff.
 
-0.18.0 adds the context follow-up (#22, part 1). A chunk worker that is not
-shown a symbol's definition is told to ask about it at confidence 0.5 or
-below, so the default floor of 0.6 drops the question however real the bug
-is. With `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo`, prxref
-looks up the definitions of the symbols such a question names and sends the
-chunk once more with them appended; a question the second reply confirms
-posts, and one it does not is dropped with its own reason. The follow-up is
-off by default, and at `off` every prompt and LLM call is the one 0.17.0
-makes; the run record and `--format json` only gain `context_followup`,
-`null`. The user-facing account is the `[0.18.0]` section of
-`CHANGELOG.md`. This file is for whoever cuts the next release. The v0.17.0
-handoff is in git history.
+0.19.0 is two fixes. #25: in the `### Dependency versions` block, a
+version-less Maven or Gradle dependency was attributed to the first imported
+BOM whether or not that BOM manages it; it now names an owner only when there
+is one candidate or a clear best guess, and marks a dependency matched to an
+import by its group alone. #26: the litellm backend now forwards
+`PRXREF_LLM_REASONING_EFFORT`, and `PRXREF_LLM_SEED=off` sends no seed, for
+providers such as Bedrock that reject it. No config key, run-record key or
+module was added. At the defaults nothing moves except the dependency-version
+lines of Java and Kotlin files. The user-facing account is the `[0.19.0]`
+section of `CHANGELOG.md`. This file is for whoever cuts the next release.
+The v0.18.0 handoff is in git history.
 
 ## What landed
 
-- **The follow-up, as a module map.** Three new modules, stdlib only, that
-  read files only through the `read` callable they are given.
-  - `repo_followup`, the lookup half. `question_indices` picks a chunk's
-    questions: its findings below the floor, most confident first.
-    `name_tiers` takes the names each one asks about, and `lookup_names` picks
-    the chunk's names from them. `lookup_excerpts` reads their definitions at
-    the pull request head, cut by `definition_body`, and
-    `render_followup_block` renders the prompt block under `FOLLOWUP_HEADER`
-    (`### Definitions referenced by this chunk, looked up for its open
-    questions`) and `FOLLOWUP_NOTE`.
-  - `followup_merge`, the confirm rule. `confirms` decides whether one
-    finding of the second reply confirms one question; `merge_followup` folds
-    the second reply into the first and returns a `MergeOutcome` with the
-    `confirmed`, `unconfirmed` and `discarded` counts. `UNCONFIRMED_PREFIX`
-    starts the new drop reason.
-  - `followup`, the per-chunk driver. `run_chunk_followup` runs the steps in
-    order, makes at most one `invoke`, never mutates the first result and
-    never raises. `skipped_row`, `ROW_KEYS` and `SKIP_REASONS` define the
-    chunk's run-record row.
-
-  How they reach a review: `orchestrate_review` takes
-  `context_followup="off"|"on"` (`FOLLOWUP_MODES`), which `cli._run_review`
-  passes from the config, so `prxref review` and the webhook server get it.
-  `orchestrator._run_worker` calls `_chunk_followup` after a chunk's first
-  attempt, and the re-run is `_invoke_chunk` with the block as
-  `extra_blocks`, joined after every other context block by a blank line.
-- **The gate.** The follow-up is active only when the key is `on`, the level
-  is `repo` and the repository-context plan has a reader (the forge or
-  `--repo-dir`). The check sits in `orchestrate_review` right after
-  `_plan_repo_context`, and the confidence floor is resolved only when it
-  passes. Otherwise the run logs `FOLLOWUP_INACTIVE_WARNING` once,
-  `PRXREF_CONTEXT_FOLLOWUP=on needs PRXREF_REPO_CONTEXT=repo and a repository
-  reader; the context follow-up is off for this run`, records `active: false`
-  and makes no extra call. That is not a configuration error; a value other
-  than `off` or `on` is, and exits 2.
-- **The trigger.** A chunk gets a follow-up when its first result has no
-  error, it did not take the timeout retry (`_run_worker` records
-  `skipped_row("timeout-retry")` instead of calling the driver), and at least
-  one finding without a `drop_reason` is below the floor. It is then skipped,
-  with the reason in the row, when no name is left (`no-names`) or no excerpt
-  is admitted (`no-excerpts`); with no excerpt there is no call. The sweep
-  never gets one.
-- **Names.** `name_tiers` reads the backtick spans of a question's title and
-  body first, then its plain text for names shaped like code: both halves of
-  a dotted access or call (`table.recent(`), a bare call (`name(`), a
-  snake_case or UPPER_SNAKE identifier, and a type-like word. A source file
-  name (`history.py`) and any part of a path give nothing. Every name has at
-  least 3 characters and is not a receiver, a literal, a Python, JS/TS, Java
-  or Kotlin keyword, a capitalised Python builtin (`TypeError`), or a bare
-  lowercase one (`len(`); after a dot a lowercase builtin name is kept as a
-  repository attribute. Type-like names rank first, then names after a dot,
-  then the rest, and plain-text names come after every backtick name.
-  `lookup_names` drops the names the pull request defines
-  (`diff_defined_names`) and gives every question one slot before any
-  question gets a second: first each question's best name, most confident
-  question first, then the remaining slots tier by tier.
-- **The one call.** The re-run keeps the first call's token budget, context
-  lines and prompt context, and gets `parse_retries=0` (an empty reply is
-  still retried once, as at 0.17.0's `N = 0`) and no timeout retry, so it
-  adds at most 2 calls to a chunk. Nothing it returns triggers another
-  follow-up.
-- **Confirmation.** `confirms`: the second-reply finding is at or above the
-  floor, in the same file, and within `quality.DEFAULT_LINE_TOLERANCE` (5)
-  lines of the question (both lines positive), or has the same normalized
-  title, or mentions a name resolved for the question at a word boundary.
-  The names resolved for a question are its own `finding_names` that an
-  admitted excerpt defines or covers. Questions settle in index order, and
-  each takes the most confident unused confirming finding, which replaces it
-  and then runs every quality pass. A question with resolved names and no
-  confirmation gets `not confirmed by context follow-up (confidence C below
-  floor F)`, which `apply_quality_gate` keeps instead of its own reason. A
-  question with no resolved name is left to the floor.
-- **Discards.** Every other finding of the second reply is dropped, never
-  posted: `discarded = len(rerun) - confirmed`, counted per chunk and per run.
-- **Failure.** A re-run that errors, times out, is truncated or raises keeps
-  the first findings, logs `context follow-up failed (keeping the first
-  review)` at WARNING and fills the row's `error`. `_chunk_followup` handles
-  a failure outside the driver the same way.
-- **The record.** The run record and `--format json` carry
-  `context_followup` right after `parse_retries` (`cli._build_json_result`):
-  `null` at `off`; at `on`, `{active, calls, confirmed, unconfirmed,
-  discarded, input_tokens, output_tokens, chunks}`
-  (`orchestrator._followup_record`). `chunks` is `null` when not active, and
-  otherwise holds one `ROW_KEYS` row per chunk (`null` for a chunk whose
-  worker left none): `questions`, `names`, each excerpt's `path`, `line`,
-  `symbol`, `source` and `chars` (never its text), `called`, `error`, the
-  three counts, the tokens and `skipped`. A run whose follow-up is on but
-  inactive, or that exits before its workers finish, records
-  `active: false`, zero counts and `chunks: null`.
-  `evals.RUN_CONFIG_KEYS` gains `context_followup` before `repo_context`, 18
-  keys in all.
-- **Traces.** Per chunk, `followup` events `start`, `ok`, `fail`, and `skip`
-  when the chunk had at least one question; one run-level `context_followup
-  ok` event with the totals, emitted only when the follow-up is active. With
-  `PRXREF_TRACE_DIR`, the re-run's files are `chunk<i>.followup.system.md`,
-  `.user.md`, `.response.json` and `.meta.json`, beside the chunk's own.
-- **Cost.** `followup._fold_usage` adds the re-run's tokens and time to the
-  chunk's, makes the chunk's `model` the re-run's when it answered, and folds
-  the costs through `costs.combine_reported`, so the cost is unknown when
-  either is. `parse_retries` and `first_error` stay the first call's. A
-  re-run that returned an error still counts its billed tokens.
-- **Caps**, each read from its constant in `repo_followup` when the function
-  runs, so a test can patch it: `MAX_FOLLOWUP_NAMES` (3) names per chunk,
-  `MAX_FOLLOWUP_READS` (8) reads, cached ones included, `MAX_FOLLOWUP_EXCERPTS`
-  (4) excerpts, `MAX_FOLLOWUP_EXCERPT_LINES` (30) lines per excerpt, ending
-  `… N more lines` when cut, and `MAX_FOLLOWUP_CHARS` (4,000) characters.
-  The reads go through a fresh `_routed_read`, so the follow-up has its own
-  per-chunk read cap; a file the pull request changes and an excluded path
-  are never read. There is no config key for any cap.
-- **Config went from 68 to 69 keys.** The one new key is
-  `PRXREF_CONTEXT_FOLLOWUP` (choice, `off` or `on`, default `off`). No
-  existing config default changed.
+- **The change, as a module map.** `git diff --stat v0.18.0..HEAD -- src/`
+  touches four files and adds none.
+  - `jvm_maven`, the owner rule (#25). `managed_dependency(group_id,
+    artifact_id, owners, kind="bom")` takes the candidate owners in declared
+    order and returns a `MavenDependency`. `MavenDependency` gains `likely`,
+    `owners` and `owner_kind` (one of `OWNER_KINDS`: `bom`, `parent`,
+    `platform`); the positional four-field form is unchanged. `_resolve`
+    builds the candidates as the external parent, if any, then the imported
+    BOMs, nearest pom first, and hands them to `managed_dependency` with kind
+    `parent` or `bom`.
+  - `jvm_deps`, the Gradle side and the group-only mark (#25).
+    `_gradle_owner` is gone; `_gradle_line` calls `managed_dependency` with
+    the platforms as candidates and kind `platform`. `_matches` also returns
+    whether the best match scored above 0, and `_dependency_lines` appends
+    `GROUP_MATCH_SUFFIX`, ` (group match only)`, to a line only a 0-score
+    match produced.
+  - `llm_backends`, the litellm fix (#26). `LiteLLMClient` takes
+    `reasoning_effort` (normalised with `or None`) and sends it as
+    `reasoning_effort=` after `seed` when truthy. `create_llm_client` passes
+    the configured effort to it, and reads the raw seed once: when it strips
+    to exactly `SEED_OFF` (`"off"`), the seed is `None` and
+    `_auto_run_seed` is never called; otherwise the 0.18.0 path is unchanged.
+  - `config`, the value (#26). `_SEED_OFF` restates `"off"` privately (a
+    test pins it equal to `llm_backends.SEED_OFF`); `_coerce_env` returns
+    it for `llm_seed` before integer coercion, and `_check_ranges` skips it
+    as it skips `None`. Lowercase only: `OFF` exits 2, like every other
+    choice-style value `config.py` checks.
+- **The owner rule.** With one candidate, it is named as in 0.18.0:
+  `g:a@(managed by bg:ba@bv)`. With several, each candidate's groupId is
+  scored by the leading segments it shares with the dependency's; the best is
+  named as `g:a@(likely managed by bg:ba@bv)` only when it shares at least
+  `MIN_OWNER_SHARED_SEGMENTS` (2) and strictly more than every other.
+  Otherwise no owner is named and at most `MAX_LISTED_OWNERS` (3) artifactIds
+  are listed in declared order, then `+K more`: `one of N imported BOMs: ...`,
+  `the parent or an imported BOM: ...` or `the parent or one of B imported
+  BOMs: ...` (the parent listed first, B counting the BOMs only), or `one of
+  N platforms: ...`. The external parent takes part in the guess, so
+  `spring-boot-starter-parent` can be the likely owner of a
+  `org.springframework.boot` starter. Gradle always named one platform
+  before, the one sharing the most segments and the first on a tie, even at
+  0 shared; it now follows the same rule.
+- **Why it lives in `jvm_maven`.** `jvm_deps` imports `jvm_maven`, and
+  `test_the_module_imports_only_the_standard_library` in
+  `tests/test_jvm_maven.py` forbids `jvm_maven` importing any non-stdlib
+  module, prxref's own included. So the one helper both Maven's `_resolve`
+  and Gradle's `_gradle_line` can call without an import cycle is in
+  `jvm_maven`.
+- **The group-only mark.** A match scores 0 when no artifactId token names a
+  segment of the import (`org.slf4j:slf4j-api` for `import
+  org.slf4j.Logger`). Such lines are kept, not dropped, because a true
+  dependency such as `spring-webmvc` for `org.springframework.web` also
+  scores 0; every tied 0-score match is marked. An artifact that another
+  import of the same file matches by name renders once, unmarked, in either
+  import order.
+- **Effort and seed on litellm.** Unset effort leaves the kwargs exactly as
+  0.18.0 sent them. `off` applies on `openai-compat` and `litellm`, which
+  then send no `seed`, and the run record's `sampling.seed` is `null`. On
+  `claude-cli` and `kiro-cli`, which never send a seed, `off` is not an
+  error. Error texts for a bad seed are unchanged.
+- **Tests.** Two new files, `tests/test_issue_25_bom_owner.py` and
+  `tests/test_issue_26_litellm_effort_seed.py`. The group-only mark moved
+  existing assertions: 18 expected lines in `tests/test_jvm_deps.py` gained
+  the mark, the Gradle owner test there and
+  `test_owner_precedence_is_external_parent_then_boms_nearest_first` in
+  `tests/test_jvm_maven.py` now expect the new owner text, and the slf4j line
+  of `tests/test_issue_20_acceptance.py` gained the mark. The #26 change
+  moved no existing test.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **A feature can pass every mocked acceptance test and do nothing live.**
-   The first live run made 0 follow-up calls in 3 runs with the follow-up
-   on: every question was skipped `no-names`, because the model wrote the
-   identifiers it asked about (`model_history`, `table.recent(`,
-   `session_id`) without backticks, and name extraction read backtick spans
-   only. Every acceptance reply had been written by people, who use
-   backticks. `name_tiers` now also reads plain-text code shapes, and
-   `TestPlainTextNames::test_a_question_without_backticks_is_confirmed` in
-   `tests/test_issue_22_followup_acceptance.py` pins a reply with no
-   backticks at all. Write at least one fixture reply the way the model
-   under test writes, not the way the author would.
-2. **A shared cap needs a fairness rule.** In the second live run the
-   follow-up fired and confirmed a real serialization finding the first
-   reply had left under the floor, but a second question, the history-window
-   one, got no lookup: `lookup_names` merged tier by tier across questions,
-   so the first question's names filled the 3 slots, one of them
-   with the builtin exception name `TypeError`. Now every question gets one
-   slot before any gets two, and Python builtin classes and bare builtins are
-   skipped. `test_every_question_gets_a_slot_before_any_gets_two` and
-   `test_a_second_question_gets_a_name_and_builtins_get_none` in
-   `tests/test_repo_followup.py`, and
-   `TestPlainTextNames::test_a_second_question_still_gets_a_name`, pin it.
-   In the third live run the history question's names reached the lookup
-   both times it appeared.
-3. **A per-chunk call ceiling that looks like it rises does not.** The
-   follow-up adds at most 2 calls, but only to a chunk that took no timeout
-   retry, so the ceiling stays `2 * (1 + max(N, 1))`, 4 at the default: a
-   follow-up chunk makes at most `3 + max(N, 1)`, and `1 + max(N, 1)` is at
-   least 2. `test_a_timeout_retried_chunk_is_skipped_without_the_driver` in
-   `tests/test_orchestrator_followup.py` pins the half that keeps it there.
-4. **Off-identity was pinned against the released tree.**
-   `tests/test_context_followup_off_identity.py` records, as literals
-   captured from the `v0.17.0` commit, the request count and the sha256 of
-   every request's `messages` on #22's fixture at `PRXREF_REPO_CONTEXT=repo`,
-   with a sub-floor question in every chunk reply, exactly what the
-   follow-up keys on. The key unset and `off` must both match those literals
-   and give the same `--format json` payload, with `context_followup` null.
-   The golden pins prompts and calls, not forge reads. That `off` never
-   resolves the floor and never calls the driver, the only path to a
-   follow-up read, is pinned separately, by
-   `test_off_never_resolves_the_floor_or_calls_the_driver` in
-   `tests/test_orchestrator_followup.py`.
-5. **The mechanism works live; the model still did not assert the second
-   bug.** In the third live run the history-window question appeared in 2 of
-   3 runs with the follow-up on, and both times its definitions were looked
-   up and sent, yet GLM 5.3 Flash did not re-assert it at or above the
-   floor, so both landed as "not confirmed". That is a model judgment with
-   the definition in view, not a starved pipeline. The named confound: a
-   confirmation mixes the new excerpt with a second sample of the same
-   chunk, so N=3 cannot separate "the excerpt helped" from "resampling
-   helped" (Live checks).
+1. **"First candidate wins" is a silent wrong answer, and a test pinned
+   it.** 0.17.0 named the external parent, or else the nearest first
+   imported BOM, as the owner of every version-less dependency.
+   `test_owner_precedence_is_external_parent_then_boms_nearest_first` in
+   `tests/test_jvm_maven.py` had three candidates and asserted that
+   `jackson-databind` was managed by `corporate-parent`, then by
+   `spring-boot-dependencies`, with `jackson-bom` imported beside them: it
+   pinned the order of the candidates, not which one manages the artifact,
+   so it read as a precedence rule rather than a wrong answer. On #25's repro,
+   `dependency_lines` at v0.18.0 printed `managed by
+   com.fasterxml.jackson:jackson-bom@2.21.5` for both
+   `jackson-databind` and `micrometer-registry-dynatrace`; at 0.19.0 the
+   first is `likely managed by` jackson-bom and the second is `managed by one
+   of 2 imported BOMs: jackson-bom, spring-boot-dependencies (group match
+   only)`. A test of a rule that picks one of several candidates should say
+   why the expected one is right, and include a case where the first is
+   wrong.
+2. **The local diff mode cannot check dependency lines end to end.** The same
+   repro through `prxref review --no-post --diff-file ... --repo-dir ...`
+   produced no dependency block at either version, because chunk context
+   reads only through the forge (`orchestrator._make_file_reader`), and a
+   `--diff-file` run has no forge. The end-to-end check had to call
+   `jvm_deps.dependency_lines` with a reader over the repro on disk (Still
+   open, "Replay from a diff file").
+3. **A provider-parameter fix needs the real library in the loop.** The
+   mocked tests prove what prxref passes to `litellm.completion`, not what
+   litellm does with it. An offline probe through real litellm (a dead
+   proxy, fake AWS credentials, a Bedrock model, effort `medium`) showed the
+   reported bug before any request: with `PRXREF_LLM_SEED` unset or `7`,
+   litellm raised `UnsupportedParamsError` naming `seed`. With `off`, param
+   mapping passed, `reasoning_effort` included, and the call failed only
+   with `APIConnectionError`, where the network was blocked on purpose.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -207,50 +142,36 @@ together:
 A key that feeds `orchestrate_review` needs one more step. `tests/test_cli.py`
 (`test_run_review_passes_every_configured_orchestrate_kwarg`) requires
 `cli._run_review` to pass every orchestrator kwarg whose name equals a config
-key. The one key 0.18.0 added, `context_followup`, feeds it this way, and
-`prxref eval run` records it in `run.json` (`evals.RUN_CONFIG_KEYS`). Current
-values: **69** keys, **1** legacy alias, **70** accepted names.
+key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
+0.19.0, touches none of the counts, but still needs the docstring,
+`.env.example` and `docs/env-vars.md` to describe it, and a value that is
+not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
+Current values: **69** keys, **1** legacy alias, **70** accepted names,
+unchanged from 0.18.0.
 
 ## Release shape (follow this next time)
 
-How 0.18.0 was built:
+How 0.19.0 was built:
 
-1. **One design pass first.** Before any code, a read-only design settled
-   every open question: the follow-up is opt-in with a choice key, active
-   only at `repo` with a reader; one call per chunk with no parse retry and
-   no timeout retry, never for the sweep; names from structure, never from
-   phrase lists; whole definitions under fixed caps with no config key; the
-   confirm rule and the one new drop reason; an always-present record key,
-   `null` when off, following the `parse_retries` precedent; and an
-   off-identity golden taken from the released tree. It also gave each new
-   module one owner and wrote down the rewording of the single-shot rule in
-   `CLAUDE.md` and `docs/llm.md`.
-2. **Pure modules first, wiring last.** Tasks ran in rounds of parallel
-   agents, each in its own worktree against a pinned base commit, and each
-   code task brought its own tests. 10 tasks merged:
-   - 4: the config key, the lookup module, the confirm rule, and the
-     off-identity golden
-   - 2: the per-chunk driver, and the user documentation with the CHANGELOG
-     section
-   - 1: the orchestrator and CLI wiring with the record key
-   - 1: the #22 acceptance tests over the issue's own fixture
-   - 2 fixes, each sent back by a live check: plain-text names (lesson 1),
-     then slot fairness with the builtin filter (lesson 2)
-3. **One integration gate per merge.** Each branch merged into
+1. **Two parallel code tasks from the 0.18.0 merge.** Each ran in its own
+   worktree against the pinned 0.18.0 merge commit, brought its own tests in
+   a new test file, and kept to its own files: the #26 task `config.py`,
+   `llm_backends.py` and the seed and effort docs in `README.md`,
+   `docs/env-vars.md`, `.env.example` and `docs/llm.md`; the #25 task
+   `jvm_maven.py`, `jvm_deps.py`, the existing JVM tests and the Java and
+   Kotlin bullet of `docs/llm.md`, the one file both edited, in separate
+   regions. Both were cut off by a usage
+   limit mid-task and resumed from their uncommitted worktrees without loss.
+2. **One integration gate per merge.** Each branch merged into
    `release/X.Y.Z` on its own, and a merge stayed only if the full
    `uv run pytest` and `uv run ruff check src tests` passed on the merged
-   tree. The wiring task's own branch had one red test, the README key list
-   for `--format json`, which only the documentation task could fix; the
-   documentation merged first, so the wiring merged green. Over the 10
-   merges the passing count rose from 8,703 at 0.17.0 through 8,729, 8,751,
-   8,781, 8,797, 8,837, 8,848 and 8,856 to 8,865, and never fell; the
-   documentation merge added no tests.
-4. **Three read-only live checks**, once the wiring merged: the
-   follow-up off against on, on #22's fixture, through one model and one
-   lane. The first two each sent a fix back before release (Live checks).
-5. **Release.** This commit bumps the version, dates the CHANGELOG, states
-   the live result in its intro, corrects one README sentence about which
-   names are looked up, and rewrites this file.
+   tree. The passing count rose from 8,865 at 0.18.0 to 8,900 after the
+   effort and seed fix and 8,926 after the BOM-owner fix, and never fell.
+3. **Two offline end-to-end checks**, one per issue, each once its fix
+   merged (Live checks). No live model run: nothing model-facing changed except the JVM
+   dependency lines.
+4. **Release.** This commit bumps the version, adds the CHANGELOG section,
+   and rewrites this file.
 
 Cutting the release:
 
@@ -276,9 +197,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-8865 passed                                   uv run pytest -q
+8926 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.18.0                                        uv run prxref --version
+0.19.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -286,44 +207,38 @@ updated this file.
 
 ### Live checks
 
-- **Context follow-up on issue #22's own fixture**, GLM 5.3 Flash through
-  llm-ferry (`domestic.flash`), `prxref review --no-post` at
-  `PRXREF_REPO_CONTEXT=repo`. One factor varied: arm A had
-  `PRXREF_CONTEXT_FOLLOWUP=off`, arm B `on`. Each check ran A B A B A B,
-  interleaved, N=3 per arm. Three checks ran; the first two each sent a fix
-  back. In every check GLM served with 0 fallbacks in a probe before and a
-  probe after the runs.
-  - **Before the plain-text names fix:** B made 0 follow-up calls in 3 runs.
-    Each run with a sub-floor question skipped it `no-names`, because the
-    model wrote the identifiers without backticks (lesson 1).
-  - **After it:** the follow-up fired in 1 of 3 B runs, 1 call, and
-    confirmed the serialization finding at `progress.py:47` (error,
-    confidence 0.9), for 2,937 more input and 9,687 more output tokens. The
-    history-window question (`README.md:7`, 0.50) got no lookup, because the
-    serialization question's names filled the 3 slots (lesson 2). The other
-    B runs had no sub-floor question, and so no call. Verdicts: mechanism
-    PASS; history-window bug FAIL, starved of slots.
-  - **After slot fairness (the released code):** the history-window
-    question appeared in 2 of 3 B runs (`progress.py:40` and `README.md:6`,
-    both 0.50). Both times its names reached the lookup and its definitions
-    were sent (`assistant/history.py:9` `model_history` and
-    `assistant/messages.py:19` `recent` in one run; `recent` beside
-    `StateStore` and `Frame` in the other). In neither did GLM re-assert it
-    at or above the floor, so both were dropped as `not confirmed by context
-    follow-up (confidence 0.50 below floor 0.60)`. One re-run confirmed a
-    serialization-side finding instead (`progress.py:31`, error, 0.85).
-    Verdicts: mechanism PASS; history-window bug asserted by the model FAIL
-    on GLM 5.3 Flash, 0 of 2; off arm unchanged.
-  - Cost when it fired: 2,903 and 3,027 more input tokens, about 36% of this
-    8,060-token review, plus the second reply's output tokens.
-  - The serialization bug was active in all 6 runs of the last check. In
-    the second check A missed it in 2 of 3 runs (Approved); N=3 cannot
-    separate an arm effect on it from GLM's variance, so none is claimed.
-  - The toggle check fired in all 6 runs of each check. The last check had
-    0 parse retries and 0 failed chunks.
-  - Named confound: a confirmation is a second sample of the chunk plus the
-    excerpt, so these runs cannot separate the excerpt's effect from
-    resampling.
+0.19.0 changes no model-facing behaviour except the JVM dependency lines, so
+no live model run was made for it. Two offline end-to-end checks ran instead:
+
+- **#25 on the issue's own repro, built on disk.** A root pom importing
+  `com.fasterxml.jackson:jackson-bom:2.21.5`, then
+  `org.springframework.boot:spring-boot-dependencies:3.5.0`; an `app` module
+  with version-less `io.micrometer:micrometer-registry-dynatrace` and
+  `com.fasterxml.jackson.core:jackson-databind`; a Java file adding
+  `import io.micrometer.core.instrument.MeterRegistry;` and
+  `import com.fasterxml.jackson.databind.ObjectMapper;`.
+  `jvm_deps.dependency_lines` with a reader over the directory printed:
+  - at 0.19.0:
+    `com.fasterxml.jackson.core:jackson-databind@(likely managed by
+    com.fasterxml.jackson:jackson-bom@2.21.5)` and
+    `io.micrometer:micrometer-registry-dynatrace@(managed by one of 2
+    imported BOMs: jackson-bom, spring-boot-dependencies) (group match
+    only)`;
+  - at v0.18.0, the control: `managed by
+    com.fasterxml.jackson:jackson-bom@2.21.5` for both.
+
+  Through `prxref review --no-post --diff-file ... --repo-dir ...` the same
+  repro gave no dependency block at either version (lesson 2).
+- **#26 on the real litellm library, offline.** A dead proxy, fake AWS
+  credentials, the model `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+  `PRXREF_LLM_REASONING_EFFORT=medium`, `LITELLM_DROP_PARAMS` unset.
+  `PRXREF_LLM_SEED` unset or `7`: `UnsupportedParamsError` naming `seed`
+  before any request, the reported bug. `off`: param mapping passed,
+  `reasoning_effort` included, and the call failed only with
+  `APIConnectionError`, the network being blocked by design.
+- The last live model result is 0.18.0's, the context follow-up on #22's
+  fixture through GLM 5.3 Flash: see the intro of the `[0.18.0]` section of
+  `CHANGELOG.md`.
 
 ## Still open — not part of this release
 
@@ -331,13 +246,13 @@ updated this file.
   #22's second bug surfaced in 2 of 3 live runs, and both times its
   definitions were looked up and sent, but GLM 5.3 Flash did not re-assert
   it at or above the 0.60 floor, so it was dropped as "not confirmed". On
-  that model, nothing in 0.18.0 posts it. A stronger model, or more runs, is
-  the next measurement (Live checks).
+  that model, nothing in 0.18.0 or 0.19.0 posts it. A stronger model, or
+  more runs, is the next measurement (the v0.18.0 handoff's Live checks).
 - **The follow-up's effect is one single-factor measurement.** Three live
   checks at N=3 per arm on one fixture, through one model. A confirmation is
   a second sample of the chunk plus the excerpt, and N=3 cannot separate the
-  two (lesson 5). Measure with `prxref eval` over more runs before changing
-  the default from `off`.
+  two (lesson 5 of the v0.18.0 handoff). Measure with `prxref eval` over
+  more runs before changing the default from `off`.
 - **Repository context's effect on findings is measured for readers only.**
   - The reader block has one single-factor measurement, at N=3 per arm on one
     fixture (the v0.17.0 handoff's Live checks).
@@ -352,6 +267,29 @@ updated this file.
 
   Measure with `prxref eval` over more runs a level before changing the
   default from `off`.
+
+0.19.0's known limitations:
+
+- **The JVM owner is a guess from groupIds.** prxref does not download a
+  BOM, a parent or a platform, so it never reads what one manages.
+  `jvm_maven.managed_dependency` scores the candidates by the leading
+  groupId segments they share with the dependency's, and nothing else: a
+  BOM that manages artifacts outside its own group (as
+  `spring-boot-dependencies` manages `io.micrometer`) is never the likely
+  owner of them, and a close groupId can be named for an artifact it does
+  not manage.
+- **The group-only mark is by name tokens.** A match is group-only when no
+  artifactId token equals an import segment, so a true dependency whose
+  artifactId shares no word with its packages, such as `spring-webmvc` for
+  `org.springframework.web`, is marked too. Such lines are kept, never
+  dropped.
+- **`PRXREF_LLM_SEED=off` still warns on the CLI backends.** On `claude-cli`
+  and `kiro-cli`, any non-empty `PRXREF_LLM_SEED`, `off` included, logs the
+  existing `PRXREF_LLM_SEED is not applied by <backend>` WARNING, which
+  reads oddly for an explicit opt-out. It is not an error
+  (`test_off_on_a_cli_backend_is_not_an_error`).
+- **`off` is lowercase only.** `OFF` or `Off` exits 2 naming the variable,
+  as other choice values in `config.py` do.
 
 0.18.0's known limitations of the context follow-up:
 
@@ -493,7 +431,7 @@ Listing, retry and cost notes:
   `PRXREF_LLM_MAX_TOKENS` 4096 and `PRXREF_LLM_TIMEOUT` 45 lost chunks to a
   thinking model in 0.16.0's live checks (lesson 4 of the v0.16.0 handoff),
   and 0.17.0's live check ran at 32,768 tokens and 900 s. Neither default
-  changed in 0.16.0, 0.17.0 or 0.18.0; raise both for such a model. The
+  changed in 0.16.0 through 0.19.0; raise both for such a model. The
   recipe under "Measuring repository context" in `tests/evals/README.md` sets
   neither, so run verbatim against such a model it cuts the replies off.
 
@@ -628,7 +566,8 @@ Carried over from 0.15.0 and earlier, still true:
   file context and no threads. `--repo-dir` gives it repository context,
   but the dependency-versions and same-file definitions blocks, Java and
   Kotlin ones included, still read only through the forge
-  (`orchestrator._make_file_reader`), so they stay empty. The title comes
+  (`orchestrator._make_file_reader`), so they stay empty; 0.19.0's #25
+  check hit this (lesson 2). The title comes
   from the patch mail or the file name. The description comes from the
   mail, `--description-file` or `--no-description`.
 - **Azure DevOps.**
@@ -691,14 +630,9 @@ Follow-ups a maintainer can act on:
   always reads the systemic template. So the sweep's example title is in force
   even on a run whose sweep never runs.
 
-The v0.17.0 handoff's #22 part 1 bullet is **done**: the follow-up lookup is
-built, opt-in, and the single-shot rule in `CLAUDE.md` and `docs/llm.md` now
-names it as its one bounded exception. The history-window bug it was meant to
-raise is still not posted on the model measured (Still open).
-
 | Item | Value |
 |---|---|
-| Released version | `0.18.0` (minor: the opt-in context follow-up, #22 part 1; one new config key, `PRXREF_CONTEXT_FOLLOWUP`, choice `off` or `on`, default `off`, no behaviour change at the defaults; one new run-record and `--format json` key, `context_followup`, `null` when off; three new modules, `repo_followup`, `followup_merge` and `followup`; one new drop reason, `not confirmed by context follow-up`, only when on; no new CLI flag; no existing config default changed) |
+| Released version | `0.19.0` (minor: the JVM BOM-owner fix, #25, and the litellm effort and seed fix, #26; no new config key, one new value, `PRXREF_LLM_SEED=off`; no new run-record or `--format json` key; no new module; no new CLI flag; no existing config default changed; at the defaults only the dependency-version lines of Java and Kotlin files change) |
 | Registration points | forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |

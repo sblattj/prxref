@@ -37,10 +37,23 @@ the nearest pom winning per ``groupId:artifactId``. A managed entry with
 ``<type>pom</type>`` and ``<scope>import</scope>`` is a BOM owner, not a
 dependency. A dependency without a version takes the nearest managed version;
 failing that, its version is inherited from something this module cannot
-read, and its owner is the first candidate in Maven's own precedence order:
-the external parent (inherited management wins over imports), then the
-imported BOMs, nearest pom first and in declaration order. A dependency with
-neither a version nor an owner renders no line.
+read. Its candidate owners are the external parent, then the imported BOMs,
+nearest pom first and in declaration order, and :func:`managed_dependency`
+applies the owner rule (#25), which offline can only guess which candidate
+manages an artifact:
+
+- exactly one candidate is named: ``g:a@(managed by bg:ba@bv)``;
+- among several, the one whose groupId shares the most leading segments with
+  the dependency's, at least :data:`MIN_OWNER_SHARED_SEGMENTS` and strictly
+  more than every other, is named as a guess:
+  ``g:a@(likely managed by bg:ba@bv)``;
+- otherwise none is named: ``g:a@(managed by one of 3 imported BOMs: ba1,
+  ba2, ba3)``, or ``the parent or one of 2 imported BOMs: ...`` when the
+  external parent is a candidate (it is listed first, and the count names the
+  BOMs only), or ``one of 2 platforms: ...`` for Gradle. At most
+  :data:`MAX_LISTED_OWNERS` artifactIds are listed, then ``+K more``.
+
+A dependency with neither a version nor a candidate owner renders no line.
 
 All I/O goes through a caller-supplied ``read(path) -> str | None`` over
 repository-relative, ``/``-separated paths, so the caller owns fetching and
@@ -58,6 +71,9 @@ MAX_POM_BYTES = 512 * 1024
 MAX_POM_PARENTS = 5
 MAX_PROPERTY_PASSES = 5
 MAX_INTERPOLATED_CHARS = 1024
+MIN_OWNER_SHARED_SEGMENTS = 2
+MAX_LISTED_OWNERS = 3
+OWNER_KINDS = ("bom", "parent", "platform")
 
 _UNSAFE_RE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 _PLACEHOLDER_RE = re.compile(r"\$\{([^${}]+)\}")
@@ -89,14 +105,19 @@ class MavenDependency:
     """One declared or managed dependency after property resolution.
 
     ``version`` is ``None`` when no pom in the chain states it; ``managed_by``
-    then names the owner whose management supplies it, or is ``None`` when
-    there is no candidate owner either.
+    then names the owner whose management supplies it, a best guess when
+    ``likely`` is true, or is ``None`` when no owner can be named. ``owners``
+    then holds the candidates none of which could be named, in declared order,
+    and ``owner_kind`` (one of :data:`OWNER_KINDS`) says what they are.
     """
 
     group_id: str
     artifact_id: str
     version: str | None = None
     managed_by: MavenCoordinate | None = None
+    likely: bool = False
+    owners: tuple[MavenCoordinate, ...] = ()
+    owner_kind: str = "bom"
 
     @property
     def name(self) -> str:
@@ -104,12 +125,66 @@ class MavenDependency:
         return f"{self.group_id}:{self.artifact_id}"
 
     def line(self) -> str | None:
-        """``g:a@v``, ``g:a@(managed by bg:ba@bv)``, or ``None`` for neither."""
+        """``g:a@v``, ``g:a@([likely ]managed by bg:ba@bv)``, ``g:a@(managed by one of ...)``, or ``None``."""
         if self.version:
             return f"{self.name}@{self.version}"
         if self.managed_by is not None:
-            return f"{self.name}@(managed by {self.managed_by.render()})"
+            guess = "likely " if self.likely else ""
+            return f"{self.name}@({guess}managed by {self.managed_by.render()})"
+        if self.owners:
+            return f"{self.name}@(managed by {_one_of(self.owners, self.owner_kind)})"
         return None
+
+
+def _one_of(owners: tuple[MavenCoordinate, ...], kind: str) -> str:
+    listed = [owner.artifact_id for owner in owners[:MAX_LISTED_OWNERS]]
+    if len(owners) > MAX_LISTED_OWNERS:
+        listed.append(f"+{len(owners) - MAX_LISTED_OWNERS} more")
+    if kind == "parent":
+        boms = len(owners) - 1
+        head = "the parent or an imported BOM" if boms == 1 else f"the parent or one of {boms} imported BOMs"
+    elif kind == "platform":
+        head = f"one of {len(owners)} platforms"
+    else:
+        head = f"one of {len(owners)} imported BOMs"
+    return f"{head}: {', '.join(listed)}"
+
+
+def _leading_shared(left: list[str], right: list[str]) -> int:
+    count = 0
+    for a, b in zip(left, right, strict=False):
+        if a != b:
+            break
+        count += 1
+    return count
+
+
+def managed_dependency(
+    group_id: str,
+    artifact_id: str,
+    owners: tuple[MavenCoordinate, ...] | list[MavenCoordinate],
+    kind: str = "bom",
+) -> MavenDependency:
+    """A version-less dependency whose version comes from one of ``owners`` (#25).
+
+    ``owners`` are the candidate owners in declared order: the imported BOMs
+    (``kind="bom"``), the external parent followed by the imported BOMs
+    (``kind="parent"``), or the Gradle platforms (``kind="platform"``). With
+    one candidate it is named. With several, the candidate whose groupId shares
+    the most leading segments with ``group_id``, at least
+    :data:`MIN_OWNER_SHARED_SEGMENTS` and strictly more than every other, is
+    named as a likely owner; otherwise none is named and the line lists the
+    candidates. With none, the dependency renders no line.
+    """
+    owners = tuple(owners)
+    if len(owners) <= 1:
+        return MavenDependency(group_id, artifact_id, None, owners[0] if owners else None)
+    segments = group_id.split(".")
+    scores = [_leading_shared(owner.group_id.split("."), segments) for owner in owners]
+    best = max(scores)
+    if best >= MIN_OWNER_SHARED_SEGMENTS and scores.count(best) == 1:
+        return MavenDependency(group_id, artifact_id, None, owners[scores.index(best)], likely=True)
+    return MavenDependency(group_id, artifact_id, None, None, owners=owners, owner_kind=kind)
 
 
 @dataclass(frozen=True)
@@ -368,13 +443,13 @@ def _resolve(path: str, read: Reader, text: str | None) -> MavenProject | None:
                 managed[key] = resolve(entry.version)
 
     owners = ([external] if external is not None else []) + list(boms.values())
-    owner = owners[0] if owners else None
+    kind = "parent" if external is not None else "bom"
 
     def dependency(key: tuple[str, str], stated: str) -> MavenDependency:
         resolved = stated or managed.get(key, "")
         if resolved:
             return MavenDependency(key[0], key[1], resolved)
-        return MavenDependency(key[0], key[1], None, owner)
+        return managed_dependency(key[0], key[1], owners, kind)
 
     dependencies: dict[tuple[str, str], MavenDependency] = {}
     for pom in chain:

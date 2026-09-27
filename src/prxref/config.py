@@ -36,7 +36,8 @@ LLM / pipeline:
                                 OpenAI-compatible backends as top-level
                                 "seed" in the request; >= 0 (0 is a valid
                                 seed); empty or unset falls back to the
-                                factory's once-per-process seed
+                                factory's once-per-process seed; "off"
+                                (lowercase) sends no seed at all
   PRXREF_LLM_CLI_PATH           claude-cli / kiro-cli only: path to the CLI
                                 binary, ``~`` expanded; empty = "claude" or
                                 "kiro-cli" on PATH. Not found = configuration
@@ -414,7 +415,8 @@ _DEFAULTS: dict[str, object] = {
     # falls back to its once-per-process seed. Unlike ``llm_temperature``
     # (whose "" marker survives to the backend that owns the wire decision),
     # the seed is a first-class int key — coerced and range-checked here —
-    # because "no seed" is representable in its own type.
+    # because "no seed" is representable in its own type. The one word value,
+    # ``_SEED_OFF``, passes through uncoerced and unranged (issue #26).
     "llm_seed": None,
     "llm_cli_path": "",
     "llm_cli_concurrency": 2,
@@ -533,6 +535,11 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "context_followup": frozenset({"off", "on"}),
 }
 
+# ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
+# (lowercase), like every _CHOICE_KEYS value; restated from
+# prxref.llm_backends.SEED_OFF, because config stays a leaf module.
+_SEED_OFF = "off"
+
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
 # prxref.orchestrator (config stays a leaf module); pinned together by
 # TestPostMode::test_the_vocabulary_matches_the_orchestrator.
@@ -641,6 +648,8 @@ def _coerce_env(key: str, raw: str, source: str) -> object:
     through a legacy alias is reported under the name the operator typed.
     """
     try:
+        if key == "llm_seed" and raw.strip() == _SEED_OFF:
+            return _SEED_OFF
         if key in _INT_KEYS:
             return int(raw.strip())
         if key in _FLOAT_KEYS:
@@ -680,12 +689,15 @@ def _check_ranges(cfg: dict[str, object], sources: dict[str, str]) -> None:
     outofscope caps (``max_warning_findings``, ``max_outofscope_findings``),
     where ``None`` means unlimited because 0 caps every finding of that
     severity, and ``dedup_similarity``, where ``None`` means the
-    reworded-duplicate pass is off. Every value that is not ``None`` —
-    including one smuggled in through an override — is still checked.
+    reworded-duplicate pass is off. ``llm_seed`` also takes the exact
+    string ``"off"`` (send no seed, issue #26), which is skipped the same
+    way; any other string, ``"OFF"`` included, still fails the check. Every
+    other value that is not ``None`` — including one smuggled in through an
+    override — is still checked.
     """
     for key, rng in sorted(_RANGES.items()):
         value = cfg[key]
-        if value is None:
+        if value is None or (key == "llm_seed" and value == _SEED_OFF):
             continue
         finite = (
             isinstance(value, (int, float))

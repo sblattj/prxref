@@ -143,8 +143,8 @@ class TestModuleSurface:
 class TestMatching:
     @pytest.mark.parametrize(("dependency", "line", "expected"), [
         (("javax.servlet", "javax.servlet-api", "4.0.1"), "import javax.servlet.http.HttpServletRequest;",
-         "javax.servlet:javax.servlet-api@4.0.1"),
-        ((*SLF4J_API, "2.0.13"), LOGGER, "org.slf4j:slf4j-api@2.0.13"),
+         "javax.servlet:javax.servlet-api@4.0.1 (group match only)"),
+        ((*SLF4J_API, "2.0.13"), LOGGER, "org.slf4j:slf4j-api@2.0.13 (group match only)"),
     ])
     def test_a_two_segment_group_that_prefixes_the_import_matches(self, dependency, line, expected):
         repo = Repo({"pom.xml": simple_pom(dep(*dependency))})
@@ -161,8 +161,8 @@ class TestMatching:
     def test_a_tie_lists_every_tied_candidate(self):
         repo = Repo({"pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"), dep("org.slf4j", "jul-to-slf4j", "2.0.13"))})
         assert dependency_lines("src/App.java", [LOGGER], repo) == [
-            "org.slf4j:jul-to-slf4j@2.0.13",
-            "org.slf4j:slf4j-api@2.0.13",
+            "org.slf4j:jul-to-slf4j@2.0.13 (group match only)",
+            "org.slf4j:slf4j-api@2.0.13 (group match only)",
         ]
 
     def test_two_shared_segments_without_a_group_prefix_do_not_match(self):
@@ -187,7 +187,9 @@ class TestMatching:
 
     def test_a_wildcard_import_equal_to_the_group_matches(self):
         repo = Repo({"pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"))})
-        assert dependency_lines("src/App.java", ["import org.slf4j.*;"], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("src/App.java", ["import org.slf4j.*;"], repo) == [
+            "org.slf4j:slf4j-api@2.0.13 (group match only)",
+        ]
 
     def test_a_kotlin_alias_import_matches_its_qualified_name(self):
         text = gradle('implementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")')
@@ -200,7 +202,7 @@ class TestMatching:
         added = [LOGGER, "import org.slf4j.LoggerFactory;", OBJECT_MAPPER, OBJECT_MAPPER]
         assert dependency_lines("src/App.java", added, repo) == [
             "com.fasterxml.jackson.core:jackson-databind@2.17.1",
-            "org.slf4j:slf4j-api@2.0.13",
+            "org.slf4j:slf4j-api@2.0.13 (group match only)",
         ]
 
 
@@ -248,7 +250,7 @@ class TestSkips:
             dep("com.acme.app", "app-core", "1.0.0"), dep(*SLF4J_API, "2.0.13"), group="com.acme.app",
         )})
         added = ["import com.acme.app.util.Strings;", LOGGER]
-        assert dependency_lines("src/App.java", added, repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("src/App.java", added, repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
 
     def test_imports_under_the_gradle_group_are_skipped(self):
         text = 'group = "com.acme.app"\n' + gradle(
@@ -256,7 +258,7 @@ class TestSkips:
         )
         repo = Repo({"build.gradle.kts": text})
         added = ["import com.acme.app.util.Strings", "import org.slf4j.Logger"]
-        assert dependency_lines("src/App.kt", added, repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("src/App.kt", added, repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
 
     def test_the_maven_group_falls_back_to_the_parent_group(self):
         text = pom(parent("com.acme.app", "acme-parent", "1.0.0", ""), "<artifactId>service</artifactId>",
@@ -273,7 +275,9 @@ class TestSkips:
     def test_the_own_group_is_a_segment_prefix_not_a_string_prefix(self):
         repo = Repo({"pom.xml": simple_pom(dep("com.acmecorp.billing", "billing-api", "3.1.0"), group="com.acme")})
         added = ["import com.acmecorp.billing.Invoice;"]
-        assert dependency_lines("App.java", added, repo) == ["com.acmecorp.billing:billing-api@3.1.0"]
+        assert dependency_lines("App.java", added, repo) == [
+            "com.acmecorp.billing:billing-api@3.1.0 (group match only)",
+        ]
 
 
 class TestWalk:
@@ -283,12 +287,14 @@ class TestWalk:
             "pom.xml": simple_pom(dep(*SLF4J_API, "1.7.36")),
             "build.gradle": gradle("implementation 'org.slf4j:slf4j-api:1.7.0'"),
         })
-        assert dependency_lines("a/b/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("a/b/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         assert repo.reads == ["a/b/pom.xml", "a/b/build.gradle.kts", "a/b/build.gradle", "a/pom.xml"]
 
     def test_the_walk_climbs_to_the_repository_root(self):
         repo = Repo({"build.gradle": gradle("implementation 'org.slf4j:slf4j-api:2.0.13'")})
-        assert dependency_lines("src/main/java/com/acme/App.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("src/main/java/com/acme/App.java", [LOGGER], repo) == [
+            "org.slf4j:slf4j-api@2.0.13 (group match only)",
+        ]
         assert repo.reads == probes(
             "src/main/java/com/acme", "src/main/java/com", "src/main/java", "src/main", "src", "",
         )
@@ -303,7 +309,7 @@ class TestWalk:
             "pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13")),
             "build.gradle.kts": gradle('implementation("org.slf4j:slf4j-api:1.7.36")'),
         })
-        assert dependency_lines("App.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("App.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         assert repo.reads == ["pom.xml"]
 
     def test_the_kotlin_build_script_wins_over_the_groovy_one(self):
@@ -311,22 +317,22 @@ class TestWalk:
             "build.gradle.kts": gradle('implementation("org.slf4j:slf4j-api:2.0.13")'),
             "build.gradle": gradle("implementation 'org.slf4j:slf4j-api:1.7.36'"),
         })
-        assert dependency_lines("App.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("App.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         assert repo.reads == ["pom.xml", "build.gradle.kts"]
 
     def test_an_empty_manifest_is_a_miss_and_the_walk_continues(self):
         repo = Repo({"a/pom.xml": "", "pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"))})
-        assert dependency_lines("a/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("a/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         assert repo.reads == probes("a") + ["pom.xml"]
 
     def test_a_read_that_raises_is_a_miss_and_the_walk_continues(self):
         repo = Repo({"pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"))}, raising=frozenset({"a/pom.xml"}))
-        assert dependency_lines("a/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("a/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         assert repo.reads == probes("a") + ["pom.xml"]
 
     def test_a_read_that_is_not_text_is_a_miss(self):
         repo = Repo({"a/pom.xml": b"<project/>", "pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"))})
-        assert dependency_lines("a/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("a/C.java", [LOGGER], repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
 
     def test_a_reader_that_always_raises_gives_nothing(self):
         repo = Repo(raising=frozenset(probes("a", "")))
@@ -355,7 +361,7 @@ class TestBrokenManifests:
     def test_a_doctype_pom_is_refused_and_stops_the_walk(self):
         doctype = pom(coords("com.acme", "app"), deps(dep(*SLF4J_API, "2.0.13")), prolog="<!DOCTYPE project>\n")
         control = Repo({"a/pom.xml": doctype.replace("<!DOCTYPE project>\n", "")})
-        assert dependency_lines("a/C.java", [LOGGER], control) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines("a/C.java", [LOGGER], control) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         repo = Repo({"a/pom.xml": doctype, "pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"))})
         assert dependency_lines("a/C.java", [LOGGER], repo) == []
         assert repo.reads == ["a/pom.xml"]
@@ -426,9 +432,10 @@ class TestGradle:
         )})
         added = [OBJECT_MAPPER, LOGGER, "import io.micrometer.core.instrument.MeterRegistry;"]
         assert dependency_lines("App.java", added, repo) == [
-            "com.fasterxml.jackson.core:jackson-databind@(managed by com.fasterxml.jackson:jackson-bom@2.17.1)",
-            "io.micrometer:micrometer-core@(managed by org.springframework.boot:spring-boot-dependencies@3.3.4)",
-            "org.slf4j:slf4j-api@(managed by org.springframework.boot:spring-boot-dependencies@3.3.4)",
+            "com.fasterxml.jackson.core:jackson-databind@(likely managed by com.fasterxml.jackson:jackson-bom@2.17.1)",
+            "io.micrometer:micrometer-core@(managed by one of 2 platforms: spring-boot-dependencies, jackson-bom)",
+            "org.slf4j:slf4j-api@(managed by one of 2 platforms: spring-boot-dependencies, jackson-bom)"
+            " (group match only)",
         ]
 
     def test_a_platform_without_a_version_renders_without_one(self):
@@ -497,7 +504,7 @@ class TestLanguages:
     ])
     def test_java_kotlin_and_kotlin_script_files_behave_alike(self, path, added):
         repo = Repo({"pom.xml": simple_pom(dep(*SLF4J_API, "2.0.13"))})
-        assert dependency_lines(path, added, repo) == ["org.slf4j:slf4j-api@2.0.13"]
+        assert dependency_lines(path, added, repo) == ["org.slf4j:slf4j-api@2.0.13 (group match only)"]
         assert repo.reads == probes("src") + ["pom.xml"]
 
 
