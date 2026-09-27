@@ -28,7 +28,7 @@ Four variables shape the request itself. All are optional, and a bad value exits
 | `PRXREF_LLM_MAX_TOKENS` | `4096` | `max_tokens` on every worker call on `openai-compat` and `litellm`; the CLI backends accept it and do not apply it (see [What is not applied](#what-is-not-applied)). Must be > 0. This is a per-call budget threaded config → orchestrator → reviewer → `invoke`; the client never reads it. |
 | `PRXREF_LLM_TIMEOUT` | `45.0` | The client's default request timeout, in seconds. Must be > 0. It is a **per-model** deadline: a model that exceeds it is abandoned and the next in the chain is tried immediately, so a chain of three can take up to three timeouts. |
 | `PRXREF_LLM_TEMPERATURE` | `0.0` (sent) | `temperature` in the payload. Must be finite and >= 0; no upper bound, since the maximum is provider-specific. Unset or empty sends the default `0.0` rather than omitting the field, so an identical diff reviews identically by default; a set value wins. `PRXREF_LLM_REASONING_EFFORT` keeps its own pass-through-unvalidated rule. |
-| `PRXREF_LLM_SEED` | *(auto-derived)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset derives one random seed per process, shared by every client the run builds, so all LLM calls in a run pin the same sampling state; the run record's `sampling.seed` reports it. |
+| `PRXREF_LLM_SEED` | *(auto-derived)* | Top-level `seed` in the payload, OpenAI-compatible backends and `litellm` alike. Must be an integer >= 0 (`0` is a valid seed). Unset derives one random seed per process, shared by every client the run builds, so all LLM calls in a run pin the same sampling state; the run record's `sampling.seed` reports it. `off` (lowercase) sends no seed at all, configured or derived, and `sampling.seed` is then `null`. |
 
 ### Configuration Example
 
@@ -87,7 +87,7 @@ For environments running without a centralized inference gateway, `prxref` suppo
 - **Backend Setting:** `PRXREF_LLM_BACKEND=litellm`
 - **Installation:** `pip install 'prxref[litellm]'`
 - **Endpoint URL: not used.** litellm resolves each model's own provider endpoint and reads that provider's credential (for example `OPENROUTER_API_KEY`) from its own environment, so `PRXREF_LLM_BASE_URL` is not required here and neither it nor `PRXREF_LLM_API_KEY` is ever passed to litellm. A set `PRXREF_LLM_BASE_URL` is ignored with one INFO line (`PRXREF_LLM_BASE_URL is set but not used by the litellm backend; ignoring it`), so a deployment that set a placeholder URL to get past the check older releases applied to every backend keeps working unchanged. To route through a LiteLLM **proxy**, which speaks the OpenAI API, use the `openai-compat` backend with `PRXREF_LLM_BASE_URL` pointing at the proxy.
-- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and the seed, configured or else auto-derived, is passed as `seed=` to `litellm.completion`. `PRXREF_LLM_REASONING_EFFORT` is not applied by `litellm`: it reaches only `openai-compat` (as `reasoning_effort` in the payload) and `claude-cli` (as `--effort`), and `kiro-cli` ignores it too.
+- **Shared settings:** `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, and `PRXREF_LLM_SEED` apply here too — temperature resolves to the same `0.0` default when unset, and the seed, configured or else auto-derived, is passed as `seed=` to `litellm.completion` unless `PRXREF_LLM_SEED=off`, which passes none. `PRXREF_LLM_REASONING_EFFORT` is passed as `reasoning_effort=` when set and left out when empty, exactly as `openai-compat` sends it; prxref forwards the value unvalidated, and litellm maps it to each provider's own effort parameter.
 
 ### Configuration Example
 
@@ -101,6 +101,23 @@ PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0,vertex_ai/ge
 - The first model in `PRXREF_LLM_MODELS` is used as the primary model.
 - Remaining models in the list are passed to `litellm.completion` via the `fallbacks=` parameter.
 - `num_retries=0` is enforced to ensure immediate failover to backup models without blocking retries on failed endpoints.
+
+### Bedrock and other strict providers
+
+Some providers reject a request that carries a parameter they do not support, and then every chunk fails. Bedrock answers `UnsupportedParamsError: bedrock does not support parameters: ['seed']`, because prxref sends a seed on every call by default. Two settings fix that:
+
+- `PRXREF_LLM_SEED=off` stops prxref sending the seed at all. The run record's `sampling.seed` is then `null`.
+- `LITELLM_DROP_PARAMS=true` is litellm's own setting, not a prxref one: litellm then drops any parameter the provider does not support, instead of raising. It covers the seed too, and any other parameter the provider refuses.
+
+Some newer models accept only `temperature=1` and reject prxref's default `0.0` (`Only temperature=1 is supported`). Set `PRXREF_LLM_TEMPERATURE=1`; the variable takes any finite value >= 0, so `1` is accepted. Where litellm knows the model refuses the value, `LITELLM_DROP_PARAMS=true` drops the temperature instead, which leaves the provider's default in force; setting it to `1` does not depend on that.
+
+```bash
+PRXREF_LLM_BACKEND=litellm
+PRXREF_LLM_MODELS=bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0
+PRXREF_LLM_REASONING_EFFORT=medium
+PRXREF_LLM_SEED=off
+PRXREF_LLM_TEMPERATURE=1
+```
 
 ---
 
@@ -232,7 +249,8 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
   value when set, else one random seed derived per process and shared by every
   client the run builds — temperature 0 alone cannot pin hosted inference
   (issue #56), so an unseeded run still varies call to call. The `sampling`
-  field reports which seed was in force. The CLI backends, `claude-cli` and
+  field reports which seed was in force. `PRXREF_LLM_SEED=off` opts out: no
+  seed is sent and `sampling.seed` is `null`. The CLI backends, `claude-cli` and
   `kiro-cli`, send no seed and no temperature: setting either logs one WARNING
   that it is not applied, and `sampling` reports both as `null` (see
   [What is not applied](#what-is-not-applied)).
