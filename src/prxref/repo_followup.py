@@ -10,7 +10,9 @@ the pull request head (:func:`lookup_excerpts`) and renders the prompt block
 (:func:`render_followup_block`).
 
 Names come from structure, never from phrase lists: the backtick spans of a
-finding's title and body. A name the PR defines itself, on a hunk line of any
+finding's title and body first, then the identifiers of its plain text whose
+shape marks them as code (a dotted chain, a call, a ``_``, a type-like word;
+see :func:`name_tiers`). A name the PR defines itself, on a hunk line of any
 file or anywhere in the head text of the chunk's own files
 (:func:`diff_defined_names`), is not looked up, since the worker was shown it.
 
@@ -48,6 +50,8 @@ SOURCES = ("import", "path-convention", "name-search", "definition-scan")
 
 _SPAN_RE = re.compile(r"`([^`\n]{1,120})`")
 _NAME_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_CHAIN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
+_PATH_SEPARATORS = ("/", "\\")
 _RECEIVERS = frozenset({"self", "this", "cls", "super"})
 _LITERALS = frozenset({"None", "True", "False", "null", "true", "false", "undefined", "nil", "NaN"})
 _DROPPED = (
@@ -117,15 +121,45 @@ def _sentence_start(text: str, start: int) -> bool:
     return bool(_SENTENCE_START_RE.search(text[:start]))
 
 
-def _plain_type_names(text: str) -> list[str]:
-    out: list[str] = []
-    for match in _NAME_RE.finditer(text):
-        name = match.group(0)
-        if not _kept(name) or not _type_like(name) or name in out:
+def _snake(name: str) -> bool:
+    return "_" in name and bool(name.strip("_"))
+
+
+def _plain_tier(name: str, parts: int, position: int, called: bool, sentence_start: bool) -> int | None:
+    if _type_like(name):
+        structural = parts > 1 or called or _snake(name)
+        if not structural and sentence_start and not any(
+            c.isupper() or c in "_$" or c.isdigit() for c in name[1:]
+        ):
+            return None
+        return 0
+    if position > 0:
+        return 1
+    if parts > 1 or called or _snake(name):
+        return 2
+    return None
+
+
+def _plain_names(text: str) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for match in _CHAIN_RE.finditer(text):
+        start, end = match.span()
+        if text[start - 1 : start] in _PATH_SEPARATORS or text[end : end + 1] in _PATH_SEPARATORS:
             continue
-        if _sentence_start(text, match.start()) and not any(c.isupper() or c in "_$" or c.isdigit() for c in name[1:]):
+        parts = match.group(0).split(".")
+        if len(parts) > 1 and language_of(match.group(0)):
             continue
-        out.append(name)
+        called = text[end : end + 1] == "("
+        at_start = _sentence_start(text, start)
+        for position, name in enumerate(parts):
+            if name in seen or not _kept(name):
+                continue
+            tier = _plain_tier(name, len(parts), position, called and position == len(parts) - 1, at_start)
+            if tier is None:
+                continue
+            seen.add(name)
+            out.append((tier, name))
     return out
 
 
@@ -140,16 +174,30 @@ def name_tiers(title: str, body: str) -> tuple[tuple[str, ...], tuple[str, ...],
     lowercase letter), tier 1 the other names that directly follow a ``.``,
     tier 2 the rest; each name appears once, in its first tier and position.
 
-    With no backtick span at all, tier 0 holds the type-like identifiers of
-    the plain text instead, less a word that starts a sentence unless it has
-    an uppercase letter, digit, ``_`` or ``$`` after its first character, so
-    ``StateStore is ...`` counts and ``The store ...`` does not; tiers 1 and
-    2 are then empty.
+    The plain text outside the spans gives names too, under the same filters.
+    An identifier there counts only through its shape: a dotted chain
+    ``a.b`` or ``a.b(`` gives ``b`` (any name after a ``.``) and ``a``, a
+    call ``name(`` gives ``name``, and an identifier holding ``_`` that is
+    not only underscores (``model_history``, ``HISTORY_WINDOW``) counts
+    alone, as does a type-like word, less one that starts a sentence unless
+    it has an uppercase letter, digit, ``_`` or ``$`` after its first
+    character, so ``StateStore is ...`` counts and ``The store ...`` does
+    not. A plain English word therefore never counts. A chain whose whole
+    text is a file name of a known source language (``history.py``,
+    ``Foo.java``), or that touches a ``/`` or ``\\``, gives nothing. The
+    plain names are tiered like span names: type-like, then after a ``.``,
+    then the rest, each tier in order of first appearance. With a backtick
+    span present, they follow every span name, all in tier 2 in that order,
+    so a plain name never outranks a span name.
     """
     text = f"{title}\n{body}"
     spans = _SPAN_RE.findall(text)
+    plain = sorted(_plain_names(_SPAN_RE.sub(" ", text)), key=lambda entry: entry[0])
     if not spans:
-        return tuple(_plain_type_names(text)), (), ()
+        by_tier: tuple[list[str], list[str], list[str]] = ([], [], [])
+        for tier, name in plain:
+            by_tier[tier].append(name)
+        return tuple(by_tier[0]), tuple(by_tier[1]), tuple(by_tier[2])
     tiers: tuple[list[str], list[str], list[str]] = ([], [], [])
     seen: set[str] = set()
     for span in spans:
@@ -164,6 +212,7 @@ def name_tiers(title: str, body: str) -> tuple[tuple[str, ...], tuple[str, ...],
                 tiers[1].append(name)
             else:
                 tiers[2].append(name)
+    tiers[2].extend(name for _, name in plain if name not in seen)
     return tuple(tiers[0]), tuple(tiers[1]), tuple(tiers[2])
 
 
