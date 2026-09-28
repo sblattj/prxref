@@ -304,6 +304,13 @@ LLM / pipeline:
                                 character budget shared by the cross-chunk,
                                 contract and other repository-context entries;
                                 positive int (default 12000)
+  PRXREF_REPO_CONTEXT_MAX_READS Repository context (#61): uncached reads
+                                every chunk together may make in one run;
+                                positive int (default 200)
+  PRXREF_REPO_CONTEXT_MAX_CHUNK_READS
+                                Repository context (#61): uncached reads one
+                                chunk may make; positive int (default 16). A
+                                PR diff file never spends either cap
   PRXREF_CONTEXT_FOLLOWUP       Context follow-up (0.18.0): "off" (the
                                 default) makes no extra call, read, log line,
                                 trace event or trace file, byte-identical to
@@ -590,6 +597,8 @@ _DEFAULTS: dict[str, object] = {
     "ticket_context_max_chars": 6000,
     "repo_context": "off",
     "repo_context_max_chars": 12000,
+    "repo_context_max_reads": 200,
+    "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
     "suggestions": "off",
     "incremental": "off",
@@ -643,6 +652,7 @@ _INT_KEYS = frozenset({
     "ticket_context_max_chars", "size_warn_lines", "size_warn_files",
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
+    "repo_context_max_reads", "repo_context_max_chunk_reads",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
 _BOOL_KEYS = frozenset({
@@ -753,6 +763,8 @@ _RANGES: dict[str, _Range] = {
     "max_findings_per_rule": _Range(0, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
     "repo_context_max_chars": _Range(0),
+    "repo_context_max_reads": _Range(0),
+    "repo_context_max_chunk_reads": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
@@ -788,6 +800,7 @@ FILE_KEYS = frozenset({
     "scoped_rules", "scoped_rules_max_chars", "prompts_dir",
     "ticket_context_file", "ticket_context_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
+    "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "incremental",
     "context_contract_globs", "context_exclude_globs",
 })

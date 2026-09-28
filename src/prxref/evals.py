@@ -70,6 +70,8 @@ RUN_CONFIG_KEYS = (
     "repo_context_max_chars",
     "context_contract_globs",
     "context_exclude_globs",
+    "repo_context_max_reads",
+    "repo_context_max_chunk_reads",
 )
 SCORE_VERSION = 1
 SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "scoped_rules", "config")

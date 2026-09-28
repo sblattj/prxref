@@ -714,11 +714,18 @@ def _repo_context_line(repo: dict) -> str:
     """Render the ``-v`` summary line for a ``repo_context`` run-record value.
 
     ``repo context: mode=<mode> reader=<reader> listing=<paths>
-    reads=<reads> cap_hit=<yes|no> entries=<n> omitted=<n>`` on one line.
-    ``listing`` is the listed path count, suffixed ``(partial)`` when the
-    listing is incomplete, or ``-`` without one; ``entries`` and ``omitted``
-    are summed over every chunk row of ``units`` and are 0 when ``units``
-    is ``None``. A missing value prints ``-``.
+    reads=<reads> max_reads=<max_reads> max_chunk_reads=<max_chunk_reads>
+    cap_hit=<no|chunk|run|chunk+run> entries=<n> omitted=<n>`` on one line.
+    ``reads`` counts every repository-context fetch, PR diff files
+    included, so it is not a fraction of ``max_reads``, which caps only
+    the reads of other paths. ``cap_hit`` names the read cap that refused
+    a read: ``chunk`` for a chunk's own cap (``chunk_read_cap_hit``),
+    ``run`` for the run's cap (``run_read_cap_hit``), ``chunk+run`` for
+    both. ``listing`` is the
+    listed path count, suffixed ``(partial)`` when the listing is
+    incomplete, or ``-`` without one; ``entries`` and ``omitted`` are summed
+    over every chunk row of ``units`` and are 0 when ``units`` is ``None``.
+    A missing value prints ``-``.
     """
     listing = repo.get("listing")
     if isinstance(listing, dict):
@@ -731,10 +738,12 @@ def _repo_context_line(repo: dict) -> str:
     rows = [row for row in chunks if isinstance(row, dict)] if isinstance(chunks, list) else []
     entries = sum(len(row["entries"]) for row in rows if isinstance(row.get("entries"), list))
     omitted = sum(row["omitted"] for row in rows if isinstance(row.get("omitted"), int))
-    cap_hit = "yes" if repo.get("read_cap_hit") else "no"
+    hit = [name for name in ("chunk", "run") if repo.get(f"{name}_read_cap_hit")]
+    cap_hit = "+".join(hit) or "no"
     return (
         f"repo context: mode={_dash(repo.get('mode'))} reader={_dash(repo.get('reader'))} "
-        f"listing={listed} reads={_dash(repo.get('reads'))} cap_hit={cap_hit} "
+        f"listing={listed} reads={_dash(repo.get('reads'))} max_reads={_dash(repo.get('max_reads'))} "
+        f"max_chunk_reads={_dash(repo.get('max_chunk_reads'))} cap_hit={cap_hit} "
         f"entries={entries} omitted={omitted}"
     )
 
@@ -1528,6 +1537,8 @@ def _run_review(
         scoped_rules_max_chars=cfg["scoped_rules_max_chars"],
         repo_context=cfg["repo_context"],
         repo_context_max_chars=cfg["repo_context_max_chars"],
+        repo_context_max_reads=cfg["repo_context_max_reads"],
+        repo_context_max_chunk_reads=cfg["repo_context_max_chunk_reads"],
         context_contract_globs=cfg["context_contract_globs"],
         context_exclude_globs=cfg["context_exclude_globs"],
         repo_dir=repo,

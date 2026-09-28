@@ -9,9 +9,11 @@ which run in parallel, one shared view of the repository:
 - every path is fetched at most once per run, single-flight across threads,
   and a miss is cached like a hit;
 - the listing is fetched at most once per run, single-flight as well;
-- each chunk's reader is capped at ``MAX_CHUNK_READS`` uncached reads and all
-  chunk readers together at ``MAX_RUN_READS``, so repository context bounds
-  both its network cost and its prompt growth;
+- each chunk's reader is capped at ``chunk_cap`` uncached reads and all
+  chunk readers together at ``run_cap``, so repository context bounds both
+  its network cost and its prompt growth. The defaults are
+  ``MAX_CHUNK_READS`` and ``MAX_RUN_READS``, which config restates as
+  ``repo_context_max_chunk_reads`` and ``repo_context_max_reads`` (#61);
 - an excluded path is never read and never listed, at the one boundary every
   read crosses;
 - ``stats`` reports the counters the run record carries.
@@ -70,7 +72,7 @@ class RepoReader:
     the order in which parallel workers ask, because each path is fetched
     once and every caller sees that one result. Once the run cap is reached,
     WHICH chunk meets it first depends on thread scheduling; that is
-    accepted only because ``stats()["read_cap_hit"]`` records that it
+    accepted only because ``stats()["run_read_cap_hit"]`` records that it
     happened.
     """
 
@@ -97,7 +99,8 @@ class RepoReader:
         self._slots: dict[str, _Slot] = {}
         self._reads = 0
         self._run_used = 0
-        self._read_cap_hit = False
+        self._chunk_cap_hit = False
+        self._run_cap_hit = False
         self._listing_slot: _Slot | None = None
 
     def _excluded(self, path: str) -> bool:
@@ -125,7 +128,6 @@ class RepoReader:
             owner = slot is None
             if owner:
                 if admit is not None and not admit():
-                    self._read_cap_hit = True
                     return None
                 slot = _Slot()
                 self._slots[path] = slot
@@ -158,14 +160,19 @@ class RepoReader:
         ``chunk_cap`` and one against the run's ``run_cap``, which every
         chunk reader of this ``RepoReader`` shares. When either cap is
         already reached, it returns None without fetching, leaves the path
-        uncached, and marks ``read_cap_hit``. An excluded path returns None
-        without fetching or counting.
+        uncached, and marks ``chunk_read_cap_hit`` when this chunk's cap is
+        spent and ``run_read_cap_hit`` when the run's cap is spent, both when
+        both are. An excluded path returns None without fetching or counting.
         """
         used = 0
 
         def admit() -> bool:
             nonlocal used
-            if used >= self._chunk_cap or self._run_used >= self._run_cap:
+            chunk_spent = used >= self._chunk_cap
+            run_spent = self._run_used >= self._run_cap
+            if chunk_spent or run_spent:
+                self._chunk_cap_hit = self._chunk_cap_hit or chunk_spent
+                self._run_cap_hit = self._run_cap_hit or run_spent
                 return False
             used += 1
             self._run_used += 1
@@ -218,22 +225,33 @@ class RepoReader:
     def stats(self) -> dict:
         """Return a snapshot of the run's counters for the run record.
 
-        ``{"reads": int, "read_cap_hit": bool, "listing": {"paths": int,
-        "complete": bool} | None}``. ``reads`` counts every call that reached
-        ``fetch``, from ``read`` and chunk readers alike. ``read_cap_hit`` is
-        true once any chunk reader refused a path at a cap. ``listing`` is
+        ``{"reads": int, "read_cap_hit": bool, "chunk_read_cap_hit": bool,
+        "run_read_cap_hit": bool, "listing": {"paths": int, "complete": bool}
+        | None}``. ``reads`` counts every call that reached ``fetch``, from
+        ``read`` and chunk readers alike. ``chunk_read_cap_hit`` is true once
+        a chunk reader refused a path because its own ``chunk_cap`` was
+        spent, ``run_read_cap_hit`` once one refused a path because the
+        shared ``run_cap`` was spent (one refusal can set both), and
+        ``read_cap_hit`` is the OR of the two. ``listing`` is
         None until ``listing()`` has finished, and when it gave None; its
         ``paths`` counts the listing after exclusion. Taking a snapshot never
         calls ``fetch`` or ``lister``.
         """
         with self._lock:
             reads = self._reads
-            cap_hit = self._read_cap_hit
+            chunk_hit = self._chunk_cap_hit
+            run_hit = self._run_cap_hit
             slot = self._listing_slot
         listing = None
         if slot is not None and slot.done.is_set() and isinstance(slot.value, PathListing):
             listing = {"paths": len(slot.value.paths), "complete": slot.value.complete}
-        return {"reads": reads, "read_cap_hit": cap_hit, "listing": listing}
+        return {
+            "reads": reads,
+            "read_cap_hit": chunk_hit or run_hit,
+            "chunk_read_cap_hit": chunk_hit,
+            "run_read_cap_hit": run_hit,
+            "listing": listing,
+        }
 
 
 def forge_reader(
@@ -242,6 +260,8 @@ def forge_reader(
     sha: str | None,
     *,
     exclude: Callable[[str], bool] | None = None,
+    run_cap: int = MAX_RUN_READS,
+    chunk_cap: int = MAX_CHUNK_READS,
 ) -> RepoReader | None:
     """Return a ``RepoReader`` over a forge at commit ``sha``, or None.
 
@@ -250,7 +270,7 @@ def forge_reader(
     ``get_file_content(ref, path, sha=sha)``. The listing calls
     ``list_paths(ref, sha=sha)`` when the forge has that method; otherwise
     the reader has no lister and ``listing()`` is None. ``kind`` is
-    ``"forge"``.
+    ``"forge"``; ``run_cap`` and ``chunk_cap`` go to the ``RepoReader``.
     """
     getter = getattr(forge, "get_file_content", None)
     if getter is None or not sha:
@@ -264,24 +284,30 @@ def forge_reader(
         return list_paths(ref, sha=sha)
 
     lister = None if list_paths is None else list_at_sha
-    return RepoReader(fetch, lister, kind="forge", exclude=exclude)
+    return RepoReader(
+        fetch, lister, kind="forge", exclude=exclude, run_cap=run_cap, chunk_cap=chunk_cap,
+    )
 
 
 def repo_dir_reader(
     repo_dir: RepoDir,
     *,
     exclude: Callable[[str], bool] | None = None,
+    run_cap: int = MAX_RUN_READS,
+    chunk_cap: int = MAX_CHUNK_READS,
 ) -> RepoReader:
     """Return a ``RepoReader`` over a local ``RepoDir`` tree.
 
     Reads call ``repo_dir.read``; the listing wraps ``repo_dir.list_files()``
     into a ``PathListing``. Both caps apply as they do to a forge, because
-    they bound prompt growth as well as network cost. ``kind`` is
-    ``"repo-dir"``.
+    they bound prompt growth as well as network cost; ``run_cap`` and
+    ``chunk_cap`` go to the ``RepoReader``. ``kind`` is ``"repo-dir"``.
     """
 
     def lister() -> PathListing:
         paths, complete = repo_dir.list_files()
         return PathListing(paths=tuple(paths), complete=complete)
 
-    return RepoReader(repo_dir.read, lister, kind="repo-dir", exclude=exclude)
+    return RepoReader(
+        repo_dir.read, lister, kind="repo-dir", exclude=exclude, run_cap=run_cap, chunk_cap=chunk_cap,
+    )

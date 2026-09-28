@@ -500,6 +500,8 @@ def orchestrate_review(
     context_contract_globs: Sequence[str] = (),
     context_exclude_globs: Sequence[str] = (),
     repo_dir: RepoDir | None = None,
+    repo_context_max_reads: int = repo_reader.MAX_RUN_READS,
+    repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
     llm_parse_retries: int = 0,
     context_followup: str = "off",
     suggestions: str = "off",
@@ -757,7 +759,13 @@ def orchestrate_review(
     never read, listed or shown. ``repo_dir`` is a
     :class:`prxref.forges.repo_dir.RepoDir` to read the repository from in
     place of the forge; this function does not validate it (``RepoDir``
-    does, when it is built). Off, nothing new is built or called: the
+    does, when it is built). ``repo_context_max_reads``
+    (``PRXREF_REPO_CONTEXT_MAX_READS``, default
+    :data:`prxref.repo_reader.MAX_RUN_READS`) caps the uncached reads of
+    every chunk together, and ``repo_context_max_chunk_reads``
+    (``PRXREF_REPO_CONTEXT_MAX_CHUNK_READS``, default
+    :data:`prxref.repo_reader.MAX_CHUNK_READS`) caps each chunk's own; both
+    go to the reader as ``run_cap`` and ``chunk_cap`` (#61). Off, nothing new is built or called: the
     prompts, posts, trace and logs are exactly a run without these
     arguments, and the record's ``repo_context`` key is ``None``.
 
@@ -787,15 +795,19 @@ def orchestrate_review(
     diff file can be fetched once by each reader.
 
     The ``repo_context`` key of every exit, when on, is ``{"mode",
-    "max_chars", "contract_globs", "exclude_globs", "reader", "listing",
-    "reads", "read_cap_hit", "units"}``. Until the chunk workers finish,
-    ``reader`` and ``listing`` are ``None``, ``reads`` is 0,
-    ``read_cap_hit`` is false and ``units`` is ``None``. After them,
-    ``reader`` is the reader's ``kind`` (``"forge"`` or ``"repo-dir"``) or
-    ``None``; ``listing`` (``{"paths", "complete"}`` or ``None``),
-    ``reads`` and ``read_cap_hit`` come from one
+    "max_chars", "max_reads", "max_chunk_reads", "contract_globs",
+    "exclude_globs", "reader", "listing", "reads", "read_cap_hit",
+    "chunk_read_cap_hit", "run_read_cap_hit", "units"}``, where
+    ``max_reads`` and ``max_chunk_reads`` are the two read caps. Until the
+    chunk workers finish, ``reader`` and ``listing`` are ``None``, ``reads``
+    is 0, the three cap flags are false and ``units`` is ``None``. After
+    them, ``reader`` is the reader's ``kind`` (``"forge"`` or
+    ``"repo-dir"``) or ``None``; ``listing`` (``{"paths", "complete"}`` or
+    ``None``), ``reads`` and the cap flags come from one
     :meth:`~prxref.repo_reader.RepoReader.stats` snapshot, so ``reads``
-    counts repository-context fetches only; and ``units`` is ``{"chunks":
+    counts repository-context fetches only. ``chunk_read_cap_hit`` says a
+    chunk's own cap refused a read, ``run_read_cap_hit`` says the run's cap
+    did, and ``read_cap_hit`` is their OR; and ``units`` is ``{"chunks":
     [{"entries", "omitted", "retry_dropped"}, ...]}``, one row per chunk in
     chunk order, where ``retry_dropped`` is true when the timeout retry ran
     (and so ran without the chunk's repository context). The sweep has no
@@ -976,12 +988,16 @@ def orchestrate_review(
         run_inputs["repo_context"] = {
             "mode": repo_context,
             "max_chars": repo_context_max_chars,
+            "max_reads": repo_context_max_reads,
+            "max_chunk_reads": repo_context_max_chunk_reads,
             "contract_globs": list(context_contract_globs),
             "exclude_globs": list(context_exclude_globs),
             "reader": None,
             "listing": None,
             "reads": 0,
             "read_cap_hit": False,
+            "chunk_read_cap_hit": False,
+            "run_read_cap_hit": False,
             "units": None,
         }
     summary_template = prompts.override("summary") if prompts is not None else ""
@@ -1322,6 +1338,8 @@ def orchestrate_review(
             "repo_context", "ok", mode=record["mode"], reader=record["reader"],
             listing=record["listing"], reads=record["reads"],
             read_cap_hit=record["read_cap_hit"],
+            chunk_read_cap_hit=record["chunk_read_cap_hit"],
+            run_read_cap_hit=record["run_read_cap_hit"],
         )
     if followup_records is not None:
         run_inputs["context_followup"] = _followup_record(followup_records)
@@ -2523,7 +2541,9 @@ def _plan_repo_context(
     """Build the run's reader and its once-per-run inputs, for a level other than ``"off"``.
 
     ``initial`` is the run's initial ``repo_context`` record, whose
-    ``max_chars`` and glob lists are the inputs. The reader reads
+    ``max_chars``, read caps (``max_reads`` as the reader's ``run_cap``,
+    ``max_chunk_reads`` as its ``chunk_cap``) and glob lists are the
+    inputs. The reader reads
     ``repo_dir`` when it is given, else the forge at the PR's head sha. At
     ``"repo"`` with a reader, the listing is taken here, once, and the
     contract files are selected here, once. At ``"repo"``, a missing reader
@@ -2531,11 +2551,12 @@ def _plan_repo_context(
     ``PRXREF_REPO_CONTEXT``.
     """
     exclude = exclude_predicate(initial["exclude_globs"])
+    caps = {"run_cap": initial["max_reads"], "chunk_cap": initial["max_chunk_reads"]}
     if repo_dir is not None:
-        reader = repo_reader.repo_dir_reader(repo_dir, exclude=exclude)
+        reader = repo_reader.repo_dir_reader(repo_dir, exclude=exclude, **caps)
     else:
         reader = repo_reader.forge_reader(
-            forge, ref, getattr(pr, "source_sha", "") or "", exclude=exclude,
+            forge, ref, getattr(pr, "source_sha", "") or "", exclude=exclude, **caps,
         )
     diff_paths = frozenset(f.path for f in files)
     if mode != "repo":
@@ -2619,18 +2640,23 @@ def _repo_context_record(
     """The ``repo_context`` record once the chunk workers are done.
 
     ``reader`` is the reader's ``kind`` or ``None``; ``listing``, ``reads``
-    and ``read_cap_hit`` come from one ``stats()`` snapshot (``None``, 0
+    and the three cap flags come from one ``stats()`` snapshot (``None``, 0
     and false without a reader); ``units`` lists the rows in chunk order,
     where a chunk whose worker left no row gets the empty unit's.
     """
     reader = plan.reader
-    stats = reader.stats() if reader is not None else {"reads": 0, "read_cap_hit": False, "listing": None}
+    stats = reader.stats() if reader is not None else {
+        "reads": 0, "read_cap_hit": False, "chunk_read_cap_hit": False,
+        "run_read_cap_hit": False, "listing": None,
+    }
     return {
         **initial,
         "reader": reader.kind if reader is not None else None,
         "listing": stats["listing"],
         "reads": stats["reads"],
         "read_cap_hit": stats["read_cap_hit"],
+        "chunk_read_cap_hit": stats["chunk_read_cap_hit"],
+        "run_read_cap_hit": stats["run_read_cap_hit"],
         "units": {
             "chunks": [
                 row if row is not None else _unit_row(repo_unit.EMPTY_UNIT)
