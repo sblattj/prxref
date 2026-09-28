@@ -559,6 +559,54 @@ def _serve_azure_devops(call: Call, payload: list[dict]) -> requests.Response | 
     return _json(body, call.url)
 
 
+GITEA_REPO = "https://codeberg.example.com/api/v1/repos/acme/api"
+GITEA_MID_SHA = "d" * 40
+GITEA_BLOBS = {
+    ("docs/usage.md", MERGE_BASE_SHA): ADO_USAGE,
+    ("docs/guide.md", HEAD_SHA): ADO_GUIDE,
+    ("src/acme/billing.py", MERGE_BASE_SHA): ADO_BILLING_OLD,
+    ("src/acme/billing.py", HEAD_SHA): ADO_BILLING_NEW,
+    ("src/acme/legacy.py", MERGE_BASE_SHA): ADO_LEGACY,
+    ("src/acme/refunds.py", HEAD_SHA): ADO_REFUNDS,
+}
+GITEA_THREE_DOT = [
+    {"filename": "docs/guide.md", "status": "added"},
+    {"filename": "docs/usage.md", "status": "removed"},
+    {"filename": "src/acme/billing.py", "status": "modified"},
+    {"filename": "src/acme/legacy.py", "status": "removed"},
+    {"filename": "src/acme/refunds.py", "status": "added"},
+]
+GITEA_THREE_DOT_FILES = (
+    ("docs/guide.md", None, "added", 5, 0),
+    ("docs/usage.md", "docs/usage.md", "removed", 0, 5),
+    ("src/acme/billing.py", "src/acme/billing.py", "modified", 7, 2),
+    ("src/acme/legacy.py", "src/acme/legacy.py", "removed", 0, 5),
+    ("src/acme/refunds.py", None, "added", 8, 0),
+)
+
+
+def _serve_gitea(call: Call, payload: list[dict]) -> requests.Response | None:
+    """Answer the compare API and the raw-file API, the two reads a rebuilt Gitea diff takes.
+
+    Gitea and Forgejo serve a compare only as JSON: the files changed since the
+    merge base and the commits on the head side, whose one unlisted parent is
+    the merge base. A Forgejo 11 instance listed a rename as an ``added`` and a
+    ``removed`` file, so ``payload`` does too, and the whole files are the
+    ``ADO_*`` texts. Not a capture.
+    """
+    raw = f"{GITEA_REPO}/raw/"
+    if call.url.startswith(raw):
+        text = GITEA_BLOBS.get((call.url[len(raw) :], call.params.get("ref")))
+        return None if text is None else _text(text, call.url)
+    if call.url != f"{GITEA_REPO}/compare/{BASE_SHA}...{HEAD_SHA}":
+        return None
+    commits = [
+        {"sha": HEAD_SHA, "parents": [{"sha": GITEA_MID_SHA}]},
+        {"sha": GITEA_MID_SHA, "parents": [{"sha": MERGE_BASE_SHA}]},
+    ] if payload else []
+    return _json({"total_commits": len(commits), "commits": commits, "files": payload}, call.url)
+
+
 # --- the cases ------------------------------------------------------------------
 
 
@@ -640,6 +688,16 @@ CASES = [
         payload=ADO_THREE_DOT,
         empty_payload=[],
         expected=THREE_DOT_FILES,
+        verbatim=False,
+    ),
+    CompareCase(
+        id="gitea",
+        forge="gitea",
+        pr_url="https://codeberg.example.com/acme/api/pulls/42",
+        serve=_serve_gitea,
+        payload=GITEA_THREE_DOT,
+        empty_payload=[],
+        expected=GITEA_THREE_DOT_FILES,
         verbatim=False,
     ),
 ]
