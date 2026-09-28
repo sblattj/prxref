@@ -447,10 +447,11 @@ self-hosted instance.
   `compare/{base}...{head}.diff` answered `500` live), so the diff is rebuilt.
   `GET /compare/{base_sha}...{head_sha}` lists the changed files and the head-side
   commits; the merge base is the one parent of those commits that is not itself
-  listed. A range with more than one such parent (a head that merged the base branch
-  in), or a listing short of `total_commits`, raises rather than guessing. Each file's
-  two sides are read through **File Content** at the merge base and at the head and
-  diffed locally. A binary side, a side over 512 KiB, or any file past the first 300
+  listed. A range where that is not exactly one commit (a head that merged the base
+  branch in), or a listing short of `total_commits`, raises rather than guessing. Each
+  file's two sides are read from the same `GET /raw/{path}?ref=` endpoint as **File
+  Content**, at the merge base and at the head, and diffed locally; unlike **File
+  Content**, a failed read here raises. A binary side, a side over 512 KiB, or any file past the first 300
   is reviewed header-only, with one warning. The compare listing reports a rename as
   a delete plus an add, so a rename's diff here differs in shape from the pull
   request's own `.diff`. An empty range returns empty text.
