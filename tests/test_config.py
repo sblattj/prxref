@@ -342,8 +342,8 @@ class TestMakeForge:
         assert getattr(forge, "_session", None) is custom
 
     def test_unknown_forge_raises(self):
-        with pytest.raises(ValueError, match="unknown forge: 'gitea'"):
-            make_forge(_make_ref("gitea"))
+        with pytest.raises(ValueError, match="unknown forge: 'sourcehut'"):
+            make_forge(_make_ref("sourcehut"))
 
 
 class TestAllowUnsignedAgreesWithGate:
