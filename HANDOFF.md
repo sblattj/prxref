@@ -1,140 +1,89 @@
-# HANDOFF — v0.25.0 shipped: repository config file .prxref.toml (#38)
+# HANDOFF — v0.26.0 shipped: summary layout you can shape (#59)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-28 · **Supersedes** the
-v0.24.0 handoff.
+v0.25.0 handoff.
 
-0.25.0 is one feature. #38: a repository can commit its prxref settings in a
-flat TOML file, `.prxref.toml`, instead of copying them into every pipeline.
-The file sits between the built-in defaults and the environment
-(`defaults < file < PRXREF_* < flags`), and whatever can send a secret
-somewhere, run a program, read or write a file outside the review's inputs,
-or move the exit code stays in the environment. New surfaces: `--config PATH`
-and `--no-config` on `review` and `eval run`, `--config PATH` on `serve`, a
-`prxref config check` subcommand, a `config_file` run-record key, and the
-`PRXREF_CONFIG_FILE` variable, which is not a config key. No new config key,
-`Forge` method or adapter. With no file found or named, every config value,
-error message, prompt, forge read, forge write and stdout byte is the same as
-in 0.24.0, and the record gains only `"config_file": null`. The user-facing
-account is the `[0.25.0]` section of `CHANGELOG.md`. This file is for whoever
-cuts the next release. The v0.24.0 handoff is in git history.
+0.26.0 is one feature. #59: a team preferred a hand-edited summary that
+grouped findings by severity under headings, used its own glyphs and named
+the head commit, and a `summary.md` override could not produce it. Now it
+can. New surfaces: two config keys, `severity_markers`
+(`PRXREF_SEVERITY_MARKERS`) and `summary_bullet_separator`
+(`PRXREF_SUMMARY_BULLET_SEPARATOR`), both file keys; the per-group summary
+slots; the marker slots; `{head_sha}`, `{head_sha_short}`,
+`{inline_accounting}`, `{chunk_count}`, `{input_tokens}` and
+`{output_tokens}`; and one `orchestrate_review` kwarg,
+`summary_bullet_separator`. No new `Forge` method, adapter, flag or
+run-record key. With neither key set and no new slot used, every summary,
+inline comment, formatter output and stdout byte is the same as in 0.25.0,
+which golden strings captured at `aeda4fe` pin. The user-facing account is
+the `[0.26.0]` section of `CHANGELOG.md`. This file is for whoever cuts the
+next release. The v0.25.0 handoff is in git history.
 
 ## What landed
 
-- **The file layer, `src/prxref/config.py`.** `find_config_file(*, explicit,
-  cwd=None, environ=None)` resolves `--config`, else `PRXREF_CONFIG_FILE`
-  (`CONFIG_FILE_ENV`), else `.prxref.toml` (`CONFIG_FILE_NAME`) in the
-  working directory, with no walk up; `off` in any case reads none, an empty
-  variable reads as unset, and a named file that is missing raises
-  `ConfigError` naming the flag or the variable. `read_config_file(path, *,
-  display=None)` parses it with `tomllib` and checks each key in a fixed
-  order: table, unknown key (with a `difflib` hint), environment-only, type,
-  empty value (read as unset), `spec_sources` URL, path containment
-  (`_contained_path`: the value is joined to the file's directory, both
-  sides `realpath`-ed, and must stay inside). `load_config(*, config_file=None,
-  ...)` layers the file under the environment and labels each file value
-  `<file>: <key>` for error messages; `load_config_with_sources` also returns
-  each key's layer (`default`, `file`, `env <NAME>`, `override`).
-- **The partition.** `FILE_KEYS` (44) and `ENV_ONLY_KEYS` (30) are two
-  hand-written frozensets, and `TestPartition` requires them to partition
-  `_DEFAULTS`, so a new key cannot land unclassified. `_ENV_ONLY_REASONS`
-  gives each environment-only key its class: credential, endpoint
-  (`llm_base_url`, `jira_base_url`), executable (`llm_backend`,
-  `llm_cli_path`), local write (`trace_file`, `trace_dir`, `fallback`), local
-  read (`price_table`) or gate (`fail_on`, `dry_run`, `allow_unsigned`).
-- **Types.** A file takes TOML types: integers (booleans refused;
-  `llm_seed` also takes `"off"`), numbers, booleans, arrays of strings, and
-  strings. `llm_temperature` is a string key that also takes a TOML number,
-  stored as the string the variable would hold (`0.2` becomes `"0.2"`).
-- **Command line, `src/prxref/cli.py`.** `_resolve_config_file` serves
-  `review`, `config check` and (in `evals.py`) `eval run`; `--config` and
-  `--no-config` are an argparse mutually exclusive group. `_serve_config_file`
-  calls `find_config_file` only when `--config` or `PRXREF_CONFIG_FILE` is
-  non-blank, so `serve` never looks in its working directory; `_cmd_serve`
-  checks the named file with `read_config_file` before listening and binds
-  it to `_webhook_handler` with `functools.partial`. `_cmd_config_check`
-  prints every `_DEFAULTS` key, sorted, with its layer, and prints a
-  credential-class value only as `<set>` or `<unset>`.
-  `_config_file_stamp` builds the record's `config_file`
-  (`{"path", "sha256", "keys"}`), attached in `cli._run_review` after
-  `orchestrate_review` returns, so the orchestrator's own dict and
-  `tests/test_run_record.py` did not move. `_build_json_result` puts it after
-  `degraded`.
-- **`config check` opens the files path keys name.** The rules file, the
-  scoped rules, the ticket file and the prompts directory are loaded by one
-  helper, `review_inputs.load_path_inputs`, which `cli._run_review`,
-  `cli._cmd_config_check` and `evals.eval_run` (without the ticket, which
-  each case names) all call. So a missing rules file or an unusable prompts
-  directory now fails `config check` with the exit 2 and the
-  `configuration error: ...` line the review would print, and the
-  misplaced-copy recipe error of lesson 1 is caught there. Each input is
-  named by `review_inputs.path_input_source` from the layer
-  `load_config_with_sources` reports: the flag, `<file>: <key>` when the
-  config file set the path (before, a file value was reported under its
-  `PRXREF_` variable), else the variable. `spec_sources` is not among them:
-  the orchestrator loads spec sources best-effort after the forge is built,
-  and a failed one never exits 2. `cli._load_prompts_dir` stays as a thin
-  wrapper, and the CLI hands the helper its own loader names
-  (`cli._path_loaders`), because tests replace `prxref.cli.load_review_rules`
-  and friends.
-- **A file named through a symlinked directory displays as its resolved
-  spelling.** `config._display_path` first compares `os.path.abspath(path)`
-  with `Path.cwd()`, as before, then the file's resolved directory (the file
-  name itself is not followed) with the resolved working directory. So on
-  macOS, from `/private/tmp/x`, `config check --config /tmp/x/.prxref.toml`
-  prints `config file: .prxref.toml`, as the `/private/tmp/...` spelling
-  does, and errors and the record's `config_file.path` agree. A path
-  outside the working directory still displays as given.
-- **Eval.** `eval run` resolves and checks the file once before the first
-  case and passes it to every case (`evals._run_case(..., config_file=...)`).
-  `eval score` builds its judge from a file-free `load_config()`.
-- **Docs.** `docs/config-file.md` (where the file is read from, precedence,
-  schema, both key tables, paths, every error message, `config check` with a
-  real sample, and "Security: which copy of the file does CI read?" with the
-  target-branch recipe); a commented `docs/examples/prxref.toml`; a
-  `PRXREF_CONFIG_FILE` row in `docs/env-vars.md` and `.env.example`; pointers
-  from the README, the per-forge CI recipes in `docs/forges.md`,
-  `docs/review-rules.md`, `docs/prompt-templates.md` and `docs/evals.md`.
-- **Tests.** Three new files: `tests/test_issue_38_config_file.py` (the
-  layer), `tests/test_issue_38_cli_config.py` (flags, `serve`,
-  `config check`, the record, a byte-for-byte no-file invariant against
-  0.24.0's stdout, the path inputs `config check` opens and the key they
-  are named by, and the symlinked-directory display), and `tests/test_issue_38_config_docs.py` (the doc's key
-  tables against `FILE_KEYS` / `ENV_ONLY_KEYS` both ways, each error-table
-  example fed to `read_config_file`, and the example file loaded).
-  `tests/conftest.py` now also clears `PRXREF_CONFIG_FILE`.
+- **`src/prxref/markers.py`: an effective glyph table.** `SEVERITY_MARKERS`,
+  `OUT_OF_TICKET_MARKER` and `FALLBACK_MARKER` remain the immutable
+  defaults. `configure(overrides)` sets a process-wide effective table, and
+  a later call replaces rather than merges. It is read through
+  `active_severity_markers()`, `out_of_ticket_marker()`, `fallback_marker()`
+  and `marker_slots()`. `parse_overrides()` validates, and `overridden()` is
+  the context manager tests use. `severity_marker`, `marker_for` and
+  `inline_header` read the effective table. The only caller of `configure` is
+  `cli._run_review`, which covers `review`, every `serve` webhook and
+  `eval run`. An autouse fixture in `tests/conftest.py` resets the table
+  around every test.
+- **The two config keys, `src/prxref/config.py`.** `severity_markers` stays
+  the raw string in the loaded config. It is validated there, not parsed in
+  place the way `price_table` is, because two tests that compare the loaded
+  config with `_DEFAULTS` special-case `price_table` by name.
+  `summary_bullet_separator` is kept verbatim: the environment path never
+  strips a value. An environment value that is only whitespace reads as
+  unset, while a TOML `" "` is honoured.
+- **The three summary templates** (`prompts/summary.md`,
+  `orchestrator._FALLBACK_SUMMARY_TEMPLATE`,
+  `formatter._DEFAULT_SUMMARY_TEMPLATE`) draw their counts-line glyphs from
+  `{error_marker}`-style slots. `tests/test_markers.py`'s parity tests now
+  require the slots and forbid a literal glyph.
+- **`orchestrator._render_summary`** fills the per-group slots
+  (`_summary_group_of` sends an unknown severity to `outofscope`, the group
+  its fallback glyph belongs to). Other findings, and the inline accounting
+  a template has no slot for, go above the footer
+  (`_insert_before_footer`: the last attribution, plus any Markdown thematic
+  break directly above it).
+- **`src/prxref/prompt_templates.py`.** `SUMMARY_MARKER_PLACEHOLDERS` and
+  `SUMMARY_OPTIONAL_PLACEHOLDERS` are the two hand-kept additions to the
+  known summary slots, which are otherwise derived from the packaged
+  template. These slots cannot go into the packaged file without changing
+  default output. `uncovered_summary_groups` drives both the load-time
+  warning and the render-time guard.
+- **Docs.** `docs/prompt-templates.md` covers every slot, the validity rule,
+  the drop guard, a table of which slots each of the two summary renderers
+  fills, and a worked example (`docs/examples/summary-by-severity.md`) whose
+  rendered output a test regenerates and compares against the doc. Also
+  updated: `docs/env-vars.md`, `docs/config-file.md`, `.env.example`,
+  `docs/examples/prxref.toml` and the README.
+- **Tests.** `tests/test_issue_59_markers.py` (the key parsing, every error,
+  the table reaching each surface, and golden defaults captured at `aeda4fe`)
+  and `tests/test_issue_59_summary_slots.py` (every slot, the validator, the
+  drop guard, one-pass literal rendering, footer placement).
 
 ## What this release taught
 
-Written down because each one cost real time.
-
-1. **A repository config file is PR-controlled in CI, so the file/environment
-   split is a security boundary, and paths need containment.** A
-   `pull_request` job's workspace is the PR's code, so auto-discovery reads
-   the author's own copy. Hence the environment-only classes and
-   `_contained_path`. Containment has a consequence for CI recipes: paths
-   resolve against the file's directory, so copying the file alone out of
-   the target branch (`git show FETCH_HEAD:.prxref.toml > $RUNNER_TEMP/...`)
-   silently repoints `review_rules = ".prxref/rules.md"` at
-   `$RUNNER_TEMP/.prxref/rules.md`, which does not exist. The docs task
-   found this by reading `_contained_path`, and the release check confirmed
-   it: that copy passed `prxref config check` with `ok`, because
-   `config check` did not yet open the files path keys name. The shipped
-   recipe extracts `.prxref.toml` and `.prxref/` together with `git archive`,
-   and `config check` now opens those files, so the one-file copy fails it
-   (What landed).
-2. **Splitting a flag task from its docs task leaves both red alone.**
-   `tests/test_cli_output.py`, `tests/test_eval_cli.py` and
-   `tests/test_evals_docs.py` pin every parser option and every
-   `--format json` key to the README and `docs/evals.md`. The command-line
-   task could not edit those docs and the docs task could not see its flags,
-   so the merged base measured 9771 passed and 6 failed, all docs pins for
-   `--config`, `--no-config` and `config_file`. Tell the release commit to
-   expect it, or give the flag task README ownership.
-3. **The early `load_config()` in `cli._cmd_review` needs no file.** It reads
-   only `fail_on` and `fallback`, and both are in `ENV_ONLY_KEYS` (gate,
-   local write), so a file could never set either, and it stays file-free.
-   The file is resolved in the same `try` block, so a missing `--config`
-   still exits 2 before any review.
+1. **A dry run never renders the summary.** `_render_summary` runs only
+   when `post_summary_wanted`, which requires `post`. So `--no-post` proves
+   the config, the template loader and the review, but not the comment body,
+   and `--format json` has no summary field. The live check below rendered
+   the dry run's own findings through `_render_summary` with the loaded
+   override. A real forge post (the `standing-up-a-live-forge-instance`
+   skill) is the stronger check if a later release changes the body again.
+2. **`claude-cli` needs `PRXREF_LLM_TIMEOUT` well above the 45 s default.**
+   The first live run lost its one worker chunk to two 45 s timeouts and
+   exited 0 with "Total LLM failure", which is the doctrine working. At 300 s
+   it reviewed both chunks.
+3. **The live review earned its keep.** Reviewing the release's own
+   footer-placement diff, it flagged (below the confidence floor) that
+   matching exactly `---` misses longer thematic breaks. That was fixed
+   before shipping, with tests for `-----`, `***`, `_ _ _` and `- - -`.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -170,38 +119,30 @@ needs the docstring, `.env.example` and `docs/env-vars.md` to describe it,
 and a value that is not an integer needs its own pass through `_coerce_env`,
 `_check_ranges` and, for the file, `_file_value`.
 Current values, counted from `config._DEFAULTS` and
-`config._LEGACY_ENV_ALIASES` at this release: **74** keys (44 file, 30
-environment-only), **1** legacy alias, **75** accepted names, unchanged from
-0.24.0. `PRXREF_CONFIG_FILE` is counted in neither: it is not a key, and
+`config._LEGACY_ENV_ALIASES` at this release: **76** keys (46 file, 30
+environment-only), **1** legacy alias, **77** accepted names; 0.26.0 added
+`severity_markers` and `summary_bullet_separator`. `PRXREF_CONFIG_FILE` is counted in neither: it is not a key, and
 `tests/test_docs_consistency.py` accepts it through `config.CONFIG_FILE_ENV`.
-The most recent new keys are `gitea_token` and `gitea_webhook_secret`
-(0.24.0), plain strings read by the adapter and the webhook verifier
-themselves, with no `cli._run_review` pass-through.
+The most recent new keys are `severity_markers` (0.26.0, read by
+`cli._run_review` into `markers.configure`, no orchestrator kwarg) and
+`summary_bullet_separator` (0.26.0, passed through as the
+`orchestrate_review` kwarg of the same name).
 `tests/conftest.py` derives its env-clearing list from `_DEFAULTS` and clears
 `PRXREF_CONFIG_FILE` by name, so an ambient value never reaches a test.
 
 ## Release shape (follow this next time)
 
-How 0.25.0 was built:
+How 0.26.0 was built:
 
-Three code tasks in two rounds, each in its own worktree with its tests in a
-new file, merged one at a time behind a full gate, then this commit.
-
-1. **First, the config-file layer** in `config.py`, from the pinned 0.24.0
-   commit: 9497 to 9620.
-2. **Then, in parallel on that merge:** the command-line wiring and
-   `prxref config check` (9620 to 9677 passed and 6 failed, the docs pins of
-   lesson 2), and the docs, example file and CI recipes (9620 to 9714).
-   Merged, the base measured 9771 passed and 6 failed.
-3. **Release.** This commit bumps the version, adds the CHANGELOG section,
-   rewrites this file, and reconciles the README, `docs/evals.md`,
-   `docs/config-file.md`, `CLAUDE.md` and the `cli.py` / `config.py`
-   docstrings against the merged command line. It adds no test; the six
-   docs pins turn green, so the suite measures 9777 passed.
-4. **Two fixes found by the release checks.** `config check` now opens the
-   files that path keys name, through a loader it shares with `review` and
-   `eval run`, and a file named through a symlinked directory displays as
-   its short name: 9777 to 9792.
+1. **Seat A, from `aeda4fe`:** the glyph table, both config keys and the
+   template marker slots, with golden strings captured before any edit:
+   9792 to 9872 passed.
+2. **Seat B, on seat A's commit:** the per-group slots, the separator
+   wiring, the validator and the docs: 9872 to 9928.
+3. **Release.** This commit moves other findings and appended accounting
+   above the footer (seat B had placed them under the attribution), fixes
+   the thematic-break match the live review found, bumps the version, and
+   adds the CHANGELOG section and this file: 9928 to 9935.
 
 Cutting the release:
 
@@ -227,9 +168,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9792 passed                                   uv run pytest -q
+9935 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.25.0                                        uv run prxref --version
+0.26.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -237,62 +178,35 @@ updated this file.
 
 ### Live checks
 
-No forge and no model is needed for these; each ran the installed
-`prxref` in a scratch directory.
-
-- **`prxref config check` with a file.** A `.prxref.toml` holding
-  `max_chunks = 4`, `llm_temperature = 0.2` (a bare number),
-  `review_rules = ".prxref/rules.md"` and `post_mode = "summary+inline"`,
-  with `PRXREF_POST_MODE=summary` and a fake `PRXREF_GITHUB_TOKEN` in the
-  environment: exit 0, 76 lines (`config file: .prxref.toml`, 74 settings,
-  `ok`), `max_chunks = 4  (file)`, `llm_temperature = 0.2  (file)`,
-  `post_mode = summary  (env PRXREF_POST_MODE)` (the environment beat the
-  file), `review_rules` printed as its resolved absolute path, and
-  `github_token = <set>  (env PRXREF_GITHUB_TOKEN)`. The fake token's text
-  appeared 0 times in stdout and stderr, in text and in JSON. `--format json`
-  gave one object whose `config_file` was `".prxref.toml"`.
-- **Without a file**, and with `--no-config` beside one: `config file: none`
-  (`null` in JSON), `max_chunks = 8  (default)`. `PRXREF_CONFIG_FILE=off`,
-  `OFF` and `--config off` read none; an empty `PRXREF_CONFIG_FILE` still
-  found `.prxref.toml`.
-- **Errors.** `max_chunk = 4` exited 2 with the `did you mean 'max_chunks'?`
-  hint, and with `--format json` left stdout empty (0 bytes);
-  `fallback = "off"` exited 2 as `(local write)`; `max_chunks = 0` printed
-  `.prxref.toml: max_chunks: must be a finite number greater than 0, got 0`;
-  a missing `--config` exited 2 from both `config check` and `review`, before
-  any network call; `--config x --no-config` was refused by argparse.
-- **The target-branch recipe, run as written** in a scratch repository: a
-  base commit with `.prxref.toml` (`max_chunks = 4`, `review_rules =
-  ".prxref/rules.md"`) and `.prxref/rules.md` (`BASE RULES`), and a PR
-  commit that changed both (`max_chunks = 1`, `confidence_floor = 1.0`,
-  `PR RULES`), cloned onto the PR branch as a CI checkout. `git fetch
-  --depth=1 origin main` and `git archive FETCH_HEAD .prxref.toml .prxref |
-  tar -x` extracted both files with the base's rules text, and
-  `config check --config $RUNNER_TEMP/base/.prxref.toml` gave
-  `max_chunks = 4  (file)`, `confidence_floor = 0.6  (default)` and
-  `review_rules` under `$RUNNER_TEMP/base/.prxref/`: the base won. The
-  control, auto-discovery in the same checkout, read the PR's copy
-  (`max_chunks = 1`, `confidence_floor = 1.0`). The one-file `git show`
-  variant resolved `review_rules` to `$RUNNER_TEMP/.prxref/rules.md`, which
-  was never extracted, and still printed `ok` (lesson 1), before
-  `config check` opened path keys; it now exits 2 naming
-  `.prxref.toml: review_rules`, which the test suite covers. `git archive` with
-  a path missing on the branch exited 128.
-
-End-to-end review: `config check` from a scratch directory whose
-`.prxref.toml` sets `llm_models`, `max_chunks = 2`, `llm_temperature = 0.2`
-and `max_inline_comments = 5` reported all four as `(file)` and the model
-endpoint as `(env ...)`. A `--no-post` review of a 32-file pull request on
-this repository then split the diff into 2 chunks (13 and 19 files), which is
-the file's `max_chunks`, and the record's `config_file` listed those 4 keys
-right after `degraded`. The verdict was Error, because on the fast model both
-chunks were cut off at the default 4096-token output budget, even after a
-retry. That is the known token-budget limit, not a config-file fault.
-`config check` on a file naming a missing `review_rules` exited 2 with an
-empty stdout and named `.prxref.toml: review_rules`; once the file existed,
-it printed `ok`.
+- **A `--no-post` review through the real CLI** (`claude-cli`, `sonnet`,
+  `PRXREF_LLM_TIMEOUT=300`) of the release's footer diff, via `--diff-file`
+  against pull request #58, with `--prompts-dir` holding
+  `docs/examples/summary-by-severity.md` as `summary.md`,
+  `PRXREF_SEVERITY_MARKERS="error=🔴,warning=🟡,outofscope=⚪"` and
+  `PRXREF_SUMMARY_BULLET_SEPARATOR=": "`. Result: exit 0, verdict Approved,
+  2 of 2 chunks reviewed, 1 finding. The record's `prompt_templates` named
+  the override (`chars: 393`).
+- **That run's finding, plus one synthetic spec finding, rendered through
+  `_render_summary`** with the loaded override and the configured table:
+  a `head \`aeda4fe\`` header, the counts line `🔴 0 error · 🟡 1 warning ·
+  🔍 1 spec · ⚪ 0 minor`, `**🟡 Warnings**` and `**🔍 Spec**` sections, and
+  ``- 🟡 `src/prxref/orchestrator.py:3712`: _insert_before_footer …`` with
+  the `: ` separator. Empty sections rendered nothing; the attribution came
+  last.
+- **`prxref config check`:** `PRXREF_SEVERITY_MARKERS=eror=X` exited 2 with
+  `unknown marker name 'eror'; did you mean 'error'?`, a 17-character
+  separator exited 2 with `must be at most 16 characters`, and valid values
+  printed as `(env PRXREF_SEVERITY_MARKERS)` and `(env
+  PRXREF_SUMMARY_BULLET_SEPARATOR)`, the latter with its trailing space.
 
 ## Still open — not part of this release
+
+- **The library formatter has no per-group slots (#59).**
+  `formatter.format_summary` fills the marker slots but not the
+  `*_findings`/`*_section` slots, `{head_sha}` or `{inline_accounting}`;
+  `docs/prompt-templates.md` tabulates the difference. Empty `*_section`
+  slots leave their blank lines behind, which Markdown collapses but a raw
+  view shows.
 
 - **The webhook daemon cannot read the reviewed repository's file.** `serve`
   reads only a file named on its own host (`--config` or

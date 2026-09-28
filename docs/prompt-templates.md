@@ -88,7 +88,29 @@ should carry. See [Example echoes](quality.md#example-echoes).
 
 The whole file is filled: `{verdict}`, `{title}`, `{file_count}`,
 `{error_count}`, `{warning_count}`, `{spec_count}`, `{outofscope_count}`,
-`{spec_note}`, `{ticket_note}`, `{findings}` and `{attribution}`.
+`{spec_note}`, `{ticket_note}`, `{findings}` and `{attribution}`, plus five
+marker slots.
+
+The marker slots hold the finding glyphs, after any
+[`PRXREF_SEVERITY_MARKERS`](env-vars.md#llm--pipeline) override (#59):
+
+| Slot | Default | Glyph for |
+|---|---|---|
+| `{error_marker}` | 🟥 | `error` findings |
+| `{warning_marker}` | 🟧 | `warning` findings |
+| `{spec_marker}` | 🔍 | `spec` findings |
+| `{outofscope_marker}` | ⬜ | `outofscope` findings, and any unrecognised severity |
+| `{out_of_ticket_marker}` | 🟦 | the prefix of a finding outside the ticket |
+
+The packaged counts line is `{error_marker} {error_count} error ·
+{warning_marker} {warning_count} warning · {spec_marker} {spec_count} spec ·
+{outofscope_marker} {outofscope_count} outofscope`. `{out_of_ticket_marker}`
+is not in the packaged template, but it is filled and known, so using it
+draws no unknown-placeholder warning. An override exported by 0.25.0 or earlier,
+which spells the glyphs literally, still loads, but it keeps those literal glyphs
+when the table is overridden; switch its counts line to the slots. The
+findings list and its `Outside the ticket` heading are built from the same
+table, so `{findings}` follows an override on its own.
 
 - Dropping `{attribution}` does not drop the attribution: the model
   attribution line is appended to a summary that lacks it, because every
@@ -97,6 +119,180 @@ The whole file is filled: `{verdict}`, `{title}`, `{file_count}`,
   of it, from your template just as it does from the packaged one.
 - The partial-review banner and the PR-size advisory are added around the
   filled template, not through a placeholder.
+
+#### Optional summary slots (#59)
+
+These are filled on every render but are not in the packaged `summary.md`,
+so the default comment is unchanged. An override may use any of them without
+an unknown-placeholder warning.
+
+| Slot | Value |
+|---|---|
+| `{error_findings}`, `{warning_findings}`, `{spec_findings}`, `{outofscope_findings}` | the bullets of that severity's findings that are not outside the ticket (scope `in` or unjudged), in `{findings}` order; empty when there are none. A finding whose severity is none of the four joins `outofscope`, whose glyph it already carries. |
+| `{outside_ticket_findings}` | the bullets of every finding outside the ticket, whatever its severity; each already carries the `{out_of_ticket_marker}` prefix. Empty when there are none. |
+| `{error_section}`, `{warning_section}`, `{spec_section}`, `{outofscope_section}` | `**<marker> <Label>**`, a blank line, the bullets and a newline, with the labels `Errors`, `Warnings`, `Spec` and `Minor` and the marker from the effective glyph table; empty when the group is. |
+| `{outside_ticket_section}` | the `**🟦 Outside the ticket (N)**` block exactly as `{findings}` carries it, plus a newline; empty when there is no such finding. |
+| `{inline_accounting}` | the `Inline comments: …` line explained below; empty on every render that has none. |
+| `{head_sha}`, `{head_sha_short}` | the PR's head commit and its first 7 characters; both empty when the forge reported none. |
+| `{chunk_count}` | review units run: those reviewed plus those that failed. |
+| `{input_tokens}`, `{output_tokens}` | the run's prompt and completion tokens. |
+
+Every bullet is `- <marker> `file:line`<separator><title>`, where the
+separator is [`PRXREF_SUMMARY_BULLET_SEPARATOR`](env-vars.md#llm--pipeline)
+(default ` — `), in `{findings}` and in the per-group slots alike.
+
+**Inline accounting.** When the inline pass could not post a comment for
+every finding, the summary is re-posted with one `Inline comments: N of M
+findings (…)` line. A template with `{inline_accounting}` gets it there
+alone. A template with `{findings}` and no `{inline_accounting}` gets it at
+the end of `{findings}`, as before. A template with neither gets it appended
+after the body.
+
+**What a summary override must contain.** `{findings}`, or at least one of
+the ten per-group slots (`{error_findings}` … `{outside_ticket_section}`).
+A template with neither is refused (exit `2`):
+
+```text
+PRXREF_PROMPTS_DIR: prompt template 'prompts/summary.md' is missing the required {findings} placeholder; a summary template needs it or at least one per-group slot ({error_findings}, {error_section}, {outofscope_findings}, {outofscope_section}, {outside_ticket_findings}, {outside_ticket_section}, {spec_findings}, {spec_section}, {warning_findings}, {warning_section})
+```
+
+**No finding is dropped.** A template without `{findings}` must place each
+of the five groups (error, warning, spec, outofscope, outside_ticket)
+through its `_findings` or its `_section` slot. A group with neither draws a
+warning when the template loads:
+
+```text
+PRXREF_PROMPTS_DIR: prompt template 'prompts/summary.md' has no {findings} and no slot for the spec finding group(s); those findings are appended under an 'Other findings' heading
+```
+
+and at render time any finding in such a group is added under
+`**Other findings (N)**`, with a warning in the log. That block, followed by
+the inline accounting when the template has neither `{findings}` nor
+`{inline_accounting}`, goes just above the footer: the attribution, together
+with a `---` rule directly over it if there is one. A template that dropped
+`{attribution}` gets them at the end of the body, with the attribution
+appended after them. The partial-review banner always comes last.
+
+Substitution is still one pass: a finding title that contains
+`{error_section}` or any other slot renders literally.
+
+#### Which slots each summary renderer fills
+
+prxref has two summary renderers. The CLI, the webhook daemon and
+`orchestrate_review` render `summary.md` (packaged or overridden); the library
+function `prxref.formatter.format_summary` renders its own table-shaped
+template and reads no override.
+
+| Slot | `summary.md` (CLI / `orchestrate_review`) | `formatter.format_summary` |
+|---|---|---|
+| `{verdict}` | yes | no |
+| `{verdict_banner}` | no; use `{verdict}` | yes |
+| `{title}`, `{file_count}`, `{ticket_note}` | yes | no |
+| `{error_count}`, `{warning_count}`, `{spec_count}`, `{outofscope_count}` | yes | yes |
+| `{spec_note}` | yes | yes, always empty |
+| the five `{…_marker}` slots | yes | yes |
+| `{findings}` | yes | no |
+| `{findings_table}`, `{dropped_section}`, `{active_count}`, `{total_count}` | no | yes |
+| per-group `{…_findings}` and `{…_section}` slots | yes | no |
+| `{inline_accounting}`, `{head_sha}`, `{head_sha_short}` | yes | no |
+| `{chunk_count}`, `{input_tokens}`, `{output_tokens}` | yes | yes |
+| `{elapsed_s}`, `{model}` | no | yes |
+| `{attribution}` | yes | yes |
+
+#### Worked example: one section per severity
+
+[`docs/examples/summary-by-severity.md`](examples/summary-by-severity.md)
+lists findings by severity, with the head commit in the header. It is the
+target template of issue #59 with two additions, `{spec_section}` (and the
+spec count) and `{inline_accounting}`, so it covers every group and loads
+without a warning:
+
+```markdown
+## prxref automated review
+
+PR: {title} · files reviewed: {file_count} · head `{head_sha_short}`
+
+{error_marker} {error_count} error · {warning_marker} {warning_count} warning · {spec_marker} {spec_count} spec · {outofscope_marker} {outofscope_count} minor
+
+{error_section}
+{warning_section}
+{spec_section}
+{outofscope_section}
+{outside_ticket_section}
+{inline_accounting}
+
+---
+
+{attribution}
+```
+
+With
+
+```bash
+PRXREF_PROMPTS_DIR=prompts   # prompts/summary.md is the file above
+PRXREF_SEVERITY_MARKERS="error=🔴,warning=🟡,outofscope=⚪"
+PRXREF_SUMMARY_BULLET_SEPARATOR=": "
+```
+
+a run with one finding of each severity and one outside the ticket posts
+(rendered by prxref, not typed):
+
+```markdown
+## prxref automated review
+
+PR: Add retry budget to the webhook client · files reviewed: 4 · head `3f9c2ab`
+
+🔴 1 error · 🟡 3 warning · 🔍 1 spec · ⚪ 1 minor
+
+**🔴 Errors**
+
+- 🔴 `src/client.py:42`: Retry loop never gives up on 5xx
+
+**🟡 Warnings**
+
+- 🟡 `src/client.py:88`: Backoff ignores Retry-After
+- 🟡 `src/config.py:—`: New key missing from .env.example
+
+**🔍 Spec**
+
+- 🔍 `src/client.py:57`: Budget must reset per delivery (T-12 §2)
+
+**⚪ Minor**
+
+- ⚪ `tests/test_client.py:12`: Test name says 3 retries, asserts 4
+
+**🟦 Outside the ticket (1)**
+
+- 🟦 🟡 `src/log.py:7`: Log line leaks the webhook URL
+
+
+
+---
+
+Reviewed by prxref · model=openai/gpt-5-mini · 20146 tok · 41.8s
+```
+
+The counts include findings outside the ticket, so `3 warning` counts the
+one under `Outside the ticket`. An empty section leaves its blank line
+behind, which Markdown collapses.
+
+The issue's template as written has no `{spec_section}`. It still loads,
+with the spec-group warning shown above, and the same run adds the spec
+finding just above the footer:
+
+```markdown
+**🟦 Outside the ticket (1)**
+
+- 🟦 🟡 `src/log.py:7`: Log line leaks the webhook URL
+
+**Other findings (1)**
+
+- 🔍 `src/client.py:57`: Budget must reset per delivery (T-12 §2)
+
+---
+
+Reviewed by prxref · model=openai/gpt-5-mini · 20146 tok · 41.8s
+```
 
 ## What is checked
 
@@ -125,13 +321,15 @@ These only warn, and the run goes on:
   prompt literally;
 - a second `## Review Context` line, of which only the first splits the
   prompt;
+- a `summary.md` without `{findings}` that gives some finding group no slot,
+  whose findings then land under `Other findings`;
 - a file other than the three templates;
 - a directory that holds none of the three, which reviews with the packaged
   templates.
 
 Nothing checks the reply format a worker or systemic template asks for. The
 only content rule beyond the marker and the placeholders is that
-`summary.md` keeps `{findings}`; no check reads the `"findings"` key of the
+`summary.md` keeps `{findings}` or a per-group slot; no check reads the `"findings"` key of the
 example reply under `## Output Format`. That key matters since 0.17.0: with
 `PRXREF_LLM_PARSE_RETRIES` at `1` or more (the default is `1`), a reply
 that is a JSON object without a `findings` list is sent again, and when the
