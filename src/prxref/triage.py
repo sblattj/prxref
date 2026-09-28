@@ -549,40 +549,79 @@ def trim_hunk_context(hunk: Hunk, context_lines: int) -> Hunk:
     )
 
 
-def build_chunks(
+def est_tokens(f: FileDiff) -> int:
+    """The chunker's token estimate for one file: 40 per changed line.
+
+    ``(lines_added + lines_removed) * 40``. :func:`plan_chunks` places files
+    by it and :class:`ChunkPlan` reports chunk sizes by it, so the reported
+    numbers and the placement can never disagree. It runs above a prompt's
+    real token count on purpose.
+    """
+    return (f.lines_added + f.lines_removed) * 40
+
+
+@dataclass(frozen=True)
+class ChunkPlan:
+    """The outcome of one :func:`plan_chunks` placement pass.
+
+    ``chunks`` is exactly what :func:`build_chunks` returns. ``chunk_tokens``
+    holds each chunk's :func:`est_tokens` total, in chunk order, as the
+    placement pass accumulated it. ``overflow_files`` counts the files the
+    pass placed through its overflow branch: the chunk count had reached
+    ``max_chunks`` and no chunk had room (under ``token_budget`` and under
+    ``max_files_per_chunk``), so the file joined the smallest chunk anyway.
+    ``token_budget`` is the budget the pass placed against.
+    """
+
+    chunks: list[list[FileDiff]]
+    chunk_tokens: tuple[int, ...]
+    overflow_files: int
+    token_budget: int
+
+    @property
+    def chunks_over_budget(self) -> int:
+        """How many chunks' estimates exceed ``token_budget``.
+
+        Overflow placements can push a chunk past it, and so can a single
+        file larger than the budget, which opens a chunk of its own even
+        below ``max_chunks``.
+        """
+        return sum(1 for tokens in self.chunk_tokens if tokens > self.token_budget)
+
+    @property
+    def largest_chunk_tokens(self) -> int:
+        """The largest chunk's estimate; ``0`` when there is no chunk."""
+        return max(self.chunk_tokens, default=0)
+
+
+def plan_chunks(
     files: list[FileDiff],
     max_chunks: int = 8,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     churn_by_path: dict[str, int] | None = None,
     max_files_per_chunk: int = DEFAULT_MAX_FILES_PER_CHUNK,
-) -> list[list[FileDiff]]:
-    """Group files into review chunks (~token_budget tokens, ≤max_chunks).
+) -> ChunkPlan:
+    """Place files into review chunks and report how the placement went.
 
-    Files are placed risk-first (score_file, descending) into the chunk
-    with the highest directory-proximity affinity that still fits the
-    budget and holds fewer than max_files_per_chunk files; otherwise a new
-    chunk opens, and once max_chunks is reached overflow goes to the
-    smallest chunk. Binary files are skipped — there is no reviewable text.
-
-    The file cap shapes placement like the budget does. Once max_chunks is
-    reached and every chunk is at the cap, an overflow file joins the
-    smallest chunk past the cap rather than being dropped: review coverage
-    is the invariant, both caps are preferences.
+    The placement is the one :func:`build_chunks` documents; this is the
+    function that runs it, and ``build_chunks`` returns this plan's
+    ``chunks``. The :class:`ChunkPlan` stats come from the same pass, never
+    from a second simulation, so ``overflow_files`` counts the very
+    placements that produced ``chunks``. A pass with no non-binary file
+    returns an empty plan.
     """
     candidates = [f for f in files if not f.is_binary]
     if not candidates:
-        return []
+        return ChunkPlan(chunks=[], chunk_tokens=(), overflow_files=0, token_budget=token_budget)
 
     churn = churn_by_path or {}
     sorted_files = sorted(
         candidates, key=lambda f: score_file(f, churn.get(f.path, 0)), reverse=True
     )
 
-    def est_tokens(f: FileDiff) -> int:
-        return (f.lines_added + f.lines_removed) * 40
-
     chunks: list[list[FileDiff]] = []
     chunk_tokens: list[int] = []
+    overflow_files = 0
 
     for f in sorted_files:
         ftokens = est_tokens(f)
@@ -609,5 +648,43 @@ def build_chunks(
             smallest = min(range(len(chunks)), key=lambda k: chunk_tokens[k])
             chunks[smallest].append(f)
             chunk_tokens[smallest] += ftokens
+            overflow_files += 1
 
-    return chunks
+    return ChunkPlan(
+        chunks=chunks,
+        chunk_tokens=tuple(chunk_tokens),
+        overflow_files=overflow_files,
+        token_budget=token_budget,
+    )
+
+
+def build_chunks(
+    files: list[FileDiff],
+    max_chunks: int = 8,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    churn_by_path: dict[str, int] | None = None,
+    max_files_per_chunk: int = DEFAULT_MAX_FILES_PER_CHUNK,
+) -> list[list[FileDiff]]:
+    """Group files into review chunks (~token_budget tokens, ≤max_chunks).
+
+    Files are placed risk-first (score_file, descending) into the chunk
+    with the highest directory-proximity affinity that still fits the
+    budget (by :func:`est_tokens`) and holds fewer than max_files_per_chunk
+    files; otherwise a new chunk opens, and once max_chunks is reached
+    overflow goes to the smallest chunk. Binary files are skipped — there
+    is no reviewable text.
+
+    The file cap shapes placement like the budget does. Once max_chunks is
+    reached and every chunk is at the cap, an overflow file joins the
+    smallest chunk past the cap rather than being dropped: review coverage
+    is the invariant, both caps are preferences.
+
+    This returns :func:`plan_chunks`'s ``chunks`` and nothing else; call
+    ``plan_chunks`` for the same chunks plus the stats of the pass that
+    placed them (overflow placements, chunks over the budget, the largest
+    chunk's estimate).
+    """
+    return plan_chunks(
+        files, max_chunks=max_chunks, token_budget=token_budget,
+        churn_by_path=churn_by_path, max_files_per_chunk=max_files_per_chunk,
+    ).chunks
