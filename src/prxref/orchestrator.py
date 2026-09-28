@@ -3414,9 +3414,12 @@ def _render_summary(
     body. A template without ``{findings}`` whose finding group (see
     :func:`prxref.prompt_templates.uncovered_summary_groups`) has neither
     of its slots gets that group's findings appended as ``**Other findings
-    (N)**`` with a WARNING, so no finding is silently dropped. The appends
-    run in this order: other findings, inline accounting, the attribution
-    (only when the body lacks it), then the partial-review banner.
+    (N)**`` with a WARNING, so no finding is silently dropped. Other
+    findings, then appended inline accounting, go above the footer (the
+    attribution and a ``---`` rule directly over it) when the body has one
+    (:func:`_insert_before_footer`); a template that dropped
+    ``{attribution}`` gets them at the end of the body and the attribution
+    after them. The partial-review banner comes last.
     """
     try:
         template = summary_template or reviewer.load_prompt("summary")
@@ -3496,18 +3499,21 @@ def _render_summary(
     })
     uncovered = uncovered_summary_groups(found)
     stray = [f for f in findings_active if _summary_group_of(f) in uncovered]
+    extras: list[str] = []
     if stray:
         logger.warning(
             "summary template has no {findings} and no slot for the %s finding group(s); "
             "appending %d finding(s) under 'Other findings'",
             ", ".join(g for g in uncovered if groups[g]), len(stray),
         )
-        rendered = (
-            f"{rendered}\n\n**Other findings ({len(stray)})**\n\n"
+        extras.append(
+            f"**Other findings ({len(stray)})**\n\n"
             f"{_summary_bullets(stray, separator=sep)}"
         )
     if accounting and not has_findings and "inline_accounting" not in found:
-        rendered = f"{rendered}\n\n{accounting}"
+        extras.append(accounting)
+    if extras:
+        rendered = _insert_before_footer(rendered, "\n\n".join(extras), attribution)
     if attribution not in rendered:
         rendered = f"{rendered}\n\n{attribution}"
     if chunks_failed:
@@ -3701,6 +3707,32 @@ def _failure_reason_lines(
         lines.append(f"- …and {hidden} more failed chunk{plural} (see logs)")
     return lines
 
+
+
+_FOOTER_RULE_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$"
+)
+
+
+def _insert_before_footer(rendered: str, block: str, attribution: str) -> str:
+    """Place ``block`` above the summary's footer, else append it to the body.
+
+    The footer is the last occurrence of ``attribution`` together with a
+    Markdown thematic break (three or more ``-``, ``*`` or ``_`` on their own
+    line) directly above it, if there is one, so text a template
+    leaves out still reads as part of the review and not as a postscript
+    under the attribution. A body without the attribution gets ``block``
+    appended after a blank line.
+    """
+    at = rendered.rfind(attribution)
+    if at < 0:
+        return f"{rendered}\n\n{block}"
+    head = rendered[:at].rstrip()
+    rule = _FOOTER_RULE_RE.search(head)
+    if rule:
+        head = head[:rule.start()].rstrip()
+    cut = len(head)
+    return f"{rendered[:cut]}\n\n{block}\n\n{rendered[cut:].lstrip(chr(10))}"
 
 
 def _summary_bullets(

@@ -165,11 +165,13 @@ warning when the template loads:
 PRXREF_PROMPTS_DIR: prompt template 'prompts/summary.md' has no {findings} and no slot for the spec finding group(s); those findings are appended under an 'Other findings' heading
 ```
 
-and at render time any finding in such a group is appended after the body,
-under `**Other findings (N)**`, with a warning in the log. The appends come
-in this order: other findings, inline accounting (when the template has
-neither `{findings}` nor `{inline_accounting}`), the attribution (when the
-template dropped `{attribution}`), and last the partial-review banner.
+and at render time any finding in such a group is added under
+`**Other findings (N)**`, with a warning in the log. That block, followed by
+the inline accounting when the template has neither `{findings}` nor
+`{inline_accounting}`, goes just above the footer: the attribution, together
+with a `---` rule directly over it if there is one. A template that dropped
+`{attribution}` gets them at the end of the body, with the attribution
+appended after them. The partial-review banner always comes last.
 
 Substitution is still one pass: a finding title that contains
 `{error_section}` or any other slot renders literally.
@@ -275,18 +277,21 @@ one under `Outside the ticket`. An empty section leaves its blank line
 behind, which Markdown collapses.
 
 The issue's template as written has no `{spec_section}`. It still loads,
-with the spec-group warning shown above, and the same run appends the spec
-finding after the body:
+with the spec-group warning shown above, and the same run adds the spec
+finding just above the footer:
 
 ```markdown
----
+**🟦 Outside the ticket (1)**
 
-Reviewed by prxref · model=openai/gpt-5-mini · 20146 tok · 41.8s
-
+- 🟦 🟡 `src/log.py:7`: Log line leaks the webhook URL
 
 **Other findings (1)**
 
 - 🔍 `src/client.py:57`: Budget must reset per delivery (T-12 §2)
+
+---
+
+Reviewed by prxref · model=openai/gpt-5-mini · 20146 tok · 41.8s
 ```
 
 ## What is checked
