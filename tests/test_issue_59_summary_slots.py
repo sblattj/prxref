@@ -235,7 +235,7 @@ class TestInlineAccounting:
         rendered = _render(
             ALL_GROUP_SLOTS_TEMPLATE + "\n{attribution}", inline_accounting=ACCOUNTING,
         )
-        assert rendered.endswith(f"Reviewed by prxref · model=m · 150 tok · 1.2s\n\n{ACCOUNTING}")
+        assert rendered.endswith(f"{ACCOUNTING}\n\nReviewed by prxref · model=m · 150 tok · 1.2s")
 
     def test_the_slot_is_empty_without_accounting(self):
         assert _render("[{inline_accounting}]{findings}").startswith("[]")
@@ -264,7 +264,33 @@ class TestDropGuard:
         assert other == (
             "- 🟧 `b.py:—` — warning problem\n- 🔍 `c.py:5` — spec problem\n"
             "- ⬜ `d.py:7` — outofscope problem\n- 🟦 🟧 `e.py:9` — outside thing\n"
-            "- 🟦 🟥 `g.py:2` — outside error"
+            "- 🟦 🟥 `g.py:2` — outside error\n\n"
+            "Reviewed by prxref · model=m · 150 tok · 1.2s"
+        )
+
+    def test_other_findings_go_above_a_rule_and_the_attribution(self):
+        rendered = _render("{error_findings}\n\n---\n\n{attribution}\n")
+        assert rendered.endswith(
+            "- 🟦 🟥 `g.py:2` — outside error\n\n---\n\n"
+            "Reviewed by prxref · model=m · 150 tok · 1.2s\n"
+        )
+
+    @pytest.mark.parametrize("rule", ["-----", "***", "_ _ _", "- - -"])
+    def test_any_thematic_break_above_the_attribution_stays_whole(self, rule):
+        rendered = _render(f"{{error_findings}}\n\n{rule}\n\n{{attribution}}\n")
+        assert rendered.endswith(
+            f"- 🟦 🟥 `g.py:2` — outside error\n\n{rule}\n\n"
+            "Reviewed by prxref · model=m · 150 tok · 1.2s\n"
+        )
+
+    def test_a_dash_ending_body_line_is_not_taken_for_a_rule(self):
+        rendered = _render("{error_findings}\nsee a---\n{attribution}")
+        assert "see a---\n\n**Other findings (5)**" in rendered
+
+    def test_other_findings_precede_an_appended_attribution(self):
+        rendered = _render("{error_findings}")
+        assert rendered.endswith(
+            "- 🟦 🟥 `g.py:2` — outside error\n\nReviewed by prxref · model=m · 150 tok · 1.2s"
         )
 
     def test_no_warning_when_the_uncovered_group_is_empty(self, caplog):
@@ -506,10 +532,11 @@ class TestWorkedExample:
         )
         with caplog.at_level(logging.WARNING, logger="prxref.orchestrator"):
             rendered = _render_example(issue)
-        tail = rendered.split("---\n\n", 1)[1]
-        assert f"```markdown\n---\n\n{tail}\n```" in DOC_PATH.read_text(encoding="utf-8")
+        tail = rendered[rendered.index("**🟦 Outside the ticket"):]
+        assert f"```markdown\n{tail}```" in DOC_PATH.read_text(encoding="utf-8")
         assert tail.endswith(
             "**Other findings (1)**\n\n- 🔍 `src/client.py:57`: Budget must reset per delivery (T-12 §2)"
+            "\n\n---\n\nReviewed by prxref · model=openai/gpt-5-mini · 20146 tok · 41.8s\n"
         )
         assert len(_warnings(caplog)) == 1
 

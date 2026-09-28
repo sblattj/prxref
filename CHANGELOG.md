@@ -8,6 +8,62 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.26.0] — 2026-09-28
+
+Summary layout you can shape (#59). A `summary.md` override
+(`PRXREF_PROMPTS_DIR`) can now group findings by severity under their own
+headings, show the reviewed head commit, and use its own severity glyphs
+everywhere prxref draws one. Two new config keys (`severity_markers`,
+`summary_bullet_separator`), both settable from `.prxref.toml`, and new
+summary slots. With neither key set and no new slot used, every summary,
+inline comment, formatter output and stdout byte is the same as in 0.25.0.
+
+### Added
+
+- **Per-group summary slots (#59).** `{error_findings}`,
+  `{warning_findings}`, `{spec_findings}` and `{outofscope_findings}` hold the
+  bullet list `{findings}` builds, restricted to that severity and to
+  findings inside the ticket (or with no ticket). `{outside_ticket_findings}`
+  holds the findings outside the ticket. Each is `""` when its group is empty.
+  The `*_section` variants (`{error_section}`, …, `{outside_ticket_section}`)
+  add a bold heading such as `**🟥 Errors**` and render nothing at all for an
+  empty group, so a template never shows an empty heading.
+- **More summary slots (#59).** `{head_sha}` and `{head_sha_short}` (the
+  first 7 characters) name the reviewed head commit. `{inline_accounting}`
+  places the inline-comment accounting line. `{chunk_count}`,
+  `{input_tokens}` and `{output_tokens}` bring the CLI summary level with the
+  library formatter's. `{error_marker}`, `{warning_marker}`, `{spec_marker}`,
+  `{outofscope_marker}` and `{out_of_ticket_marker}` hold the effective
+  glyphs. `docs/prompt-templates.md` has a table of which slots each of the
+  two summary renderers fills, and a worked example
+  (`docs/examples/summary-by-severity.md`).
+- **`PRXREF_SEVERITY_MARKERS` / `severity_markers` (#59).** Comma-separated
+  `name=glyph` pairs, e.g. `error=🔴,warning=🟡,outofscope=⚪`, over the
+  names `error`, `warning`, `spec`, `outofscope` and `out_of_ticket`. Names
+  you leave out keep their default. The table applies to the summary counts
+  line and bullets, the section headings, inline comment headers, the spec
+  note and the library formatter. An unknown name (with a did-you-mean hint),
+  a malformed pair, an empty or whitespace-bearing glyph, a repeated name, or
+  two names that would render the same glyph is a configuration error (exit
+  2).
+- **`PRXREF_SUMMARY_BULLET_SEPARATOR` / `summary_bullet_separator` (#59).**
+  The text between a summary bullet's location and its title, kept verbatim
+  including its spaces. It defaults to ` — `; `: ` gives
+  ``- 🔴 `a.py:3`: title``. At most 16 characters and no newline.
+
+### Changed
+
+- **A `summary.md` override no longer needs `{findings}` (#59).** It is
+  valid with `{findings}` or with at least one per-group slot; a template
+  with neither is still refused (exit 2). When a template without
+  `{findings}` leaves a group without a slot, loading it logs a warning
+  naming the group. At render time that group's findings are added under
+  `**Other findings (N)**` just above the footer, so no finding is dropped.
+- **The packaged summary templates draw glyphs from marker slots (#59)**
+  instead of literals. The rendered text is unchanged. An override that
+  still writes the glyphs literally keeps working, but it will not follow
+  `PRXREF_SEVERITY_MARKERS`.
+
 ## [0.25.0] — 2026-09-28
 
 Repository config file `.prxref.toml` (#38). Most settings can now be
