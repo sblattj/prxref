@@ -51,6 +51,7 @@ Configure secret tokens and match the events accepted by `prxref`:
 | **Bitbucket Cloud** | `PRXREF_BITBUCKET_WEBHOOK_SECRET` | `Pull Request: Created` (`pullrequest:created`), `Pull Request: Updated` (`pullrequest:updated`) | HMAC-SHA256 in `X-Hub-Signature` |
 | **Bitbucket Server / Data Center** | `PRXREF_BITBUCKET_WEBHOOK_SECRET` (the same secret as Cloud) | `pr:opened`, `pr:modified`, `pr:from_ref_updated` (the source branch moved) | HMAC-SHA256 in `X-Hub-Signature`; the same `X-Event-Key` header as Cloud, told apart by event name and payload shape |
 | **GitLab** | `PRXREF_GITLAB_WEBHOOK_SECRET` | `Merge request events` (actions: `open`, `update`) | Secret token in `X-Gitlab-Token` header |
+| **Gitea / Forgejo** | `PRXREF_GITEA_WEBHOOK_SECRET` | `Pull Request` (actions: `opened`, `synchronized`, `reopened`) | Bare-hex HMAC-SHA256 in `X-Forgejo-Signature` or `X-Gitea-Signature`. Webhook type **Forgejo** or **Gitea**, content type `application/json`. See [Gitea / Forgejo](forges.md#6-gitea--forgejo) |
 | **Azure DevOps** | `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` | `git.pullrequest.created`, `git.pullrequest.updated`, on a PR whose status is `active` | No event header and no signature: recognized by `publisherId: "tfs"` in the body, authenticated by the HTTP Basic auth password (the user name is ignored). Subscriptions: see [Azure DevOps service hooks](#azure-devops-service-hooks) |
 
 *Note on Insecure Development Bypass:* Setting `PRXREF_ALLOW_UNSIGNED=1` allows unsigned payloads for local testing. Do not use in production.
@@ -158,7 +159,7 @@ The container includes a built-in curl-free health check using Python standard l
 ```bash
 # A URL prxref cannot review — still exit 0
 $ prxref review --pr-url https://github.com/org/repo/issues/42
-unrecognized PR URL 'https://github.com/org/repo/issues/42' — expected a Bitbucket pull-requests, GitHub pull, or GitLab merge_requests link (bitbucket.org, github.com, gitlab.com, or a self-hosted Bitbucket Data Center, GitHub Enterprise Server, or GitLab host), or an Azure DevOps pullrequest link (dev.azure.com, *.visualstudio.com, or an Azure DevOps Server host); the URL must keep the forge's own path shape.
+unrecognized PR URL 'https://github.com/org/repo/issues/42' — expected a Bitbucket pull-requests, GitHub pull, or GitLab merge_requests link (bitbucket.org, github.com, gitlab.com, or a self-hosted Bitbucket Data Center, GitHub Enterprise Server, or GitLab host), a Gitea or Forgejo pulls link (any host, Codeberg included), or an Azure DevOps pullrequest link (dev.azure.com, *.visualstudio.com, or an Azure DevOps Server host); the URL must keep the forge's own path shape.
 $ echo $?
 0
 

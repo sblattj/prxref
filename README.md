@@ -1,8 +1,8 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps — Cloud and self-hosted.
+Fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and Azure DevOps — Cloud and self-hosted.
 
-prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, and Azure DevOps in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary. Give it the spec or ticket a change implements with `--spec` (a web page, a local file or directory, or a Jira ticket URL) and the review also checks the diff against that spec.
+prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, Gitea/Forgejo (including Codeberg), and Azure DevOps in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary. Give it the spec or ticket a change implements with `--spec` (a web page, a local file or directory, or a Jira ticket URL) and the review also checks the diff against that spec.
 
 ```
                   ┌──────────────────────┐
@@ -128,6 +128,10 @@ prxref review --pr-url https://github.com/owner/repository/pull/108
 # GitLab & Self-Hosted GitLab (including nested subgroups)
 prxref review --pr-url https://gitlab.com/group/subgroup/project/-/merge_requests/15
 
+# Gitea & Forgejo, on any host (including Codeberg)
+prxref review --pr-url https://codeberg.org/owner/repository/pulls/7
+prxref review --pr-url https://git.example.com/owner/repository/pulls/7
+
 # Azure DevOps Services (dev.azure.com or the legacy *.visualstudio.com host)
 prxref review --pr-url https://dev.azure.com/organization/project/_git/repository/pullrequest/42
 prxref review --pr-url https://organization.visualstudio.com/project/_git/repository/pullrequest/42
@@ -136,7 +140,7 @@ prxref review --pr-url https://organization.visualstudio.com/project/_git/reposi
 prxref review --pr-url https://ado.corp.example/tfs/DefaultCollection/project/_git/repository/pullrequest/42
 ```
 
-**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. Azure DevOps Services and Server share one adapter. It has no diff endpoint to call, so it rebuilds the PR's diff from the changed files; a public project can be reviewed with no token at all. Posting to Azure DevOps is not yet verified against a live server, and Azure DevOps Server is untested. See [docs/forges.md](docs/forges.md).
+**Supported hosts.** Every forge is supported on any host. GitHub Enterprise Server and self-hosted GitLab share one adapter each with their SaaS products, which speak the same REST API at a different base URL. Bitbucket does not: Server / Data Center speaks `/rest/api/1.0` against different resource shapes, so it is a separate adapter selected automatically from the URL — `PRXREF_BITBUCKET_SERVER_TOKEN` for Data Center, `PRXREF_BITBUCKET_TOKEN` for Cloud. Gitea and Forgejo share one adapter on any host, Codeberg included, authenticated by `PRXREF_GITEA_TOKEN`; a public repository can be reviewed with no token. Azure DevOps Services and Server share one adapter. It has no diff endpoint to call, so it rebuilds the PR's diff from the changed files; a public project can be reviewed with no token at all. Posting to Azure DevOps is not yet verified against a live server, and Azure DevOps Server is untested. See [docs/forges.md](docs/forges.md).
 
 ## LLM Configuration
 
@@ -183,6 +187,7 @@ Configure the authentication token matching your forge:
 | **GitHub** | `PRXREF_GITHUB_TOKEN` | Personal Access Token (PAT) or GitHub App token |
 | **GitHub Enterprise** | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | Used when host is not `github.com` (falls back to `PRXREF_GITHUB_TOKEN`) |
 | **GitLab** | `PRXREF_GITLAB_TOKEN` | Personal, project, or group access token (`PRIVATE-TOKEN`) |
+| **Gitea / Forgejo** | `PRXREF_GITEA_TOKEN` | Access token: `read:repository` to review, `write:repository` plus `write:issue` to post. With none set, public repositories are read anonymously |
 | **Azure DevOps** | `PRXREF_AZURE_DEVOPS_TOKEN` | Personal access token: Code (Read) to review, Code (Read & write) to post |
 | **Azure DevOps (Pipelines)** | `SYSTEM_ACCESSTOKEN` | The job token, used when no PAT is set; map it into the step with `env: SYSTEM_ACCESSTOKEN: $(System.AccessToken)`. With neither set, public projects are read anonymously |
 
@@ -192,14 +197,14 @@ When the token can read a PR but not comment on it (a fork PR under a plain `pul
 
 ## Webhook Server
 
-Run prxref as a persistent daemon to handle webhook events from GitHub, Bitbucket, GitLab, and Azure DevOps:
+Run prxref as a persistent daemon to handle webhook events from GitHub, Bitbucket, GitLab, Gitea/Forgejo, and Azure DevOps:
 
 ```bash
 prxref serve --port 8080 --host 0.0.0.0
 ```
 
 The service exposes:
-- `POST /webhook` — verifies HMAC or token signatures per forge (for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
+- `POST /webhook` — verifies HMAC or token signatures per forge (for Gitea and Forgejo, the `X-Forgejo-Signature` or `X-Gitea-Signature` HMAC against `PRXREF_GITEA_WEBHOOK_SECRET`, checked before the GitHub-compatible headers those forges also send; for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
 ## Review Against a Spec or Ticket
@@ -343,7 +348,7 @@ With `PRXREF_SUGGESTIONS=on` (off by default), an inline comment can carry repla
 |---|---|
 | GitHub (Cloud and Enterprise) | A `suggestion` block with the **Commit suggestion** button. A multi-line suggestion is posted as a comment on the whole line range. |
 | GitLab (Cloud and self-managed) | A `suggestion:-0+N` block with the **Apply suggestion** button, anchored at the first line it replaces. |
-| Bitbucket Cloud, Bitbucket Server / Data Center, Azure DevOps | A **Suggested change** label naming the line or lines, then a plain code block to copy. No apply button. |
+| Bitbucket Cloud, Bitbucket Server / Data Center, Gitea / Forgejo, Azure DevOps | A **Suggested change** label naming the line or lines, then a plain code block to copy. No apply button. |
 
 An empty suggestion deletes the lines: an empty `suggestion` block on GitHub and GitLab, and the sentence `Suggested change: delete line N` elsewhere. A suggestion replaces at most 20 lines, all inside one diff hunk. A suggestion that fails a check is dropped and the finding posts as a plain comment. The summary's findings list never shows suggestions.
 
@@ -363,7 +368,7 @@ A run reviews every file on a first review, when the forge cannot read its summa
 
 `prxref review` takes:
 
-- `--pr-url URL` — full web URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure DevOps. Required unless `--diff-file` is given.
+- `--pr-url URL` — full web URL of the PR or MR on Bitbucket, GitHub, GitLab, Gitea/Forgejo, or Azure DevOps. Required unless `--diff-file` is given.
 - `--no-post` — dry run; run review analysis and quality passes without writing comments to the forge. In text mode this also prints every active finding's location, title, and body, and every dropped finding with its drop reason.
 - `--max-chunks N` — override maximum diff chunks evaluated (default `8`).
 - `--timeout SECONDS` — override the per-model request deadline (default `45.0`, or `PRXREF_LLM_TIMEOUT` when set); the flag wins for the current invocation only.
@@ -455,7 +460,7 @@ prxref review --diff-file tests/evals/<case>/diff.patch --context-file tests/eva
   3. the date of the head commit (`--head-sha` when given, else the PR's current head).
 
   The history is read once, before the review starts, by one call to the forge's history reader; that network read is not recorded in the run trace. GitHub and Bitbucket Cloud can read it, and GitHub needs a token to (see "Description History (Replay)" in [docs/forges.md](docs/forges.md)). The title is pinned exactly when the description is. A cutoff before the PR was opened shows the original description.
-- **Falling back to the current text.** When the history cannot pin them, the replay keeps the PR's *current* title and description, stamps `"description": "live"`, and logs a WARNING that starts `replay shows the PR's CURRENT title and description` and gives the reason: the forge cannot read description history (Bitbucket Server, GitLab and Azure DevOps cannot), the read failed (no GitHub token, a 401 or 403, a transport error), the history has neither a first review nor a head commit date, or it does not reach the cutoff (it is incomplete, or the version then in force was deleted). None of these stops the review. An explicit `--as-of` on a forge that cannot read history is the exception: it exits `2` naming `--as-of`, because the time you asked for cannot be honoured.
+- **Falling back to the current text.** When the history cannot pin them, the replay keeps the PR's *current* title and description, stamps `"description": "live"`, and logs a WARNING that starts `replay shows the PR's CURRENT title and description` and gives the reason: the forge cannot read description history (Bitbucket Server, GitLab, Gitea/Forgejo and Azure DevOps cannot), the read failed (no GitHub token, a 401 or 403, a transport error), the history has neither a first review nor a head commit date, or it does not reach the cutoff (it is incomplete, or the version then in force was deleted). None of these stops the review. An explicit `--as-of` on a forge that cannot read history is the exception: it exits `2` naming `--as-of`, because the time you asked for cannot be honoured.
 - **`--description-file PATH` and `--no-description`** replace the description with that file's text or with nothing, read no history, and leave the title as it is now. Both also work without `--pr-url`, replacing the description a `git format-patch` file supplies. At most one of `--as-of`, `--description-file` and `--no-description` may be given.
 - **What a pinned replay does not pin.** The PR's current threads still reach the prompt unless you add `--no-threads`; a replay at pinned SHAs without `--no-threads` logs a warning saying so. With `--pr-url`, `--diff-file` and no `--head-sha`, file context is read at the PR's current head, with a warning. The title stays the current one under `--description-file` and `--no-description`, and after a fall back to the current text.
 - **The record.** A replay's JSON record gains a `replay` stamp, always with all seven keys, and the text summary prints it as a `replay:` line. A normal run's record has no `replay` key.
@@ -501,6 +506,6 @@ $ prxref review --pr-url https://github.com/org/repo/pull/1 --max-chunks 0
 configuration error: --max-chunks: must be a finite number greater than 0, got 0
 ```
 
-[Replay mode](#replay-mode-evaluation) keeps the same split. A bad set of replay flags exits `2` naming the flag: neither `--pr-url` nor `--diff-file`, a lone `--base-sha` or `--head-sha`, a SHA that is not full 40- or 64-character hex, two equal SHAs, SHAs without `--pr-url`, an unreadable `--diff-file`, two or more of `--as-of`, `--description-file` and `--no-description`, an `--as-of` that is not an ISO-8601 time with a UTC offset (a date alone included), `--as-of` without `--pr-url`, or an unreadable `--description-file`. These are checked before the PR URL is parsed, so they exit `2` even next to an unrecognized URL; pinned SHAs on a forge that cannot fetch a commit range also exit `2`, once the forge is known, and so does `--as-of` on a forge that cannot read description history (Bitbucket Server, GitLab, Azure DevOps). A description history that cannot be read is not an error: the replay keeps the current title and description and logs a warning. An empty pinned range or a blank diff file is a review error, unlike an empty PR diff: the run ends as an `Error` run, which exits `0` under the default `PRXREF_FAIL_ON=never` and `1` under `error` or `any`.
+[Replay mode](#replay-mode-evaluation) keeps the same split. A bad set of replay flags exits `2` naming the flag: neither `--pr-url` nor `--diff-file`, a lone `--base-sha` or `--head-sha`, a SHA that is not full 40- or 64-character hex, two equal SHAs, SHAs without `--pr-url`, an unreadable `--diff-file`, two or more of `--as-of`, `--description-file` and `--no-description`, an `--as-of` that is not an ISO-8601 time with a UTC offset (a date alone included), `--as-of` without `--pr-url`, or an unreadable `--description-file`. These are checked before the PR URL is parsed, so they exit `2` even next to an unrecognized URL; pinned SHAs on a forge that cannot fetch a commit range also exit `2`, once the forge is known, and so does `--as-of` on a forge that cannot read description history (Bitbucket Server, GitLab, Gitea/Forgejo, Azure DevOps). A description history that cannot be read is not an error: the replay keeps the current title and description and logs a warning. An empty pinned range or a blank diff file is a review error, unlike an empty PR diff: the run ends as an `Error` run, which exits `0` under the default `PRXREF_FAIL_ON=never` and `1` under `error` or `any`.
 
 `PRXREF_FAIL_ON` is the one opt-out of the advisory contract, and its default `never` is the doctrine above, unchanged. Setting it to `error` or `any` turns the reviewer into a merge gate — failing a build on a finding turns a probabilistic reviewer into a gate, and the first false positive teaches a team to bypass the gate, so think hard before you set it. Read the verdict from the posted summary, which also carries a partial-review banner when some chunks did not make it. Do not build a security control on the exit code. The webhook daemon has no exit code and is unaffected.

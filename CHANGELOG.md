@@ -8,6 +8,80 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.24.0] — 2026-09-28
+
+Gitea and Forgejo support (#31). prxref now reviews pull requests on a fifth
+forge: Gitea, Forgejo, Codeberg and gitea.com, on any host, through one new
+adapter, with webhook verification for `prxref serve` and a CI recipe for
+Forgejo Actions and Gitea Actions. Two new config keys, `PRXREF_GITEA_TOKEN`
+and `PRXREF_GITEA_WEBHOOK_SECRET`; no new CLI flag, run-record key or `Forge`
+method. For every other forge, every URL resolution, prompt, forge read,
+forge write, webhook verdict and stdout byte is the same as in 0.23.0.
+
+### Added
+
+- **Gitea / Forgejo reviews (#31).** `prxref review --pr-url
+  <scheme>://<host>[/<sub-path>]/<owner>/<repo>/pulls/<n>` detects the forge
+  on any host, including instances under a sub-path and plain-HTTP ones.
+  `detect_forge` asks it after GitLab and before Azure DevOps, and it refuses
+  the other forges' cloud hosts and any URL with an `api` segment ahead of
+  the owner, so API URLs that resolved to nothing still do. The token comes
+  from `PRXREF_GITEA_TOKEN`, sent as `Authorization: token <t>`; without one,
+  a public repository is read anonymously. Observed scopes:
+  `read:repository` to review, and `write:repository` (inline comments) plus
+  `write:issue` (the summary) to post.
+- **Gitea / Forgejo delivery (#31).** The summary is a comment on the pull
+  request's conversation (`/issues/{n}/comments`) that later runs edit in
+  place. Each run posts its inline findings as one `COMMENT` review, each
+  comment anchored by `new_position` to a line of the new file; the review is
+  accepted or refused whole, so a read-only token is reported as a failed
+  inline post even under `PRXREF_POST_MODE=inline`. Suggestions render as the
+  copyable **Suggested change** block, with no apply button. Re-review
+  pruning deletes a whole review when every comment in it is prxref's own and
+  its body is empty or prxref's; otherwise it deletes single comments through
+  Forgejo's review-comment delete route, and where that route is refused it
+  logs the failure and leaves the comment.
+- **Gitea / Forgejo pinned-range replay (#31).** The API has no compare diff,
+  so `--base-sha`/`--head-sha` rebuild one locally from the compare listing
+  plus whole files at the merge base and the head. Binary files, files over
+  512 KiB and files past the first 300 are reviewed header-only. A rename
+  appears as a delete plus an add, as the compare listing reports it, and a
+  range whose head merged the base branch in is refused. The API exposes no
+  description edit history, so a replay shows the current title and
+  description, and `--as-of` exits 2, as on GitLab.
+- **Gitea / Forgejo webhooks (#31).** `prxref serve` recognizes
+  `X-Forgejo-Event` / `X-Gitea-Event` and verifies the bare-hex HMAC-SHA256
+  in `X-Forgejo-Signature` or `X-Gitea-Signature` against the new
+  `PRXREF_GITEA_WEBHOOK_SECRET`; with the secret unset it rejects every such
+  delivery with 401 unless `PRXREF_ALLOW_UNSIGNED=1`. `pull_request` actions
+  `opened`, `synchronized` and `reopened` are reviewed; everything else is
+  acknowledged with 202 and ignored. Both forges also send GitHub's headers
+  (`X-GitHub-Event`, `X-Hub-Signature-256`) on every delivery, so their own
+  headers are checked first; a delivery carrying only GitHub headers gets
+  exactly the 0.23.0 verdict. Deliveries captured from live Gitea 1.24 and
+  Forgejo 11 instances ship, scrubbed, as test fixtures.
+- **Docs (#31).** A Gitea / Forgejo section in docs/forges.md (URL shapes,
+  token scopes, every endpoint the adapter calls, webhook setup and headers),
+  a Forgejo Actions / Gitea Actions CI recipe (`.forgejo/workflows/` or
+  `.gitea/workflows/`) that builds `--pr-url` from `github.server_url` and
+  `github.repository`, a row in the "When prxref cannot post" matrix, and the
+  two keys in `.env.example`, docs/env-vars.md and the config reference.
+
+### Known limitations
+
+- **Whether Forgejo and Gitea runners render the fallback is unverified.**
+  Their runners set `GITHUB_ACTIONS=true`, so a run that cannot post emits
+  GitHub-style `::warning` annotations and appends to
+  `$GITHUB_STEP_SUMMARY`; whether either forge shows those in its UI has not
+  been checked. No Forgejo or Gitea Actions runner has run the CI recipe.
+- **Single-comment prune on upstream Gitea is unverified.** The
+  review-comment delete route was exercised on Forgejo only. Where it is
+  refused, a partly human review keeps prxref's old comments.
+- **The adapter was exercised live on Forgejo 11 only.** Webhook deliveries
+  were captured from both Gitea 1.24 and Forgejo 11, but the adapter's reads
+  and writes ran against a local Forgejo; Codeberg, gitea.com and upstream
+  Gitea have not run a review.
+
 ## [0.23.0] — 2026-09-27
 
 Graceful degradation when the token cannot post (#48). When prxref can read a
@@ -2350,7 +2424,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/sblattj/prxref/releases/tag/v0.24.0
 [0.23.0]: https://github.com/sblattj/prxref/releases/tag/v0.23.0
 [0.22.0]: https://github.com/sblattj/prxref/releases/tag/v0.22.0
 [0.21.1]: https://github.com/sblattj/prxref/releases/tag/v0.21.1

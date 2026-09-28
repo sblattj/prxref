@@ -82,6 +82,7 @@ The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`,
 | `PRXREF_GITHUB_TOKEN` | *(empty)* | GitHub Personal Access Token or GitHub App token for `github.com`. |
 | `PRXREF_GITHUB_ENTERPRISE_TOKEN` | *(empty)* | GitHub Enterprise token for custom/self-hosted GitHub Enterprise Server domains. Falls back to `PRXREF_GITHUB_TOKEN` if unset. |
 | `PRXREF_GITLAB_TOKEN` | *(empty)* | GitLab Personal, Project, or Group Access Token (sent via `PRIVATE-TOKEN` header) for `gitlab.com` or self-hosted GitLab. |
+| `PRXREF_GITEA_TOKEN` | *(empty)* | Gitea or Forgejo access token for any host, including Codeberg. `read:repository` is enough to review; posting needs `write:repository` (inline comments) and `write:issue` (the summary). When empty, requests are anonymous (public repositories, read-only). See [docs/forges.md](forges.md#gitea--forgejo). |
 | `PRXREF_AZURE_DEVOPS_TOKEN` | *(empty)* | Azure DevOps personal access token, sent as Basic `:PAT`: **Code (Read)** to review, **Code (Read & write)** to post. When empty, the Pipelines `SYSTEM_ACCESSTOKEN` is sent as a Bearer token; when both are empty, requests are anonymous (public projects, read-only). |
 
 ### Spec Sources / Jira
@@ -99,6 +100,7 @@ The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`,
 | `PRXREF_BITBUCKET_WEBHOOK_SECRET` | *(empty)* | HMAC secret for Bitbucket webhooks, Cloud and Server alike (verified against `X-Hub-Signature` via HMAC-SHA256). |
 | `PRXREF_GITHUB_WEBHOOK_SECRET` | *(empty)* | HMAC secret for GitHub webhooks (verified against `X-Hub-Signature-256` via HMAC-SHA256). |
 | `PRXREF_GITLAB_WEBHOOK_SECRET` | *(empty)* | Secret token for GitLab webhooks (verified against `X-Gitlab-Token`). |
+| `PRXREF_GITEA_WEBHOOK_SECRET` | *(empty)* | HMAC secret for Gitea and Forgejo webhooks (verified against `X-Forgejo-Signature` or `X-Gitea-Signature`, a bare-hex HMAC-SHA256 of the body). |
 | `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` | *(empty)* | Secret for Azure DevOps service hooks, compared in constant time with the **password** of the hook's Basic authentication (the user name is ignored). Empty rejects Azure DevOps webhooks with `401` unless `PRXREF_ALLOW_UNSIGNED` is `1`. |
 | `PRXREF_ALLOW_UNSIGNED` | `False` | Accepts webhooks without valid HMAC/token signatures (dev/testing only; logs a warning). Must be the literal string `1` — `true`/`yes`/`on` deliberately do **not** enable the bypass, so it cannot be switched on by a stray truthy value. |
 
@@ -171,11 +173,11 @@ The two knobs above, plus the four opt-in levers added in 0.15.0 (`PRXREF_MAX_WA
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **72** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **74** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
 - **LLM / Pipeline (54):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_LLM_SEED`, `PRXREF_LLM_CLI_PATH`, `PRXREF_LLM_CLI_CONCURRENCY`, `PRXREF_LLM_PARSE_RETRIES`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`, `PRXREF_MAX_FINDINGS_PER_RULE`, `PRXREF_GROUP_FINDINGS`, `PRXREF_DEDUP_SIMILARITY`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_FAIL_ON`, `PRXREF_DRY_RUN`, `PRXREF_TRACE_FILE`, `PRXREF_TRACE_DIR`, `PRXREF_POST_MODE`, `PRXREF_POST_VERDICT`, `PRXREF_PRICE_TABLE`, `PRXREF_POST_COST`, `PRXREF_SIZE_WARN_LINES`, `PRXREF_SIZE_WARN_FILES`, `PRXREF_SIZE_IGNORE_GLOBS`, `PRXREF_SPEC_SOURCES`, `PRXREF_SPEC_MAX_CHARS`, `PRXREF_SPEC_DIGEST_TOKENS`, `PRXREF_REVIEW_RULES`, `PRXREF_REVIEW_RULES_MAX_CHARS`, `PRXREF_SCOPED_RULES`, `PRXREF_SCOPED_RULES_MAX_CHARS`, `PRXREF_PROMPTS_DIR`, `PRXREF_TICKET_CONTEXT_FILE`, `PRXREF_TICKET_CONTEXT_MAX_CHARS`, `PRXREF_REPO_CONTEXT`, `PRXREF_REPO_CONTEXT_MAX_CHARS`, `PRXREF_CONTEXT_FOLLOWUP`, `PRXREF_SUGGESTIONS`, `PRXREF_INCREMENTAL`, `PRXREF_FALLBACK`, `PRXREF_CONTEXT_CONTRACT_GLOBS`, `PRXREF_CONTEXT_EXCLUDE_GLOBS`
-- **Per-Forge Auth (10):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_BITBUCKET_SERVER_TOKEN`, `PRXREF_BITBUCKET_SERVER_USER`, `PRXREF_BITBUCKET_SERVER_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`, `PRXREF_AZURE_DEVOPS_TOKEN`
+- **Per-Forge Auth (11):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_BITBUCKET_SERVER_TOKEN`, `PRXREF_BITBUCKET_SERVER_USER`, `PRXREF_BITBUCKET_SERVER_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`, `PRXREF_GITEA_TOKEN`, `PRXREF_AZURE_DEVOPS_TOKEN`
 - **Spec Sources / Jira (3):** `PRXREF_JIRA_BASE_URL`, `PRXREF_JIRA_EMAIL`, `PRXREF_JIRA_API_TOKEN`
-- **Webhooks (5):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
+- **Webhooks (6):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_GITEA_WEBHOOK_SECRET`, `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(72 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 73 accepted variable names.)*
+*(74 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 75 accepted variable names.)*

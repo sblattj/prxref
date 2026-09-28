@@ -1,111 +1,128 @@
-# HANDOFF — v0.23.0 shipped: graceful degradation when the token cannot post (#48)
+# HANDOFF — v0.24.0 shipped: Gitea and Forgejo support (#31)
 
-**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-27 · **Supersedes** the
-v0.22.0 handoff.
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-28 · **Supersedes** the
+v0.23.0 handoff.
 
-0.23.0 is one feature. #48: when the token can read a pull request but not
-comment on it (a fork PR under a plain `pull_request` workflow, or a
-read-only pipeline token), the review still reaches the author through the
-CI job: GitHub annotations and the job summary, Azure Pipelines logging
-commands, a GitLab Code Quality report, or the log. The new key
-`PRXREF_FALLBACK` is `auto` by default but acts only when a post fails, so
-when every post succeeds (or nothing is posted) every prompt, forge read,
-forge write, stdout byte and run-record value is the same as in 0.22.0,
-apart from the one new run-record key `degraded`, which is `null`. One new
-config key, one new module (`ci_fallback`), one new run-record and
-`--format json` key, and no new CLI flag or `Forge` method. The user-facing
-account is the `[0.23.0]` section of `CHANGELOG.md`. This file is for
-whoever cuts the next release. The v0.22.0 handoff is in git history.
+0.24.0 is one feature. #31: prxref reviews pull requests on Gitea and
+Forgejo (Codeberg, gitea.com and self-hosted instances, optionally under a
+sub-path), and `prxref serve` verifies their webhooks. That makes five
+forges served by six adapters (Bitbucket Cloud and Bitbucket Server are
+separate adapters). Two new config keys (`PRXREF_GITEA_TOKEN`,
+`PRXREF_GITEA_WEBHOOK_SECRET`), one new adapter module (`forges/gitea.py`),
+and no new CLI flag, run-record key or `Forge` method. For every other
+forge, every URL resolution, prompt, forge read, forge write, webhook
+verdict, stdout byte and run-record value is the same as in 0.23.0. The
+user-facing account is the `[0.24.0]` section of `CHANGELOG.md`. This file
+is for whoever cuts the next release. The v0.23.0 handoff is in git history.
 
 ## What landed
 
-- **The key.** `PRXREF_FALLBACK` (`auto`|`off`, default `auto`) is a
-  `_CHOICE_KEYS` key. It never reaches the orchestrator:
-  `cli._cmd_review` reads it from the same `load_config()` call as
-  `fail_on`, and after the review returns, and before either output format
-  prints, calls `cli._emit_fallback` when it is `auto`. It is not an
-  `orchestrate_review` keyword and is left out of `evals.RUN_CONFIG_KEYS`.
-- **`src/prxref/ci_fallback.py`, pure renderers.** Nothing in it reads the
-  environment or writes a file. `github_annotations` renders `::error`,
-  `::warning` or `::notice` lines with `file`, `line` and `title`
-  properties, errors first, then warnings, then the rest, capped at
-  `GITHUB_ANNOTATION_CAP` (50). `azure_log_issues` renders
-  `##vso[task.logissue type=error|warning;...]` lines with no cap.
-  `gitlab_codequality` renders Code Quality entries: `check_name` is the
-  finding's rule or `prxref`, `fingerprint` is the SHA-256 of `[file, line,
-  title]` so it is stable across runs, and severity maps to `major`, `minor`
-  or `info`. `step_summary_markdown` prefixes the summary with one quoted
-  line saying it could not be posted. `GITLAB_REPORT_FILE` is
-  `gl-code-quality-report.json`, and `DEGRADED_SUMMARY_KEY` names the result
-  key that carries the summary markdown.
-- **`detect_ci(environ)`** returns `github` when `GITHUB_ACTIONS` is `true`,
-  `azure` when `TF_BUILD` is `true`, `gitlab` when `GITLAB_CI` is `true`
-  (each case-insensitive), `bitbucket` when `BITBUCKET_BUILD_NUMBER` is
-  non-empty, else `None`; the first match wins. The GitHub branch also reads
-  `GITHUB_STEP_SUMMARY` for the job-summary path.
-- **The emission, `cli._emit_fallback`,** does nothing unless the result's
-  `degraded` is a dict, and emits only the active findings. Under GitHub
-  Actions it prints the annotations and appends the summary to
-  `$GITHUB_STEP_SUMMARY` when that is set; under Azure Pipelines it prints
-  the logging commands; under GitLab CI it writes the report in the working
-  directory, replacing any existing file; under Bitbucket Pipelines and no
-  CI it logs the summary at WARNING. Under `--format json` the stdout lines
-  are skipped so stdout stays one JSON document. Every CI then logs one
-  WARNING naming the cause. It never raises: a failed write is logged and
-  left out of `fallback`, and any other failure is logged and stops the
-  emission. The exit code is `_fail_on_exit`'s, untouched. The webhook
-  daemon never calls it, so it records `degraded` but never emits.
-- **The run-record key.** `degraded`, after `incremental` in the record and
-  in `--format json`: `null` when no post failed, else `{"cause", "failed",
-  "fallback", "annotations"}`. The orchestrator fills `cause` and `failed`:
-  `orchestrator.post_failure_cause` classifies each failed post as
-  `permission` when the exception's `response.status_code` is in
-  `PERMISSION_STATUSES` (401, 403), else `error`, and `_degraded_record`
-  lists each failed post kind once (a failed summary re-post counts as
-  `summary`) and says `permission` when any failure was. The main exit,
-  `_summary_only_run` and `_error_run` stamp it through `_with_degraded`,
-  which also sets `DEGRADED_SUMMARY_KEY` to the summary the post would have
-  carried (rendered fresh for `PRXREF_POST_MODE=inline`); that key never
-  reaches `--format json`. The CLI fills `fallback` and `annotations` as it
-  emits.
-- **The conftest clears the CI variables.** The autouse env fixture in
-  `tests/conftest.py` now also deletes `GITHUB_ACTIONS`,
-  `GITHUB_STEP_SUMMARY`, `TF_BUILD`, `GITLAB_CI` and
-  `BITBUCKET_BUILD_NUMBER` (`CI_ENV_NAMES`), because the suite itself runs
-  under GitHub Actions (lesson 1).
-- **Tests.** One new file, `tests/test_issue_48_degradation.py`, which also
-  pins sha256 goldens of the text, `-v` and JSON stdout and the posted
-  summaries of a successful review, measured on the 0.22.0 CLI. Existing
-  pins moved only where they list record or JSON keys.
-- **Docs.** `docs/forges.md` gains the "When prxref cannot post" matrix,
-  and `docs/env-vars.md`, `.env.example` and the `config.py` docstring
-  describe the key.
+- **The adapter, `src/prxref/forges/gitea.py` (`ForgeImpl`, name `gitea`).**
+  It speaks the `/api/v1` REST API Gitea and Forgejo share, at
+  `<scheme>://<host>[/<sub-path>]/api/v1/repos/<owner>/<repo>`; the scheme
+  and sub-path are kept from the PR URL, so plain-HTTP instances work. The
+  token is `PRXREF_GITEA_TOKEN`, sent as `Authorization: token <t>`, and
+  every read works anonymously on a public repository. Methods and
+  endpoints:
+  - `get_pr`: `GET /pulls/{n}`; `get_diff`: `GET /pulls/{n}.diff`, as-is.
+  - `post_summary` / `get_summary`: `GET /issues/{n}/comments` (unpaged, one
+    read) to find `SUMMARY_MARKER`, then `PATCH /issues/comments/{id}` or
+    `POST /issues/{n}/comments`. A failed lookup raises `FeedReadError`, so
+    it never falls through to a second summary.
+  - `post_inline_comments`: one `POST /pulls/{n}/reviews` with event
+    `COMMENT`, the head SHA as `commit_id`, and each comment's
+    `new_position` (a new-file line; `old_position` for the old side). The
+    server does not validate lines, so the review is accepted or refused
+    whole, and a refusal is logged and raised.
+  - `list_threads`: `GET /pulls/{n}/reviews` paged at 50 until an empty
+    page (at most 50 pages), then each review's `/comments`.
+  - `prune_inline_comments`: reads every review first, then deletes a
+    wholly attributed review (empty or attributed body) with
+    `DELETE /pulls/{n}/reviews/{id}`, else each attributed comment with
+    `DELETE /pulls/{n}/reviews/{id}/comments/{c}`. Best-effort, never
+    raises.
+  - `get_compare_diff`: `GET /compare/{base}...{head}`, then both sides of
+    each file through `GET /raw/{path}?ref=`, diffed locally with the
+    `_render_hunks` it imports from `azure_devops.py`. The merge base is
+    the one parent of the listed commits that is not itself listed; any
+    other count raises `ValueError`. Past 300 files, over 512 KiB, or binary
+    renders header-only.
+  - `get_file_content`: `GET /raw/{path}?ref=`, `None` on any failure, over
+    512 KiB, or a NUL byte. `list_paths`: `GET /git/trees/{sha}` with
+    `recursive=true`, 1000 a page, while `truncated`, up to
+    `MAX_LISTING_PAGES` (20).
+  - No `get_pr_history`: the API has no description edit history, so
+    `--as-of` exits 2 here, as on GitLab. `suggestion_style` is `gitea`,
+    which `formatter.format_suggestion_block` renders as the copyable
+    fallback block.
+- **Detection.** `forges/base.py` `detect_forge` asks bitbucket,
+  bitbucket_server, github, gitlab, gitea, azure_devops, in that order, and
+  `config.make_forge` maps `gitea` to the adapter. The Gitea pattern,
+  `.../<owner>/<repo>/pulls/<n>` on any host, is disjoint from every other
+  forge's path shape, but because it accepts any host, `parse_pr_url`
+  refuses `_OTHER_FORGE_HOSTS` (github.com, api.github.com, gitlab.com,
+  bitbucket.org, api.bitbucket.org, dev.azure.com) and any `api` segment
+  ahead of the owner (lesson 3).
+- **Webhooks.** `webhooks.verify_signature` checks `X-Forgejo-Event` /
+  `X-Gitea-Event` (`_GITEA_EVENT_HEADERS`) before `X-GitHub-Event` and every
+  other forge (lesson 1). `_verify_gitea` compares the bare-hex HMAC-SHA256
+  in `X-Forgejo-Signature` or `X-Gitea-Signature` with
+  `PRXREF_GITEA_WEBHOOK_SECRET` in constant time; an unset secret or
+  missing signature is a 401 unless `PRXREF_ALLOW_UNSIGNED=1`. Only event
+  `pull_request` with action `opened`, `synchronized` or `reopened` is
+  reviewed (202 with `queued: false` otherwise), and the PR URL is the
+  payload's `pull_request.html_url`.
+- **Config.** `gitea_token` and `gitea_webhook_secret` in
+  `config._DEFAULTS`, with the docstring, `.env.example` and
+  `docs/env-vars.md`.
+- **Tests and fixtures.** Two new files, `tests/test_forge_gitea.py` and
+  `tests/test_issue_31_gitea_webhook.py`, and a new fixtures directory,
+  `tests/fixtures/gitea/`: 12 webhook deliveries (opened, synchronized,
+  reopened, closed, push, issue comment) captured from Gitea 1.24.7 and
+  Forgejo 11.0.16, with `html_url` rewritten to `git.example.com`,
+  signatures blanked and delivery ids zeroed; the tests re-sign the body.
+  `tests/test_forge_compare_contract.py` gains a gitea case, and
+  `tests/test_config.py`'s unknown-forge test now uses `sourcehut`, since
+  `gitea` is known.
+- **Docs.** `docs/forges.md` gains a Gitea / Forgejo section (URL shapes,
+  every endpoint above, token scopes, webhook setup and observed headers, a
+  Forgejo Actions / Gitea Actions CI recipe) and a row in the "When prxref
+  cannot post" matrix; README, `docs/deploy.md`, `CLAUDE.md`, the
+  `pyproject.toml` description and the CLI help name the fifth forge.
 
 ## What this release taught
 
 Written down because each one cost real time.
 
-1. **The test suite runs under GitHub Actions, so a feature keyed on CI
-   environment variables fires inside the project's own CI run.**
-   `.github/workflows/ci.yml` runs `uv run pytest -q` on a runner where
-   `GITHUB_ACTIONS=true` and `GITHUB_STEP_SUMMARY` names the job's real
-   summary file. Any CLI test with a failing post would have printed
-   annotations into the job log and appended to that summary, and passed or
-   failed differently than on a laptop. The fixtures now clear those
-   variables (`CI_ENV_NAMES` in `tests/conftest.py`), and each test sets the
-   ones it needs.
-2. **A forge adapter that swallows per-comment 4xx errors hides a permission
-   failure from any caller that looks for exceptions.** Only GitHub's
-   `post_inline_comments` raises on a 401 or 403. Bitbucket Cloud,
-   Bitbucket Server, GitLab and Azure DevOps skip each refused comment and
-   return a count, so `PRXREF_POST_MODE=inline` on those forges records no
-   degradation. The default mode is covered only because the summary post
-   raises first. It is a documented gap (Still open), not a fix.
-3. **A record key pinned by numeric offset escapes a name-based search.**
-   `tests/test_cli_scoped_rules.py` asserts `keys.index("sampling") ==
-   keys.index("scoped_rules") + 8` (it was `+ 7`), so a grep for
-   `incremental` to find every pin of the record's key list misses it. The
-   full suite found it.
+1. **Gitea and Forgejo send GitHub's own headers, so a compatible forge's
+   native header must be checked before the GitHub one.** Every delivery
+   captured live from Gitea 1.24.7 and Forgejo 11.0.16 carried
+   `X-GitHub-Event` and `X-Hub-Signature-256` (`sha256=`) next to their own
+   `X-Gitea-*` / `X-Forgejo-*` families. At 0.23.0's dispatch order those
+   deliveries went to `_verify_github`: they needed the GitHub secret, and
+   a push (`synchronized`, not GitHub's `synchronize`) was ignored. With the
+   Gitea check moved below the GitHub one, 50 of the webhook file's 76 tests
+   go red. The captures ship as `tests/fixtures/gitea/`.
+2. **Four API facts written from memory were wrong, and only a live
+   instance showed it.** The plan assumed (a) a paged issue-comment list:
+   it is unpaged and ignores `limit` and `page`, so paging it would burn
+   the page budget and refuse to post; (b) a compare `.diff`: the API route
+   answered 500, and the web route 404 on a private repository, so the
+   compare diff is rebuilt locally; (c) a rename reported as `renamed` with
+   `previous_filename`: the compare listing reports it as added plus
+   removed; (d) any page size: the server clamps a page to
+   `MAX_RESPONSE_ITEMS` (50), so a larger page size would read a clamped
+   page as the last. All four came from running the adapter against a local
+   Forgejo 11.0.16.
+3. **A new forge whose URL pattern accepts any host can capture URLs that
+   used to resolve to nothing.** Without a guard,
+   `https://api.github.com/repos/o/r/pulls/1` and a GitHub Enterprise Server
+   `/api/v3/repos/...` URL, which 0.23.0 resolved to `None`, match
+   `.../<owner>/<repo>/pulls/<n>` and would have gone to the Gitea adapter.
+   The parser refuses the other forges' cloud hosts and an `api` segment
+   ahead of the owner. `test_parse_pr_url_rejects_non_gitea_urls` pins the
+   API URLs, and `test_gitea_parser_refuses_every_other_forges_urls` pins
+   every other forge's page URLs, in `tests/test_forge_gitea.py`.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -132,14 +149,20 @@ key. A new value for an existing key, as `off` for `PRXREF_LLM_SEED` in
 `.env.example` and `docs/env-vars.md` to describe it, and a value that is
 not an integer needs its own pass through `_coerce_env` and `_check_ranges`.
 Current values, counted from `config._DEFAULTS` and
-`config._LEGACY_ENV_ALIASES` at this release: **72** keys, **1** legacy
-alias, **73** accepted names, up from 71 and 72 in 0.22.0. The most recent
-new key is `fallback` (`PRXREF_FALLBACK`), added in 0.23.0. It took the
-`_CHOICE_KEYS` table, the docstring, `.env.example`, both counts and the
-LLM / Pipeline heading of `docs/env-vars.md`, but no `cli._run_review`
-pass-through, because it is not an `orchestrate_review` keyword:
-`cli._cmd_review` reads it itself. It is left out of
-`evals.RUN_CONFIG_KEYS`. The key before it, `incremental`
+`config._LEGACY_ENV_ALIASES` at this release: **74** keys, **1** legacy
+alias, **75** accepted names, up from 72 and 73 in 0.23.0. The most recent
+new keys are `gitea_token` (`PRXREF_GITEA_TOKEN`) and
+`gitea_webhook_secret` (`PRXREF_GITEA_WEBHOOK_SECRET`), added in 0.24.0.
+They are plain strings, so they took no type table, only `_DEFAULTS`, the
+docstring, `.env.example`, both counts, the Per-Forge Authentication and
+Webhook Receiver tables of `docs/env-vars.md` and its per-group counts, and no `cli._run_review` pass-through: the
+adapter and `webhooks._verify_gitea` read the environment themselves, as
+the other forges' credentials do. Neither is in `evals.RUN_CONFIG_KEYS`.
+`tests/conftest.py` derives its env-clearing list from `_DEFAULTS`, so the
+suite clears both for free. Before them, `fallback` (`PRXREF_FALLBACK`,
+0.23.0) took the `_CHOICE_KEYS` table, the docstring, `.env.example`, both
+counts and the LLM / Pipeline heading, but no pass-through, because
+`cli._cmd_review` reads it itself. The key before it, `incremental`
 (`PRXREF_INCREMENTAL`, 0.22.0), took every surface above, the pass-through
 included, and is left out of `evals.RUN_CONFIG_KEYS` too, which a test
 pins. `suggestions` (`PRXREF_SUGGESTIONS`, 0.21.0) took the same surfaces.
@@ -152,19 +175,21 @@ sources for every default; it now keeps an explicit set of supplied keys.
 
 ## Release shape (follow this next time)
 
-How 0.23.0 was built:
+How 0.24.0 was built:
 
-1. **One code task in its own worktree from a pinned commit, its tests in
-   a new file, merged behind a full gate.** It added the key, `ci_fallback`,
-   the orchestrator's failure classification and the CLI's emission, and
-   pinned sha256 goldens of a successful review's output measured on the
-   0.22.0 CLI before any edit. `uv run pytest` rose from 9222 to 9280 (55
-   new tests, plus 3 from `tests/test_docs_consistency.py` parametrizing
-   over the new key), and `uv run ruff check src tests` stayed clean.
-2. **No live checks** (see below).
-3. **Release.** This commit bumps the version, adds the CHANGELOG section,
-   rewrites this file and tightens one README sentence; it adds no test,
-   so the count stays at 9280.
+1. **Two parallel code tasks, each in its own worktree from the same
+   pinned 0.23.0 commit, each with its tests in a new file, merged one at a
+   time behind a full gate.** One built the adapter and its detection; the
+   other built the webhook verification, the config keys and the docs. Both
+   ran their own live checks against local Gitea and Forgejo containers
+   (below). From 9280 at the 0.23.0 base, the webhook task alone measured
+   9362 and the adapter task alone 9415; merged, the suite measured 9497
+   (82 + 135 new tests), and `uv run ruff check src tests` stayed clean.
+2. **Release.** This commit bumps the version, adds the CHANGELOG section,
+   rewrites this file, and brings the forge lists in README, `CLAUDE.md`,
+   `docs/forges.md`, `docs/deploy.md`, `pyproject.toml` and the CLI help and
+   unrecognized-URL message up to five forges; it adds no test, so the count
+   stays at 9497.
 
 Cutting the release:
 
@@ -190,9 +215,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9280 passed                                   uv run pytest -q
+9497 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.23.0                                        uv run prxref --version
+0.24.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -200,23 +225,60 @@ updated this file.
 
 ### Live checks
 
-None. The feature only acts when a post fails, and verification never
-writes to a forge, so a refused post was exercised only through mocked
-HTTP 401 and 403 responses in the test suite. The GitHub annotations, the
-job summary, the Azure Pipelines logging commands and the GitLab Code
-Quality report follow each CI's documented syntax, and are checked against
-that syntax in the suite, but none of them has run on a live runner yet.
+- **The adapter's methods ran against a local Forgejo 11.0.16.** Through
+  `detect_forge` and `make_forge`: with no token, `get_pr`, `get_diff`,
+  `get_compare_diff` (three-dot confirmed: a base-only edit was absent),
+  the empty range, `get_file_content` and `list_paths`; with a token,
+  `post_summary` twice (one comment, updated in place), `get_summary`,
+  `post_inline_comments` (`new_position` 21 read back as position 21),
+  `list_threads`, a path-scoped prune (the single-comment route) and a full
+  prune (the whole-review route), after which a human comment survived.
+- **Webhook deliveries were captured from Gitea 1.24.7 and Forgejo
+  11.0.16**: opened, pushed, closed, reopened and commented. With the new
+  code, the right secret reviewed opened, synchronized and reopened and
+  ignored the rest, and a wrong secret gave `gitea signature mismatch` on
+  all 25 captured deliveries. Token scopes were measured on both
+  instances: `read:repository` reads the diff but is refused both posts,
+  `write:repository` posts the review, and `write:issue` posts the summary
+  comment.
+- **No runner was exercised.** Neither Forgejo Actions nor Gitea Actions
+  has run the CI recipe.
+
+End-to-end review: `prxref review` with posting ran twice against a pull
+request on a local Forgejo 11 instance, with a small hosted model. The first
+run posted one summary and 3 inline comments, all on the planted defects.
+After a push, the second run updated the same summary in place (still one
+summary comment), pruned the 3 stale inline comments and posted 4 new ones,
+one of them on the newly changed file. All 7 comments carry model attribution,
+and both run records say `posted: true`, `degraded: null`.
 
 ## Still open — not part of this release
 
+- **Upstream Gitea's single-comment delete is unverified.** Pruning a review
+  that also holds a human's comment uses
+  `DELETE /pulls/{n}/reviews/{id}/comments/{c}`, which ran live on Forgejo
+  only. If upstream Gitea refuses it, the prune logs a WARNING and prxref's
+  old comment stays. Check it against a Gitea instance.
+- **Whether Forgejo and Gitea runners render the fallback is unverified.**
+  Their runners set `GITHUB_ACTIONS=true`, so a run that cannot post prints
+  GitHub `::warning` annotations and appends to `$GITHUB_STEP_SUMMARY`;
+  whether either UI shows them is unknown, though the lines are always in
+  the job log.
+- **Gitea Actions and Forgejo Actions have not run the CI recipe live.**
+  The recipe in `docs/forges.md` follows the GitHub Actions syntax both
+  document, including the `synchronize` event name; the first live run is
+  its proof. The adapter itself has not reviewed a pull request on
+  Codeberg, gitea.com or upstream Gitea.
 - **With `PRXREF_POST_MODE=inline`, a read-only token is detected on GitHub
-  only.** Bitbucket Cloud, Bitbucket Server, GitLab and Azure DevOps skip a
-  refused inline comment without raising (lesson 2), so an inline-only run
-  on those forges records no degradation and emits nothing. The default
-  post mode is covered, because the summary post fails first and the
-  inline comments wait on it. Closing it means those adapters must report
-  a 401 or 403 on an inline comment, which changes what `post_inline_comments`
-  returns or raises on four forges.
+  and Gitea / Forgejo only.** Bitbucket Cloud, Bitbucket Server, GitLab and
+  Azure DevOps skip a refused inline comment without raising (lesson 2 of
+  the v0.23.0 handoff), so an inline-only run on those forges records no
+  degradation and emits nothing. Gitea / Forgejo post every inline comment
+  in one review that is accepted or refused whole, and a refusal raises.
+  The default post mode is covered everywhere, because the summary post
+  fails first and the inline comments wait on it. Closing it means those
+  adapters must report a 401 or 403 on an inline comment, which changes what
+  `post_inline_comments` returns or raises on four forges.
 - **The fallback formats have no live proof yet.** The first will be a fork
   PR under a plain `pull_request` workflow in a real CI run; watch its
   annotations, its job summary and its `degraded` record.
@@ -227,7 +289,7 @@ that syntax in the suite, but none of them has run on a live runner yet.
   the first live proof; watch its `incremental` record and the summary's
   note line.
 - **5-file chunks on GLM 5.3 Flash can exhaust even the 8192 retry
-  budget.** In the live check above, 2 of 4 units stopped at 4096 and again
+  budget.** In the v0.22.0 handoff's live check, 2 of 4 units stopped at 4096 and again
   at 8192. Raising the default budget stays with the head-to-head
   measurement in the next bullet.
 - **With incremental on, the verdict can be Approved over files with open
@@ -565,9 +627,9 @@ Carried over from 0.15.0 and earlier, still true:
     is `LoggingRetry(total=3)` with a 30-second read timeout, so reaching the
     fallback can take up to four such timeouts.
 - **#16 Only GitHub and Bitbucket Cloud read description history.**
-  - **Other forges.** On GitLab, Azure DevOps and Bitbucket Server, a replay
-    logs a WARNING and uses the live title and description. An explicit
-    `--as-of` there exits 2.
+  - **Other forges.** On GitLab, Gitea / Forgejo, Azure DevOps and Bitbucket
+    Server, a replay logs a WARNING and uses the live title and description.
+    An explicit `--as-of` there exits 2.
   - **Unprobed endpoint.** GitHub Enterprise Server's GraphQL endpoint
     (`https://<host>/api/graphql`) has not been probed live.
   - **Large PRs.** A PR with more than 5,000 reviews, comments or title renames
@@ -673,8 +735,8 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.23.0` (minor: graceful degradation when the token cannot post, #48, on by default but acting only on a failed post; one new config key, `PRXREF_FALLBACK`; one new run-record and `--format json` key, `degraded`, `null` when no post failed; one new module, `ci_fallback`; no new CLI flag or `Forge` method) |
-| Registration points | CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`) and the `impls` dict in `config.py` (`make_forge`); repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Released version | `0.24.0` (minor: Gitea and Forgejo support, #31; five forges served by six adapters; two new config keys, `PRXREF_GITEA_TOKEN` and `PRXREF_GITEA_WEBHOOK_SECRET`; one new adapter module, `forges/gitea.py`; no new CLI flag, run-record key or `Forge` method) |
+| Registration points | CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`, where order matters only as a guard, and Gitea's any-host pattern must keep refusing the other forges' hosts) and the `impls` dict in `config.py` (`make_forge`); webhooks: the header dispatch in `webhooks.verify_signature`, where a forge that also sends GitHub's headers must be checked before GitHub; repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
