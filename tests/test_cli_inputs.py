@@ -450,7 +450,7 @@ class TestWebhookDaemon:
             "prxref.cli._run_review", lambda url, **kw: seen.append((url, kw)),
         )
         cli._webhook_handler(CLI_URL)
-        assert seen == [(CLI_URL, {"post": True, "context_file": ""})]
+        assert seen == [(CLI_URL, {"post": True, "context_file": "", "config_file": None})]
 
     def test_a_configured_ticket_file_never_reaches_a_webhook_review(
         self, runtime, monkeypatch,

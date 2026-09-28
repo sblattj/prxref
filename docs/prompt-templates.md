@@ -15,6 +15,10 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/ac
 - `PRXREF_PROMPTS_DIR` names the directory for every run, the webhook daemon
   included. `--prompts-dir DIR` names it for one run and wins over the
   variable. `--prompts-dir ""` turns the variable off for one run.
+- The directory can also go in the repository's `.prxref.toml`
+  (`prompts_dir = ".prxref/prompts"`), relative to that file and kept inside
+  the repository; see [docs/config-file.md](config-file.md). The CI safety
+  section below applies to it as well.
 - `prxref prompts export DIR [--force]` writes the packaged templates into
   `DIR` byte for byte. An unedited export loads without a warning and reviews
   exactly as the packaged templates do.
@@ -98,8 +102,9 @@ The whole file is filled: `{verdict}`, `{title}`, `{file_count}`,
 
 The directory is loaded once per run, before any network call. A problem
 that would break the review is a configuration error: `prxref review` exits
-`2` naming `--prompts-dir` or `PRXREF_PROMPTS_DIR`, whichever supplied the
-path, and the webhook daemon logs it and reviews nothing. What each template
+`2` naming `--prompts-dir`, `PRXREF_PROMPTS_DIR` or the config file's
+`prompts_dir` key (`.prxref.toml: prompts_dir`), whichever supplied the
+path; `prxref config check` fails the same way; and the webhook daemon logs it and reviews nothing. What each template
 must keep, and the size limit, are stated once, under `PRXREF_PROMPTS_DIR` in
 [env-vars.md](env-vars.md).
 

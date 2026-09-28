@@ -11,13 +11,13 @@ flag or argument that supplied it, and the CLI prints it as
 The CLI imports this module lazily, inside its ``eval`` handler. This module
 must never import ``prxref.cli``: that import would close a cycle.
 
-``eval`` adds no environment variable; every setting is a flag. Every LLM
+``eval`` adds no environment variable; every setting is a flag. ``eval
+run`` reads the repository config file ``review`` would read (#38). Every LLM
 call it makes is single-shot, and it never posts to a forge.
 """
 from __future__ import annotations
 
 import argparse
-import functools
 import hashlib
 import json
 import logging
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from prxref import eval_judge, eval_metrics, reviewer
-from prxref.config import load_config
+from prxref.config import find_config_file, load_config, load_config_with_sources
 from prxref.eval_cases import EvalCase, case_from_json_record, case_to_json, is_safe_id, load_cases
 from prxref.eval_metrics import (
     FULL,
@@ -44,8 +44,7 @@ from prxref.eval_metrics import (
 )
 from prxref.judge import GRADE_FULL, GRADE_NONE, GRADE_PARTIAL
 from prxref.llm import ConfigError
-from prxref.prompt_templates import load_prompt_templates
-from prxref.rules import load_review_rules, load_scoped_rules
+from prxref.review_inputs import load_path_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +85,12 @@ def eval_run(
     """Replay every case of ``--cases`` and write one labelled run under ``--out``.
 
     Reads ``args.cases``, ``args.label``, ``args.out``, ``args.rules_file``,
-    ``args.scoped_rules``, ``args.prompts_dir`` and ``args.resume``.
+    ``args.scoped_rules``, ``args.prompts_dir`` and ``args.resume``, and
+    ``args.config`` / ``args.no_config`` when present (#38): the repository
+    config file is resolved once as ``review`` resolves it (``--config``,
+    else ``PRXREF_CONFIG_FILE``, else ``.prxref.toml`` in the working
+    directory; ``--no-config`` reads none), and every case and ``run.json``'s
+    ``config`` use it.
     ``run_review`` is the CLI's ``_run_review`` and
     ``build_record`` its ``_build_json_result`` (the ``--format json``
     payload); the CLI passes both, because this module cannot import it.
@@ -100,10 +104,14 @@ def eval_run(
     - a bad ``--cases`` dataset, from :func:`prxref.eval_cases.load_cases`,
       naming ``--cases``, the case id and the field;
     - a malformed environment, from ``load_config``, naming the variable;
+    - a missing or invalid config file, naming ``--config``,
+      ``PRXREF_CONFIG_FILE`` or the file and key;
     - an unusable rules file, scoped rules entry or prompts directory, loaded
-      once as ``review`` loads it (the scoped rules against the always-on
-      file), naming ``--rules-file``, ``--scoped-rules`` or ``--prompts-dir``
-      when the flag was given and ``PRXREF_REVIEW_RULES``,
+      once as ``review`` loads it, through
+      :func:`prxref.review_inputs.load_path_inputs` (the scoped rules against
+      the always-on file), naming ``--rules-file``, ``--scoped-rules`` or
+      ``--prompts-dir`` when the flag was given, ``<file>: <key>`` when the
+      config file set the path, and ``PRXREF_REVIEW_RULES``,
       ``PRXREF_SCOPED_RULES`` or ``PRXREF_PROMPTS_DIR`` otherwise;
     - an existing ``<out>/<label>`` without ``--resume``, naming ``--label``;
     - a run directory that cannot be created, naming ``--out``.
@@ -177,7 +185,11 @@ def eval_run(
             f"that starts with a letter or digit, got {args.label!r}"
         )
     cases = load_cases(args.cases, source="--cases")
-    cfg = load_config(
+    config_file = find_config_file(
+        explicit="off" if getattr(args, "no_config", False) else getattr(args, "config", None),
+    )
+    cfg, layers = load_config_with_sources(
+        config_file=config_file,
         review_rules=args.rules_file,
         scoped_rules=args.scoped_rules,
         prompts_dir=args.prompts_dir,
@@ -187,7 +199,7 @@ def eval_run(
             "prompts_dir": "--prompts-dir",
         },
     )
-    _check_review_inputs(args, cfg)
+    load_path_inputs(cfg, layers, config_file=config_file, ticket=False)
     created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     run_dir = Path(args.out) / args.label
     if run_dir.exists() and not args.resume:
@@ -205,7 +217,7 @@ def eval_run(
     for case in cases:
         line = _run_case(
             case, cases_dir / case.id, args,
-            run_review=run_review, build_record=build_record,
+            run_review=run_review, build_record=build_record, config_file=config_file,
         )
         print(line, flush=True)
     _write_json(
@@ -216,43 +228,6 @@ def eval_run(
     return 0
 
 
-def _check_review_inputs(args: argparse.Namespace, cfg: Mapping[str, Any]) -> None:
-    """Load the rules files and the prompts directory every case shares, so a bad one exits 2 once.
-
-    Each is loaded as ``review`` loads it, named by its flag when given and
-    by its variable otherwise, and the scoped rules are checked against the
-    always-on file. The loaded objects are discarded: each case loads its own.
-    """
-    rules = _load_shared_input(
-        load_review_rules, cfg["review_rules"],
-        source="--rules-file" if args.rules_file is not None else "PRXREF_REVIEW_RULES",
-        max_chars=cfg["review_rules_max_chars"],
-    )
-    _load_shared_input(
-        functools.partial(load_scoped_rules, always_on=rules), cfg["scoped_rules"],
-        source="--scoped-rules" if args.scoped_rules is not None else "PRXREF_SCOPED_RULES",
-        max_chars=cfg["review_rules_max_chars"],
-    )
-    _load_shared_input(
-        load_prompt_templates, cfg["prompts_dir"],
-        source="--prompts-dir" if args.prompts_dir is not None else "PRXREF_PROMPTS_DIR",
-    )
-
-
-def _load_shared_input(loader: Callable[..., Any], path: Any, *, source: str, **kwargs: Any) -> Any:
-    """Call ``loader(path, source=source, **kwargs)``, fenced as the CLI fences its loaders.
-
-    An ``OSError`` or ``ValueError`` that escapes the loader becomes a
-    ``ConfigError`` naming ``source``.
-    """
-    try:
-        return loader(path, source=source, **kwargs)
-    except ConfigError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
-
-
 def _run_case(
     case: EvalCase,
     case_dir: Path,
@@ -260,8 +235,13 @@ def _run_case(
     *,
     run_review: Callable[..., Any],
     build_record: Callable[[Any], dict],
+    config_file: Path | None = None,
 ) -> str:
-    """Run one fenced case into ``case_dir`` and return its stdout line."""
+    """Run one fenced case into ``case_dir`` and return its stdout line.
+
+    ``config_file`` is the repository config file every case reviews with
+    (#38), handed to ``run_review`` as is.
+    """
     if args.resume and any((case_dir / name).is_file() for name in ("record.json", "error.json")):
         return f"{case.id}: skipped (already recorded)"
     trace_dir = case_dir / "trace"
@@ -282,6 +262,7 @@ def _run_case(
             prompts_dir=args.prompts_dir,
             trace_dir=str(trace_dir),
             repo_dir=case.repo_dir,
+            config_file=config_file,
         )
         if result is None:
             raise RuntimeError(f"unrecognized PR URL {case.pr_url!r}")
