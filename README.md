@@ -106,6 +106,8 @@ prxref review --pr-url https://github.com/org/repo/pull/123
 uv tool install git+https://github.com/sblattj/prxref
 ```
 
+In CI, keep the pipeline to credentials and the endpoint, and commit a `.prxref.toml` at the repository root for everything else (see [docs/config-file.md](docs/config-file.md) and the [example](docs/examples/prxref.toml)); `prxref config check` validates it. On a lane that gates merges, read that file from the target branch, as [its security section](docs/config-file.md#security-which-copy-of-the-file-does-ci-read) shows.
+
 To work on prxref itself (development setup, tests, and lint), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Review Any Forge
@@ -173,6 +175,8 @@ On a reasoning model the hidden reasoning trace draws from the **same** completi
 On `openai-compat` and `litellm`, temperature `0.0` and a sampling `seed` are sent on every call — `PRXREF_LLM_SEED` when set, else one random seed per process shared by the whole run (issue #56), and none at all with `PRXREF_LLM_SEED=off`, for providers such as Bedrock that reject it — but neither makes a review bit-reproducible — provider fingerprints, load-balanced backends, and gateways that ignore `seed` all still vary the model's output. The CLI backends send neither, and the run record's `sampling` field shows both as `null`. Everything downstream of the model is deterministic: findings are ordered by `(file, line, title)` and the caps break ties by content, and the run record's `sampling` field reports which knobs were in force. See [Determinism](docs/llm.md#determinism-what-is-pinned-and-what-still-varies).
 
 See [docs/llm.md](docs/llm.md) for architecture, failover behavior, and backend setup, and [docs/env-vars.md](docs/env-vars.md#tuning-for-your-team) for tuning the confidence floor and finding caps to your team.
+
+The model chain, the effort, the token budget and the other non-secret settings above can also be committed in the repository's `.prxref.toml` (`llm_models = ["z-ai/glm-5.3-flash"]`); the backend, the endpoint and the key stay in the environment. See [docs/config-file.md](docs/config-file.md); `prxref config check` validates the file.
 
 ## Forge Authentication
 

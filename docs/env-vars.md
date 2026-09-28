@@ -2,7 +2,7 @@
 
 All environment variables used by `prxref` are prefixed with `PRXREF_`.
 
-Configuration is loaded from built-in defaults, overridden by environment variables, and further overridden by explicit programmatic keyword arguments (the CLI's `--max-chunks` is one). An empty or whitespace-only value reads as **unset**, so a stray `PRXREF_LLM_TIMEOUT=` in a `.env` file keeps the default instead of aborting.
+Configuration is loaded from built-in defaults, overridden by a repository config file when there is one, then by environment variables, and further overridden by explicit programmatic keyword arguments (the CLI's `--max-chunks` is one). Most of the keys below can also be set in a `.prxref.toml` committed to the repository, under their lowercase names without the prefix (`max_chunks = 4`); credentials, endpoints, executables, local reads and writes, and the gate cannot. See [docs/config-file.md](config-file.md). An empty or whitespace-only value reads as **unset**, so a stray `PRXREF_LLM_TIMEOUT=` in a `.env` file keeps the default instead of aborting.
 
 ## Variable Reference
 
@@ -104,6 +104,12 @@ The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`,
 | `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` | *(empty)* | Secret for Azure DevOps service hooks, compared in constant time with the **password** of the hook's Basic authentication (the user name is ignored). Empty rejects Azure DevOps webhooks with `401` unless `PRXREF_ALLOW_UNSIGNED` is `1`. |
 | `PRXREF_ALLOW_UNSIGNED` | `False` | Accepts webhooks without valid HMAC/token signatures (dev/testing only; logs a warning). Must be the literal string `1` — `true`/`yes`/`on` deliberately do **not** enable the bypass, so it cannot be switched on by a stray truthy value. |
 
+### Repository Config File
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PRXREF_CONFIG_FILE` | *(empty — `./.prxref.toml` when present)* | **Repository config file (#38).** Path of the TOML config file to read, for every run of the process; `--config PATH` wins for one run. `off` (any case) reads no file, like `--no-config`. Empty or unset, `prxref review` and `prxref eval run` read `.prxref.toml` from the working directory when it exists (parent directories are never searched), and `prxref serve` reads no file. A named file that does not exist raises `ConfigError` naming this variable and exits `2`. The file sits below the environment: every variable in this page still wins over it. It is not a configuration key, so it cannot be set in the file itself and is not counted below. See [docs/config-file.md](config-file.md). |
+
 ## Bad Configuration Is the Only Thing That Fails a Build
 
 Under the default `PRXREF_FAIL_ON=never`, `prxref review` exits **0** on every review error — a network failure, an LLM timeout, bad forge credentials, even a review in which every chunk failed — and on an empty PR diff, which is not an error at all. prxref is an advisor, not a merge gate.
@@ -180,4 +186,4 @@ The tables above define all **74** configuration keys in `src/prxref/config.py` 
 - **Spec Sources / Jira (3):** `PRXREF_JIRA_BASE_URL`, `PRXREF_JIRA_EMAIL`, `PRXREF_JIRA_API_TOKEN`
 - **Webhooks (6):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_GITEA_WEBHOOK_SECRET`, `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
 
-*(74 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 75 accepted variable names.)*
+*(74 configuration keys, plus one deprecated alias — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` — for 75 accepted variable names.)* `PRXREF_CONFIG_FILE` is not among them: it names the [repository config file](config-file.md) rather than setting a key, so it counts in no category and in neither total.

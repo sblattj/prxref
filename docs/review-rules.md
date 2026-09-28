@@ -18,6 +18,10 @@ export PRXREF_REVIEW_RULES=/etc/prxref/rules.md
 - `PRXREF_REVIEW_RULES` names it for every run. `--rules-file PATH` names it
   for one run and wins over the variable. `--rules-file ""` turns an
   environment-configured file off for one run.
+- Both paths can also go in the repository's `.prxref.toml`
+  (`review_rules = ".prxref/rules.md"`, `scoped_rules = [".prxref/rules"]`),
+  relative to that file and kept inside the repository; see
+  [docs/config-file.md](config-file.md).
 - Unset (the default), nothing changes: the prompts, the trace files, the
   JSONL trace and the exit code are what they would be without the feature,
   and the run record carries `review_rules: null`.
