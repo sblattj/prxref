@@ -53,8 +53,8 @@ MAX_CHARS = config._DEFAULTS["repo_context_max_chars"]
 WARN_NAME = "PRXREF_REPO_CONTEXT"
 NO_FINDINGS = '{"findings": []}'
 INITIAL_KEYS = {
-    "mode", "max_chars", "contract_globs", "exclude_globs", "reader", "listing",
-    "reads", "read_cap_hit", "units",
+    "mode", "max_chars", "max_reads", "max_chunk_reads", "contract_globs", "exclude_globs",
+    "reader", "listing", "reads", "read_cap_hit", "chunk_read_cap_hit", "run_read_cap_hit", "units",
 }
 
 PY_HELPER = (
@@ -471,8 +471,10 @@ class TestABuildThatRaises:
 class TestEarlyExits:
     def _initial(self, mode: str) -> dict:
         return {
-            "mode": mode, "max_chars": MAX_CHARS, "contract_globs": list(GLOBS), "exclude_globs": [],
-            "reader": None, "listing": None, "reads": 0, "read_cap_hit": False, "units": None,
+            "mode": mode, "max_chars": MAX_CHARS, "max_reads": 200, "max_chunk_reads": 16,
+            "contract_globs": list(GLOBS), "exclude_globs": [],
+            "reader": None, "listing": None, "reads": 0, "read_cap_hit": False,
+            "chunk_read_cap_hit": False, "run_read_cap_hit": False, "units": None,
         }
 
     @pytest.mark.parametrize("mode", ["diff", "repo"])
@@ -539,7 +541,10 @@ class TestTheTrace:
         ]
         (run,) = [e for e in events if e["node"] == "repo_context"]
         assert run["phase"] == "ok"
-        assert run["meta"] == {key: record[key] for key in ("mode", "reader", "listing", "reads", "read_cap_hit")}
+        assert run["meta"] == {
+            key: record[key]
+            for key in ("mode", "reader", "listing", "reads", "read_cap_hit", "chunk_read_cap_hit", "run_read_cap_hit")
+        }
         sweep_start = next(
             i for i, e in enumerate(events) if (e["node"], e["phase"]) == ("sweep", "start")
         )
