@@ -266,11 +266,11 @@ from .triage import (
     SCOPE_UNKNOWN,
     Finding,
     added_lines_by_file,
-    build_chunks,
     count_size_relevant_changes,
     normalize_rule,
     normalize_scope,
     parse_unified_diff,
+    plan_chunks,
 )
 
 logger = logging.getLogger("prxref")
@@ -510,8 +510,9 @@ def orchestrate_review(
     """Run one full review pass over a PR and optionally post results.
 
     Returns ``{verdict, findings_active, findings_dropped, chunk_count,
-    chunks_reviewed, chunks_failed, elapsed_ms, input_tokens, output_tokens,
-    posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
+    chunks_reviewed, chunks_failed, chunks_over_budget, largest_chunk_tokens,
+    overflow_files, chunk_token_budget, elapsed_ms, input_tokens,
+    output_tokens, posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
     suggestions, incremental, degraded}``, plus
@@ -540,6 +541,21 @@ def orchestrate_review(
     an incremental run whose delta chunks to nothing (an empty diff returns
     before any review unit runs). ``chunks_reviewed`` + ``chunks_failed``
     always equals it.
+
+    ``chunks_over_budget``, ``largest_chunk_tokens``, ``overflow_files`` and
+    ``chunk_token_budget`` (issue #61) describe the diff chunking, from the
+    same :func:`prxref.triage.plan_chunks` pass that produced the chunks, and
+    are stamped on every exit by :func:`_run_record`. ``chunk_token_budget``
+    is ``token_budget``; ``chunks_over_budget`` counts the chunks whose
+    :func:`prxref.triage.est_tokens` total exceeds it (a single file larger
+    than the budget counts, even below ``max_chunks``);
+    ``largest_chunk_tokens`` is the largest chunk's estimate; and
+    ``overflow_files`` counts the files placed past the cap, appended to the
+    smallest chunk because ``max_chunks`` chunks existed and none had room.
+    The three counts are ``0`` on every exit taken before chunking ran or
+    where it produced no chunk (an empty diff, every file binary); an exit
+    after chunking (the scoped-rules error, a total failure) carries the
+    real counts even when ``chunk_count`` is ``0``.
 
     ``max_tokens`` is the per-chunk completion budget handed to every worker;
     ``None`` leaves ``reviewer.MAX_TOKENS`` in charge. ``token_budget`` sizes
@@ -958,6 +974,10 @@ def orchestrate_review(
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "degraded": None,
+        "chunks_over_budget": 0,
+        "largest_chunk_tokens": 0,
+        "overflow_files": 0,
+        "chunk_token_budget": token_budget,
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -1073,11 +1093,15 @@ def orchestrate_review(
 
     try:
         with tracer.span("build_chunks") as sp:
-            chunks = build_chunks(
+            plan = plan_chunks(
                 review_files, max_chunks=max_chunks, token_budget=token_budget,
                 max_files_per_chunk=max_files_per_chunk,
             )
+            chunks = plan.chunks
             sp["chunks"] = len(chunks)
+        run_inputs["chunks_over_budget"] = plan.chunks_over_budget
+        run_inputs["largest_chunk_tokens"] = plan.largest_chunk_tokens
+        run_inputs["overflow_files"] = plan.overflow_files
     except Exception as e:  # noqa: BLE001
         logger.error("build_chunks failed: %s", e)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
