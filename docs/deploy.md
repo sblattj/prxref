@@ -159,7 +159,7 @@ The container includes a built-in curl-free health check using Python standard l
 ```bash
 # A URL prxref cannot review — still exit 0
 $ prxref review --pr-url https://github.com/org/repo/issues/42
-unrecognized PR URL 'https://github.com/org/repo/issues/42' — expected a Bitbucket pull-requests, GitHub pull, or GitLab merge_requests link (bitbucket.org, github.com, gitlab.com, or a self-hosted Bitbucket Data Center, GitHub Enterprise Server, or GitLab host), or an Azure DevOps pullrequest link (dev.azure.com, *.visualstudio.com, or an Azure DevOps Server host); the URL must keep the forge's own path shape.
+unrecognized PR URL 'https://github.com/org/repo/issues/42' — expected a Bitbucket pull-requests, GitHub pull, or GitLab merge_requests link (bitbucket.org, github.com, gitlab.com, or a self-hosted Bitbucket Data Center, GitHub Enterprise Server, or GitLab host), a Gitea or Forgejo pulls link (any host, Codeberg included), or an Azure DevOps pullrequest link (dev.azure.com, *.visualstudio.com, or an Azure DevOps Server host); the URL must keep the forge's own path shape.
 $ echo $?
 0
 
