@@ -182,7 +182,7 @@ class TestTypes:
             ('llm_models = "a,b"', "an array of strings", "a string"),
             ("llm_models = [1, 2]", "an array of strings", "an array"),
             ("post_mode = 1", "a string", "an integer"),
-            ("llm_temperature = 0.2", "a string", "a float"),
+            ("llm_temperature = true", "a number or a string", "a boolean"),
             ("post_mode = 1979-05-27", "a string", "a date"),
         ],
     )

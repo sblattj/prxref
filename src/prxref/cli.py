@@ -9,6 +9,16 @@ Provides these subcommands:
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
   * ``prompts export DIR [--force]`` — the packaged prompt templates, written
     to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
+  * ``config check [--config PATH | --no-config] [--format text|json]`` —
+    validate the repository config file and the environment, and print every
+    setting with the layer that supplied it (credentials only as set/unset).
+
+``review``, ``eval run`` and ``config check`` read a repository config file
+(#38): ``--config PATH``, else ``PRXREF_CONFIG_FILE``, else ``.prxref.toml``
+in the working directory; ``--no-config`` (or ``off``) reads none. ``serve``
+never discovers one: it reads only the file ``serve --config`` or
+``PRXREF_CONFIG_FILE`` names. The run record's ``config_file`` stamps the
+file's path, sha256 and keys, and is ``null`` without one.
 
 ``review`` takes four optional inputs besides the PR itself, and they
 compose: ``--spec URL_OR_PATH`` (repeatable) grounds the review against specs
@@ -108,6 +118,7 @@ import argparse
 import codecs
 import errno
 import functools
+import hashlib
 import importlib
 import json
 import logging
@@ -123,7 +134,17 @@ from typing import Any
 
 import prxref
 from prxref import ci_fallback
-from prxref.config import load_config, make_forge
+from prxref.config import (
+    _DEFAULTS,
+    _ENV_ONLY_REASONS,
+    CONFIG_FILE_ENV,
+    _display_path,
+    find_config_file,
+    load_config,
+    load_config_with_sources,
+    make_forge,
+    read_config_file,
+)
 from prxref.costs import cost_label
 from prxref.forges.base import detect_forge
 from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
@@ -137,6 +158,28 @@ from prxref.triage import SCOPE_IN, SCOPE_OUT, normalize_scope
 from prxref.viz import render_file
 
 logger = logging.getLogger("prxref")
+
+
+def _add_config_flags(parser: argparse.ArgumentParser) -> None:
+    """Add the mutually exclusive ``--config PATH`` and ``--no-config`` (#38)."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "repository config file to read instead of .prxref.toml in the "
+            "working directory; wins over PRXREF_CONFIG_FILE, and 'off' reads none"
+        ),
+    )
+    group.add_argument(
+        "--no-config",
+        action="store_true",
+        help=(
+            "read no repository config file: neither .prxref.toml nor the file "
+            "PRXREF_CONFIG_FILE names"
+        ),
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -343,6 +386,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "does the same for every run and this flag wins when both are set)"
         ),
     )
+    _add_config_flags(rev)
 
     srv = sub.add_parser("serve", help="run webhook listener daemon")
     srv.add_argument(
@@ -355,6 +399,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--host",
         default="0.0.0.0",
         help="bind address (default 0.0.0.0)",
+    )
+    srv.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "repository config file for every webhook review; serve never reads "
+            ".prxref.toml from its working directory, only this file or the one "
+            "PRXREF_CONFIG_FILE names ('off' reads none)"
+        ),
     )
 
     ev = sub.add_parser(
@@ -410,6 +464,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="continue an existing --label run instead of refusing it",
     )
+    _add_config_flags(ev_run)
     ev_score = ev_sub.add_parser(
         "score", help="grade a run against its human labels"
     )
@@ -474,6 +529,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="overwrite templates already in DIR (without it, an existing one is refused and nothing is written)",
+    )
+
+    cf = sub.add_parser(
+        "config", help="check the repository config file (.prxref.toml) and the settings in force",
+    )
+    cf_sub = cf.add_subparsers(dest="config_command")
+    cf_check = cf_sub.add_parser(
+        "check",
+        help=(
+            "validate the config file review would read (.prxref.toml or "
+            "PRXREF_CONFIG_FILE) and the environment, and print every setting with its source"
+        ),
+    )
+    _add_config_flags(cf_check)
+    cf_check.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default text); json emits exactly one JSON object on stdout",
     )
 
     return parser
@@ -782,8 +856,8 @@ def _build_json_result(result: Any) -> dict:
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``repo_context``, ``parse_retries``, ``context_followup``,
-    ``suggestions``, ``incremental``, ``degraded``, then ``sampling`` and
-    ``replay`` when present.
+    ``suggestions``, ``incremental``, ``degraded``, ``config_file``, then
+    ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -806,7 +880,10 @@ def _build_json_result(result: Any) -> dict:
     "since_sha", "files_total", "files_reviewed", "marker_sha"}``), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
-    "annotations"}``, see :func:`_emit_fallback`);
+    "annotations"}``, see :func:`_emit_fallback`), and so is
+    ``config_file`` (#38: ``null`` when the run read no repository config
+    file; otherwise ``{"path", "sha256", "keys"}``, see
+    :func:`_config_file_stamp`);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -848,6 +925,7 @@ def _build_json_result(result: Any) -> dict:
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
         "degraded": result.get("degraded"),
+        "config_file": result.get("config_file"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1305,6 +1383,7 @@ def _run_review(
     no_description: bool = False,
     repo_dir: str | None = None,
     full_review: bool = False,
+    config_file: Path | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1340,6 +1419,7 @@ def _run_review(
     # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
     # orchestrate_review has no timeout parameter.
     cfg = load_config(
+        config_file=config_file,
         max_chunks=max_chunks,
         llm_timeout=timeout,
         trace_dir=trace_dir,
@@ -1360,6 +1440,7 @@ def _run_review(
             "prompts_dir": "--prompts-dir",
         },
     )
+    config_stamp = _config_file_stamp(config_file)
     # The rules files, the ticket file, the prompts directory and --repo-dir
     # are read here, after config and before make_forge and the LLM client, so
     # an unusable one exits 2 before any network I/O. load_config stays I/O-free.
@@ -1429,7 +1510,7 @@ def _run_review(
         full_review_reason = f"PRXREF_FAIL_ON={cfg['fail_on']}"
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
-    return orchestrate(
+    result = orchestrate(
         forge=forge,
         ref=ref,
         llm=llm,
@@ -1492,9 +1573,54 @@ def _run_review(
         full_review=full_review_reason is not None,
         full_review_reason=full_review_reason,
     )
+    if isinstance(result, dict):
+        result["config_file"] = config_stamp
+    return result
 
 
-def _webhook_handler(url: str) -> None:
+def _config_file_stamp(path: Path | None) -> dict[str, Any] | None:
+    """The run record's ``config_file`` (#38): ``None`` without a file.
+
+    Otherwise ``{"path", "sha256", "keys"}``: the file as errors name it
+    (relative to the working directory when inside it), the sha256 of its
+    bytes, and the sorted keys it sets, including any a later layer
+    overrode. A file that cannot be read is a ``ConfigError`` naming it.
+    """
+    if path is None:
+        return None
+    display = _display_path(path)
+    keys = sorted(read_config_file(path, display=display))
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ConfigError(f"{display}: cannot read config file: {exc.strerror}") from exc
+    return {"path": display, "sha256": digest, "keys": keys}
+
+
+def _resolve_config_file(args: argparse.Namespace) -> Path | None:
+    """The config file ``review``, ``eval run`` and ``config check`` read (#38).
+
+    ``--no-config`` is an explicit ``off``; otherwise ``--config``, then
+    ``PRXREF_CONFIG_FILE``, then ``.prxref.toml`` in the working directory,
+    as :func:`prxref.config.find_config_file` resolves them.
+    """
+    explicit = "off" if getattr(args, "no_config", False) else getattr(args, "config", None)
+    return find_config_file(explicit=explicit)
+
+
+def _serve_config_file(explicit: str | None) -> Path | None:
+    """The config file the webhook daemon reads: named, never discovered (#38).
+
+    Only ``--config`` or ``PRXREF_CONFIG_FILE`` can name one, and ``off``
+    in either reads none. The daemon's working directory is not the
+    repository it reviews, so ``.prxref.toml`` there is never read.
+    """
+    if (explicit is None or not explicit.strip()) and not os.environ.get(CONFIG_FILE_ENV, "").strip():
+        return None
+    return find_config_file(explicit=explicit)
+
+
+def _webhook_handler(url: str, *, config_file: Path | None = None) -> None:
     """Review one webhook-delivered PR, posting unless PRXREF_DRY_RUN is set.
 
     ``post=True`` is the daemon's intent, not its last word: ``_run_review``
@@ -1506,10 +1632,12 @@ def _webhook_handler(url: str) -> None:
     so its findings always carry scope ``unknown``. The team rules file, the
     ``PRXREF_SCOPED_RULES`` files and the ``PRXREF_PROMPTS_DIR`` templates
     still come from the daemon's environment, re-read on every webhook. The
-    daemon passes no replay flag, so it never replays.
+    daemon passes no replay flag, so it never replays. ``config_file`` is
+    the file ``serve --config`` or ``PRXREF_CONFIG_FILE`` named, re-read on
+    every webhook, or ``None`` for none.
     """
     try:
-        _run_review(url, post=True, context_file="")
+        _run_review(url, post=True, context_file="", config_file=config_file)
     except Exception:
         logger.exception("webhook review failed for %s", url)
 
@@ -1655,8 +1783,10 @@ def _cmd_review(args: argparse.Namespace) -> int:
     # knob must gate, so the value has to be known before orchestration can
     # fail. load_config is a pure read of the same environment, and
     # _run_review loads it again with the flag overrides — within one process
-    # the two cannot disagree.
+    # the two cannot disagree. fail_on and fallback can only be set in the
+    # environment, so the policy never needs the repository config file.
     try:
+        config_file = _resolve_config_file(args)
         policy = load_config()
         fail_on = policy["fail_on"]
         fallback = policy["fallback"]
@@ -1684,6 +1814,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             no_description=args.no_description,
             repo_dir=args.repo_dir,
             full_review=args.full_review,
+            config_file=config_file,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
@@ -1720,6 +1851,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
     if args.format == "json":
         print(json.dumps(_build_json_result(result)))
     else:
+        stamp = result.get("config_file") if isinstance(result, dict) else None
+        if args.verbose and isinstance(stamp, dict):
+            logger.info("config: %s (%d keys)", stamp["path"], len(stamp["keys"]))
         _print_summary(result, elapsed, verbose=args.verbose)
         if args.no_post or args.verbose:
             _print_findings(result)
@@ -1730,6 +1864,18 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
+    """Run the webhook daemon; a config file ``--config`` or ``PRXREF_CONFIG_FILE`` names is checked first.
+
+    A missing or invalid named file exits 2 before the daemon listens. With
+    no file named, the handler is :func:`_webhook_handler` itself.
+    """
+    try:
+        config_file = _serve_config_file(getattr(args, "config", None))
+        if config_file is not None:
+            read_config_file(config_file, display=_display_path(config_file))
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
     # Said once at startup rather than per webhook: _webhook_handler blanks
     # the variable on every review, and an operator who set it should learn
     # that before the first PR arrives, not infer it from unscoped findings.
@@ -1738,8 +1884,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             "PRXREF_TICKET_CONTEXT_FILE is ignored by prxref serve: one file "
             "cannot describe every PR"
         )
+    handler = (
+        _webhook_handler if config_file is None
+        else functools.partial(_webhook_handler, config_file=config_file)
+    )
     serve_fn = importlib.import_module("prxref.webhooks").serve
-    serve_fn(port=args.port, host=args.host, handler=_webhook_handler)
+    serve_fn(port=args.port, host=args.host, handler=handler)
     return 0
 
 
@@ -1806,9 +1956,59 @@ def _cmd_prompts_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _config_value_text(value: Any) -> str:
+    """One ``config check`` text value: JSON for a list or dict, ``str`` otherwise."""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value)
+    return str(value)
+
+
+def _cmd_config_check(args: argparse.Namespace) -> int:
+    """Validate the config ``review`` would use and print every setting with its source (#38).
+
+    The file is resolved exactly as ``review`` resolves it, then the full
+    :func:`prxref.config.load_config_with_sources` runs, so the environment
+    is validated too. A ``ConfigError`` prints ``configuration error: ...``
+    on stderr, nothing on stdout, and exits 2; otherwise the exit is 0.
+
+    Each ``_DEFAULTS`` key is reported, sorted, with its source:
+    ``default``, ``file`` or ``env <NAME>``. A credential is never printed:
+    its value reads ``<set>`` when non-empty and ``<unset>`` otherwise.
+
+    Text output is ``config file: <path>`` (or ``none``), one
+    ``<key> = <value>  (<source>)`` line per key (lists and dicts as JSON,
+    anything else by ``str``), then ``ok``. JSON output is one object,
+    ``{"config_file": <path or null>, "values": {key: {"value", "source"}}}``.
+    """
+    try:
+        path = _resolve_config_file(args)
+        cfg, layers = load_config_with_sources(config_file=path)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    display = None if path is None else _display_path(path)
+    values: dict[str, dict[str, Any]] = {}
+    for key in sorted(_DEFAULTS):
+        value = cfg[key]
+        if _ENV_ONLY_REASONS.get(key) == "credential":
+            value = "<set>" if value else "<unset>"
+        values[key] = {"value": value, "source": layers[key]}
+    if args.format == "json":
+        print(json.dumps({"config_file": display, "values": values}, default=str))
+        return 0
+    lines = [f"config file: {display if display is not None else 'none'}"]
+    lines.extend(
+        f"{key} = {_config_value_text(row['value'])}  ({row['source']})"
+        for key, row in values.items()
+    )
+    lines.append("ok")
+    _print_lines(lines)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare``,
-    ``trace render``, ``prompts export``, or ``--version``."""
+    ``trace render``, ``prompts export``, ``config check``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -1839,6 +2039,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prompts":
         if args.prompts_command == "export":
             return _cmd_prompts_export(args)
+        parser.print_help(sys.stderr)
+        return 2
+    if args.command == "config":
+        if args.config_command == "check":
+            return _cmd_config_check(args)
         parser.print_help(sys.stderr)
         return 2
 
