@@ -8,6 +8,117 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.25.0] — 2026-09-28
+
+Repository config file `.prxref.toml` (#38). Most settings can now be
+committed with the code instead of copied into every pipeline: rules files,
+the model chain, context levels, comment policy and caps. Credentials,
+endpoints, executables, local reads and writes, and the gate stay in the
+environment. Two new flags on `review` and `eval run` (`--config`,
+`--no-config`), one on `serve` (`--config`), one new subcommand
+(`prxref config check`), one new run-record key (`config_file`) and one new
+environment variable (`PRXREF_CONFIG_FILE`), which is not a config key. When
+no file is found or named, every config value, error message, prompt, forge
+read, forge write and stdout byte is the same as in 0.24.0, and the run
+record gains only `"config_file": null`.
+
+### Added
+
+- **Repository config file (#38).** A flat TOML file, read with the stdlib
+  `tomllib`, whose keys are the config key names (`max_chunks = 4` for
+  `PRXREF_MAX_CHUNKS`). Precedence is built-in defaults < file <
+  environment < command-line flags, so the pipeline always has the last
+  word. Values take TOML types: integers, numbers, booleans, arrays of
+  strings, and strings for choice keys. An empty string or array reads as
+  unset, as an empty environment variable does. An error about a file value
+  names the file and the key, as in
+  `.prxref.toml: max_chunks: must be ...`.
+- **Where the file is read from (#38).** `--config PATH`, else
+  `PRXREF_CONFIG_FILE`, else `.prxref.toml` in the working directory.
+  Parent directories are never searched. The value `off`, in any case, in
+  the flag or the variable reads no file, and so does `--no-config`. A named
+  file that does not exist exits 2 with
+  `--config: config file not found: PATH` or the same line naming
+  `PRXREF_CONFIG_FILE`.
+- **What a file may not set (#38).** 30 keys are environment-only, each with
+  a reason class: credential (tokens, passwords, webhook secrets), endpoint
+  (`llm_base_url`, `jira_base_url`), executable (`llm_backend`,
+  `llm_cli_path`), local write (`trace_file`, `trace_dir`, `fallback`),
+  local read (`price_table`) and gate (`fail_on`, `dry_run`,
+  `allow_unsigned`). Setting one in the file exits 2 naming the key, its
+  class and the `PRXREF_` variable to use instead, even when the value is
+  empty.
+- **Paths in the file stay in the repository (#38).** `review_rules`, each
+  `scoped_rules` entry, `prompts_dir`, `ticket_context_file` and each
+  `spec_sources` entry resolve against the file's own directory, not the
+  working directory. An absolute path, a `~` path, or one that resolves
+  outside that directory through `..` or a symlink exits 2. `spec_sources`
+  in the file takes local paths only; web pages and Jira tickets stay in
+  `PRXREF_SPEC_SOURCES` or `--spec`.
+- **Loud errors (#38).** An unknown key, a wrong type, a table and a TOML
+  syntax or UTF-8 error each exit 2 before any network call, naming the file
+  and linking docs/config-file.md. An unknown key close to a real one gets a
+  hint: `unknown key 'max_chunk'; did you mean 'max_chunks'?`.
+- **`--config PATH` and `--no-config` on `prxref review` and
+  `prxref eval run` (#38).** They are mutually exclusive. `eval run`
+  resolves and checks the file once, before the first case, reviews every
+  case with it, and its `run.json` `config` reflects it.
+- **`prxref serve --config PATH` (#38).** The daemon never auto-discovers
+  `.prxref.toml`, because its working directory is not the repository it
+  reviews. It reads a file only when `--config` or `PRXREF_CONFIG_FILE`
+  names one (`off` reads none), exits 2 before listening when that file is
+  missing or invalid, and re-reads it for every webhook review.
+- **`prxref config check [--config PATH | --no-config]
+  [--format text|json]` (#38).** It resolves the file as `review` does,
+  validates the file and the environment without reading a pull request or
+  calling a model, and prints every setting with its source (`default`,
+  `file` or `env PRXREF_<NAME>`), then `ok`. Credentials and webhook
+  secrets print only as `<set>` or `<unset>`. It exits 0 when the
+  configuration is valid, and 2 with the `configuration error: ...` line a
+  review would print when it is not; under `--format json` an error leaves
+  stdout empty. It does not open the files that path keys name.
+- **Run record and `--format json` key `config_file` (#38), after
+  `degraded`.** `null` when no file was read, else
+  `{"path", "sha256", "keys"}`: the file as errors name it, the sha256 of
+  its bytes, and the sorted keys it sets, including keys a later layer
+  overrode. With `-v` in text mode, `review` logs
+  `config: <path> (<n> keys)`.
+- **`llm_temperature` in the file takes a TOML number (#38)**, as in
+  `llm_temperature = 0.2`, or a quoted string. The number is stored as the
+  string the environment variable would hold.
+- **Docs (#38).** docs/config-file.md covers where the file is read from,
+  precedence, the schema, every key a file can and cannot set, the path
+  rules, each error message, `prxref config check`, and which copy of the
+  file CI reads. A commented example is in docs/examples/prxref.toml, and
+  the README, the per-forge CI recipes, docs/env-vars.md
+  (`PRXREF_CONFIG_FILE`), .env.example, docs/review-rules.md and
+  docs/prompt-templates.md point at it. For lanes that gate merges, a recipe
+  extracts `.prxref.toml` and the `.prxref/` directory it names from the
+  target branch with `git archive` and passes the copy with `--config`, so
+  the target branch's settings win over the pull request's.
+
+### Security
+
+- **A pull request can edit the file that reviews it.** In CI the
+  workspace is usually the PR's own code, so auto-discovery reads the PR's
+  copy of `.prxref.toml`. The file can relax review settings (lower caps,
+  raise `confidence_floor`, point the rules or prompts at the PR's own
+  copies, pick another model), but it cannot reach credentials, endpoints,
+  executables, local reads or writes, or the gate, and its paths cannot
+  leave the repository. On a lane where the review gates the merge
+  (`PRXREF_FAIL_ON=error` or `any`), or one under `pull_request_target`,
+  read the file from the target branch with the recipe in
+  docs/config-file.md ("Security: which copy of the file does CI read?"),
+  check out only the base, or set `PRXREF_CONFIG_FILE=off`.
+
+### Known limitations
+
+- **The webhook daemon cannot read the reviewed repository's file.** It
+  would need to fetch `.prxref.toml` from the forge for each pull request;
+  `serve` reads only a file named on its own host.
+- **`prxref eval score` reads no file.** Its judge takes every setting from
+  the environment, including `PRXREF_LLM_PARSE_RETRIES`.
+
 ## [0.24.0] — 2026-09-28
 
 Gitea and Forgejo support (#31). prxref now reviews pull requests on a fifth
@@ -2424,7 +2535,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/sblattj/prxref/releases/tag/v0.25.0
 [0.24.0]: https://github.com/sblattj/prxref/releases/tag/v0.24.0
 [0.23.0]: https://github.com/sblattj/prxref/releases/tag/v0.23.0
 [0.22.0]: https://github.com/sblattj/prxref/releases/tag/v0.22.0

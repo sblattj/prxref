@@ -41,12 +41,23 @@ naming whichever one supplied it. An empty `PRXREF_CONFIG_FILE` reads as unset.
 
 `prxref serve` never auto-discovers. The webhook daemon's working directory is
 not a repository, so it reads a file only when `--config PATH` or
-`PRXREF_CONFIG_FILE` names one. A file given to the daemon is checked by the
-same rules as a repository's.
+`PRXREF_CONFIG_FILE` names one (`off` reads none). A file given to the daemon
+is checked by the same rules as a repository's, once before the daemon listens
+(a missing or invalid file exits `2`), and it is read again for every webhook
+review. `prxref eval score` reads no file: its judge takes every setting from
+the environment.
 
-The run record and `--format json` carry `config_file`: `null` when no file was
-read, otherwise the file's `path`, its `sha256`, and the `keys` it set, so a
-run can always be traced to the exact file that shaped it.
+The run record and `--format json` carry `config_file`, after `degraded`:
+`null` when no file was read, otherwise the file's `path` (as its errors name
+it, relative to the working directory when inside it), the `sha256` of its
+bytes, and the sorted `keys` it set, including keys the environment or a flag
+then overrode. A run can always be traced to the exact file that shaped it:
+
+```json
+"config_file": {"path": ".prxref.toml", "sha256": "<64 hex digits>", "keys": ["max_chunks", "post_mode"]}
+```
+
+With `-v` in text mode, `prxref review` also logs `config: <path> (<n> keys)`.
 
 ## Precedence
 
@@ -288,14 +299,51 @@ prxref config check --format json
 
 `prxref config check` loads the file and the whole environment exactly as a
 review would, without reading a pull request or calling a model. It prints
-the file it read (or `none`), then every setting with its value and where the
-value came from (the default, the file, or the environment variable that
-set it), then `ok`. Credentials print as `<set>` or `<unset>`, never their
-value. `--format json` prints the same as one JSON document, `config_file`
-and a `values` map of `{"value", "source"}` per key. It exits `0` when
+the file it read (or `none`), then every setting, sorted by key, with its value
+and where the value came from: `default`, `file`, or `env PRXREF_<NAME>` for
+the variable that set it. The last line is `ok`. Credentials and webhook
+secrets print as `<set>` or `<unset>`, never their value. With this file and
+`PRXREF_POST_MODE=summary` and `PRXREF_GITHUB_TOKEN` set in the environment:
+
+```toml
+max_chunks = 4
+llm_temperature = 0.2
+review_rules = ".prxref/rules.md"
+post_mode = "summary+inline"
+```
+
+the output reads, with most of its 76 lines left out here:
+
+```text
+config file: .prxref.toml
+allow_unsigned = False  (default)
+azure_devops_token = <unset>  (default)
+...
+github_token = <set>  (env PRXREF_GITHUB_TOKEN)
+...
+llm_temperature = 0.2  (file)
+...
+max_chunks = 4  (file)
+...
+post_mode = summary  (env PRXREF_POST_MODE)
+...
+review_rules = /home/ci/repo/.prxref/rules.md  (file)
+...
+ok
+```
+
+A path key prints as the absolute path it resolved to. `config check` checks
+that each path stays inside the repository, but it does not open the files
+they name: a rules file or prompts directory that is missing or fails its
+own checks is reported by the review that reads it.
+
+`--format json` prints the same as one line of JSON:
+`{"config_file": ".prxref.toml", "values": {"allow_unsigned": {"value": false, "source": "default"}, ...}}`,
+with `config_file` `null` when no file was read. It exits `0` when
 everything is valid and `2`, with the same `configuration error: ...` line a
-review would print, when anything is not. `--config PATH` and `--no-config`
-work as they do for `review`.
+review would print on stderr, when anything is not; with `--format json` an
+error leaves stdout empty. `--config PATH` and `--no-config` work as they do
+for `review`.
 
 Run it in the pipeline step before the review, or as a pre-commit hook, so a
 broken file fails in the change that broke it.
@@ -341,7 +389,9 @@ not: read the file from something the PR cannot change.
 
   List only paths that exist on the target branch; `git archive` fails on a
   missing one. For a file that names no paths, copying the one file is
-  enough:
+  enough. Do not copy a file that names paths this way: its paths would then
+  resolve beside the copy, where nothing was extracted, and
+  `prxref config check` still prints `ok`, because it does not open them.
 
   ```bash
   git fetch --depth=1 origin "${{ github.base_ref }}"
