@@ -151,6 +151,7 @@ from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, ch
 from prxref.forges.repo_dir import RepoDir
 from prxref.llm import ConfigError
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
+from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir
 from prxref.rules import load_review_rules, load_scoped_rules
 from prxref.text_inputs import check_readable_path, decode_text
 from prxref.ticket import load_ticket_context
@@ -1307,40 +1308,19 @@ def _resolve_description(
     return {"history": history, "cutoff": cutoff}, DescriptionPin("pinned", cutoff, source)
 
 
-def _load_text_input(loader: Any, path: str | list[str], *, max_chars: int, source: str) -> Any:
-    """Run the rules or ticket-context ``loader``, fencing every failure into a ``ConfigError``.
-
-    ``path`` is handed to ``loader`` as given: one path for the rules and
-    ticket files, the configured list for the path-scoped rules.
-    The loaders raise ``ConfigError`` naming ``source`` themselves; an
-    ``OSError`` or ``ValueError`` that escapes one is re-raised as a
-    ``ConfigError`` naming it too. So an unusable file always exits 2 before
-    any network call, and nothing a loader raises can reach the orchestrator,
-    which reads the loaded object unfenced.
-    """
-    try:
-        return loader(path, max_chars=max_chars, source=source)
-    except ConfigError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
-
-
 def _load_prompts_dir(path: str | None, *, source: str) -> Any:
-    """Load the prompt-template overrides in ``path``, fenced as :func:`_load_text_input` fences a file.
+    """:func:`prxref.review_inputs.load_prompts_dir` with this module's ``load_prompt_templates``."""
+    return load_prompts_dir(path, source=source, loader=load_prompt_templates)
 
-    ``None``, ``""`` and whitespace mean "no overrides" and return ``None``,
-    so ``--prompts-dir ""`` turns ``PRXREF_PROMPTS_DIR`` off. The loader
-    raises ``ConfigError`` naming ``source`` itself; an ``OSError`` or
-    ``ValueError`` that escapes it becomes one too, so an unusable directory
-    always exits 2 before any network call.
-    """
-    try:
-        return load_prompt_templates(path, source=source)
-    except ConfigError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise ConfigError(f"{source}: cannot load prompts directory {path!r}: {exc}") from exc
+
+def _path_loaders() -> PathLoaders:
+    """The loaders this module imported, looked up now, for :func:`load_path_inputs`."""
+    return PathLoaders(
+        review_rules=load_review_rules,
+        scoped_rules=load_scoped_rules,
+        ticket_context=load_ticket_context,
+        prompt_templates=load_prompt_templates,
+    )
 
 
 def _open_repo_dir(path: str | None) -> RepoDir | None:
@@ -1418,7 +1398,7 @@ def _run_review(
     # _check_ranges and make every range guarantee conditional on nobody using
     # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
     # orchestrate_review has no timeout parameter.
-    cfg = load_config(
+    cfg, layers = load_config_with_sources(
         config_file=config_file,
         max_chunks=max_chunks,
         llm_timeout=timeout,
@@ -1445,30 +1425,11 @@ def _run_review(
     # are read here, after config and before make_forge and the LLM client, so
     # an unusable one exits 2 before any network I/O. load_config stays I/O-free.
     # Each is reported under the input that supplied its path: the flag
-    # whenever it was given, else the variable. The scoped rules are checked
-    # against the always-on file, so one team word mapped to two tiers across
-    # them exits 2 here rather than silently taking the scoped tier.
-    rules = _load_text_input(
-        load_review_rules, cfg["review_rules"],
-        max_chars=cfg["review_rules_max_chars"],
-        source="--rules-file" if rules_file is not None else "PRXREF_REVIEW_RULES",
-    )
-    scoped = _load_text_input(
-        functools.partial(load_scoped_rules, always_on=rules), cfg["scoped_rules"],
-        max_chars=cfg["review_rules_max_chars"],
-        source="--scoped-rules" if scoped_rules is not None else "PRXREF_SCOPED_RULES",
-    )
-    ticket = _load_text_input(
-        load_ticket_context, cfg["ticket_context_file"],
-        max_chars=cfg["ticket_context_max_chars"],
-        source=(
-            "--context-file" if context_file is not None else "PRXREF_TICKET_CONTEXT_FILE"
-        ),
-    )
-    prompts = _load_prompts_dir(
-        cfg["prompts_dir"],
-        source="--prompts-dir" if prompts_dir is not None else "PRXREF_PROMPTS_DIR",
-    )
+    # whenever it was given, the config file when it set the path, else the
+    # variable. `config check` opens them through the same helper, so it
+    # fails exactly where this would.
+    inputs = load_path_inputs(cfg, layers, config_file=config_file, loaders=_path_loaders())
+    rules, scoped, ticket, prompts = inputs.rules, inputs.scoped, inputs.ticket, inputs.prompts
     repo = _open_repo_dir(repo_dir)
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -1968,8 +1929,13 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
     The file is resolved exactly as ``review`` resolves it, then the full
     :func:`prxref.config.load_config_with_sources` runs, so the environment
-    is validated too. A ``ConfigError`` prints ``configuration error: ...``
-    on stderr, nothing on stdout, and exits 2; otherwise the exit is 0.
+    is validated too. The rules files, the ticket file and the prompts
+    directory are then opened as ``review`` opens them
+    (:func:`prxref.review_inputs.load_path_inputs`), so an unusable one fails
+    here with the message ``review`` would print, naming the config file key,
+    the variable or the flag that supplied its path. A ``ConfigError``
+    prints ``configuration error: ...`` on stderr, nothing on stdout, and
+    exits 2; otherwise the exit is 0.
 
     Each ``_DEFAULTS`` key is reported, sorted, with its source:
     ``default``, ``file`` or ``env <NAME>``. A credential is never printed:
@@ -1983,6 +1949,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
     try:
         path = _resolve_config_file(args)
         cfg, layers = load_config_with_sources(config_file=path)
+        load_path_inputs(cfg, layers, config_file=path, loaders=_path_loaders())
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
