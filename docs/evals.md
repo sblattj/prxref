@@ -192,7 +192,7 @@ For example:
 ## `prxref eval run`
 
 ```bash
-prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume]
+prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]
 ```
 
 | Flag | Meaning |
@@ -204,10 +204,14 @@ prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--sco
 | `--scoped-rules PATH` | Path-scoped review rules for every case, as `prxref review --scoped-rules`. Repeatable. Replaces `PRXREF_SCOPED_RULES`; `--scoped-rules ""` turns it off. |
 | `--prompts-dir DIR` | Prompt templates for every case, as `prxref review --prompts-dir`. Overrides `PRXREF_PROMPTS_DIR`; `--prompts-dir ""` turns it off. |
 | `--resume` | Continue an existing run instead of refusing it. |
+| `--config PATH` | The [repository config file](config-file.md) every case reviews with, as `prxref review --config`. It wins over `PRXREF_CONFIG_FILE`, and `--config off` reads none. Without it or `--no-config`, the run reads `PRXREF_CONFIG_FILE`, else `.prxref.toml` in the working directory. |
+| `--no-config` | Read no repository config file for any case. Cannot be combined with `--config`. |
 
 It exits `2`, before any case runs and before anything is written, on a
 `--label` that is not a safe name, a bad dataset (naming `--cases`), a
-malformed environment (naming the variable), an unusable rules file,
+malformed environment (naming the variable), a missing or invalid
+repository config file (naming `--config`, `PRXREF_CONFIG_FILE`, or the
+file and the key), an unusable rules file,
 scoped rules entry or prompts directory (naming `--rules-file`,
 `--scoped-rules` or `--prompts-dir`, or the variable when the flag is not
 given), an existing run directory without `--resume` (naming `--label`), or
@@ -396,6 +400,10 @@ headline, then the path of `score.md`:
 Recall (micro): 37.5% (credit 1.5 of 4 scored labels) over 3 cases
 score: prxref-eval/base/score.md
 ```
+
+`eval score` reads no [repository config file](config-file.md): the judge
+takes its backend, endpoint and key, and `PRXREF_LLM_PARSE_RETRIES`, from
+the environment only, even when `.prxref.toml` sets `llm_parse_retries`.
 
 It exits `2` on a `--label` that is not a safe name; a run with no
 `run.json` (write it with `eval run`, or finish an interrupted one with

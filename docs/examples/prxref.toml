@@ -1,0 +1,62 @@
+# .prxref.toml - repository config for prxref (issue #38)
+#
+# Copy this file to the root of your repository as .prxref.toml. prxref reads
+# it from the working directory, so run prxref from the repository root.
+#
+# Keys are the PRXREF_* environment variable names, lowercased, without the
+# prefix. The pipeline's environment and command-line flags still win over
+# every value here. Credentials, endpoints (llm_base_url), the backend, and
+# the gate (fail_on, dry_run) cannot be set in this file; keep them in the
+# pipeline.
+#
+# Validate before committing:  prxref config check
+# Schema and every key:         docs/config-file.md
+
+# --- Rules -------------------------------------------------------------------
+# Paths are relative to THIS file's directory and must stay inside it.
+
+# The team checklist every review unit reads.
+review_rules = ".prxref/rules.md"
+
+# Rules that reach only the files their applies_to globs match: a file per
+# area, or a directory read one level deep for *.md files.
+scoped_rules = [".prxref/rules/java.md", ".prxref/rules/helm"]
+
+# At most this many findings per team rule; 0 turns the cap off.
+max_findings_per_rule = 2
+
+# --- Model chain -------------------------------------------------------------
+# Tried in order, cheapest first. The endpoint and its key stay in the
+# pipeline (PRXREF_LLM_BASE_URL, PRXREF_LLM_API_KEY).
+
+llm_models = ["z-ai/glm-5.3-flash", "openai/gpt-4o-mini"]
+llm_reasoning_effort = "low"
+llm_max_tokens = 8192
+llm_timeout = 60.0
+# Quoted, so every prxref release that reads this file accepts it.
+llm_temperature = "0.0"
+
+# --- Context -----------------------------------------------------------------
+# off | diff | repo. "diff" adds definitions from the PR's own changed files.
+
+repo_context = "diff"
+repo_context_max_chars = 12000
+chunk_context_lines = 5
+context_exclude_globs = ["**/fixtures/**", "**/*.snap"]
+
+# --- Comment policy ----------------------------------------------------------
+
+# summary+inline | summary | inline
+post_mode = "summary+inline"
+max_inline_comments = 10
+post_verdict = true
+group_findings = true
+suggestions = "on"
+
+# --- Noise and size ----------------------------------------------------------
+
+confidence_floor = 0.7
+max_error_findings = 5
+max_warning_findings = 10
+size_warn_lines = 800
+size_ignore_globs = ["docs/generated/**"]
