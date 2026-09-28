@@ -84,6 +84,7 @@ def allowed_names() -> set[str]:
     return (
         expected_names()
         | set(config._LEGACY_ENV_ALIASES.values())
+        | {config.CONFIG_FILE_ENV}
         | DOCUMENTED_NON_KEYS
     )
 
