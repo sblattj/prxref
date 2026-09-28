@@ -244,7 +244,13 @@ updated this file.
 - **No runner was exercised.** Neither Forgejo Actions nor Gitea Actions
   has run the CI recipe.
 
-End-to-end review: <pending>
+End-to-end review: `prxref review` with posting ran twice against a pull
+request on a local Forgejo 11 instance, with a small hosted model. The first
+run posted one summary and 3 inline comments, all on the planted defects.
+After a push, the second run updated the same summary in place (still one
+summary comment), pruned the 3 stale inline comments and posted 4 new ones,
+one of them on the newly changed file. All 7 comments carry model attribution,
+and both run records say `posted: true`, `degraded: null`.
 
 ## Still open — not part of this release
 
