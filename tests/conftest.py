@@ -52,6 +52,7 @@ def _clear_prxref_env(monkeypatch):
     job summary.
     """
     clear_prxref_env(monkeypatch)
+    monkeypatch.delenv(config.CONFIG_FILE_ENV, raising=False)
     for name in CI_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
 

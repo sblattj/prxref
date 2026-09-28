@@ -846,6 +846,10 @@ def _file_value(key: str, value: object, display: str) -> object:
         raise wrong("an array of strings")
     if isinstance(value, str):
         return value
+    if key == "llm_temperature":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        raise wrong("a number or a string")
     raise wrong("a string")
 
 
@@ -920,8 +924,10 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
     ``display`` names the file in errors (default ``str(path)``). Values come
     back in the types the environment layer produces; an empty string or an
     empty array reads as unset and is left out, like an empty environment
-    variable. Path keys come back resolved against the file's directory. A
-    syntax error (with its line), a non-UTF-8 file, a table, an unknown key,
+    variable. ``llm_temperature`` takes a TOML number or a string, and a
+    number comes back as the string the environment would hold (``0.2``
+    reads as ``"0.2"``). Path keys come back resolved against the file's
+    directory. A syntax error (with its line), a non-UTF-8 file, a table, an unknown key,
     an :data:`ENV_ONLY_KEYS` key, a wrong type, a ``spec_sources`` URL, or a
     path outside the file's directory raises
     :class:`~prxref.llm.ConfigError`. The environment is never read.
@@ -1137,6 +1143,27 @@ def load_config(
     Config itself knows no flag names: the caller that owns the surface names
     it.
     """
+    return load_config_with_sources(
+        config_file=config_file, source_labels=source_labels, **overrides,
+    )[0]
+
+
+def load_config_with_sources(
+    *,
+    config_file: Path | None = None,
+    source_labels: dict[str, str] | None = None,
+    **overrides: object,
+) -> tuple[dict, dict[str, str]]:
+    """:func:`load_config`, plus which layer supplied each key (#38).
+
+    Takes the same arguments, validates the same way and returns the same
+    config dict, paired with ``{key: layer}`` for every key, where ``layer``
+    is ``"default"``, ``"file"`` (the ``config_file``), ``"env <NAME>"``
+    (``NAME`` being the variable actually read, a legacy alias included) or
+    ``"override"`` (a keyword argument). A key the ``suggestions``
+    token-budget bump raised keeps the layer that supplied its value before
+    the bump, ``"default"``.
+    """
     cfg: dict[str, object] = {
         key: list(value) if isinstance(value, list) else value
         for key, value in _DEFAULTS.items()
@@ -1151,11 +1178,13 @@ def load_config(
     # every default is pre-attributed to its env var name. Used below to
     # decide whether the suggestions token-budget bump may apply.
     supplied: set[str] = set()
+    layers: dict[str, str] = dict.fromkeys(_DEFAULTS, "default")
     if config_file is not None:
         display = _display_path(config_file)
         for key, value in read_config_file(config_file, display=display).items():
             cfg[key] = value
             sources[key] = f"{display}: {key}"
+            layers[key] = "file"
             supplied.add(key)
     for key in _DEFAULTS:
         name = _ENV_PREFIX + key.upper()
@@ -1169,6 +1198,7 @@ def load_config(
             continue
         cfg[key] = _coerce_env(key, raw, name)
         sources[key] = name
+        layers[key] = f"env {name}"
         supplied.add(key)
     for key, value in overrides.items():
         if key not in _DEFAULTS:
@@ -1177,6 +1207,7 @@ def load_config(
             continue
         cfg[key] = value
         sources[key] = labels.get(key, key)
+        layers[key] = "override"
         supplied.add(key)
     if cfg["suggestions"] == "on" and "llm_max_tokens" not in supplied:
         # Issue #30 part D: at the default budget, GLM 5.3 Flash truncated
@@ -1188,7 +1219,7 @@ def load_config(
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
     _check_price_table(cfg, sources)
-    return cfg
+    return cfg, layers
 
 
 def make_forge(ref: PRRef, session=None) -> Forge:
