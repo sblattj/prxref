@@ -1,21 +1,23 @@
 # prxref
 
-Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps — Cloud and self-hosted.
+Fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and Azure DevOps — Cloud and self-hosted.
 
 ## What This Is
 
-A Python CLI + webhook service that reviews PRs/MRs on any of the four major
-forges by: parsing one unified diff, chunking it, running parallel single-shot
-LLM worker reviews with a fallback model chain, gating findings through
-deterministic quality passes, and posting inline comments + a summary.
+A Python CLI + webhook service that reviews PRs/MRs on any of five forges
+(Bitbucket, GitHub, GitLab, Gitea/Forgejo, Azure DevOps) by: parsing one
+unified diff, chunking it, running parallel single-shot LLM worker reviews
+with a fallback model chain, gating findings through deterministic quality
+passes, and posting inline comments + a summary.
 
-`prxref review --pr-url https://<any-forge>/<owner>/<repo>/pull|pullrequest|merge_requests/<n>`
+`prxref review --pr-url https://<any-forge>/<owner>/<repo>/pull|pulls|pullrequest|merge_requests/<n>`
 auto-detects the forge.
 
 ## Tech
 
 - Python 3.12+, `uv` for env/lock, hatchling packaging
-- One `Forge` Protocol (src/prxref/forges/base.py), five adapters
+- One `Forge` Protocol (src/prxref/forges/base.py), six adapters for five
+  forges
 - Bitbucket needs two of them: Cloud speaks `/2.0` on `bitbucket.org` only,
   Server / Data Center speaks `/rest/api/1.0` on any host, so the adapter is
   picked from the URL. `detect_forge` asks Cloud first, but that order is
@@ -26,6 +28,15 @@ auto-detects the forge.
   first means a later loosening degrades into a shadowed forge rather than a
   silently mis-routed one. GitHub and GitLab stay one adapter each, because
   their self-hosted products differ only in base URL.
+- Gitea/Forgejo is one adapter for every host (Codeberg, gitea.com,
+  self-hosted, optionally under a sub-path), because Forgejo keeps Gitea's
+  `/api/v1`. Its `/pulls/N` path is disjoint from the other forges' patterns;
+  `detect_forge` asks it after GitLab and before Azure DevOps. Since the
+  pattern accepts any host, the parser refuses the other forges' cloud hosts
+  and any URL with an `/api/` segment ahead of the owner, which would
+  otherwise capture API URLs that resolve to nothing. The API has no
+  compare-diff endpoint, so the pinned-range diff is rebuilt locally from the
+  compare file listing plus whole files at the merge base and the head.
 - Azure DevOps is one adapter for Services and Server, asked last by
   `detect_forge`; it has no unified-diff endpoint, so it rebuilds the diff
   locally from the Diffs API change list plus blob contents.

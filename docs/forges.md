@@ -395,8 +395,16 @@ self-hosted instance.
 - **Supported URL Shapes:**
   - `https://{host}/{owner}/{repo}/pulls/{number}`, on any host, e.g.
     `https://codeberg.org/{owner}/{repo}/pulls/{number}`
+  - `http(s)://{host}/{sub-path}/{owner}/{repo}/pulls/{number}` for an instance
+    served under a sub-path; the owner and repository are always the last two
+    segments before `/pulls/`, and plain HTTP is kept for a self-hosted instance.
 - **Detection Order:** `detect_forge` asks this parser after GitLab and before Azure
-  DevOps.
+  DevOps. The `/pulls/` path is disjoint from the other forges' shapes, but the
+  pattern accepts any host, so the parser refuses the other forges' cloud hosts
+  (`github.com`, `api.github.com`, `gitlab.com`, `bitbucket.org`,
+  `api.bitbucket.org`, `dev.azure.com`) and any URL with an `api` segment ahead of
+  the owner, such as a GitHub Enterprise Server `/api/v3/repos/...` URL. Those still
+  resolve to nothing, as before.
 - **Authentication:** `PRXREF_GITEA_TOKEN`, an access token created under
   **Settings → Applications**. Without one, requests are anonymous, which reads a
   public repository but cannot post. Observed on live Gitea 1.24 and Forgejo 11
@@ -408,8 +416,51 @@ self-hosted instance.
     issues.
 
   So a token that posts the full review needs `write:repository` and `write:issue`.
-- **API Endpoints & Behavior:** the adapter speaks `{scheme}://{host}/api/v1`, the
-  API that Gitea and Forgejo share.
+- **API Endpoints & Behavior:** the adapter speaks the `/api/v1` REST API that Gitea
+  and Forgejo share, with the token sent as `Authorization: token <t>`.
+  - **Base URL:** `{scheme}://{host}[/{sub-path}]/api/v1/repos/{owner}/{repo}`
+  - **Metadata:** `GET /pulls/{number}`.
+  - **Diffs:** `GET /pulls/{number}.diff`, returned as-is.
+  - **Summary Comments:** `GET /issues/{number}/comments` (one read: the listing is
+    not paged, and ignores `limit` and `page`), then `PATCH /issues/comments/{id}` on
+    the comment carrying `<!-- prxref-summary -->`, or `POST /issues/{number}/comments`
+    when there is none.
+  - **Inline Comments:** one `POST /pulls/{number}/reviews` per run, with event
+    `COMMENT`, the head SHA as `commit_id`, and each comment anchored by
+    `new_position`, a line of the new file (`old_position` for a comment on the old
+    side). The API has no line range, so a multi-line comment anchors at its last
+    line. The server does not check a line against the diff, so the review is
+    accepted or refused whole; a refusal is logged with the response body and raised.
+  - **Thread List:** `GET /pulls/{number}/reviews`, paged 50 at a time (the server
+    clamps a page to its `MAX_RESPONSE_ITEMS`, 50 by default) until an empty page,
+    then `GET /pulls/{number}/reviews/{id}/comments` for each review.
+  - **Pruning:** after reading every review, a review whose every comment carries the
+    attribution marker, and whose body is empty or attributed, is deleted whole with
+    `DELETE /pulls/{number}/reviews/{id}`, which both forges serve. Otherwise each
+    attributed comment is deleted with
+    `DELETE /pulls/{number}/reviews/{id}/comments/{comment_id}`, which Forgejo serves;
+    whether upstream Gitea serves it is unverified, and a refused delete is logged and
+    the comment left in place.
+  - **File Content:** `GET /raw/{path}?ref={sha}`, best-effort. A non-2xx, a body over
+    512 KiB, or a binary body returns `None`.
+- **Pinned Commit Range (Replay):** the API has no compare diff (the API's
+  `compare/{base}...{head}.diff` answered `500` live), so the diff is rebuilt.
+  `GET /compare/{base_sha}...{head_sha}` lists the changed files and the head-side
+  commits; the merge base is the one parent of those commits that is not itself
+  listed. A range with more than one such parent (a head that merged the base branch
+  in), or a listing short of `total_commits`, raises rather than guessing. Each file's
+  two sides are read through **File Content** at the merge base and at the head and
+  diffed locally. A binary side, a side over 512 KiB, or any file past the first 300
+  is reviewed header-only, with one warning. The compare listing reports a rename as
+  a delete plus an add, so a rename's diff here differs in shape from the pull
+  request's own `.diff`. An empty range returns empty text.
+- **Description History (Replay):** none. The API exposes no description edit
+  history, so a `--pr-url` replay here shows the current title and description and
+  logs a warning, and `--as-of` exits `2`.
+- **Repository Listing (Repository Context):** `GET /git/trees/{sha}?recursive=true`,
+  1000 entries a page, read while `truncated` says another page follows, up to 20
+  pages. Only `blob` entries are kept. A walk that stops at the cap is marked
+  incomplete, and a failed page gives no listing.
 - **Webhook Integration:**
   - **Setup:** in the repository's **Settings → Webhooks**, add a webhook of type
     **Forgejo** or **Gitea** with target URL `https://<host>/webhook`, content type
@@ -514,7 +565,9 @@ webhook daemon records `degraded` but never emits.
 
 The `failed` list above assumes the default `PRXREF_POST_MODE=summary+inline`, in which a
 refused summary means the inline comments are never attempted. With
-`PRXREF_POST_MODE=inline`, only GitHub reports a refused inline comment as a failure:
+`PRXREF_POST_MODE=inline`, only GitHub and Gitea / Forgejo report a refused inline
+comment as a failure (Gitea / Forgejo post every inline comment in one review, which
+is accepted or refused whole):
 the Bitbucket Cloud, Bitbucket Server, GitLab and Azure DevOps adapters skip each
 comment a 4xx rejects, as they do for a line outside the diff, so an inline-only run on
 those forges does not detect a read-only token and records no degradation.
