@@ -509,7 +509,9 @@ check from a diff.
 | the model writes a word that is not mapped | unchanged behaviour: dropped as `invalid severity` |
 
 Every configuration error names the input that supplied the path:
-`--rules-file` when the flag was given, else `PRXREF_REVIEW_RULES`. The file
+`--rules-file` when the flag was given, `PRXREF_REVIEW_RULES` when the
+variable set it, and `.prxref.toml: review_rules` when the
+[repository config file](config-file.md) did. The file
 is read before any network call, so `prxref review` exits `2` without touching
 the forge or the model. This holds under `PRXREF_FAIL_ON` as well.
 

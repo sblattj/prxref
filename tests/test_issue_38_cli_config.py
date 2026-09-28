@@ -418,6 +418,154 @@ class TestConfigCheck:
         capsys.readouterr()
 
 
+# --------------------------------------------------------------------------- path inputs
+
+
+class TestPathInputsAreOpened:
+    """``config check`` opens the files path keys name, as ``review`` does, and names their source."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        for name in ("PRXREF_REVIEW_RULES", "PRXREF_SCOPED_RULES",
+                     "PRXREF_TICKET_CONTEXT_FILE", "PRXREF_PROMPTS_DIR"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _write(self, repo: Path, text: str) -> None:
+        (repo / config.CONFIG_FILE_NAME).write_text(text, encoding="utf-8")
+
+    def _missing_rules_message(self, repo: Path, source: str) -> str:
+        missing = repo.resolve() / "missing.md"
+        return (
+            f"configuration error: {source}: cannot read rules file "
+            f"'{missing}': No such file or directory\n"
+        )
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_a_missing_rules_file_named_by_the_file_exits_2(self, repo, capsys, fmt):
+        self._write(repo, 'review_rules = "missing.md"\n')
+        code, out, err = _check(capsys, "--format", fmt)
+        assert code == 2
+        assert out == ""
+        assert err == self._missing_rules_message(repo, ".prxref.toml: review_rules")
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_an_unusable_prompts_dir_named_by_the_file_exits_2(self, repo, capsys, fmt):
+        (repo / "prompts").mkdir()
+        (repo / "prompts" / "worker.md").write_text("no marker here\n", encoding="utf-8")
+        self._write(repo, 'prompts_dir = "prompts"\n')
+        code, out, err = _check(capsys, "--format", fmt)
+        assert code == 2
+        assert out == ""
+        assert err.startswith("configuration error: .prxref.toml: prompts_dir: prompt template ")
+
+    def test_the_same_file_set_through_the_variable_names_the_variable(
+        self, repo, capsys, monkeypatch,
+    ):
+        monkeypatch.setenv("PRXREF_REVIEW_RULES", str(repo.resolve() / "missing.md"))
+        code, out, err = _check(capsys, "--format", "json")
+        assert code == 2
+        assert out == ""
+        assert err == self._missing_rules_message(repo, "PRXREF_REVIEW_RULES")
+
+    def test_the_variable_beats_the_file_and_is_named(self, repo, capsys, monkeypatch):
+        self._write(repo, 'review_rules = "other.md"\n')
+        monkeypatch.setenv("PRXREF_REVIEW_RULES", str(repo.resolve() / "missing.md"))
+        code, _out, err = _check(capsys)
+        assert code == 2
+        assert err == self._missing_rules_message(repo, "PRXREF_REVIEW_RULES")
+
+    def test_usable_files_still_print_ok(self, repo, capsys):
+        (repo / "rules.md").write_text("Prefer small functions.\n", encoding="utf-8")
+        self._write(repo, 'review_rules = "rules.md"\n')
+        code, out, err = _check(capsys)
+        assert code == 0
+        assert out.splitlines()[-1] == "ok"
+        assert err == ""
+
+    def test_review_names_the_file_key(self, repo, recorder, capsys):
+        self._write(repo, 'review_rules = "missing.md"\n')
+        assert _review() == 2
+        assert recorder == []
+        assert capsys.readouterr().err.endswith(
+            self._missing_rules_message(repo, ".prxref.toml: review_rules")
+        )
+
+    def test_review_and_config_check_print_the_same_line(self, repo, recorder, capsys):
+        self._write(repo, 'scoped_rules = ["missing.md"]\n')
+        assert _review() == 2
+        review_line = capsys.readouterr().err.strip().splitlines()[-1]
+        code, _out, err = _check(capsys)
+        assert code == 2
+        assert err.strip() == review_line
+        assert review_line.startswith("configuration error: .prxref.toml: scoped_rules: ")
+
+    def test_a_flag_is_still_named_over_the_file(self, repo, recorder, capsys):
+        self._write(repo, 'review_rules = "rules.md"\n')
+        assert _review("--rules-file", "missing.md") == 2
+        assert "configuration error: --rules-file: " in capsys.readouterr().err
+
+    def test_eval_run_names_the_file_key(self, repo, recorder, capsys):
+        self._write(repo, 'review_rules = "missing.md"\n')
+        argv = ["eval", "run", "--cases", str(FIXTURE / "cases.json"), "--label", "L",
+                "--out", str(repo / "out")]
+        assert cli.main(argv) == 2
+        assert recorder == []
+        assert capsys.readouterr().err.endswith(
+            self._missing_rules_message(repo, ".prxref.toml: review_rules")
+        )
+
+
+# --------------------------------------------------------------------------- symlinked paths
+
+
+class TestSymlinkedDisplay:
+    """A config file named through a symlinked directory displays as its resolved spelling."""
+
+    @pytest.fixture
+    def linked(self, tmp_path, monkeypatch):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.chdir(real)
+        return real, link
+
+    def test_display_path_resolves_the_directory(self, linked):
+        real, link = linked
+        assert config._display_path(link / config.CONFIG_FILE_NAME) == config.CONFIG_FILE_NAME
+        assert config._display_path(real / config.CONFIG_FILE_NAME) == config.CONFIG_FILE_NAME
+        assert config._display_path(link / "sub" / "x.toml") == str(Path("sub") / "x.toml")
+
+    def test_relative_stays_relative_and_outside_stays_as_given(self, linked, tmp_path):
+        assert config._display_path(Path("sub/x.toml")) == str(Path("sub") / "x.toml")
+        outside = tmp_path / "shared.toml"
+        assert config._display_path(outside) == str(outside)
+
+    def test_a_symlinked_file_keeps_its_own_name(self, linked, tmp_path):
+        real, _link = linked
+        target = tmp_path / "elsewhere.toml"
+        target.write_text("max_chunks = 2\n", encoding="utf-8")
+        (real / config.CONFIG_FILE_NAME).symlink_to(target)
+        assert config._display_path(real / config.CONFIG_FILE_NAME) == config.CONFIG_FILE_NAME
+
+    def test_errors_config_check_and_the_record_agree(self, linked, recorder, capsys):
+        real, link = linked
+        named = str(link / config.CONFIG_FILE_NAME)
+        (real / config.CONFIG_FILE_NAME).write_text("max_chunks = 3\n", encoding="utf-8")
+        code, out, _err = _check(capsys, "--config", named)
+        assert code == 0
+        assert out.splitlines()[0] == "config file: .prxref.toml"
+        code, out, _err = _check(capsys, "--config", named, "--format", "json")
+        assert json.loads(out)["config_file"] == ".prxref.toml"
+        assert _review("--config", named, "--format", "json") == 0
+        assert json.loads(capsys.readouterr().out)["config_file"]["path"] == ".prxref.toml"
+        (real / config.CONFIG_FILE_NAME).write_text("max_chunks = 0\n", encoding="utf-8")
+        code, out, err = _check(capsys, "--config", named)
+        assert code == 2
+        assert out == ""
+        assert err.startswith("configuration error: .prxref.toml: max_chunks: ")
+
+
 # --------------------------------------------------------------------------- sources helper
 
 

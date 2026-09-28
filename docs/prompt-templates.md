@@ -102,8 +102,9 @@ The whole file is filled: `{verdict}`, `{title}`, `{file_count}`,
 
 The directory is loaded once per run, before any network call. A problem
 that would break the review is a configuration error: `prxref review` exits
-`2` naming `--prompts-dir` or `PRXREF_PROMPTS_DIR`, whichever supplied the
-path, and the webhook daemon logs it and reviews nothing. What each template
+`2` naming `--prompts-dir`, `PRXREF_PROMPTS_DIR` or the config file's
+`prompts_dir` key (`.prxref.toml: prompts_dir`), whichever supplied the
+path; `prxref config check` fails the same way; and the webhook daemon logs it and reviews nothing. What each template
 must keep, and the size limit, are stated once, under `PRXREF_PROMPTS_DIR` in
 [env-vars.md](env-vars.md).
 
