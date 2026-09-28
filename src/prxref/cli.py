@@ -1502,6 +1502,7 @@ def _run_review(
         dedup_similarity=cfg["dedup_similarity"],
         post_mode=cfg["post_mode"],
         post_verdict=cfg["post_verdict"],
+        summary_bullet_separator=cfg["summary_bullet_separator"],
         trace_file=cfg["trace_file"],
         trace_dir=cfg["trace_dir"],
         spec_sources=cfg["spec_sources"],
