@@ -622,8 +622,10 @@ def _print_summary(
     """Print the text-mode summary of one review.
 
     Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
-    ``size advisory:`` when the PR-size advisory fired; and ``replay:`` when
-    the run was a replay, so a replay can never be read as a live review.
+    ``chunks:`` when a chunk ran over the token budget or a file was placed
+    past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
+    when the PR-size advisory fired; and ``replay:`` when the run was a
+    replay, so a replay can never be read as a live review.
     The ``replay:`` line carries the stamp as ``key=value`` pairs, ending in
     ``description=<status>`` and, when a cutoff was chosen,
     `` as_of=<time> (<source>)``.
@@ -647,6 +649,9 @@ def _print_summary(
     if failed:
         reviewed = record.get("chunks_reviewed", 0)
         print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
+    chunks_line = _chunk_pressure_line(record)
+    if chunks_line:
+        print(chunks_line, file=target)
     size = record.get("size_advisory")
     if isinstance(size, dict) and size.get("message"):
         print(f"size advisory: {size['message']}", file=target)
@@ -708,6 +713,36 @@ def _print_summary(
     repo = record.get("repo_context")
     if isinstance(repo, dict):
         print(_repo_context_line(repo), file=target)
+
+
+def _chunk_pressure_line(record: dict) -> str | None:
+    """Render the text-mode ``chunks:`` line, or ``None`` when there is nothing to say.
+
+    ``chunks: <n> over the <budget>-token budget (largest ~<tokens>)`` when
+    ``chunks_over_budget`` is above 0, and ``<n> file(s) placed past the
+    chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET`` when
+    ``overflow_files`` is, joined by `` · `` when both are. ``None`` when
+    both are 0 or missing, so a normal run prints no new line.
+    """
+    over = record.get("chunks_over_budget")
+    overflow = record.get("overflow_files")
+    over = over if isinstance(over, int) and not isinstance(over, bool) else 0
+    overflow = overflow if isinstance(overflow, int) and not isinstance(overflow, bool) else 0
+    if over <= 0 and overflow <= 0:
+        return None
+    parts = []
+    if over > 0:
+        parts.append(
+            f"{over} over the {_dash(record.get('chunk_token_budget'))}-token budget "
+            f"(largest ~{_dash(record.get('largest_chunk_tokens'))})"
+        )
+    if overflow > 0:
+        noun = "file" if overflow == 1 else "files"
+        parts.append(
+            f"{overflow} {noun} placed past the chunk cap; "
+            "raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET"
+        )
+    return "chunks: " + " · ".join(parts)
 
 
 def _repo_context_line(repo: dict) -> str:
@@ -861,7 +896,9 @@ def _build_json_result(result: Any) -> dict:
     """Build the single JSON payload for ``--format json``.
 
     Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
-    ``chunks_failed``, ``elapsed_ms``, ``input_tokens``, ``output_tokens``,
+    ``chunks_failed``, ``chunks_over_budget``, ``largest_chunk_tokens``,
+    ``overflow_files``, ``chunk_token_budget``, ``elapsed_ms``,
+    ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
@@ -916,6 +953,10 @@ def _build_json_result(result: Any) -> dict:
         "chunk_count": result.get("chunk_count"),
         "chunks_reviewed": result.get("chunks_reviewed"),
         "chunks_failed": result.get("chunks_failed"),
+        "chunks_over_budget": result.get("chunks_over_budget"),
+        "largest_chunk_tokens": result.get("largest_chunk_tokens"),
+        "overflow_files": result.get("overflow_files"),
+        "chunk_token_budget": result.get("chunk_token_budget"),
         "elapsed_ms": result.get("elapsed_ms"),
         "input_tokens": result.get("input_tokens"),
         "output_tokens": result.get("output_tokens"),
