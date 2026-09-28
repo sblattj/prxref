@@ -72,5 +72,10 @@ auto-detects the forge.
 - config lives in one place: `config._DEFAULTS` plus the `_INT_KEYS` /
   `_FLOAT_KEYS` / `_RANGES` / `_CHOICE_KEYS` tables. A new key needs all four
   surfaces — those tables, the `config.py` docstring, `.env.example`, and
-  `docs/env-vars.md`.
+  `docs/env-vars.md` — plus a classification into `FILE_KEYS` or
+  `ENV_ONLY_KEYS` (and its row in `docs/config-file.md`).
+- config file: `.prxref.toml` sits between defaults and env; a new key must
+  be classified into `FILE_KEYS` or `ENV_ONLY_KEYS` (a test enforces the
+  partition), and anything that names a host, runs a program, writes a file
+  or reads outside the repo is env-only.
 - every posted comment carries model attribution
