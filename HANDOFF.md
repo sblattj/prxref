@@ -1,89 +1,70 @@
-# HANDOFF — v0.26.0 shipped: summary layout you can shape (#59)
+# HANDOFF — v0.27.0 shipped: chunk and read-cap visibility (#61)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-28 · **Supersedes** the
-v0.25.0 handoff.
+v0.26.0 handoff.
 
-0.26.0 is one feature. #59: a team preferred a hand-edited summary that
-grouped findings by severity under headings, used its own glyphs and named
-the head commit, and a `summary.md` override could not produce it. Now it
-can. New surfaces: two config keys, `severity_markers`
-(`PRXREF_SEVERITY_MARKERS`) and `summary_bullet_separator`
-(`PRXREF_SUMMARY_BULLET_SEPARATOR`), both file keys; the per-group summary
-slots; the marker slots; `{head_sha}`, `{head_sha_short}`,
-`{inline_accounting}`, `{chunk_count}`, `{input_tokens}` and
-`{output_tokens}`; and one `orchestrate_review` kwarg,
-`summary_bullet_separator`. No new `Forge` method, adapter, flag or
-run-record key. With neither key set and no new slot used, every summary,
-inline comment, formatter output and stdout byte is the same as in 0.25.0,
-which golden strings captured at `aeda4fe` pin. The user-facing account is
-the `[0.26.0]` section of `CHANGELOG.md`. This file is for whoever cuts the
-next release. The v0.25.0 handoff is in git history.
+0.27.0 is the "ship now" half of #61. #61 asked whether the chunk count and
+the repository-context read caps are set right. That question needs A/B
+data, so this release changes no default. It makes the limits settable and
+their effect visible. New surfaces: two config keys, `repo_context_max_reads`
+(`PRXREF_REPO_CONTEXT_MAX_READS`, 200) and `repo_context_max_chunk_reads`
+(`PRXREF_REPO_CONTEXT_MAX_CHUNK_READS`, 16), both file keys and both
+`orchestrate_review` kwargs. There are also new run-record keys:
+`repo_context.{chunk_read_cap_hit, run_read_cap_hit, max_reads,
+max_chunk_reads}` and top-level `chunks_over_budget`,
+`largest_chunk_tokens`, `overflow_files` and `chunk_token_budget`. Finally,
+`triage.plan_chunks` and a module-level `triage.est_tokens`. Chunk placement
+is unchanged. Text output is unchanged except the `repo context:` line
+(`-v`, repository context on) and a `chunks:` line that appears only on
+overflow. The user-facing account is the `[0.27.0]` section of
+`CHANGELOG.md`. #61 stays open for the default changes.
 
 ## What landed
 
-- **`src/prxref/markers.py`: an effective glyph table.** `SEVERITY_MARKERS`,
-  `OUT_OF_TICKET_MARKER` and `FALLBACK_MARKER` remain the immutable
-  defaults. `configure(overrides)` sets a process-wide effective table, and
-  a later call replaces rather than merges. It is read through
-  `active_severity_markers()`, `out_of_ticket_marker()`, `fallback_marker()`
-  and `marker_slots()`. `parse_overrides()` validates, and `overridden()` is
-  the context manager tests use. `severity_marker`, `marker_for` and
-  `inline_header` read the effective table. The only caller of `configure` is
-  `cli._run_review`, which covers `review`, every `serve` webhook and
-  `eval run`. An autouse fixture in `tests/conftest.py` resets the table
-  around every test.
-- **The two config keys, `src/prxref/config.py`.** `severity_markers` stays
-  the raw string in the loaded config. It is validated there, not parsed in
-  place the way `price_table` is, because two tests that compare the loaded
-  config with `_DEFAULTS` special-case `price_table` by name.
-  `summary_bullet_separator` is kept verbatim: the environment path never
-  strips a value. An environment value that is only whitespace reads as
-  unset, while a TOML `" "` is honoured.
-- **The three summary templates** (`prompts/summary.md`,
-  `orchestrator._FALLBACK_SUMMARY_TEMPLATE`,
-  `formatter._DEFAULT_SUMMARY_TEMPLATE`) draw their counts-line glyphs from
-  `{error_marker}`-style slots. `tests/test_markers.py`'s parity tests now
-  require the slots and forbid a literal glyph.
-- **`orchestrator._render_summary`** fills the per-group slots
-  (`_summary_group_of` sends an unknown severity to `outofscope`, the group
-  its fallback glyph belongs to). Other findings, and the inline accounting
-  a template has no slot for, go above the footer
-  (`_insert_before_footer`: the last attribution, plus any Markdown thematic
-  break directly above it).
-- **`src/prxref/prompt_templates.py`.** `SUMMARY_MARKER_PLACEHOLDERS` and
-  `SUMMARY_OPTIONAL_PLACEHOLDERS` are the two hand-kept additions to the
-  known summary slots, which are otherwise derived from the packaged
-  template. These slots cannot go into the packaged file without changing
-  default output. `uncovered_summary_groups` drives both the load-time
-  warning and the render-time guard.
-- **Docs.** `docs/prompt-templates.md` covers every slot, the validity rule,
-  the drop guard, a table of which slots each of the two summary renderers
-  fills, and a worked example (`docs/examples/summary-by-severity.md`) whose
-  rendered output a test regenerates and compares against the doc. Also
-  updated: `docs/env-vars.md`, `docs/config-file.md`, `.env.example`,
-  `docs/examples/prxref.toml` and the README.
-- **Tests.** `tests/test_issue_59_markers.py` (the key parsing, every error,
-  the table reaching each surface, and golden defaults captured at `aeda4fe`)
-  and `tests/test_issue_59_summary_slots.py` (every slot, the validator, the
-  drop guard, one-pass literal rendering, footer placement).
+- **Read caps as config.** The caps are `repo_reader.MAX_RUN_READS` and
+  `MAX_CHUNK_READS`, which remain the defaults, threaded to `forge_reader`
+  and `repo_dir_reader` as `run_cap` and `chunk_cap`. The kwargs come right
+  after `repo_dir` in `orchestrate_review`, because an existing test pins
+  the five names after `max_findings_per_rule`. Both keys are appended to
+  `evals.RUN_CONFIG_KEYS`, which now has 21 entries. An old baseline without
+  them still scores and compares: score copies `config` as-is and compare
+  never reads it.
+- **Which cap was hit.** `RepoReader.stats()` and the record carry
+  `chunk_read_cap_hit` and `run_read_cap_hit`, and `read_cap_hit` is their
+  OR. The CLI prints `cap_hit=no|chunk|run|chunk+run`. `reads` is not shown
+  as a fraction of `max_reads`, because it also counts PR-file fetches,
+  which spend neither cap. In the live run below, `reads=9` came with
+  `max_reads=3`.
+- **Chunk overflow.** `triage.plan_chunks` returns a `ChunkPlan`: the chunks
+  plus counts from the same placement pass, and `build_chunks` returns its
+  chunks. A file "overflows" when the chunk count is at `max_chunks` and no
+  chunk has room, either on tokens or on the per-chunk file cap. So
+  `overflow_files > 0` with `chunks_over_budget == 0` is possible. The
+  fields start in `run_inputs` as `0, 0, 0, budget` and are stamped on all 8
+  exits. `chunk_count` is still `len(chunks) + 1`, the whole-PR sweep
+  included. The CLI hint to raise the limits appears only when files
+  overflowed; one oversized file is not fixed by more chunks.
+- **Tests.** `tests/test_issue_61_read_caps.py` (config errors, cap
+  binding, threading, the CLI line, eval backward compatibility, and the
+  8 × 16 < 200 property) and `tests/test_issue_61_chunk_overflow.py` (the
+  stats, placement identical to a frozen copy of the 0.26.0 `build_chunks`
+  on 40 random inputs, record fields on several exits, and the CLI line
+  present and absent).
 
 ## What this release taught
 
-1. **A dry run never renders the summary.** `_render_summary` runs only
-   when `post_summary_wanted`, which requires `post`. So `--no-post` proves
-   the config, the template loader and the review, but not the comment body,
-   and `--format json` has no summary field. The live check below rendered
-   the dry run's own findings through `_render_summary` with the loaded
-   override. A real forge post (the `standing-up-a-live-forge-instance`
-   skill) is the stronger check if a later release changes the body again.
-2. **`claude-cli` needs `PRXREF_LLM_TIMEOUT` well above the 45 s default.**
-   The first live run lost its one worker chunk to two 45 s timeouts and
-   exited 0 with "Total LLM failure", which is the doctrine working. At 300 s
-   it reviewed both chunks.
-3. **The live review earned its keep.** Reviewing the release's own
-   footer-placement diff, it flagged (below the confidence floor) that
-   matching exactly `---` misses longer thematic breaks. That was fixed
-   before shipping, with tests for `-----`, `***`, `_ _ _` and `- - -`.
+1. **Key-set pins are spread wider than any grep list.** Adding record keys
+   failed 35 tests across 6 files, and the brief's grep had named 3 of them.
+   The cheap way to find every pin is one full-suite run right after the
+   first edit.
+2. **The `A81_*_KEYS` tuples in `tests/test_orchestrator_rule_cap.py` feed
+   golden hashes.** Adding a key to them changes five pinned hashes. New
+   record keys are left out before hashing instead.
+3. **Hidden config-key constraints.** `evals.RUN_CONFIG_KEYS` has its count
+   (and the count as a spelled-out word) pinned in tests and
+   `docs/evals.md`, and its last four entries are order-pinned. The
+   `orchestrate_review` signature has a pinned five-kwarg window. See the
+   coupling section.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -119,30 +100,30 @@ needs the docstring, `.env.example` and `docs/env-vars.md` to describe it,
 and a value that is not an integer needs its own pass through `_coerce_env`,
 `_check_ranges` and, for the file, `_file_value`.
 Current values, counted from `config._DEFAULTS` and
-`config._LEGACY_ENV_ALIASES` at this release: **76** keys (46 file, 30
-environment-only), **1** legacy alias, **77** accepted names; 0.26.0 added
-`severity_markers` and `summary_bullet_separator`. `PRXREF_CONFIG_FILE` is counted in neither: it is not a key, and
+`config._LEGACY_ENV_ALIASES` at this release: **78** keys (48 file, 30
+environment-only), **1** legacy alias, **79** accepted names; 0.27.0 added
+`repo_context_max_reads` and `repo_context_max_chunk_reads`. `PRXREF_CONFIG_FILE` is counted in neither: it is not a key, and
 `tests/test_docs_consistency.py` accepts it through `config.CONFIG_FILE_ENV`.
-The most recent new keys are `severity_markers` (0.26.0, read by
-`cli._run_review` into `markers.configure`, no orchestrator kwarg) and
-`summary_bullet_separator` (0.26.0, passed through as the
-`orchestrate_review` kwarg of the same name).
+The most recent new keys are `repo_context_max_reads` and
+`repo_context_max_chunk_reads` (0.27.0, both passed through as
+`orchestrate_review` kwargs of the same names). Two constraints outside
+the config tables caught them. A key that goes into
+`evals.RUN_CONFIG_KEYS` changes a count pinned in tests and in
+`docs/evals.md`, including the count spelled out as a word, and the last
+four entries are order-pinned, so append. A new `orchestrate_review`
+kwarg must not land inside the pinned five-name window after
+`max_findings_per_rule`.
 `tests/conftest.py` derives its env-clearing list from `_DEFAULTS` and clears
 `PRXREF_CONFIG_FILE` by name, so an ambient value never reaches a test.
 
 ## Release shape (follow this next time)
 
-How 0.26.0 was built:
+How 0.27.0 was built:
 
-1. **Seat A, from `aeda4fe`:** the glyph table, both config keys and the
-   template marker slots, with golden strings captured before any edit:
-   9792 to 9872 passed.
-2. **Seat B, on seat A's commit:** the per-group slots, the separator
-   wiring, the validator and the docs: 9872 to 9928.
-3. **Release.** This commit moves other findings and appended accounting
-   above the footer (seat B had placed them under the attribution), fixes
-   the thematic-break match the live review found, bumps the version, and
-   adds the CHANGELOG section and this file: 9928 to 9935.
+1. **Two parallel seats from `7e5375c`:** read caps and the cap split
+   (9935 to 9984 passed), and chunk overflow (9935 to 9972).
+2. **Release branch:** both seats merged with no conflicts (10021 passed),
+   followed by this commit: the version bump, CHANGELOG and this file.
 
 Cutting the release:
 
@@ -168,9 +149,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9935 passed                                   uv run pytest -q
+10021 passed                                  uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.26.0                                        uv run prxref --version
+0.27.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -178,28 +159,26 @@ updated this file.
 
 ### Live checks
 
-- **A `--no-post` review through the real CLI** (`claude-cli`, `sonnet`,
-  `PRXREF_LLM_TIMEOUT=300`) of the release's footer diff, via `--diff-file`
-  against pull request #58, with `--prompts-dir` holding
-  `docs/examples/summary-by-severity.md` as `summary.md`,
-  `PRXREF_SEVERITY_MARKERS="error=🔴,warning=🟡,outofscope=⚪"` and
-  `PRXREF_SUMMARY_BULLET_SEPARATOR=": "`. Result: exit 0, verdict Approved,
-  2 of 2 chunks reviewed, 1 finding. The record's `prompt_templates` named
-  the override (`chars: 393`).
-- **That run's finding, plus one synthetic spec finding, rendered through
-  `_render_summary`** with the loaded override and the configured table:
-  a `head \`aeda4fe\`` header, the counts line `🔴 0 error · 🟡 1 warning ·
-  🔍 1 spec · ⚪ 0 minor`, `**🟡 Warnings**` and `**🔍 Spec**` sections, and
-  ``- 🟡 `src/prxref/orchestrator.py:3712`: _insert_before_footer …`` with
-  the `: ` separator. Empty sections rendered nothing; the attribution came
-  last.
-- **`prxref config check`:** `PRXREF_SEVERITY_MARKERS=eror=X` exited 2 with
-  `unknown marker name 'eror'; did you mean 'error'?`, a 17-character
-  separator exited 2 with `must be at most 16 characters`, and valid values
-  printed as `(env PRXREF_SEVERITY_MARKERS)` and `(env
-  PRXREF_SUMMARY_BULLET_SEPARATOR)`, the latter with its trailing space.
+- **A `--no-post -v` review through the real CLI** (`claude-cli`, `sonnet`,
+  `PRXREF_LLM_TIMEOUT=300`). It reviewed the release's own `src/` diff via
+  `--diff-file` with `--repo-dir .`, `PRXREF_REPO_CONTEXT=repo`,
+  `PRXREF_MAX_CHUNKS=2`, `PRXREF_CHUNK_TOKEN_BUDGET=2000`,
+  `PRXREF_REPO_CONTEXT_MAX_CHUNK_READS=2` and
+  `PRXREF_REPO_CONTEXT_MAX_READS=3`. It exited 0 with verdict Approved and
+  printed:
+  `chunks: 2 over the 2000-token budget (largest ~7240) · 4 files placed past the chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET`
+  and
+  `repo context: mode=repo reader=repo-dir listing=1557 reads=9 max_reads=3 max_chunk_reads=2 cap_hit=chunk+run entries=29 omitted=0`.
+- **The same run with `--format json`** gave `chunk_count: 3` (2 chunks plus
+  the sweep), `chunks_over_budget: 2`, `largest_chunk_tokens: 7240`,
+  `overflow_files: 4` and `chunk_token_budget: 2000`. Its `repo_context` had
+  both cap flags true, `max_reads: 3` and `max_chunk_reads: 2`.
 
 ## Still open — not part of this release
+
+- **#61's default changes.** Whether to raise `max_chunks` or the read caps
+  waits for A/B data. The fields above are what such a comparison should
+  read.
 
 - **The library formatter has no per-group slots (#59).**
   `formatter.format_summary` fills the marker slots but not the
