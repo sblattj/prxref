@@ -52,6 +52,9 @@ max_inline_comments = 10
 post_verdict = true
 group_findings = true
 suggestions = "on"
+# Finding glyphs and the bullet separator (#59). Unset keeps the defaults.
+# severity_markers = "error=🔴,warning=🟡"
+# summary_bullet_separator = ": "
 
 # --- Noise and size ----------------------------------------------------------
 

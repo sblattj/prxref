@@ -174,6 +174,28 @@ LLM / pipeline:
                                 the posted summary's attribution line
                                 (default off). The cost is always in the run
                                 record, --format json and the traces.
+  PRXREF_SEVERITY_MARKERS       Finding glyphs (#59): comma-separated
+                                name=glyph pairs overriding any of error,
+                                warning, spec, outofscope and
+                                out_of_ticket, e.g.
+                                "error=🔴,warning=🟡"; whitespace around
+                                pairs, names and glyphs is stripped. A
+                                name not given keeps its default glyph;
+                                empty (default) overrides nothing. An
+                                unknown name, a pair without "=", an empty
+                                glyph, a repeated name, a glyph holding
+                                whitespace or a comma, or two of the five
+                                effective glyphs being equal is a
+                                configuration error.
+  PRXREF_SUMMARY_BULLET_SEPARATOR
+                                Text between a summary bullet's location
+                                and its title (#59); default " — " (space,
+                                em dash, space). Never stripped: leading
+                                and trailing spaces are part of the value,
+                                though a whitespace-only environment value
+                                reads as unset like any other. Empty = the
+                                default. A newline or more than 16
+                                characters is a configuration error.
   PRXREF_SIZE_WARN_LINES        Advisory-only threshold on lines changed
                                 (added + removed, from the parsed diff,
                                 excluding lock and generated files); one
@@ -477,7 +499,7 @@ from typing import NamedTuple
 
 from prxref.forges.base import Forge, PRRef
 
-from . import costs
+from . import costs, markers
 from .llm import ConfigError
 from .quality import DEFAULT_CONFIDENCE_FLOOR, DEFAULT_MAX_ERRORS
 from .triage import (
@@ -492,6 +514,12 @@ _ENV_PREFIX = "PRXREF_"
 #: left ``llm_max_tokens`` unset (issue #30, part D): the reference-model
 #: measurement showed the 4096 default truncating every suggestions-on run.
 SUGGESTIONS_MAX_TOKENS = 8192
+
+#: The text between a summary bullet's location and its title (issue #59).
+_DEFAULT_BULLET_SEPARATOR = " — "
+
+#: The longest ``summary_bullet_separator`` accepted, in characters.
+_MAX_BULLET_SEPARATOR_CHARS = 16
 
 _DEFAULTS: dict[str, object] = {
     "llm_backend": "openai-compat",
@@ -540,6 +568,11 @@ _DEFAULTS: dict[str, object] = {
     # text and every consumer sees one type.
     "price_table": "",
     "post_cost": False,
+    # ``name=glyph`` pairs; _check_severity_markers validates the value and
+    # leaves it as given, and cli._run_review hands it to markers.configure.
+    "severity_markers": "",
+    # Never stripped: the spaces around the dash are part of the value.
+    "summary_bullet_separator": _DEFAULT_BULLET_SEPARATOR,
     # ``None`` = the advisory is off, the second "None means off" class next
     # to ``llm_seed``: 0 is a legal threshold, so it cannot spell "unset".
     "size_warn_lines": None,
@@ -748,6 +781,7 @@ FILE_KEYS = frozenset({
     "dedup_similarity", "max_chunks", "chunk_token_budget", "chunk_max_files",
     "chunk_context_lines", "max_workers", "max_inline_comments",
     "post_mode", "post_verdict", "post_cost",
+    "severity_markers", "summary_bullet_separator",
     "size_warn_lines", "size_warn_files", "size_ignore_globs",
     "spec_sources", "spec_max_chars", "spec_digest_tokens",
     "review_rules", "review_rules_max_chars",
@@ -1127,6 +1161,46 @@ def _check_price_table(cfg: dict[str, object], sources: dict[str, str]) -> None:
     )
 
 
+def _check_severity_markers(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Reject a malformed ``severity_markers`` table (#59).
+
+    Same doctrine as :func:`_check_price_table`: it runs after environment
+    AND overrides, and a failure is a ``ConfigError`` naming whichever input
+    supplied the value. The value is the ``name=glyph`` pair string, or a
+    mapping from a library caller; both are validated by
+    :func:`prxref.markers.parse_overrides` and left as given, for
+    :func:`prxref.markers.configure` to install.
+    """
+    try:
+        markers.parse_overrides(cfg["severity_markers"])
+    except ValueError as exc:
+        raise ConfigError(f"{sources['severity_markers']}: {exc}") from exc
+
+
+def _check_bullet_separator(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Validate ``summary_bullet_separator`` (#59); ``""`` reads as the default.
+
+    The value is never stripped, because its leading and trailing spaces are
+    the point. A non-string, a newline or carriage return, or more than
+    :data:`_MAX_BULLET_SEPARATOR_CHARS` characters is a ``ConfigError``
+    naming whichever input supplied it.
+    """
+    value = cfg["summary_bullet_separator"]
+    source = sources["summary_bullet_separator"]
+    if not isinstance(value, str):
+        raise ConfigError(f"{source}: must be a string, got {value!r}")
+    if value == "":
+        cfg["summary_bullet_separator"] = _DEFAULT_BULLET_SEPARATOR
+        return
+    if "\n" in value or "\r" in value:
+        raise ConfigError(f"{source}: must not contain a newline, got {value!r}")
+    if len(value) > _MAX_BULLET_SEPARATOR_CHARS:
+        raise ConfigError(
+            f"{source}: must be at most {_MAX_BULLET_SEPARATOR_CHARS} characters, "
+            f"got {len(value)} ({value!r})"
+        )
+
+
 def load_config(
     *,
     config_file: Path | None = None,
@@ -1144,8 +1218,9 @@ def load_config(
 
     Keys mirror the env table above (lowercase, no prefix). Env values are
     type-coerced per key (int / float / bool / comma-or-whitespace list /
-    str); an empty or whitespace-only value reads as unset. ``price_table``
-    comes back parsed, as a dict. A malformed value, one out of its numeric
+    str); an empty or whitespace-only value reads as unset. A string value
+    is never stripped, so ``summary_bullet_separator`` keeps its spaces.
+    ``price_table`` comes back parsed, as a dict. A malformed value, one out of its numeric
     range, or one outside its key's allowed vocabulary raises
     :class:`~prxref.llm.ConfigError` naming the input that supplied it, which
     the CLI turns into exit 2.
@@ -1233,6 +1308,8 @@ def load_config_with_sources(
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
     _check_price_table(cfg, sources)
+    _check_severity_markers(cfg, sources)
+    _check_bullet_separator(cfg, sources)
     return cfg, layers
 
 
