@@ -198,6 +198,10 @@ new file, merged one at a time behind a full gate, then this commit.
    `docs/config-file.md`, `CLAUDE.md` and the `cli.py` / `config.py`
    docstrings against the merged command line. It adds no test; the six
    docs pins turn green, so the suite measures 9777 passed.
+4. **Two fixes found by the release checks.** `config check` now opens the
+   files that path keys name, through a loader it shares with `review` and
+   `eval run`, and a file named through a symlinked directory displays as
+   its short name: 9777 to 9792.
 
 Cutting the release:
 
@@ -223,7 +227,7 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-9777 passed                                   uv run pytest -q
+9792 passed                                   uv run pytest -q
 All checks passed!                            uv run ruff check src tests
 0.25.0                                        uv run prxref --version
 ```
@@ -275,7 +279,18 @@ No forge and no model is needed for these; each ran the installed
   `.prxref.toml: review_rules`, which the test suite covers. `git archive` with
   a path missing on the branch exited 128.
 
-End-to-end review: <pending>
+End-to-end review: `config check` from a scratch directory whose
+`.prxref.toml` sets `llm_models`, `max_chunks = 2`, `llm_temperature = 0.2`
+and `max_inline_comments = 5` reported all four as `(file)` and the model
+endpoint as `(env ...)`. A `--no-post` review of a 32-file pull request on
+this repository then split the diff into 2 chunks (13 and 19 files), which is
+the file's `max_chunks`, and the record's `config_file` listed those 4 keys
+right after `degraded`. The verdict was Error, because on the fast model both
+chunks were cut off at the default 4096-token output budget, even after a
+retry. That is the known token-budget limit, not a config-file fault.
+`config check` on a file naming a missing `review_rules` exited 2 with an
+empty stdout and named `.prxref.toml: review_rules`; once the file existed,
+it printed `ok`.
 
 ## Still open — not part of this release
 
