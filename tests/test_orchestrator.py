@@ -274,6 +274,7 @@ class TestHappyPath:
         assert set(res) == {
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
+            "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
@@ -745,6 +746,7 @@ class TestMaxTokensThreading:
         assert set(res) == {
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
+            "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
@@ -848,8 +850,8 @@ class TestChunkFileCapAndContextKnobs:
             assert default is constant, (fn.__name__, param)
 
     def test_max_files_per_chunk_reaches_build_chunks(self, monkeypatch):
-        spy = MagicMock(wraps=orchestrator.build_chunks)
-        monkeypatch.setattr(orchestrator, "build_chunks", spy)
+        spy = MagicMock(wraps=orchestrator.plan_chunks)
+        monkeypatch.setattr(orchestrator, "plan_chunks", spy)
         orchestrate_review(
             FakeForge(diff=FOUR_FILE_DIFF), REF, FakeLLM("{}"), post=False,
             max_files_per_chunk=3,
@@ -1061,6 +1063,7 @@ class TestQualityGateKnobsAreThreaded:
         assert set(res) == {
             "verdict", "findings_active", "findings_dropped", "chunk_count",
             "chunks_reviewed", "chunks_failed",
+            "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
             "elapsed_ms", "input_tokens", "output_tokens", "posted",
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
@@ -1073,6 +1076,7 @@ class TestQualityGateKnobsAreThreaded:
 RESULT_KEYS = {
     "verdict", "findings_active", "findings_dropped", "chunk_count",
     "chunks_reviewed", "chunks_failed",
+    "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
@@ -2387,7 +2391,7 @@ class TestRunTrace:
         stage = "forge." + failing
         assert [e["phase"] for e in events if e["node"] == stage] == ["start", "fail"]
 
-    @pytest.mark.parametrize("stage", ["parse_unified_diff", "build_chunks"])
+    @pytest.mark.parametrize("stage", ["parse_unified_diff", "plan_chunks"])
     def test_a_pipeline_stage_crash_closes_the_run_as_failed(
         self, tmp_path, monkeypatch, stage
     ):

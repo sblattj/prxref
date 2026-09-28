@@ -35,7 +35,8 @@ BASE_TEXT_VERBOSE = (
 )
 BASE_JSON = (
     '{"verdict": "Approved", "findings": [], "chunk_count": 1, "chunks_reviewed": 1, '
-    '"chunks_failed": 0, "elapsed_ms": 5, "input_tokens": 10, "output_tokens": 2, '
+    '"chunks_failed": 0, "chunks_over_budget": null, "largest_chunk_tokens": null, '
+    '"overflow_files": null, "chunk_token_budget": null, "elapsed_ms": 5, "input_tokens": 10, "output_tokens": 2, '
     '"cost_usd": null, "cost_estimated": null, "posted": false, "review_rules": null, '
     '"ticket_context": null, "spec_grounding": null, "size_advisory": null, '
     '"prompt_templates": null, "scoped_rules": null, "rule_counts": null, '

@@ -314,7 +314,9 @@ prxref-eval/                        --out
   no `--cases` and never opens the files the case names.
 - **`cases/<id>/record.json`** is the review's record, exactly what
   `prxref review --format json` prints: the verdict, every finding (active,
-  then dropped with its `drop_reason`), the chunk counts, `elapsed_ms`,
+  then dropped with its `drop_reason`), the chunk counts (with
+  `chunks_over_budget`, `largest_chunk_tokens`, `overflow_files` and
+  `chunk_token_budget`), `elapsed_ms`,
   tokens and cost, the stamps, and `replay`. A review whose verdict is
   `Error` is a normal `record.json` with that verdict.
 - **`cases/<id>/error.json`** replaces it when the review raised:
