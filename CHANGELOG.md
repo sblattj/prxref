@@ -76,12 +76,25 @@ record gains only `"config_file": null`.
   secrets print only as `<set>` or `<unset>`. It exits 0 when the
   configuration is valid, and 2 with the `configuration error: ...` line a
   review would print when it is not; under `--format json` an error leaves
-  stdout empty. It does not open the files that path keys name.
+  stdout empty. It opens the rules file, the scoped rules, the
+  ticket-context file and the prompts directory as `review` does, so a
+  missing or unusable one fails `config check` with the same exit 2 and the
+  same message, and a file copied away from the files its paths name is
+  caught before the review.
+- **A path the file set is named as the file's key (#38).** When
+  `review_rules`, `scoped_rules`, `ticket_context_file` or `prompts_dir`
+  comes from the file and cannot be loaded, `review`, `eval run` and
+  `config check` name it `.prxref.toml: review_rules`, as every other file
+  error does, rather than the `PRXREF_` variable nobody set. A path from the
+  environment or a flag is still named by the variable or the flag.
 - **Run record and `--format json` key `config_file` (#38), after
   `degraded`.** `null` when no file was read, else
   `{"path", "sha256", "keys"}`: the file as errors name it, the sha256 of
   its bytes, and the sorted keys it sets, including keys a later layer
-  overrode. With `-v` in text mode, `review` logs
+  overrode. A file inside the working directory is named relative to it
+  even when it is named through a symlinked directory (`/tmp` for
+  `/private/tmp` on macOS), so errors, `config check` and the record show
+  the same short name for either spelling. With `-v` in text mode, `review` logs
   `config: <path> (<n> keys)`.
 - **`llm_temperature` in the file takes a TOML number (#38)**, as in
   `llm_temperature = 0.2`, or a quoted string. The number is stored as the

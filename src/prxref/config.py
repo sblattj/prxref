@@ -913,10 +913,22 @@ def find_config_file(
 
 
 def _display_path(path: Path) -> str:
-    """``path`` relative to the working directory when inside it, else as given."""
+    """``path`` relative to the working directory when inside it, else as given.
+
+    Inside is decided lexically first, then with the file's directory and
+    the working directory both resolved, so a path spelled through a
+    symlinked directory (``/tmp`` for ``/private/tmp`` on macOS) displays
+    as its resolved spelling does. The file name itself is never followed.
+    """
+    absolute = Path(os.path.abspath(path))
     try:
-        return str(Path(os.path.abspath(path)).relative_to(Path.cwd()))
+        return str(absolute.relative_to(Path.cwd()))
     except ValueError:
+        pass
+    try:
+        resolved = absolute.parent.resolve() / absolute.name
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except (OSError, RuntimeError, ValueError):
         return str(path)
 
 
