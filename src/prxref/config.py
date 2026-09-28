@@ -407,6 +407,8 @@ Per-forge auth:
   PRXREF_GITHUB_TOKEN           GitHub token (github.com)
   PRXREF_GITHUB_ENTERPRISE_TOKEN GitHub Enterprise token (GHES hosts)
   PRXREF_GITLAB_TOKEN           GitLab token
+  PRXREF_GITEA_TOKEN            Gitea/Forgejo access token (any host;
+                                empty reads public repositories anonymously)
   PRXREF_AZURE_DEVOPS_TOKEN     Azure DevOps personal access token (Code
                                 Read to review, Read & write to post); empty
                                 falls back to SYSTEM_ACCESSTOKEN, then to
@@ -416,6 +418,8 @@ Webhooks:
   PRXREF_BITBUCKET_WEBHOOK_SECRET HMAC secret for Bitbucket webhook payloads
   PRXREF_GITHUB_WEBHOOK_SECRET    HMAC secret for GitHub webhook payloads
   PRXREF_GITLAB_WEBHOOK_SECRET    HMAC secret for GitLab webhook payloads
+  PRXREF_GITEA_WEBHOOK_SECRET     HMAC secret for Gitea/Forgejo webhook
+                                  payloads
   PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET
                                   Basic-auth password of the Azure DevOps
                                   service hook (the user name is ignored);
@@ -567,10 +571,12 @@ _DEFAULTS: dict[str, object] = {
     "github_token": "",
     "github_enterprise_token": "",
     "gitlab_token": "",
+    "gitea_token": "",
     "azure_devops_token": "",
     "bitbucket_webhook_secret": "",
     "github_webhook_secret": "",
     "gitlab_webhook_secret": "",
+    "gitea_webhook_secret": "",
     "azure_devops_webhook_secret": "",
     "allow_unsigned": False,
 }
@@ -902,13 +908,14 @@ def make_forge(ref: PRRef, session=None) -> Forge:
     ``session`` optionally injects a custom ``requests.Session`` (tests,
     shared connection pools). Unknown forge names raise ``ValueError``.
     """
-    from prxref.forges import azure_devops, bitbucket, bitbucket_server, github, gitlab
+    from prxref.forges import azure_devops, bitbucket, bitbucket_server, gitea, github, gitlab
 
     impls = {
         "bitbucket": bitbucket.ForgeImpl,
         "bitbucket-server": bitbucket_server.ForgeImpl,
         "github": github.ForgeImpl,
         "gitlab": gitlab.ForgeImpl,
+        "gitea": gitea.ForgeImpl,
         "azure-devops": azure_devops.ForgeImpl,
     }
     impl = impls.get(ref.forge)

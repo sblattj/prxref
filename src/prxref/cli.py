@@ -2,7 +2,7 @@
 
 Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
-    GitLab, or Azure DevOps URL (Cloud or self-hosted).
+    GitLab, Gitea/Forgejo, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H]`` — webhook listener daemon.
   * ``eval run|score|compare`` — replay labelled cases, score the findings
     against the human labels, and compare two scored runs (``prxref.evals``).
@@ -142,7 +142,7 @@ logger = logging.getLogger("prxref")
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prxref",
-        description="Fast automated AI code review for Bitbucket, GitLab, GitHub, and Azure DevOps.",
+        description="Fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and Azure DevOps.",
     )
     parser.add_argument(
         "--version",
@@ -156,8 +156,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pr-url",
         default=None,
         help=(
-            "full URL of the PR or MR on Bitbucket, GitHub, GitLab, or Azure "
-            "DevOps (required unless --diff-file is given)"
+            "full URL of the PR or MR on Bitbucket, GitHub, GitLab, "
+            "Gitea/Forgejo (.../<owner>/<repo>/pulls/<n> on any host), or "
+            "Azure DevOps (required unless --diff-file is given)"
         ),
     )
     rev.add_argument(
@@ -1705,7 +1706,8 @@ def _cmd_review(args: argparse.Namespace) -> int:
             "pull-requests, GitHub pull, or GitLab merge_requests link "
             "(bitbucket.org, github.com, gitlab.com, or a self-hosted "
             "Bitbucket Data Center, GitHub Enterprise Server, or GitLab "
-            "host), or an Azure DevOps pullrequest link (dev.azure.com, "
+            "host), a Gitea or Forgejo pulls link (any host, Codeberg "
+            "included), or an Azure DevOps pullrequest link (dev.azure.com, "
             "*.visualstudio.com, or an Azure DevOps Server host); the URL "
             "must keep the forge's own path shape.",
             file=sys.stderr,
