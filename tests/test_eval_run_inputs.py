@@ -138,7 +138,10 @@ class TestFlags:
     def test_the_flags_come_right_after_rules_file_with_review_metavars(self):
         run = _subparser(_subparser(cli._build_parser(), "eval"), "run")
         options = [a.option_strings[0] for a in run._actions if a.option_strings and a.dest != "help"]
-        assert options == ["--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume"]
+        assert options == [
+            "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
+            "--config", "--no-config",
+        ]
         by_flag = {a.option_strings[0]: a for a in run._actions if a.option_strings}
         assert (by_flag["--scoped-rules"].metavar, by_flag["--prompts-dir"].metavar) == ("PATH", "DIR")
 
