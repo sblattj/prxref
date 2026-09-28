@@ -169,6 +169,8 @@ its `PRXREF_` name.
 | `post_mode` | string | What is posted: `summary+inline`, `summary` or `inline` ([more](env-vars.md#llm--pipeline)). |
 | `post_verdict` | boolean | Keep the verdict stamp in the posted summary ([more](env-vars.md#llm--pipeline)). |
 | `post_cost` | boolean | Append the run's cost to the attribution line ([more](env-vars.md#llm--pipeline)). |
+| `severity_markers` | string | Replace finding glyphs, as `name=glyph` pairs, e.g. `"error=🔴,warning=🟡"` ([more](env-vars.md#llm--pipeline)). |
+| `summary_bullet_separator` | string | Text between a summary bullet's location and its title, spaces kept, e.g. `": "` ([more](env-vars.md#llm--pipeline)). |
 | `max_inline_comments` | integer | Most inline comments posted per review ([more](env-vars.md#llm--pipeline)). |
 | `group_findings` | boolean | Fold findings that break one rule in one file into one comment ([more](env-vars.md#llm--pipeline)). |
 | `suggestions` | string | `on` asks for applicable code suggestions ([more](env-vars.md#llm--pipeline)). |

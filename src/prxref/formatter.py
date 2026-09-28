@@ -9,8 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from .markers import SCOPE_LABELS, marker_for
-from .markers import SEVERITY_MARKERS as _SEVERITY_MARKERS
+from .markers import SCOPE_LABELS, SEVERITY_MARKERS, marker_for, marker_slots
 from .triage import Finding
 
 try:
@@ -25,8 +24,10 @@ _SEVERITY_ORDER: dict[str, int] = {
 
 _DEFAULT_SUMMARY_TEMPLATE = (
     "## {verdict_banner}\n\n"
-    "**Findings:** 🟥 {error_count} error · 🟧 {warning_count} warning · "
-    "🔍 {spec_count} spec · ⬜ {outofscope_count} outofscope\n"
+    "**Findings:** {error_marker} {error_count} error · "
+    "{warning_marker} {warning_count} warning · "
+    "{spec_marker} {spec_count} spec · "
+    "{outofscope_marker} {outofscope_count} outofscope\n"
     "{spec_note}\n"
     "{active_count} active of {total_count} raw\n\n"
     "{findings_table}\n"
@@ -41,7 +42,7 @@ _DEFAULT_SUMMARY_TEMPLATE = (
 def _norm_severity(severity: str) -> str:
     """Normalize a severity for lookup; unknown values read as ``outofscope``."""
     norm = (severity or "").strip().lower()
-    if norm in _SEVERITY_MARKERS:
+    if norm in SEVERITY_MARKERS:
         return norm
     return "outofscope"
 
@@ -128,7 +129,10 @@ def _load_summary_template() -> str:
     ``outofscope_count``, ``active_count``, ``total_count``,
     ``findings_table``, ``dropped_section``, ``chunk_count``,
     ``input_tokens``, ``output_tokens``, ``elapsed_s``, ``model``,
-    ``attribution``.
+    ``attribution``, and the five marker slots of
+    :data:`markers.MARKER_SLOTS` (``error_marker``, ``warning_marker``,
+    ``spec_marker``, ``outofscope_marker``, ``out_of_ticket_marker``), filled
+    from the effective glyph table.
     """
     if _reviewer_load_prompt is not None:
         try:
@@ -255,6 +259,7 @@ def format_summary(
         "attribution": build_attribution(
             model, elapsed_ms, input_tokens + output_tokens
         ),
+        **marker_slots(),
     }
     try:
         return _load_summary_template().format(**values)

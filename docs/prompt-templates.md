@@ -88,7 +88,29 @@ should carry. See [Example echoes](quality.md#example-echoes).
 
 The whole file is filled: `{verdict}`, `{title}`, `{file_count}`,
 `{error_count}`, `{warning_count}`, `{spec_count}`, `{outofscope_count}`,
-`{spec_note}`, `{ticket_note}`, `{findings}` and `{attribution}`.
+`{spec_note}`, `{ticket_note}`, `{findings}` and `{attribution}`, plus five
+marker slots.
+
+The marker slots hold the finding glyphs, after any
+[`PRXREF_SEVERITY_MARKERS`](env-vars.md#llm--pipeline) override (#59):
+
+| Slot | Default | Glyph for |
+|---|---|---|
+| `{error_marker}` | 🟥 | `error` findings |
+| `{warning_marker}` | 🟧 | `warning` findings |
+| `{spec_marker}` | 🔍 | `spec` findings |
+| `{outofscope_marker}` | ⬜ | `outofscope` findings, and any unrecognised severity |
+| `{out_of_ticket_marker}` | 🟦 | the prefix of a finding outside the ticket |
+
+The packaged counts line is `{error_marker} {error_count} error ·
+{warning_marker} {warning_count} warning · {spec_marker} {spec_count} spec ·
+{outofscope_marker} {outofscope_count} outofscope`. `{out_of_ticket_marker}`
+is not in the packaged template, but it is filled and known, so using it
+draws no unknown-placeholder warning. An override exported by 0.25.0 or earlier,
+which spells the glyphs literally, still loads, but it keeps those literal glyphs
+when the table is overridden; switch its counts line to the slots. The
+findings list and its `Outside the ticket` heading are built from the same
+table, so `{findings}` follows an override on its own.
 
 - Dropping `{attribution}` does not drop the attribution: the model
   attribution line is appended to a summary that lacks it, because every

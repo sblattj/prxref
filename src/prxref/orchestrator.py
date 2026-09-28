@@ -207,7 +207,13 @@ from .forges.base import (
 from .forges.repo_dir import RepoDir
 from .formatter import SUGGESTION_STYLE_GITHUB, format_suggestion_block, suggestion_range
 from .llm import LLMClient
-from .markers import OUT_OF_TICKET_MARKER, SEVERITY_MARKERS, inline_header, marker_for
+from .markers import (
+    active_severity_markers,
+    inline_header,
+    marker_for,
+    marker_slots,
+    out_of_ticket_marker,
+)
 from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
 from .quality import (
     GROUPED_INTO_PREFIX,
@@ -407,9 +413,9 @@ def redact_for_post(reason: str) -> str:
 _FALLBACK_SUMMARY_TEMPLATE = (
     "🤖 **prxref review — {verdict}**\n\n"
     "PR: {title}\n\n"
-    "Files reviewed: {file_count} · 🟥 {error_count} error · "
-    "🟧 {warning_count} warning · 🔍 {spec_count} spec · "
-    "⬜ {outofscope_count} outofscope\n"
+    "Files reviewed: {file_count} · {error_marker} {error_count} error · "
+    "{warning_marker} {warning_count} warning · {spec_marker} {spec_count} spec · "
+    "{outofscope_marker} {outofscope_count} outofscope\n"
     "{spec_note}{ticket_note}\n"
     "{findings}\n\n{attribution}"
 )
@@ -3333,13 +3339,16 @@ def _render_summary(
     The template is filled in ONE pass (:func:`reviewer.fill_template`), so
     a PR title, a note or a finding title containing ``{findings}``,
     ``{attribution}`` or any other placeholder renders literally instead of
-    receiving that placeholder's value. ``spec_note`` and ``ticket_note``
-    ride ``{spec_note}{ticket_note}`` on the line after the counts; each
+    receiving that placeholder's value. The five marker slots
+    (``{error_marker}`` ... ``{out_of_ticket_marker}``,
+    :func:`markers.marker_slots`) are filled from the effective glyph table,
+    as are the bullets and the outside-ticket heading. ``spec_note`` and
+    ``ticket_note`` ride ``{spec_note}{ticket_note}`` on the line after the counts; each
     carries its own trailing newline when non-empty, so empty notes leave the
     summary byte-identical. ``{findings}`` lists the in-ticket and unjudged
     findings first; findings outside the ticket (scope ``"out"``) follow
     under a bold ``Outside the ticket (N)`` heading led by
-    :data:`markers.OUT_OF_TICKET_MARKER`; when no other finding exists,
+    :func:`markers.out_of_ticket_marker`; when no other finding exists,
     ``No in-ticket findings.`` stands in for the first list. Without an
     active ticket every scope is ``"unknown"``, so the list stays flat.
     ``cost_label`` is the attribution's last field
@@ -3376,7 +3385,7 @@ def _render_summary(
         bullets = "No findings — nice work."
     if outside:
         bullets = (
-            f"{bullets}\n\n**{OUT_OF_TICKET_MARKER} Outside the ticket ({len(outside)})**"
+            f"{bullets}\n\n**{out_of_ticket_marker()} Outside the ticket ({len(outside)})**"
             f"\n\n{_summary_bullets(outside)}"
         )
     if inline_accounting:
@@ -3397,6 +3406,7 @@ def _render_summary(
         "ticket_note": ticket_note,
         "findings": bullets,
         "attribution": attribution,
+        **marker_slots(),
     })
     if attribution not in rendered:
         rendered = f"{rendered}\n\n{attribution}"
@@ -3504,7 +3514,7 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
     lines: list[str] = []
     if len(failed) < total:
         lines.append(
-            f"> {SEVERITY_MARKERS['spec']} Spec-grounded: {total} source(s) · "
+            f"> {active_severity_markers()['spec']} Spec-grounded: {total} source(s) · "
             f"{specs.constraint_count(digest)} constraint(s) injected"
         )
     if failed:

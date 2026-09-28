@@ -30,7 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from prxref import orchestrator
+from prxref import markers, orchestrator
 from prxref.cli import _fmt_finding_line, _print_findings
 from prxref.formatter import format_inline_comment
 from prxref.llm import InvokeResult
@@ -231,9 +231,9 @@ class TestSummaryFindingsList:
             "_(1 of 1 inline)_"
         )
 
-    def test_the_group_heading_is_built_from_the_marker_table(self, monkeypatch):
-        monkeypatch.setattr(orchestrator, "OUT_OF_TICKET_MARKER", "@@")
-        rendered = _render([_finding(1, scope=SCOPE_OUT)])
+    def test_the_group_heading_is_built_from_the_marker_table(self):
+        with markers.overridden({"out_of_ticket": "@@"}):
+            rendered = _render([_finding(1, scope=SCOPE_OUT)])
         assert "**@@ Outside the ticket (1)**" in rendered
         assert OUT_OF_TICKET_MARKER == BLUE
 

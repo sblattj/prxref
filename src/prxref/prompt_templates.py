@@ -24,7 +24,10 @@ required of every override automatically:
   feature slots in :data:`OPTIONAL_PLACEHOLDERS`. Only the text after the
   marker is filled, so a placeholder above it does not count.
 - ``summary.md`` must contain ``{findings}``; the other summary slots may be
-  dropped.
+  dropped. Its known slots are the packaged template's plus the five marker
+  slots of :data:`SUMMARY_MARKER_PLACEHOLDERS`, the one hand-kept addition:
+  ``{out_of_ticket_marker}`` is filled on every render but the packaged
+  template does not use it.
 
 Refused outright: a URL instead of a local path, a path that does not exist
 or is not a directory, a directory that symlinks out of the working
@@ -56,6 +59,7 @@ from dataclasses import dataclass
 from importlib import resources
 
 from .llm import ConfigError
+from .markers import MARKER_SLOTS
 from .reviewer import _CONTEXT_MARKER
 from .text_inputs import check_readable_path, confine_to_cwd, decode_text
 
@@ -66,6 +70,7 @@ TEMPLATE_NAMES: tuple[str, ...] = ("worker", "systemic", "summary")
 REVIEW_TEMPLATES: frozenset[str] = frozenset({"worker", "systemic"})
 OPTIONAL_PLACEHOLDERS: frozenset[str] = frozenset({"scope_example", "rule_example", "suggestion_example"})
 SUMMARY_REQUIRED: frozenset[str] = frozenset({"findings"})
+SUMMARY_MARKER_PLACEHOLDERS: frozenset[str] = frozenset(MARKER_SLOTS.values())
 MAX_TEMPLATE_BYTES = 256 * 1024
 PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
@@ -293,6 +298,7 @@ def _validate(name: str, text: str, path: str, source: str) -> None:
                 source, path, _braced(above), CONTEXT_MARKER,
             )
     else:
+        known |= SUMMARY_MARKER_PLACEHOLDERS
         missing = SUMMARY_REQUIRED - found
         if missing:
             raise ConfigError(

@@ -344,6 +344,8 @@ Findings inside the ticket (`in`) and findings the reviewer could not place (`un
 
 Before 0.14.0, `outofscope` findings rendered 🟦. They now render ⬜ on every run, and 🟦 means only "outside the ticket".
 
+Every glyph above is the default. `PRXREF_SEVERITY_MARKERS` (or `severity_markers` in `.prxref.toml`) replaces any of them with `name=glyph` pairs, for example `error=🔴,warning=🟡,out_of_ticket=🔷`; the names are `error`, `warning`, `spec`, `outofscope` and `out_of_ticket`, and the five glyphs must stay distinct. See [docs/env-vars.md](docs/env-vars.md).
+
 ## Code Suggestions
 
 With `PRXREF_SUGGESTIONS=on` (off by default), an inline comment can carry replacement code for the lines it flags. Each forge gets the form it can apply:
