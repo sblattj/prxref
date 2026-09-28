@@ -157,6 +157,8 @@ its `PRXREF_` name.
 |---|---|---|
 | `repo_context` | string | Repository context level: `off`, `diff` or `repo` ([more](env-vars.md#llm--pipeline)). |
 | `repo_context_max_chars` | integer | Per-chunk character budget for repository context ([more](env-vars.md#llm--pipeline)). |
+| `repo_context_max_reads` | integer | Uncached repository-context reads all chunks together may make in one run ([more](env-vars.md#llm--pipeline)). |
+| `repo_context_max_chunk_reads` | integer | Uncached repository-context reads one chunk may make ([more](env-vars.md#llm--pipeline)). |
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
@@ -314,7 +316,7 @@ review_rules = ".prxref/rules.md"
 post_mode = "summary+inline"
 ```
 
-the output reads, with most of its 76 lines left out here:
+the output reads, with most of its 78 lines left out here:
 
 ```text
 config file: .prxref.toml

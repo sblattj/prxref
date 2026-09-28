@@ -8,6 +8,48 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.27.0] — 2026-09-28
+
+Chunking and repository-context read limits, visible and settable (#61).
+Every review now reports whether its chunks overflowed the token budget,
+and which repository-context read cap was hit, per chunk or per run. The two
+read caps are config keys (`repo_context_max_reads`,
+`repo_context_max_chunk_reads`), both settable from `.prxref.toml`. No
+default changes: the caps stay 200 and 16, `max_chunks` stays 8, chunk
+placement is unchanged, and a review that does not overflow prints the same
+text as in 0.26.0.
+
+### Added
+
+- **`PRXREF_REPO_CONTEXT_MAX_READS` / `repo_context_max_reads` and
+  `PRXREF_REPO_CONTEXT_MAX_CHUNK_READS` / `repo_context_max_chunk_reads`
+  (#61).** The run-wide and per-chunk caps on repository-context file reads
+  (defaults 200 and 16, the previous hard-coded values). Integers greater
+  than 0; anything else exits 2 naming the variable. Both are recorded in the
+  eval harness's run config.
+- **Which cap was hit (#61).** The run record's `repo_context` gains
+  `chunk_read_cap_hit`, `run_read_cap_hit`, `max_reads` and
+  `max_chunk_reads`. `read_cap_hit` stays, as the OR of the two flags. The
+  `repo_context` trace event carries both flags. At the defaults with the
+  context follow-up off, 8 chunks × 16 reads stay under 200, so only the
+  per-chunk cap can bind.
+- **Chunk overflow fields (#61).** `chunks_over_budget`,
+  `largest_chunk_tokens`, `overflow_files` and `chunk_token_budget` sit next
+  to `chunk_count` in the run record and `--format json`, on every exit.
+  `overflow_files` counts files placed past `PRXREF_MAX_CHUNKS` into an
+  already-full chunk. `triage.plan_chunks` returns the chunks with these
+  counts from the same placement pass; `build_chunks` is unchanged.
+
+### Changed
+
+- **Text output (#61).** The `repo context:` line reads
+  `reads=N max_reads=M max_chunk_reads=K cap_hit=no|chunk|run|chunk+run`
+  (was `cap_hit=no|yes`). `reads` still counts PR-file fetches, which
+  spend neither cap. A new `chunks:` line appears only when a chunk is over
+  budget or files overflowed, for example
+  `chunks: 2 over the 2000-token budget (largest ~7240) · 4 files placed past
+  the chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET`.
+
 ## [0.26.0] — 2026-09-28
 
 Summary layout you can shape (#59). A `summary.md` override

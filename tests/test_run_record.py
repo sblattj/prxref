@@ -46,6 +46,7 @@ pytestmark = pytest.mark.usefixtures("contract_stubs")
 BASE_KEYS = {
     "verdict", "findings_active", "findings_dropped", "chunk_count",
     "chunks_reviewed", "chunks_failed", "elapsed_ms", "input_tokens",
+    "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
     "output_tokens", "posted", "sampling",
 }
 RECORD_KEYS = {
