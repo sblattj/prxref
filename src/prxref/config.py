@@ -457,9 +457,11 @@ Config file (#38):
   else PRXREF_CONFIG_FILE, else ``.prxref.toml`` in the working directory
   only (no walk up the tree). The value ``off`` (any case) in the flag or the
   variable disables the file. PRXREF_CONFIG_FILE is read only there; it is
-  not a config key. Credentials, endpoints, executables, local writes and
-  the gate stay environment-only (:data:`ENV_ONLY_KEYS`), paths set by the
-  file must stay inside its directory, and an unknown key is an error. See
+  not a config key. Credentials, endpoints, executables, local writes, local
+  reads and the gate stay environment-only (:data:`ENV_ONLY_KEYS`), paths
+  set by the file must stay inside its directory, ``spec_sources`` in the
+  file takes local paths only, and an unknown key is an error.
+  ``llm_temperature`` takes a TOML number or a string. See
   docs/config-file.md.
 """
 from __future__ import annotations

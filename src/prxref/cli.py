@@ -3,7 +3,7 @@
 Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, Gitea/Forgejo, or Azure DevOps URL (Cloud or self-hosted).
-  * ``serve [--port N] [--host H]`` — webhook listener daemon.
+  * ``serve [--port N] [--host H] [--config PATH]`` — webhook listener daemon.
   * ``eval run|score|compare`` — replay labelled cases, score the findings
     against the human labels, and compare two scored runs (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
