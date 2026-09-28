@@ -29,13 +29,15 @@ REPO = FIXTURE / "repo"
 DIFF = FIXTURE / "pr.diff"
 CASE_ID = "issue17-repo-context"
 FOUR = ("repo_context", "repo_context_max_chars", "context_contract_globs", "context_exclude_globs")
+READ_CAPS = ("repo_context_max_reads", "repo_context_max_chunk_reads")
 
 ENTRY = {"path": "api/openapi/connectors.yaml", "line": 6, "symbol": "IdempotencyKey",
          "kind": "contract", "reason": "contract", "chars": 120}
 SAMPLE = {
-    "mode": "repo", "max_chars": 12000, "contract_globs": ["**/openapi/**"], "exclude_globs": [],
+    "mode": "repo", "max_chars": 12000, "max_reads": 200, "max_chunk_reads": 16,
+    "contract_globs": ["**/openapi/**"], "exclude_globs": [],
     "reader": "repo-dir", "listing": {"paths": 9, "complete": True}, "reads": 4,
-    "read_cap_hit": False, "units": None,
+    "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False, "units": None,
 }
 TWO_CHUNKS = {
     **SAMPLE,
@@ -43,6 +45,7 @@ TWO_CHUNKS = {
     "listing": {"paths": 120, "complete": False},
     "reads": 16,
     "read_cap_hit": True,
+    "chunk_read_cap_hit": True,
     "units": {"chunks": [
         {"entries": [ENTRY, {**ENTRY, "line": 9}], "omitted": 1, "retry_dropped": False},
         {"entries": [{**ENTRY, "kind": "definition", "reason": "import"}], "omitted": 2,
@@ -271,19 +274,22 @@ class TestJsonKey:
 class TestVerboseLine:
     def test_units_none_prints_zero_totals(self):
         assert _repo_lines(_summary({"verdict": "Approved", "repo_context": SAMPLE})) == [
-            "repo context: mode=repo reader=repo-dir listing=9 reads=4 cap_hit=no entries=0 omitted=0",
+            "repo context: mode=repo reader=repo-dir listing=9 reads=4 max_reads=200 max_chunk_reads=16 cap_hit=no "
+            "entries=0 omitted=0",
         ]
 
     def test_two_chunk_rows_are_summed(self):
         assert _repo_lines(_summary({"verdict": "Approved", "repo_context": TWO_CHUNKS})) == [
-            "repo context: mode=repo reader=forge listing=120(partial) reads=16 cap_hit=yes "
+            "repo context: mode=repo reader=forge listing=120(partial) reads=16 max_reads=200 max_chunk_reads=16 "
+            "cap_hit=chunk "
             "entries=3 omitted=3",
         ]
 
     def test_no_reader_and_no_listing_print_dashes(self):
         record = {**SAMPLE, "mode": "diff", "reader": None, "listing": None, "reads": 0}
         assert _repo_lines(_summary({"verdict": "Approved", "repo_context": record})) == [
-            "repo context: mode=diff reader=- listing=- reads=0 cap_hit=no entries=0 omitted=0",
+            "repo context: mode=diff reader=- listing=- reads=0 max_reads=200 max_chunk_reads=16 cap_hit=no "
+            "entries=0 omitted=0",
         ]
 
     def test_it_follows_the_spec_line(self):
@@ -309,7 +315,8 @@ class TestVerboseLine:
         assert cli.main(["review", "--diff-file", str(DIFF), "-v"]) == 0
 
         assert _repo_lines(capsys.readouterr().out.splitlines()) == [
-            "repo context: mode=repo reader=forge listing=120(partial) reads=16 cap_hit=yes "
+            "repo context: mode=repo reader=forge listing=120(partial) reads=16 max_reads=200 max_chunk_reads=16 "
+            "cap_hit=chunk "
             "entries=3 omitted=3",
         ]
 
@@ -358,9 +365,9 @@ class TestEvalWiring:
         }
         assert stub_llm.calls == 0
 
-    def test_run_config_keys_end_with_the_four_settings(self):
-        assert evals.RUN_CONFIG_KEYS[-4:] == FOUR
-        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 4
+    def test_run_config_keys_end_with_the_four_settings_then_the_read_caps(self):
+        assert evals.RUN_CONFIG_KEYS[-6:] == FOUR + READ_CAPS
+        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 6
 
 
 class TestFixtureEvalEndToEnd:
@@ -387,7 +394,7 @@ class TestFixtureEvalEndToEnd:
         assert [entry for entry in entries if entry["kind"] == "contract"] != []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        assert list(run["config"])[-4:] == list(FOUR)
+        assert list(run["config"])[-6:] == list(FOUR + READ_CAPS)
         assert run["config"]["repo_context"] == "repo"
         assert run["config"]["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
         assert stub_llm.calls >= 2

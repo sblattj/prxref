@@ -155,7 +155,9 @@ class TestSingleFlight:
             fetch.release.set()
         _join(threads)
         assert results == ["class A {}"] * THREADS
-        assert reader.stats() == {"reads": 1, "read_cap_hit": False, "listing": None}
+        assert reader.stats() == {
+            "reads": 1, "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False, "listing": None,
+        }
 
     def test_eight_threads_listing_call_the_lister_once(self):
         entered = threading.Event()
@@ -301,7 +303,9 @@ class TestRunCap:
         assert first("f") is None
         assert reader.chunk_reader()("g") is None
         assert fetch.calls == ["a", "b", "c", "d"]
-        assert reader.stats() == {"reads": 4, "read_cap_hit": True, "listing": None}
+        assert reader.stats() == {
+            "reads": 4, "read_cap_hit": True, "chunk_read_cap_hit": True, "run_read_cap_hit": True, "listing": None,
+        }
 
     def test_a_cached_path_reads_after_the_run_cap(self):
         fetch = Fetch({p: p.upper() for p in "abcde"})
@@ -321,7 +325,9 @@ class TestReadIgnoresCaps:
         reader = _reader(fetch, run_cap=1, chunk_cap=1)
         assert [reader.read(p) for p in "abcde"] == ["A", "B", "C", "D", "E"]
         assert fetch.calls == list("abcde")
-        assert reader.stats() == {"reads": 5, "read_cap_hit": False, "listing": None}
+        assert reader.stats() == {
+            "reads": 5, "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False, "listing": None,
+        }
 
     def test_read_does_not_spend_the_chunk_readers_budget(self):
         fetch = Fetch({p: p.upper() for p in "abcdef"})
@@ -333,7 +339,9 @@ class TestReadIgnoresCaps:
         assert chunk("d") == "D"
         assert chunk("e") is None
         assert fetch.calls == ["a", "b", "c", "d"]
-        assert reader.stats() == {"reads": 4, "read_cap_hit": True, "listing": None}
+        assert reader.stats() == {
+            "reads": 4, "read_cap_hit": True, "chunk_read_cap_hit": True, "run_read_cap_hit": True, "listing": None,
+        }
 
     def test_read_serves_a_path_a_chunk_reader_fetched(self):
         fetch = Fetch({"a": "A"})
@@ -357,7 +365,9 @@ class TestExclude:
         assert chunk("cases/expected.json") is None
         assert chunk("a.py") == "A"
         assert fetch.calls == ["a.py"]
-        assert reader.stats() == {"reads": 1, "read_cap_hit": False, "listing": None}
+        assert reader.stats() == {
+            "reads": 1, "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False, "listing": None,
+        }
 
     def test_excluded_paths_are_dropped_from_the_listing_and_complete_is_kept(self):
         raw = PathListing(paths=(".env", "a.py", "cases/expected.json", "src/B.java"), complete=False)
@@ -500,7 +510,10 @@ class TestForgeReader:
         assert reader.listing() is listing
         assert forge.reads == [(REF, "a.py", SHA), (REF, "b.py", SHA)]
         assert forge.lists == [(REF, SHA)]
-        assert reader.stats() == {"reads": 2, "read_cap_hit": False, "listing": {"paths": 1, "complete": True}}
+        assert reader.stats() == {
+            "reads": 2, "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False,
+            "listing": {"paths": 1, "complete": True},
+        }
 
     def test_no_list_paths_gives_no_listing(self):
         reader = forge_reader(ReadOnlyForge({"a.py": "A"}), REF, SHA)
@@ -536,7 +549,10 @@ class TestForgeReader:
         assert reader.listing() == listing
         assert inner.reads == [(REF, "src/A.java", SHA), (REF, "src/B.java", SHA)]
         assert inner.lists == [(REF, SHA)]
-        assert reader.stats() == {"reads": 2, "read_cap_hit": False, "listing": {"paths": 2, "complete": False}}
+        assert reader.stats() == {
+            "reads": 2, "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False,
+            "listing": {"paths": 2, "complete": False},
+        }
 
     def test_a_replay_forge_over_an_inner_without_list_paths_lists_none_once(self):
         replay = ReplayForge(ReadOnlyForge({"a.py": "A"}))
@@ -565,7 +581,10 @@ class TestRepoDirReader:
         assert reader.listing() == PathListing(
             paths=("cases/expected.json", "src/A.java", "src/B.java"), complete=True
         )
-        assert reader.stats() == {"reads": 2, "read_cap_hit": False, "listing": {"paths": 3, "complete": True}}
+        assert reader.stats() == {
+            "reads": 2, "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False,
+            "listing": {"paths": 3, "complete": True},
+        }
 
     def test_exclude_applies(self, tmp_path):
         reader = repo_dir_reader(self._tree(tmp_path), exclude=lambda p: p.endswith("expected.json"))
@@ -580,7 +599,10 @@ class TestRepoDirReader:
         chunk = reader.chunk_reader()
         assert [chunk(f"f{i:02d}.txt") for i in range(MAX_CHUNK_READS)] == [f"{i}\n" for i in range(MAX_CHUNK_READS)]
         assert chunk(f"f{MAX_CHUNK_READS:02d}.txt") is None
-        assert reader.stats() == {"reads": MAX_CHUNK_READS, "read_cap_hit": True, "listing": None}
+        assert reader.stats() == {
+            "reads": MAX_CHUNK_READS, "read_cap_hit": True, "chunk_read_cap_hit": True, "run_read_cap_hit": False,
+            "listing": None,
+        }
 
     def test_an_incomplete_walk_stays_incomplete(self, tmp_path, monkeypatch):
         from prxref.forges import repo_dir as repo_dir_module
