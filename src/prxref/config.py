@@ -447,12 +447,30 @@ A malformed value, one out of its numeric range, or one outside its key's
 allowed vocabulary (``PRXREF_FAIL_ON`` accepts only never | error | any)
 raises :class:`~prxref.llm.ConfigError`, which the CLI reports as a
 configuration error and exits 2 for — never as a review failure.
+
+Config file (#38):
+  A repository config file, ``.prxref.toml``, is a flat TOML document whose
+  keys are the lowercase names above without the ``PRXREF_`` prefix
+  (``max_chunks = 4``). With a file, precedence is built-in defaults < file <
+  environment < ``overrides`` kwargs, and an error about a file value names
+  ``<file>: <key>``. :func:`find_config_file` locates it: ``--config PATH``,
+  else PRXREF_CONFIG_FILE, else ``.prxref.toml`` in the working directory
+  only (no walk up the tree). The value ``off`` (any case) in the flag or the
+  variable disables the file. PRXREF_CONFIG_FILE is read only there; it is
+  not a config key. Credentials, endpoints, executables, local writes and
+  the gate stay environment-only (:data:`ENV_ONLY_KEYS`), paths set by the
+  file must stay inside its directory, and an unknown key is an error. See
+  docs/config-file.md.
 """
 from __future__ import annotations
 
+import difflib
 import math
 import os
 import re
+import tomllib
+from collections.abc import Mapping
+from pathlib import Path
 from typing import NamedTuple
 
 from prxref.forges.base import Forge, PRRef
@@ -708,6 +726,261 @@ _LEGACY_ENV_ALIASES: dict[str, str] = {
     "max_error_findings": _ENV_PREFIX + "MAX_ERRORS",
 }
 
+#: The repository config file auto-discovered in the working directory (#38).
+CONFIG_FILE_NAME = ".prxref.toml"
+
+#: The environment variable naming a config file, or ``off`` to disable it.
+#: Not a config key: only :func:`find_config_file` reads it.
+CONFIG_FILE_ENV = _ENV_PREFIX + "CONFIG_FILE"
+
+#: Where every config-file error points the operator.
+CONFIG_DOCS_URL = "https://github.com/sblattj/prxref/blob/main/docs/config-file.md"
+
+#: Keys a repository config file may set (#38). Listed by hand, like
+#: :data:`ENV_ONLY_KEYS`, so a new key must be classified before it loads.
+FILE_KEYS = frozenset({
+    "llm_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
+    "llm_temperature", "llm_seed", "llm_cli_concurrency", "llm_parse_retries",
+    "confidence_floor", "max_error_findings", "max_warning_findings",
+    "max_outofscope_findings", "max_findings_per_rule", "group_findings",
+    "dedup_similarity", "max_chunks", "chunk_token_budget", "chunk_max_files",
+    "chunk_context_lines", "max_workers", "max_inline_comments",
+    "post_mode", "post_verdict", "post_cost",
+    "size_warn_lines", "size_warn_files", "size_ignore_globs",
+    "spec_sources", "spec_max_chars", "spec_digest_tokens",
+    "review_rules", "review_rules_max_chars",
+    "scoped_rules", "scoped_rules_max_chars", "prompts_dir",
+    "ticket_context_file", "ticket_context_max_chars",
+    "repo_context", "repo_context_max_chars", "context_followup",
+    "suggestions", "incremental",
+    "context_contract_globs", "context_exclude_globs",
+})
+
+_ENV_ONLY_REASONS: dict[str, str] = {
+    "llm_backend": "executable",
+    "llm_base_url": "endpoint",
+    "llm_api_key": "credential",
+    "llm_cli_path": "executable",
+    "fail_on": "gate",
+    "dry_run": "gate",
+    "allow_unsigned": "gate",
+    "trace_file": "local write",
+    "trace_dir": "local write",
+    "fallback": "local write",
+    "price_table": "local read",
+    "jira_base_url": "endpoint",
+    "jira_email": "credential",
+    "jira_api_token": "credential",
+    "bitbucket_token": "credential",
+    "bitbucket_user": "credential",
+    "bitbucket_app_password": "credential",
+    "bitbucket_server_token": "credential",
+    "bitbucket_server_user": "credential",
+    "bitbucket_server_password": "credential",
+    "github_token": "credential",
+    "github_enterprise_token": "credential",
+    "gitlab_token": "credential",
+    "gitea_token": "credential",
+    "azure_devops_token": "credential",
+    "bitbucket_webhook_secret": "credential",
+    "github_webhook_secret": "credential",
+    "gitlab_webhook_secret": "credential",
+    "gitea_webhook_secret": "credential",
+    "azure_devops_webhook_secret": "credential",
+}
+
+#: Keys only the pipeline may set (#38). A repository file is controlled by
+#: whoever can change the repository, a PR author included when CI reads the
+#: PR's checkout, so credentials, endpoints, executables, local reads and
+#: writes, and the gate never come from it.
+ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
+
+_FILE_PATH_KEYS = frozenset({
+    "review_rules", "scoped_rules", "prompts_dir", "ticket_context_file",
+    "spec_sources",
+})
+
+
+def _toml_type_name(value: object) -> str:
+    """The TOML name of a parsed value's type, for a type error."""
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, int):
+        return "an integer"
+    if isinstance(value, float):
+        return "a float"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    if isinstance(value, dict):
+        return "a table"
+    return f"a {type(value).__name__}"
+
+
+def _file_value(key: str, value: object, display: str) -> object:
+    """Type-check one file value and return it in the env layer's type."""
+    def wrong(expected: str) -> ConfigError:
+        return ConfigError(
+            f"{display}: {key!r} must be {expected}, got "
+            f"{_toml_type_name(value)}; see {CONFIG_DOCS_URL}"
+        )
+
+    if key in _INT_KEYS:
+        if key == "llm_seed" and value == _SEED_OFF:
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        raise wrong('an integer or "off"' if key == "llm_seed" else "an integer")
+    if key in _FLOAT_KEYS:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        raise wrong("a number")
+    if key in _BOOL_KEYS:
+        if isinstance(value, bool):
+            return value
+        raise wrong("a boolean")
+    if key in _LIST_KEYS:
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return [v.strip() for v in value if v.strip()]
+        raise wrong("an array of strings")
+    if isinstance(value, str):
+        return value
+    raise wrong("a string")
+
+
+def _contained_path(key: str, raw: str, base: str, display: str) -> str:
+    """Resolve a file-supplied path against the file's directory, contained.
+
+    ``base`` is the real path of the file's directory. An absolute path, a
+    ``~`` path, or one whose real path (symlinks followed) leaves ``base`` is
+    a :class:`~prxref.llm.ConfigError`.
+    """
+    def outside(why: str) -> ConfigError:
+        return ConfigError(
+            f"{display}: {key!r} path {raw!r} must stay inside the repository "
+            f"({why}); use a path relative to the config file's directory; "
+            f"see {CONFIG_DOCS_URL}"
+        )
+
+    if raw.startswith("~"):
+        raise outside("a home-directory path")
+    if os.path.isabs(raw):
+        raise outside("an absolute path")
+    resolved = os.path.realpath(os.path.join(base, raw))
+    if os.path.commonpath([base, resolved]) != base:
+        raise outside("it resolves outside the config file's directory")
+    return resolved
+
+
+def find_config_file(
+    *,
+    explicit: str | None,
+    cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Locate the repository config file for one run, or ``None`` for none.
+
+    ``explicit`` is the ``--config`` value; when it is ``None`` or empty,
+    :data:`CONFIG_FILE_ENV` in ``environ`` (default ``os.environ``) is used,
+    an empty value reading as unset. ``off`` (any case) in either disables
+    the file. A named path is resolved against ``cwd`` (default the working
+    directory) and must be an existing file, else
+    :class:`~prxref.llm.ConfigError` naming ``--config`` or
+    ``PRXREF_CONFIG_FILE``. With neither, ``cwd/.prxref.toml`` is returned
+    when it is a file; parent directories are never searched.
+    """
+    env = os.environ if environ is None else environ
+    base = Path.cwd() if cwd is None else cwd
+    named, source = explicit, "--config"
+    if named is None or not named.strip():
+        named, source = env.get(CONFIG_FILE_ENV), CONFIG_FILE_ENV
+    if named is not None and named.strip():
+        if named.strip().lower() == "off":
+            return None
+        path = base / Path(named)
+        if not path.is_file():
+            raise ConfigError(f"{source}: config file not found: {named}")
+        return path
+    candidate = base / CONFIG_FILE_NAME
+    return candidate if candidate.is_file() else None
+
+
+def _display_path(path: Path) -> str:
+    """``path`` relative to the working directory when inside it, else as given."""
+    try:
+        return str(Path(os.path.abspath(path)).relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
+def read_config_file(path: Path, *, display: str | None = None) -> dict[str, object]:
+    """Parse and validate a repository config file into ``{key: value}``.
+
+    ``display`` names the file in errors (default ``str(path)``). Values come
+    back in the types the environment layer produces; an empty string or an
+    empty array reads as unset and is left out, like an empty environment
+    variable. Path keys come back resolved against the file's directory. A
+    syntax error (with its line), a non-UTF-8 file, a table, an unknown key,
+    an :data:`ENV_ONLY_KEYS` key, a wrong type, a ``spec_sources`` URL, or a
+    path outside the file's directory raises
+    :class:`~prxref.llm.ConfigError`. The environment is never read.
+    """
+    name = str(path) if display is None else display
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"{name}: not valid UTF-8 (byte {exc.start}); save the file as "
+            f"UTF-8; see {CONFIG_DOCS_URL}"
+        ) from exc
+    except OSError as exc:
+        raise ConfigError(f"{name}: cannot read config file: {exc.strerror}") from exc
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{name}: invalid TOML: {exc}; see {CONFIG_DOCS_URL}") from exc
+    base = os.path.realpath(os.path.dirname(os.path.abspath(path)))
+    result: dict[str, object] = {}
+    for key, raw in data.items():
+        if isinstance(raw, dict):
+            raise ConfigError(
+                f"{name}: {key!r} is a table, but the config file is flat; "
+                f"write each key at the top level; see {CONFIG_DOCS_URL}"
+            )
+        if key not in _DEFAULTS:
+            probe = key.lower().removeprefix(_ENV_PREFIX.lower())
+            close = difflib.get_close_matches(probe, list(_DEFAULTS), n=1)
+            hint = f" did you mean {close[0]!r}?" if close else ""
+            raise ConfigError(
+                f"{name}: unknown key {key!r};{hint} see {CONFIG_DOCS_URL}"
+            )
+        if key in ENV_ONLY_KEYS:
+            raise ConfigError(
+                f"{name}: {key!r} cannot be set in a repository config file "
+                f"({_ENV_ONLY_REASONS[key]}); set {_ENV_PREFIX}{key.upper()} "
+                f"in the pipeline instead; see {CONFIG_DOCS_URL}"
+            )
+        value = _file_value(key, raw, name)
+        if value == "" or value == []:
+            continue
+        if key == "spec_sources":
+            for entry in value:
+                if "://" in entry:
+                    raise ConfigError(
+                        f"{name}: 'spec_sources' entry {entry!r} is a URL; a "
+                        f"repository config file lists local paths only, so "
+                        f"set PRXREF_SPEC_SOURCES in the pipeline for web and "
+                        f"Jira sources; see {CONFIG_DOCS_URL}"
+                    )
+        if key in _FILE_PATH_KEYS:
+            if isinstance(value, list):
+                value = [_contained_path(key, v, base, name) for v in value]
+            else:
+                value = _contained_path(key, value, base, name)
+        result[key] = value
+    return result
+
 
 def _truthy(raw: str) -> bool:
     """Parse a security-gating boolean; only the literal "1" enables it.
@@ -835,9 +1108,19 @@ def _check_price_table(cfg: dict[str, object], sources: dict[str, str]) -> None:
 
 
 def load_config(
-    *, source_labels: dict[str, str] | None = None, **overrides: object
+    *,
+    config_file: Path | None = None,
+    source_labels: dict[str, str] | None = None,
+    **overrides: object,
 ) -> dict:
     """Build the runtime config dict from defaults, environment, then overrides.
+
+    ``config_file`` (#38) adds a repository config file layer between the
+    defaults and the environment, read by :func:`read_config_file`; its
+    values are attributed to ``<file>: <key>`` in errors, where ``<file>`` is
+    the path relative to the working directory when inside it, and count as
+    operator-supplied. ``None`` (the default) reads no file; this function
+    never discovers one itself (see :func:`find_config_file`).
 
     Keys mirror the env table above (lowercase, no prefix). Env values are
     type-coerced per key (int / float / bool / comma-or-whitespace list /
@@ -868,6 +1151,12 @@ def load_config(
     # every default is pre-attributed to its env var name. Used below to
     # decide whether the suggestions token-budget bump may apply.
     supplied: set[str] = set()
+    if config_file is not None:
+        display = _display_path(config_file)
+        for key, value in read_config_file(config_file, display=display).items():
+            cfg[key] = value
+            sources[key] = f"{display}: {key}"
+            supplied.add(key)
     for key in _DEFAULTS:
         name = _ENV_PREFIX + key.upper()
         raw = os.environ.get(name)
