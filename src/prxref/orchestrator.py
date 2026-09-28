@@ -151,7 +151,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    the operator's ``summary.md`` override when ``prompts`` carries one, with
    placeholders ``{verdict} {title} {file_count} {error_count}
    {warning_count} {spec_count} {spec_note} {ticket_note}
-   {outofscope_count} {findings} {attribution}`` filled, plus
+   {outofscope_count} {findings} {attribution}`` filled, along with the
+   marker slots and the optional slots of :func:`_render_summary`
+   (per-severity finding groups, head SHA, chunk and token counts), plus
    inline comments for up to ``max_inline_comments`` active findings.
    ``post_mode`` narrows what is written: ``"summary+inline"`` (default) is
    that full behaviour, ``"summary"`` skips the inline batch, ``"inline"``
@@ -213,8 +215,17 @@ from .markers import (
     marker_for,
     marker_slots,
     out_of_ticket_marker,
+    severity_marker,
 )
-from .prompt_templates import CONTEXT_MARKER, REVIEW_TEMPLATES, PromptTemplates, packaged_text, placeholders
+from .prompt_templates import (
+    CONTEXT_MARKER,
+    REVIEW_TEMPLATES,
+    SUMMARY_GROUP_PLACEHOLDERS,
+    PromptTemplates,
+    packaged_text,
+    placeholders,
+    uncovered_summary_groups,
+)
 from .quality import (
     GROUPED_INTO_PREFIX,
     RULE_CAP_PREFIX,
@@ -420,6 +431,11 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "{findings}\n\n{attribution}"
 )
 
+SUMMARY_BULLET_SEPARATOR = " — "
+_SUMMARY_GROUP_LABELS: dict[str, str] = {
+    "error": "Errors", "warning": "Warnings", "spec": "Spec", "outofscope": "Minor",
+}
+
 # A {verdict} placeholder together with the separator joining it to the rest
 # of its line — ": {verdict}", " — {verdict}", " - {verdict}" — so removing it
 # leaves a clean header instead of a dangling colon or dash. A bare
@@ -455,6 +471,7 @@ def orchestrate_review(
     dedup_similarity: float | None = None,
     post_mode: str = "summary+inline",
     post_verdict: bool = True,
+    summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
     trace_file: str | None = None,
     trace_dir: str | None = None,
     spec_sources: Sequence[str] = (),
@@ -551,6 +568,12 @@ def orchestrate_review(
     re-validated here: ``load_config`` already gates it, and a library
     caller passing an unknown mode degrades to the plain no-op that mode's
     membership tests produce.
+
+    ``summary_bullet_separator`` joins each summary bullet's ``file:line``
+    to its title (``PRXREF_SUMMARY_BULLET_SEPARATOR``); the default,
+    :data:`SUMMARY_BULLET_SEPARATOR` (``" — "``), renders the summary exactly
+    as before. It reaches every summary render, the empty-diff summary and
+    the inline-accounting re-post included, and is not re-validated here.
 
     ``trace_dir`` turns on the per-unit prompt/response dump: each review
     unit writes ``<label>.system.md``, ``<label>.user.md``,
@@ -1096,6 +1119,7 @@ def orchestrate_review(
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            summary_bullet_separator=summary_bullet_separator,
             reviewed_head=_mark_reviewed_head(
                 run_inputs, scope, pr, post_mode=post_mode, complete=True,
             ),
@@ -1595,6 +1619,7 @@ def orchestrate_review(
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            summary_bullet_separator=summary_bullet_separator,
             incremental_note=incremental_note,
         )
         fallback_summary = summary
@@ -1653,6 +1678,7 @@ def orchestrate_review(
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
@@ -1679,6 +1705,7 @@ def orchestrate_review(
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            summary_bullet_separator=summary_bullet_separator,
             incremental_note=incremental_note,
         )
 
@@ -3333,6 +3360,7 @@ def _render_summary(
     size_advisory_line: str = "",
     summary_template: str = "",
     incremental_note: str = "",
+    summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
 ) -> str:
     """Render the PR summary comment body.
 
@@ -3362,6 +3390,33 @@ def _render_summary(
     the packaged template through ``reviewer.load_prompt``, and only that
     read can fall back to the built-in template, so an override is always
     rendered as given.
+
+    Optional slots, filled on every render and absent from the packaged
+    template (:data:`prxref.prompt_templates.SUMMARY_OPTIONAL_PLACEHOLDERS`):
+    ``{error_findings}``, ``{warning_findings}``, ``{spec_findings}`` and
+    ``{outofscope_findings}`` are the bullets of that severity's findings
+    not scoped ``"out"`` (a severity outside the four joins
+    ``outofscope``), and ``{outside_ticket_findings}`` those of every
+    ``"out"`` finding, each ``""`` when empty and in ``{findings}`` order.
+    Each ``{<group>_section}`` is ``**<marker> <Label>**\\n\\n<bullets>\\n``
+    (labels ``Errors``, ``Warnings``, ``Spec``, ``Minor``) or ``""``;
+    ``{outside_ticket_section}`` is the ``Outside the ticket (N)`` block
+    exactly as ``{findings}`` carries it, plus a trailing newline.
+    ``{head_sha}`` is ``pr.source_sha`` (``""`` when unknown),
+    ``{head_sha_short}`` its first 7 characters, ``{chunk_count}``
+    ``chunks_reviewed + chunks_failed``, and ``{input_tokens}`` /
+    ``{output_tokens}`` the token counts. ``summary_bullet_separator`` joins
+    every bullet's location to its title.
+
+    ``inline_accounting`` goes to the ``{inline_accounting}`` slot when the
+    template has one; otherwise it rides the end of ``{findings}``, as it
+    always has, and a template with neither slot gets it appended to the
+    body. A template without ``{findings}`` whose finding group (see
+    :func:`prxref.prompt_templates.uncovered_summary_groups`) has neither
+    of its slots gets that group's findings appended as ``**Other findings
+    (N)**`` with a WARNING, so no finding is silently dropped. The appends
+    run in this order: other findings, inline accounting, the attribution
+    (only when the body lacks it), then the partial-review banner.
     """
     try:
         template = summary_template or reviewer.load_prompt("summary")
@@ -3375,22 +3430,46 @@ def _render_summary(
     for f in findings_active:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
+    sep = summary_bullet_separator
     inside = [f for f in findings_active if f.scope != SCOPE_OUT]
     outside = [f for f in findings_active if f.scope == SCOPE_OUT]
     if inside:
-        bullets = _summary_bullets(inside)
+        bullets = _summary_bullets(inside, separator=sep)
     elif outside:
         bullets = "No in-ticket findings."
     else:
         bullets = "No findings — nice work."
+    outside_section = ""
     if outside:
-        bullets = (
-            f"{bullets}\n\n**{out_of_ticket_marker()} Outside the ticket ({len(outside)})**"
-            f"\n\n{_summary_bullets(outside)}"
+        outside_section = (
+            f"**{out_of_ticket_marker()} Outside the ticket ({len(outside)})**"
+            f"\n\n{_summary_bullets(outside, separator=sep)}\n"
         )
-    if inline_accounting:
-        bullets = f"{bullets}\n\n{inline_accounting}"
+        bullets = f"{bullets}\n\n{outside_section[:-1]}"
 
+    found = placeholders(template)
+    has_findings = "findings" in found
+    accounting = inline_accounting or ""
+    if accounting and has_findings and "inline_accounting" not in found:
+        bullets = f"{bullets}\n\n{accounting}"
+
+    groups: dict[str, list[Finding]] = {g: [] for g in SUMMARY_GROUP_PLACEHOLDERS}
+    for f in findings_active:
+        groups[_summary_group_of(f)].append(f)
+    group_slots: dict[str, str] = {}
+    for group, (list_slot, section_slot) in SUMMARY_GROUP_PLACEHOLDERS.items():
+        listed = _summary_bullets(groups[group], separator=sep)
+        group_slots[list_slot] = listed
+        if group == "outside_ticket":
+            group_slots[section_slot] = outside_section
+        elif listed:
+            group_slots[section_slot] = (
+                f"**{severity_marker(group)} {_SUMMARY_GROUP_LABELS[group]}**\n\n{listed}\n"
+            )
+        else:
+            group_slots[section_slot] = ""
+
+    head_sha = getattr(pr, "source_sha", "") or ""
     attribution = _attribution(
         model, input_tokens + output_tokens, elapsed_ms, cost_label=cost_label,
     )
@@ -3406,8 +3485,29 @@ def _render_summary(
         "ticket_note": ticket_note,
         "findings": bullets,
         "attribution": attribution,
+        "inline_accounting": accounting,
+        "head_sha": head_sha,
+        "head_sha_short": head_sha[:7],
+        "chunk_count": str(chunks_reviewed + chunks_failed),
+        "input_tokens": str(input_tokens),
+        "output_tokens": str(output_tokens),
+        **group_slots,
         **marker_slots(),
     })
+    uncovered = uncovered_summary_groups(found)
+    stray = [f for f in findings_active if _summary_group_of(f) in uncovered]
+    if stray:
+        logger.warning(
+            "summary template has no {findings} and no slot for the %s finding group(s); "
+            "appending %d finding(s) under 'Other findings'",
+            ", ".join(g for g in uncovered if groups[g]), len(stray),
+        )
+        rendered = (
+            f"{rendered}\n\n**Other findings ({len(stray)})**\n\n"
+            f"{_summary_bullets(stray, separator=sep)}"
+        )
+    if accounting and not has_findings and "inline_accounting" not in found:
+        rendered = f"{rendered}\n\n{accounting}"
     if attribution not in rendered:
         rendered = f"{rendered}\n\n{attribution}"
     if chunks_failed:
@@ -3603,13 +3703,31 @@ def _failure_reason_lines(
 
 
 
-def _summary_bullets(findings: Sequence[Finding]) -> str:
-    """One ``- <marker> `file:line` — title`` summary bullet per finding, in order."""
+def _summary_bullets(
+    findings: Sequence[Finding], *, separator: str = SUMMARY_BULLET_SEPARATOR,
+) -> str:
+    """One ``- <marker> `file:line`<separator>title`` summary bullet per finding, in order.
+
+    ``separator`` defaults to :data:`SUMMARY_BULLET_SEPARATOR` (``" — "``);
+    a file-level finding's line is always rendered ``—``, whatever the
+    separator. ``""`` for no findings.
+    """
     return "\n".join(
         f"- {marker_for(f.severity, f.scope)} "
-        f"`{f.file}:{f.line if f.line > 0 else '—'}` — {f.title}"
+        f"`{f.file}:{f.line if f.line > 0 else '—'}`{separator}{f.title}"
         for f in findings
     )
+
+
+def _summary_group_of(f: Finding) -> str:
+    """The summary group a finding renders in: ``outside_ticket`` for scope ``out``, else its severity.
+
+    A severity outside the four known ones joins ``outofscope``, whose glyph
+    :func:`markers.marker_for` already gives it.
+    """
+    if f.scope == SCOPE_OUT:
+        return "outside_ticket"
+    return f.severity if f.severity in _SUMMARY_GROUP_LABELS else "outofscope"
 
 
 def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
@@ -3674,6 +3792,7 @@ def _summary_only_run(
     max_outofscope_findings: int | None = None,
     ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
     summary_template: str = "", reviewed_head: str | None = None,
+    summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -3698,7 +3817,9 @@ def _summary_only_run(
 
     ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
     ``summary_template`` are handed to :func:`_render_summary` unchanged; all
-    four default to ``""``, which renders the summary exactly as before.
+    four default to ``""``, which renders the summary exactly as before. So
+    is ``summary_bullet_separator``, whose default is
+    :data:`SUMMARY_BULLET_SEPARATOR`.
     ``reviewed_head`` is stamped on the body by :func:`_with_reviewed_head`;
     ``None`` (the default) leaves it as before. The run-record keys are added
     by the caller's :func:`_run_record`, not here.
@@ -3741,6 +3862,7 @@ def _summary_only_run(
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
+            summary_bullet_separator=summary_bullet_separator,
         )
         try:
             forge.post_summary(ref, _with_reviewed_head(summary, reviewed_head))

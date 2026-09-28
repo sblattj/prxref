@@ -23,11 +23,21 @@ required of every override automatically:
   after it, every placeholder the packaged template has after it, except the
   feature slots in :data:`OPTIONAL_PLACEHOLDERS`. Only the text after the
   marker is filled, so a placeholder above it does not count.
-- ``summary.md`` must contain ``{findings}``; the other summary slots may be
-  dropped. Its known slots are the packaged template's plus the five marker
-  slots of :data:`SUMMARY_MARKER_PLACEHOLDERS`, the one hand-kept addition:
-  ``{out_of_ticket_marker}`` is filled on every render but the packaged
-  template does not use it.
+- ``summary.md`` must contain ``{findings}`` or at least one per-group slot
+  of :data:`SUMMARY_GROUP_PLACEHOLDERS` (``{error_findings}``,
+  ``{error_section}`` ... ``{outside_ticket_section}``); every other summary
+  slot may be dropped. Without ``{findings}``, a group (error, warning,
+  spec, outofscope, outside_ticket) with neither of its two slots is logged
+  as a WARNING, and at render time its findings are appended under an
+  ``Other findings (N)`` heading, so no finding is dropped. Its known slots
+  are the packaged template's plus two hand-kept sets, which are filled on
+  every render but kept out of the packaged template so that its output
+  stays byte-identical: the five marker slots of
+  :data:`SUMMARY_MARKER_PLACEHOLDERS` (``{out_of_ticket_marker}`` is the one
+  the packaged template does not use) and
+  :data:`SUMMARY_OPTIONAL_PLACEHOLDERS`, the per-group slots plus
+  ``{inline_accounting}``, ``{head_sha}``, ``{head_sha_short}``,
+  ``{chunk_count}``, ``{input_tokens}`` and ``{output_tokens}``.
 
 Refused outright: a URL instead of a local path, a path that does not exist
 or is not a directory, a directory that symlinks out of the working
@@ -71,6 +81,16 @@ REVIEW_TEMPLATES: frozenset[str] = frozenset({"worker", "systemic"})
 OPTIONAL_PLACEHOLDERS: frozenset[str] = frozenset({"scope_example", "rule_example", "suggestion_example"})
 SUMMARY_REQUIRED: frozenset[str] = frozenset({"findings"})
 SUMMARY_MARKER_PLACEHOLDERS: frozenset[str] = frozenset(MARKER_SLOTS.values())
+SUMMARY_GROUPS: tuple[str, ...] = ("error", "warning", "spec", "outofscope", "outside_ticket")
+SUMMARY_GROUP_PLACEHOLDERS: dict[str, tuple[str, str]] = {
+    group: (f"{group}_findings", f"{group}_section") for group in SUMMARY_GROUPS
+}
+SUMMARY_GROUP_SLOTS: frozenset[str] = frozenset(
+    slot for pair in SUMMARY_GROUP_PLACEHOLDERS.values() for slot in pair
+)
+SUMMARY_OPTIONAL_PLACEHOLDERS: frozenset[str] = SUMMARY_GROUP_SLOTS | frozenset({
+    "inline_accounting", "head_sha", "head_sha_short", "chunk_count", "input_tokens", "output_tokens",
+})
 MAX_TEMPLATE_BYTES = 256 * 1024
 PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
@@ -164,7 +184,9 @@ def required_placeholders(name: str) -> frozenset[str]:
     For ``worker`` and ``systemic``: every placeholder after
     :data:`CONTEXT_MARKER` in the packaged template, minus
     :data:`OPTIONAL_PLACEHOLDERS`, computed from the packaged file on every
-    call. For ``summary``: :data:`SUMMARY_REQUIRED`. Any other name raises
+    call. For ``summary``: :data:`SUMMARY_REQUIRED`, which a summary
+    override may replace with any slot of :data:`SUMMARY_GROUP_SLOTS`
+    (the loader accepts either). Any other name raises
     ``ValueError``.
     """
     _require_name(name)
@@ -172,6 +194,21 @@ def required_placeholders(name: str) -> frozenset[str]:
         return SUMMARY_REQUIRED
     _, _, tail = _packaged_text(name).partition(CONTEXT_MARKER)
     return placeholders(tail) - OPTIONAL_PLACEHOLDERS
+
+
+def uncovered_summary_groups(found: frozenset[str]) -> tuple[str, ...]:
+    """The summary finding groups a template with placeholder set ``found`` leaves unrendered.
+
+    ``()`` when ``found`` holds ``findings``, which lists every finding.
+    Otherwise every group of :data:`SUMMARY_GROUPS`, in that order, for
+    which ``found`` holds neither the ``<group>_findings`` nor the
+    ``<group>_section`` slot.
+    """
+    if "findings" in found:
+        return ()
+    return tuple(
+        group for group, slots in SUMMARY_GROUP_PLACEHOLDERS.items() if not found & frozenset(slots)
+    )
 
 
 def load_prompt_templates(path: str | os.PathLike[str] | None, *, source: str) -> PromptTemplates | None:
@@ -298,11 +335,19 @@ def _validate(name: str, text: str, path: str, source: str) -> None:
                 source, path, _braced(above), CONTEXT_MARKER,
             )
     else:
-        known |= SUMMARY_MARKER_PLACEHOLDERS
+        known |= SUMMARY_MARKER_PLACEHOLDERS | SUMMARY_OPTIONAL_PLACEHOLDERS
         missing = SUMMARY_REQUIRED - found
-        if missing:
+        if missing and not found & SUMMARY_GROUP_SLOTS:
             raise ConfigError(
-                f"{source}: prompt template {path!r} is missing the required {_braced(missing)} placeholder"
+                f"{source}: prompt template {path!r} is missing the required {_braced(missing)} placeholder; "
+                f"a summary template needs it or at least one per-group slot ({_braced(SUMMARY_GROUP_SLOTS)})"
+            )
+        uncovered = uncovered_summary_groups(found)
+        if uncovered:
+            logger.warning(
+                "%s: prompt template %r has no {findings} and no slot for the %s finding group(s); "
+                "those findings are appended under an 'Other findings' heading",
+                source, path, ", ".join(uncovered),
             )
     unknown = found - known
     if unknown:
