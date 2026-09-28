@@ -259,6 +259,14 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
 
   Run it as a build-validation pipeline (a branch policy), which is what sets the
   `System.PullRequest.*` variables.
+
+  The step reads `.prxref.toml` from the repository root, so commit one there for
+  the settings the pipeline does not pin (see [docs/config-file.md](config-file.md));
+  `prxref config check` validates it. Build validation checks out the PR's merge
+  commit, so that is the PR's copy of the file; for a gating lane read it from the
+  target branch instead, as
+  [its security section](config-file.md#security-which-copy-of-the-file-does-ci-read)
+  shows.
 - **API Endpoints & Behavior:**
   - **Base URL:** `{scheme}://{host}{collection}/{project}/_apis/git/repositories/{repo}`,
     always project-scoped (the organization-level routes refuse anonymous reads), with
@@ -524,6 +532,12 @@ self-hosted instance.
   onto their own. `github.server_url` is the instance's own address, so the same file
   works on Codeberg and on a self-hosted instance. prxref exits `0` on every review
   error, so the job never fails a pull request unless you set `PRXREF_FAIL_ON`.
+
+  This job checks out nothing, so it reads no `.prxref.toml`. To keep the other
+  settings in a committed `.prxref.toml` (see [docs/config-file.md](config-file.md);
+  `prxref config check` validates it), check out the **base** branch before the
+  review step, never the pull request's head, so the job reads the target branch's
+  copy; the container then needs `git`. Or name a file with `--config PATH`.
 - **Webhook daemon:** as for the other forges, run `prxref serve` with the
   [Docker Compose or Docker CLI setup](deploy.md#1-docker-deployment-recommended), and put
   `PRXREF_GITEA_TOKEN` and `PRXREF_GITEA_WEBHOOK_SECRET` in its env file.

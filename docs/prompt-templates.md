@@ -15,6 +15,10 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/ac
 - `PRXREF_PROMPTS_DIR` names the directory for every run, the webhook daemon
   included. `--prompts-dir DIR` names it for one run and wins over the
   variable. `--prompts-dir ""` turns the variable off for one run.
+- The directory can also go in the repository's `.prxref.toml`
+  (`prompts_dir = ".prxref/prompts"`), relative to that file and kept inside
+  the repository; see [docs/config-file.md](config-file.md). The CI safety
+  section below applies to it as well.
 - `prxref prompts export DIR [--force]` writes the packaged templates into
   `DIR` byte for byte. An unedited export loads without a warning and reviews
   exactly as the packaged templates do.
