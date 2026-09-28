@@ -333,9 +333,13 @@ ok
 ```
 
 A path key prints as the absolute path it resolved to. `config check` checks
-that each path stays inside the repository, but it does not open the files
-they name: a rules file or prompts directory that is missing or fails its
-own checks is reported by the review that reads it.
+that each path stays inside the repository, then opens the rules file, the
+scoped rules, the ticket-context file and the prompts directory exactly as
+`review` does. One that is missing or fails its own checks exits `2` with the
+line the review would print, naming the key as `.prxref.toml: review_rules`
+when the file set the path, or the variable or flag that did.
+`spec_sources` entries are not opened: a review reads them best-effort and
+records a failed one rather than stopping.
 
 `--format json` prints the same as one line of JSON:
 `{"config_file": ".prxref.toml", "values": {"allow_unsigned": {"value": false, "source": "default"}, ...}}`,
@@ -390,8 +394,9 @@ not: read the file from something the PR cannot change.
   List only paths that exist on the target branch; `git archive` fails on a
   missing one. For a file that names no paths, copying the one file is
   enough. Do not copy a file that names paths this way: its paths would then
-  resolve beside the copy, where nothing was extracted, and
-  `prxref config check` still prints `ok`, because it does not open them.
+  resolve beside the copy, where nothing was extracted. `prxref config check`
+  catches this: it opens those paths and exits `2`, naming the file key
+  (`.prxref.toml: review_rules`).
 
   ```bash
   git fetch --depth=1 origin "${{ github.base_ref }}"

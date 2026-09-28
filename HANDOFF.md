@@ -59,6 +59,31 @@ cuts the next release. The v0.24.0 handoff is in git history.
   `orchestrate_review` returns, so the orchestrator's own dict and
   `tests/test_run_record.py` did not move. `_build_json_result` puts it after
   `degraded`.
+- **`config check` opens the files path keys name.** The rules file, the
+  scoped rules, the ticket file and the prompts directory are loaded by one
+  helper, `review_inputs.load_path_inputs`, which `cli._run_review`,
+  `cli._cmd_config_check` and `evals.eval_run` (without the ticket, which
+  each case names) all call. So a missing rules file or an unusable prompts
+  directory now fails `config check` with the exit 2 and the
+  `configuration error: ...` line the review would print, and the
+  misplaced-copy recipe error of lesson 1 is caught there. Each input is
+  named by `review_inputs.path_input_source` from the layer
+  `load_config_with_sources` reports: the flag, `<file>: <key>` when the
+  config file set the path (before, a file value was reported under its
+  `PRXREF_` variable), else the variable. `spec_sources` is not among them:
+  the orchestrator loads spec sources best-effort after the forge is built,
+  and a failed one never exits 2. `cli._load_prompts_dir` stays as a thin
+  wrapper, and the CLI hands the helper its own loader names
+  (`cli._path_loaders`), because tests replace `prxref.cli.load_review_rules`
+  and friends.
+- **A file named through a symlinked directory displays as its resolved
+  spelling.** `config._display_path` first compares `os.path.abspath(path)`
+  with `Path.cwd()`, as before, then the file's resolved directory (the file
+  name itself is not followed) with the resolved working directory. So on
+  macOS, from `/private/tmp/x`, `config check --config /tmp/x/.prxref.toml`
+  prints `config file: .prxref.toml`, as the `/private/tmp/...` spelling
+  does, and errors and the record's `config_file.path` agree. A path
+  outside the working directory still displays as given.
 - **Eval.** `eval run` resolves and checks the file once before the first
   case and passes it to every case (`evals._run_case(..., config_file=...)`).
   `eval score` builds its judge from a file-free `load_config()`.
@@ -71,8 +96,9 @@ cuts the next release. The v0.24.0 handoff is in git history.
   `docs/review-rules.md`, `docs/prompt-templates.md` and `docs/evals.md`.
 - **Tests.** Three new files: `tests/test_issue_38_config_file.py` (the
   layer), `tests/test_issue_38_cli_config.py` (flags, `serve`,
-  `config check`, the record, and a byte-for-byte no-file invariant against
-  0.24.0's stdout), and `tests/test_issue_38_config_docs.py` (the doc's key
+  `config check`, the record, a byte-for-byte no-file invariant against
+  0.24.0's stdout, the path inputs `config check` opens and the key they
+  are named by, and the symlinked-directory display), and `tests/test_issue_38_config_docs.py` (the doc's key
   tables against `FILE_KEYS` / `ENV_ONLY_KEYS` both ways, each error-table
   example fed to `read_config_file`, and the example file loaded).
   `tests/conftest.py` now also clears `PRXREF_CONFIG_FILE`.
@@ -92,8 +118,10 @@ Written down because each one cost real time.
    `$RUNNER_TEMP/.prxref/rules.md`, which does not exist. The docs task
    found this by reading `_contained_path`, and the release check confirmed
    it: that copy passed `prxref config check` with `ok`, because
-   `config check` does not open the files path keys name. The shipped recipe
-   extracts `.prxref.toml` and `.prxref/` together with `git archive`.
+   `config check` did not yet open the files path keys name. The shipped
+   recipe extracts `.prxref.toml` and `.prxref/` together with `git archive`,
+   and `config check` now opens those files, so the one-file copy fails it
+   (What landed).
 2. **Splitting a flag task from its docs task leaves both red alone.**
    `tests/test_cli_output.py`, `tests/test_eval_cli.py` and
    `tests/test_evals_docs.py` pin every parser option and every
@@ -242,7 +270,9 @@ No forge and no model is needed for these; each ran the installed
   control, auto-discovery in the same checkout, read the PR's copy
   (`max_chunks = 1`, `confidence_floor = 1.0`). The one-file `git show`
   variant resolved `review_rules` to `$RUNNER_TEMP/.prxref/rules.md`, which
-  was never extracted, and still printed `ok` (lesson 1). `git archive` with
+  was never extracted, and still printed `ok` (lesson 1), before
+  `config check` opened path keys; it now exits 2 naming
+  `.prxref.toml: review_rules`, which the test suite covers. `git archive` with
   a path missing on the branch exited 128.
 
 End-to-end review: <pending>
@@ -259,21 +289,9 @@ End-to-end review: <pending>
   `load_config()`, and it has no `--config` flag. Only `llm_parse_retries`
   among the judge's inputs is a file key, so a file value for it reaches
   `eval run`'s reviews but not the judge.
-- **`config check` does not open the files path keys name.** It checks
-  containment only, so a missing rules file or an unusable prompts directory
-  passes `config check` and exits 2 at the review. Loading them there would
-  catch the misplaced-copy recipe error of lesson 1.
 - **No CI runner has run the target-branch recipe.** It ran as written in a
   scratch repository (Live checks), not inside GitHub Actions, GitLab CI or
   Bitbucket Pipelines.
-- **A file named through a symlink keeps its absolute name.**
-  `config._display_path` compares `os.path.abspath(path)`, which does not
-  resolve symlinks, with `Path.cwd()`, which does. So on macOS, from
-  `/private/tmp/x`, `config check --config /tmp/x/.prxref.toml` prints
-  `config file: /tmp/x/.prxref.toml`, while the `/private/tmp/...` spelling
-  prints `.prxref.toml`; errors and the record's `path` follow the same
-  rule. Auto-discovery is unaffected, because it joins the resolved
-  working directory. The name is still correct, only longer.
 - **Upstream Gitea's single-comment delete is unverified.** Pruning a review
   that also holds a human's comment uses
   `DELETE /pulls/{n}/reviews/{id}/comments/{c}`, which ran live on Forgejo

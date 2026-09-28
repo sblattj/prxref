@@ -18,7 +18,6 @@ call it makes is single-shot, and it never posts to a forge.
 from __future__ import annotations
 
 import argparse
-import functools
 import hashlib
 import json
 import logging
@@ -31,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from prxref import eval_judge, eval_metrics, reviewer
-from prxref.config import find_config_file, load_config
+from prxref.config import find_config_file, load_config, load_config_with_sources
 from prxref.eval_cases import EvalCase, case_from_json_record, case_to_json, is_safe_id, load_cases
 from prxref.eval_metrics import (
     FULL,
@@ -45,8 +44,7 @@ from prxref.eval_metrics import (
 )
 from prxref.judge import GRADE_FULL, GRADE_NONE, GRADE_PARTIAL
 from prxref.llm import ConfigError
-from prxref.prompt_templates import load_prompt_templates
-from prxref.rules import load_review_rules, load_scoped_rules
+from prxref.review_inputs import load_path_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +107,11 @@ def eval_run(
     - a missing or invalid config file, naming ``--config``,
       ``PRXREF_CONFIG_FILE`` or the file and key;
     - an unusable rules file, scoped rules entry or prompts directory, loaded
-      once as ``review`` loads it (the scoped rules against the always-on
-      file), naming ``--rules-file``, ``--scoped-rules`` or ``--prompts-dir``
-      when the flag was given and ``PRXREF_REVIEW_RULES``,
+      once as ``review`` loads it, through
+      :func:`prxref.review_inputs.load_path_inputs` (the scoped rules against
+      the always-on file), naming ``--rules-file``, ``--scoped-rules`` or
+      ``--prompts-dir`` when the flag was given, ``<file>: <key>`` when the
+      config file set the path, and ``PRXREF_REVIEW_RULES``,
       ``PRXREF_SCOPED_RULES`` or ``PRXREF_PROMPTS_DIR`` otherwise;
     - an existing ``<out>/<label>`` without ``--resume``, naming ``--label``;
     - a run directory that cannot be created, naming ``--out``.
@@ -188,7 +188,7 @@ def eval_run(
     config_file = find_config_file(
         explicit="off" if getattr(args, "no_config", False) else getattr(args, "config", None),
     )
-    cfg = load_config(
+    cfg, layers = load_config_with_sources(
         config_file=config_file,
         review_rules=args.rules_file,
         scoped_rules=args.scoped_rules,
@@ -199,7 +199,7 @@ def eval_run(
             "prompts_dir": "--prompts-dir",
         },
     )
-    _check_review_inputs(args, cfg)
+    load_path_inputs(cfg, layers, config_file=config_file, ticket=False)
     created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     run_dir = Path(args.out) / args.label
     if run_dir.exists() and not args.resume:
@@ -226,43 +226,6 @@ def eval_run(
     )
     print(f"run directory: {run_dir}", flush=True)
     return 0
-
-
-def _check_review_inputs(args: argparse.Namespace, cfg: Mapping[str, Any]) -> None:
-    """Load the rules files and the prompts directory every case shares, so a bad one exits 2 once.
-
-    Each is loaded as ``review`` loads it, named by its flag when given and
-    by its variable otherwise, and the scoped rules are checked against the
-    always-on file. The loaded objects are discarded: each case loads its own.
-    """
-    rules = _load_shared_input(
-        load_review_rules, cfg["review_rules"],
-        source="--rules-file" if args.rules_file is not None else "PRXREF_REVIEW_RULES",
-        max_chars=cfg["review_rules_max_chars"],
-    )
-    _load_shared_input(
-        functools.partial(load_scoped_rules, always_on=rules), cfg["scoped_rules"],
-        source="--scoped-rules" if args.scoped_rules is not None else "PRXREF_SCOPED_RULES",
-        max_chars=cfg["review_rules_max_chars"],
-    )
-    _load_shared_input(
-        load_prompt_templates, cfg["prompts_dir"],
-        source="--prompts-dir" if args.prompts_dir is not None else "PRXREF_PROMPTS_DIR",
-    )
-
-
-def _load_shared_input(loader: Callable[..., Any], path: Any, *, source: str, **kwargs: Any) -> Any:
-    """Call ``loader(path, source=source, **kwargs)``, fenced as the CLI fences its loaders.
-
-    An ``OSError`` or ``ValueError`` that escapes the loader becomes a
-    ``ConfigError`` naming ``source``.
-    """
-    try:
-        return loader(path, source=source, **kwargs)
-    except ConfigError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise ConfigError(f"{source}: cannot load {path!r}: {exc}") from exc
 
 
 def _run_case(
