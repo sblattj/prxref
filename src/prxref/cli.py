@@ -133,7 +133,7 @@ from pathlib import Path
 from typing import Any
 
 import prxref
-from prxref import ci_fallback
+from prxref import ci_fallback, markers
 from prxref.config import (
     _DEFAULTS,
     _ENV_ONLY_REASONS,
@@ -1420,6 +1420,9 @@ def _run_review(
             "prompts_dir": "--prompts-dir",
         },
     )
+    # One glyph table per process: review, the webhook daemon (every webhook
+    # review loads the same environment and file) and eval run all pass here.
+    markers.configure(cfg["severity_markers"])
     config_stamp = _config_file_stamp(config_file)
     # The rules files, the ticket file, the prompts directory and --repo-dir
     # are read here, after config and before make_forge and the LLM client, so

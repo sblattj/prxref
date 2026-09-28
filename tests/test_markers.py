@@ -146,28 +146,29 @@ _SUMMARY_TEMPLATES = {
 
 
 class TestSummaryTemplateParity:
-    """The three summary templates keep their counts-line glyphs as literals
-    (they are the readable source of the layout); this holds each literal to
-    the table, so a glyph change that misses a template fails here."""
+    """The three summary templates spell no glyph (#59): each counts line
+    draws every glyph from the table through its marker slot, so a template
+    cannot drift from the table, default or operator-configured."""
 
     @pytest.mark.parametrize("name", list(_SUMMARY_TEMPLATES))
-    def test_every_counts_glyph_matches_the_table(self, name):
+    def test_every_count_is_led_by_its_own_marker_slot(self, name):
         pairs = _COUNT_RE.findall(_SUMMARY_TEMPLATES[name]())
-        assert sorted(sev for _glyph, sev in pairs) == sorted(SEVERITY_MARKERS), pairs
-        for glyph, sev in pairs:
-            assert glyph == SEVERITY_MARKERS[sev], (name, sev, glyph)
+        assert sorted(sev for _lead, sev in pairs) == sorted(SEVERITY_MARKERS), pairs
+        for lead, sev in pairs:
+            assert lead == "{" + markers.MARKER_SLOTS[sev] + "}", (name, sev, lead)
 
     @pytest.mark.parametrize("name", list(_SUMMARY_TEMPLATES))
-    def test_minor_is_grey_on_every_run(self, name):
-        assert "⬜ {outofscope_count} outofscope" in _SUMMARY_TEMPLATES[name]()
+    def test_no_template_spells_a_glyph(self, name):
+        text = _SUMMARY_TEMPLATES[name]()
+        assert [g for g in _GLYPHS if g in text] == [], name
+
+    @pytest.mark.parametrize("name", list(_SUMMARY_TEMPLATES))
+    def test_minor_is_the_outofscope_slot_on_every_run(self, name):
+        assert "{outofscope_marker} {outofscope_count} outofscope" in _SUMMARY_TEMPLATES[name]()
 
 
 _PACKAGE = Path(markers.__file__).resolve().parent
 _GLYPHS = frozenset(SEVERITY_MARKERS.values()) | {OUT_OF_TICKET_MARKER}
-_TEMPLATE_CONSTANTS = {
-    "orchestrator.py": "_FALLBACK_SUMMARY_TEMPLATE",
-    "formatter.py": "_DEFAULT_SUMMARY_TEMPLATE",
-}
 
 
 def _docstring_ids(tree: ast.Module) -> set[int]:
@@ -184,28 +185,11 @@ def _docstring_ids(tree: ast.Module) -> set[int]:
     return ids
 
 
-def _assigned_ids(tree: ast.Module, name: str) -> set[int]:
-    ids: set[int] = set()
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        else:
-            continue
-        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
-            ids.update(id(n) for n in ast.walk(node.value))
-    return ids
-
-
-def _glyph_literals(path: Path, *, exempt_template: bool = True) -> list[tuple[int, list[str]]]:
+def _glyph_literals(path: Path) -> list[tuple[int, list[str]]]:
     """Every non-docstring string constant (f-string parts included) in
     ``path`` that contains a marker glyph, as ``(lineno, glyphs)``."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     skip = _docstring_ids(tree)
-    template = _TEMPLATE_CONSTANTS.get(path.relative_to(_PACKAGE).as_posix())
-    if exempt_template and template:
-        skip |= _assigned_ids(tree, template)
     hits = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip:
@@ -216,9 +200,10 @@ def _glyph_literals(path: Path, *, exempt_template: bool = True) -> list[tuple[i
 
 
 class TestGlyphsLiveInOnePlace:
-    """Design #64 §9.2 and contract §6.2's end state: code renders a glyph
-    from the table and never re-types it, apart from the named summary
-    templates (docstrings are documentation and are not scanned)."""
+    """Design #64 §9.2 and contract §6.2's end state, tightened by #59: code
+    renders a glyph from the table and never re-types it, with no exemption
+    for the summary templates (docstrings are documentation and are not
+    scanned)."""
 
     def test_no_module_but_markers_spells_a_glyph(self):
         offenders = {
@@ -228,10 +213,11 @@ class TestGlyphsLiveInOnePlace:
         }
         assert offenders == {}
 
-    def test_the_scan_sees_glyphs_where_they_are(self):
+    def test_the_scan_sees_glyphs_where_they_are(self, tmp_path):
         assert _glyph_literals(_PACKAGE / "markers.py")
-        for rel in _TEMPLATE_CONSTANTS:
-            assert _glyph_literals(_PACKAGE / rel, exempt_template=False), rel
+        spelled = tmp_path / "spelled.py"
+        spelled.write_text('"""🟥 in a docstring."""\nX = f"{1} 🟧"\n', encoding="utf-8")
+        assert _glyph_literals(spelled) == [(2, ["🟧"])]
 
     def test_the_out_of_ticket_glyph_appears_only_in_markers(self):
         holders = sorted(

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from prxref import config
+from prxref import config, markers
 
 
 def prxref_env_names() -> list[str]:
@@ -41,6 +41,19 @@ CI_ENV_NAMES = (
     "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY", "TF_BUILD", "GITLAB_CI", "BITBUCKET_BUILD_NUMBER",
 )
 """The CI variables the post-failure fallback reads (issue #48)."""
+
+
+@pytest.fixture(autouse=True)
+def _default_markers():
+    """Every test starts and ends on the default glyph table (#59).
+
+    ``markers.configure`` is process-wide and ``cli._run_review`` calls it, so
+    a test that sets ``PRXREF_SEVERITY_MARKERS`` would otherwise leak its
+    glyphs into every later test that renders.
+    """
+    markers.configure(None)
+    yield
+    markers.configure(None)
 
 
 @pytest.fixture(autouse=True)
