@@ -1,8 +1,9 @@
-"""Forge contract: one Protocol, five implementations.
+"""Forge contract: one Protocol, six implementations.
 
 The implementations are bitbucket (Cloud), bitbucket_server (Server / Data
-Center), github (Cloud and Enterprise Server), gitlab (SaaS and self-hosted)
-and azure_devops (Azure DevOps Services and Azure DevOps Server).
+Center), github (Cloud and Enterprise Server), gitlab (SaaS and self-hosted),
+gitea (Gitea, Forgejo and Codeberg) and azure_devops (Azure DevOps Services
+and Azure DevOps Server).
 
 Every value that flows through the pipeline is forge-agnostic past this module.
 Diff handling is deliberately unified: each forge returns ONE raw unified diff
@@ -21,7 +22,7 @@ from typing import Protocol
 class PRRef:
     """A pull/merge request identity, normalized across forges."""
 
-    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab" | "azure-devops" | "local"
+    forge: str  # "bitbucket" | "bitbucket-server" | "github" | "gitlab" | "gitea" | "azure-devops" | "local"
     host: str  # e.g. "bitbucket.org", "github.com", "gitlab.com", or self-hosted host
     owner: str  # workspace / org / group
     repo: str
@@ -344,13 +345,21 @@ def detect_forge(url: str) -> PRRef | None:
     narrower should be asked first, so that loosening one later degrades into a
     shadowed forge rather than a silently mis-routed one.
 
+    Gitea (Forgejo, Codeberg) is asked after GitLab and before Azure DevOps.
+    It matches any host, but only a plural ``/{owner}/{repo}/pulls/{n}``
+    path: GitHub's pattern needs a singular ``/pull/``, GitLab's
+    ``/-/merge_requests/``, both Bitbucket patterns ``pull-requests`` and
+    Azure DevOps ``/_git/``, so no forge's PR URL is accepted by Gitea's
+    parser or Gitea's by theirs. Only a contrived URL carrying two shapes,
+    one in its trailing path, matches twice, and the earlier parser wins.
+
     Azure DevOps is asked last for the same defensive reason: its URLs carry
     ``/_git/{repo}/pullrequest/{n}``, which no other pattern accepts, so it
     cannot shadow or be shadowed by the forges ahead of it.
     """
-    from . import azure_devops, bitbucket, bitbucket_server, github, gitlab
+    from . import azure_devops, bitbucket, bitbucket_server, gitea, github, gitlab
 
-    for forge in (bitbucket, bitbucket_server, github, gitlab, azure_devops):
+    for forge in (bitbucket, bitbucket_server, github, gitlab, gitea, azure_devops):
         ref = forge.ForgeImpl.parse_pr_url(url)
         if ref is not None:
             return ref
