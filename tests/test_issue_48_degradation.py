@@ -463,5 +463,6 @@ class TestASuccessfulPostIsUnchanged:
         assert rc == 0
         payload = json.loads(out)
         assert payload.pop("degraded") is None
+        assert payload.pop("config_file") is None
         assert _sha(json.dumps(payload)) == BASE_JSON_SHA
         assert not (tmp_path / GITLAB_REPORT_FILE).exists()
