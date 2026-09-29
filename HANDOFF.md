@@ -1,70 +1,63 @@
-# HANDOFF — v0.27.0 shipped: chunk and read-cap visibility (#61)
+# HANDOFF — v0.28.0 shipped: team-rules cap default raised to 24000 (#63)
 
-**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-28 · **Supersedes** the
-v0.26.0 handoff.
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-29 · **Supersedes** the
+v0.27.0 handoff.
 
-0.27.0 is the "ship now" half of #61. #61 asked whether the chunk count and
-the repository-context read caps are set right. That question needs A/B
-data, so this release changes no default. It makes the limits settable and
-their effect visible. New surfaces: two config keys, `repo_context_max_reads`
-(`PRXREF_REPO_CONTEXT_MAX_READS`, 200) and `repo_context_max_chunk_reads`
-(`PRXREF_REPO_CONTEXT_MAX_CHUNK_READS`, 16), both file keys and both
-`orchestrate_review` kwargs. There are also new run-record keys:
-`repo_context.{chunk_read_cap_hit, run_read_cap_hit, max_reads,
-max_chunk_reads}` and top-level `chunks_over_budget`,
-`largest_chunk_tokens`, `overflow_files` and `chunk_token_budget`. Finally,
-`triage.plan_chunks` and a module-level `triage.est_tokens`. Chunk placement
-is unchanged. Text output is unchanged except the `repo context:` line
-(`-v`, repository context on) and a `chunks:` line that appears only on
-overflow. The user-facing account is the `[0.27.0]` section of
-`CHANGELOG.md`. #61 stays open for the default changes.
+0.28.0 is a one-default release: `PRXREF_REVIEW_RULES_MAX_CHARS` rises
+from 12000 to 24000 (#63), matching `PRXREF_SCOPED_RULES_MAX_CHARS`, so
+the two caps no longer disagree. Team rules files mined from reviewer
+comments routinely run 18k to 22k characters, and the old default cut
+their tail — usually the last groups in the file (tests, observability,
+process) — behind one WARNING most CI runs never surface. The loader, the
+prompt block and the run record are unchanged; the record's `max_chars`
+simply reports 24000 unless the variable says otherwise. The cost: a
+rules file between 12k and 24k characters now reaches every review unit
+whole, up to roughly 3000 more input tokens per unit at the top of that
+range, and `PRXREF_REVIEW_RULES_MAX_CHARS=12000` restores the old
+behavior. The user-facing account is the `[0.28.0]` section of
+`CHANGELOG.md`.
 
 ## What landed
 
-- **Read caps as config.** The caps are `repo_reader.MAX_RUN_READS` and
-  `MAX_CHUNK_READS`, which remain the defaults, threaded to `forge_reader`
-  and `repo_dir_reader` as `run_cap` and `chunk_cap`. The kwargs come right
-  after `repo_dir` in `orchestrate_review`, because an existing test pins
-  the five names after `max_findings_per_rule`. Both keys are appended to
-  `evals.RUN_CONFIG_KEYS`, which now has 21 entries. An old baseline without
-  them still scores and compares: score copies `config` as-is and compare
-  never reads it.
-- **Which cap was hit.** `RepoReader.stats()` and the record carry
-  `chunk_read_cap_hit` and `run_read_cap_hit`, and `read_cap_hit` is their
-  OR. The CLI prints `cap_hit=no|chunk|run|chunk+run`. `reads` is not shown
-  as a fraction of `max_reads`, because it also counts PR-file fetches,
-  which spend neither cap. In the live run below, `reads=9` came with
-  `max_reads=3`.
-- **Chunk overflow.** `triage.plan_chunks` returns a `ChunkPlan`: the chunks
-  plus counts from the same placement pass, and `build_chunks` returns its
-  chunks. A file "overflows" when the chunk count is at `max_chunks` and no
-  chunk has room, either on tokens or on the per-chunk file cap. So
-  `overflow_files > 0` with `chunks_over_budget == 0` is possible. The
-  fields start in `run_inputs` as `0, 0, 0, budget` and are stamped on all 8
-  exits. `chunk_count` is still `len(chunks) + 1`, the whole-PR sweep
-  included. The CLI hint to raise the limits appears only when files
-  overflowed; one oversized file is not fixed by more chunks.
-- **Tests.** `tests/test_issue_61_read_caps.py` (config errors, cap
-  binding, threading, the CLI line, eval backward compatibility, and the
-  8 × 16 < 200 property) and `tests/test_issue_61_chunk_overflow.py` (the
-  stats, placement identical to a frozen copy of the 0.26.0 `build_chunks`
-  on 40 random inputs, record fields on several exits, and the CLI line
-  present and absent).
+- **The default.** `config._DEFAULTS["review_rules_max_chars"]` 12000 →
+  24000, and the `config.py` docstring table's `(default …)` line with it.
+  `tests/test_docs_consistency.py` then forces `.env.example` and
+  `docs/env-vars.md` along, which both name the default in prose.
+- **Docs.** `README.md`; `docs/review-rules.md` (the cap bullet, the
+  truncation-line example, the record example, the `-v` line, the scoped
+  per-file examples, and the cost section, now ~6000 tokens per unit at
+  the default); `.env.example`. The doc examples pair a body size with
+  the cap, and a truncated example that kept its 18344-character file
+  would have become impossible (18344 < 24000 truncates nothing), so the
+  example file is now 27344 characters.
+- **Tests.** `tests/test_issue_63_rules_cap_default.py` (new): the default
+  matches the scoped cap and flows through `load_config`; a
+  20295-character body loads whole with no `prxref.rules` warning; and
+  `PRXREF_REVIEW_RULES_MAX_CHARS=12000` still truncates it with the
+  raise-the-cap warning. Four existing spots assert the real default and
+  followed it: `_POSITIVE_INT_KNOBS` in `tests/test_config.py`, the
+  loader-call record in `tests/test_cli_inputs.py`, the CLI `_expected`
+  record in `tests/test_issue_63_review_rules.py`, and the eval
+  `SCOPED_RECORD` fixture in `tests/test_eval_run_inputs.py`.
 
 ## What this release taught
 
-1. **Key-set pins are spread wider than any grep list.** Adding record keys
-   failed 35 tests across 6 files, and the brief's grep had named 3 of them.
-   The cheap way to find every pin is one full-suite run right after the
-   first edit.
-2. **The `A81_*_KEYS` tuples in `tests/test_orchestrator_rule_cap.py` feed
-   golden hashes.** Adding a key to them changes five pinned hashes. New
-   record keys are left out before hashing instead.
-3. **Hidden config-key constraints.** `evals.RUN_CONFIG_KEYS` has its count
-   (and the count as a spelled-out word) pinned in tests and
-   `docs/evals.md`, and its last four entries are order-pinned. The
-   `orchestrate_review` signature has a pinned five-kwarg window. See the
-   coupling section.
+1. **A default is pinned in more places than the config tables.** One
+   number moved and four test files needed it. Grepping `12000` does not
+   separate "the default" from "an explicit cap a test passes"
+   (`max_chars=12000` helper defaults, fabricated formatter fixtures) or
+   from the unrelated `repo_context_max_chars` default, which is also
+   12000 and did NOT move. A full-suite run right after the first edit is
+   the only reliable census, and explicit-cap fixtures that pass either
+   way must be left alone.
+2. **Doc examples encode two numbers, not one.** `docs/review-rules.md`
+   shows `chars=18344 (truncated at 12000)`; raising only the cap would
+   make the example self-contradictory. When a cap default moves, every
+   example pairing a size with it must stay arithmetically possible.
+3. **`ruff format` is not this project's style.** `uv run ruff format
+   --check .` wants to reformat 246 files; only `ruff check` is enforced.
+   Running `ruff format` on a touched file injects hundreds of unrelated
+   lines into the diff. Lint, don't format.
 
 ## The coupling that will catch the next person adding a config key
 
@@ -118,12 +111,12 @@ kwarg must not land inside the pinned five-name window after
 
 ## Release shape (follow this next time)
 
-How 0.27.0 was built:
+How 0.28.0 was built:
 
-1. **Two parallel seats from `7e5375c`:** read caps and the cap split
-   (9935 to 9984 passed), and chunk overflow (9935 to 9972).
-2. **Release branch:** both seats merged with no conflicts (10021 passed),
-   followed by this commit: the version bump, CHANGELOG and this file.
+1. **One seat from `b40e721`** (PR #64, the #63 default change; 10025
+   passed on the feature branch).
+2. **Release branch:** this commit — the version bump, CHANGELOG and this
+   file.
 
 Cutting the release:
 
@@ -149,9 +142,9 @@ pattern does not match GitHub's auto-generated source archive.
 ## Verified at release
 
 ```
-10021 passed                                  uv run pytest -q
+10025 passed                                  uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.27.0                                        uv run prxref --version
+0.28.0                                        uv run prxref --version
 ```
 
 These counts come from the release branch, measured at the commit that last
@@ -159,26 +152,42 @@ updated this file.
 
 ### Live checks
 
-- **A `--no-post -v` review through the real CLI** (`claude-cli`, `sonnet`,
-  `PRXREF_LLM_TIMEOUT=300`). It reviewed the release's own `src/` diff via
-  `--diff-file` with `--repo-dir .`, `PRXREF_REPO_CONTEXT=repo`,
-  `PRXREF_MAX_CHUNKS=2`, `PRXREF_CHUNK_TOKEN_BUDGET=2000`,
-  `PRXREF_REPO_CONTEXT_MAX_CHUNK_READS=2` and
-  `PRXREF_REPO_CONTEXT_MAX_READS=3`. It exited 0 with verdict Approved and
-  printed:
-  `chunks: 2 over the 2000-token budget (largest ~7240) · 4 files placed past the chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET`
-  and
-  `repo context: mode=repo reader=repo-dir listing=1557 reads=9 max_reads=3 max_chunk_reads=2 cap_hit=chunk+run entries=29 omitted=0`.
-- **The same run with `--format json`** gave `chunk_count: 3` (2 chunks plus
-  the sweep), `chunks_over_budget: 2`, `largest_chunk_tokens: 7240`,
-  `overflow_files: 4` and `chunk_token_budget: 2000`. Its `repo_context` had
-  both cap flags true, `max_reads: 3` and `max_chunk_reads: 2`.
+All three ran the release's own 11-file diff (`git diff 66a2d72^ 66a2d72`)
+through `--no-post --diff-file` with a 20295-character rules file
+(`blocker: error` front matter, a canary last rule), `claude-cli`, `sonnet`,
+`PRXREF_LLM_TIMEOUT=300`.
+
+- **Default cap, `-v`.** Exit 0, verdict Approved, and the rules line
+  carries no truncation:
+  `rules: .local/live-63/rules.md sha256=1bd1c1a9f97a chars=20295`.
+  The only WARNING was claude-cli's own subscription rate-limit notice.
+- **Default cap, `--format json`.** `review_rules` reads
+  `"chars": 20295, "max_chars": 24000, "truncated": false,
+  "severity_map": {"blocker": "error"}`, with `chunk_count: 4` (3 chunks
+  plus the sweep) and 104,461 input tokens.
+- **`PRXREF_REVIEW_RULES_MAX_CHARS=12000`, `-v`.** The same file truncates:
+  one WARNING ("only the first 12000 reach the prompt — raise
+  `PRXREF_REVIEW_RULES_MAX_CHARS`") and the line ends
+  `(truncated at 12000)`; 71,408 input tokens.
+- **The token delta of one pair of runs is not the rules delta.**
+  104,460 − 71,408 ≈ 33k input tokens, but the extra rules text is only
+  8,295 characters ≈ 2,100 tokens × 4 units ≈ 8,300 tokens. The rest is
+  run-to-run variance (reply lengths, retries, cache misses). Do not quote
+  this pair as the cost of the higher cap.
 
 ## Still open — not part of this release
 
+- **No A/B of the raised rules cap on prxref's own reviews.** #63's
+  evidence is a replay of 65 past PRs that ran with no rules cap at all,
+  where 18k-to-22k-character rules files scored best. A 12000-vs-24000
+  comparison on prxref's own output — `prxref eval run` twice over a
+  labelled replay set, once with the variable at 12000 — has not run; the
+  live check above is one noisy pair, not a measurement.
+
 - **#61's default changes.** Whether to raise `max_chunks` or the read caps
-  waits for A/B data. The fields above are what such a comparison should
-  read.
+  waits for A/B data. The fields such a comparison should read are 0.27.0's:
+  `chunks_over_budget`, `largest_chunk_tokens`, `overflow_files` and the
+  `repo_context` cap flags.
 
 - **The library formatter has no per-group slots (#59).**
   `formatter.format_summary` fills the marker slots but not the
@@ -681,7 +690,7 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.25.0` (minor: repository config file `.prxref.toml`, #38; flags `--config` / `--no-config` on `review` and `eval run`, `--config` on `serve`; subcommand `prxref config check`; run-record key `config_file`; variable `PRXREF_CONFIG_FILE`, not a config key; no new config key, adapter or `Forge` method) |
+| Released version | `0.28.0` (minor: `PRXREF_REVIEW_RULES_MAX_CHARS` default 12000 → 24000, #63; no new config key, adapter or `Forge` method) |
 | Registration points | config-file classification: `config.FILE_KEYS` / `config.ENV_ONLY_KEYS` with `_ENV_ONLY_REASONS`, and `_FILE_PATH_KEYS` for contained paths; CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`, where order matters only as a guard, and Gitea's any-host pattern must keep refusing the other forges' hosts) and the `impls` dict in `config.py` (`make_forge`); webhooks: the header dispatch in `webhooks.verify_signature`, where a forge that also sends GitHub's headers must be checked before GitHub; repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
