@@ -46,7 +46,7 @@ CONFLICT_FILE = '---\napplies_to: ["**/*.py"]\nseverity:\n  blocker: warning\n--
 SCOPED_RECORD = {
     "entries": ["rules/python.md"],
     "files": [{
-        "path": "rules/python.md", "sha256": "1" * 64, "chars": 40, "max_chars": 12000,
+        "path": "rules/python.md", "sha256": "1" * 64, "chars": 40, "max_chars": 24000,
         "truncated": False, "severity_map": {}, "applies_to": ["**/*.py"],
     }],
     "max_chars": 24000,
