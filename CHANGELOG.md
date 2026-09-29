@@ -8,7 +8,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
-## [Unreleased]
+## [0.28.0] — 2026-09-29
+
+Team rules reach the model whole (#63). The
+`PRXREF_REVIEW_RULES_MAX_CHARS` default rises from 12000 to 24000,
+matching `PRXREF_SCOPED_RULES_MAX_CHARS`, so a rules file between 12k
+and 24k characters no longer loses its tail — the last groups in the
+file (tests, observability, process) that the old cap cut behind one
+WARNING most CI runs never surface. Nothing else moves: the loader, the
+prompt block and the record are unchanged, and the old ceiling stays one
+environment variable away.
 
 ### Changed
 
@@ -2661,7 +2670,10 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/sblattj/prxref/releases/tag/v0.28.0
+[0.27.0]: https://github.com/sblattj/prxref/releases/tag/v0.27.0
+[0.26.0]: https://github.com/sblattj/prxref/releases/tag/v0.26.0
 [0.25.0]: https://github.com/sblattj/prxref/releases/tag/v0.25.0
 [0.24.0]: https://github.com/sblattj/prxref/releases/tag/v0.24.0
 [0.23.0]: https://github.com/sblattj/prxref/releases/tag/v0.23.0
