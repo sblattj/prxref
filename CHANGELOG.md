@@ -8,6 +8,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Changed
+
+- **`PRXREF_REVIEW_RULES_MAX_CHARS` default raised from 12000 to 24000 (#63).**
+  Team rules files built from mined reviewer comments routinely run 18k to
+  22k characters, and the 12000 default silently cut their tail — usually
+  the last groups in the file (tests, observability, process), which then
+  went unchecked behind one WARNING most CI runs never surface. The new
+  default matches `PRXREF_SCOPED_RULES_MAX_CHARS` (24000), so the two caps
+  no longer disagree. Prompts for rules files between 12k and 24k
+  characters get longer, by up to roughly 3000 more input tokens per review
+  unit at the top of that range; set `PRXREF_REVIEW_RULES_MAX_CHARS=12000`
+  to keep the old behavior.
+
 ## [0.27.0] — 2026-09-28
 
 Chunking and repository-context read limits, visible and settable (#61).

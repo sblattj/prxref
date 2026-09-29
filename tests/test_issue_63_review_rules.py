@@ -751,7 +751,7 @@ def _rules_lines(text: str) -> list[str]:
 class TestCli:
     def _expected(self, path: str, **kw) -> dict:
         return {
-            "path": path, "sha256": _sha(path), "chars": len(BODY), "max_chars": 12000,
+            "path": path, "sha256": _sha(path), "chars": len(BODY), "max_chars": 24000,
             "truncated": False, "severity_map": MAP, **kw,
         }
 
