@@ -1080,7 +1080,7 @@ class TestErrorsNameTheirSource:
 
 _POSITIVE_INT_KNOBS = [
     ("llm_cli_concurrency", "PRXREF_LLM_CLI_CONCURRENCY", 2),
-    ("review_rules_max_chars", "PRXREF_REVIEW_RULES_MAX_CHARS", 12000),
+    ("review_rules_max_chars", "PRXREF_REVIEW_RULES_MAX_CHARS", 24000),
     ("ticket_context_max_chars", "PRXREF_TICKET_CONTEXT_MAX_CHARS", 6000),
 ]
 
