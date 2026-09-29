@@ -236,7 +236,7 @@ LLM / pipeline:
   PRXREF_REVIEW_RULES_MAX_CHARS Characters of the rules body (after the
                                 front matter) kept in the prompt; longer is
                                 truncated with a warning; positive int
-                                (default 12000)
+                                (default 24000)
   PRXREF_SCOPED_RULES           Path-scoped review rules (0.15.0): rules
                                 files and directories (``*.md`` one level
                                 deep) whose ``applies_to:`` front-matter
@@ -589,7 +589,7 @@ _DEFAULTS: dict[str, object] = {
     "spec_max_chars": 120000,
     "spec_digest_tokens": 3000,
     "review_rules": "",
-    "review_rules_max_chars": 12000,
+    "review_rules_max_chars": 24000,
     "scoped_rules": [],
     "scoped_rules_max_chars": 24000,
     "prompts_dir": None,

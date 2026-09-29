@@ -179,11 +179,11 @@ is an error rather than something silently skipped.
 
 ## The cap, the hash and the run record
 
-- **The cap.** `PRXREF_REVIEW_RULES_MAX_CHARS` (default `12000`, must be
+- **The cap.** `PRXREF_REVIEW_RULES_MAX_CHARS` (default `24000`, must be
   greater than 0) caps the **body**: the text after the front matter, with
   surrounding whitespace stripped. A longer body is cut at the cap, and the
   block then ends with
-  `[team rules truncated: only the first 12000 of 18344 characters are shown]`.
+  `[team rules truncated: only the first 24000 of 27344 characters are shown]`.
   prxref also logs one WARNING per run that names
   `PRXREF_REVIEW_RULES_MAX_CHARS`.
 - **The hash.** `sha256` covers the raw bytes of the whole file, front matter
@@ -198,7 +198,7 @@ Every review result carries a `review_rules` record, `null` when no rules are
 configured:
 
 ```json
-{"path": ".prxref/rules.md", "sha256": "<64 hex>", "chars": 18344, "max_chars": 12000,
+{"path": ".prxref/rules.md", "sha256": "<64 hex>", "chars": 27344, "max_chars": 24000,
  "truncated": true,
  "severity_map": {"blocker": "error", "major": "warning", "must fix": "warning", "nit": "outofscope"}}
 ```
@@ -213,7 +213,7 @@ It appears in these places:
 | Where | What |
 |---|---|
 | `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run) |
-| `-v` text output | `rules: .prxref/rules.md sha256=<first 12 hex> chars=18344 (truncated at 12000)` |
+| `-v` text output | `rules: .prxref/rules.md sha256=<first 12 hex> chars=27344 (truncated at 24000)` |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `rules ok` event whose meta is the record, right after `run start`; a `rules remap` event with `findings=<n>` when the map rewrote any finding |
 | `--trace-dir` | the rules block itself, in every `<unit>.system.md` |
 
@@ -434,9 +434,9 @@ rules are configured:
 ```json
 {"entries": [".prxref/scoped"],
  "files": [
-   {"path": ".prxref/scoped/helm.md", "sha256": "<64 hex>", "chars": 47, "max_chars": 12000,
+   {"path": ".prxref/scoped/helm.md", "sha256": "<64 hex>", "chars": 47, "max_chars": 24000,
     "truncated": false, "severity_map": {}, "applies_to": ["helm/**"]},
-   {"path": ".prxref/scoped/java.md", "sha256": "<64 hex>", "chars": 94, "max_chars": 12000,
+   {"path": ".prxref/scoped/java.md", "sha256": "<64 hex>", "chars": 94, "max_chars": 24000,
     "truncated": false, "severity_map": {"nit": "outofscope"},
     "applies_to": ["**/*.java", "!**/src/test/**"]}],
  "max_chars": 24000,
@@ -469,7 +469,7 @@ rules are configured:
 
 The always-on file rides **every** review unit: each chunk and the sweep.
 So it adds about `chars / 4 × (chunks + 1)` input tokens per run. At the
-12000-character default that is roughly 3000 tokens per unit. A scoped file
+24000-character default that is roughly 6000 tokens per unit. A scoped file
 adds about `chars / 4` to each unit it reaches: the chunks whose paths it
 matches, plus the sweep whenever any chunk does. So it adds
 `chars / 4 × (matching chunks + 1)` tokens, and a file without

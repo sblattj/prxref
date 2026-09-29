@@ -357,7 +357,7 @@ class TestLoaderWiring:
         calls, loaded = loaders
         assert _review("--rules-file", "r.md", "--context-file", "t.md") == 0
         assert calls["rules"] == [
-            {"path": "r.md", "max_chars": 12000, "source": "--rules-file"},
+            {"path": "r.md", "max_chars": 24000, "source": "--rules-file"},
         ]
         assert calls["ticket"] == [
             {"path": "t.md", "max_chars": 6000, "source": "--context-file"},
