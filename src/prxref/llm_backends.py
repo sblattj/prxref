@@ -64,7 +64,7 @@ from .llm import ConfigError, InvokeResult, LLMClient
 DEFAULT_BASE_URL = ""
 DEFAULT_API_KEY = ""
 DEFAULT_MODELS = ""
-DEFAULT_TIMEOUT = 45.0
+DEFAULT_TIMEOUT = 120.0
 # Sent, not just a fallback: temperature 0 is the reproducibility default —
 # identical diff, same model, same verdict — and it only works if the field
 # actually reaches the wire. Resolved by create_llm_client when the operator
@@ -724,7 +724,7 @@ def create_llm_client(
     as ``reasoning_effort=`` (litellm maps it per provider), and to
     claude-cli as its effort setting; empty omits it, and kiro-cli ignores
     it.
-    PRXREF_LLM_TIMEOUT (seconds, default 45.0, must be > 0) becomes the
+    PRXREF_LLM_TIMEOUT (seconds, default 120.0, must be > 0) becomes the
     client's ``default_timeout``. PRXREF_LLM_TEMPERATURE is parsed to a
     float (finite, >= 0 — no upper bound, since the maximum is
     provider-specific); an unset or empty value resolves to

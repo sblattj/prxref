@@ -580,11 +580,11 @@ class TestFmtCostLabel:
 class TestTheRecordCarriesTheFlagOnlyWhenTrue:
     def test_false_is_never_written(self):
         out = orchestrator._run_record({}, {"cost_api_equivalent": False, "cost_usd": 0.0})
-        assert out == {"cost_usd": 0.0}
+        assert out == {"cost_usd": 0.0, "failed_chunks": None}
 
     def test_true_is_written(self):
         out = orchestrator._run_record({}, {"cost_api_equivalent": True})
-        assert out == {"cost_api_equivalent": True}
+        assert out == {"cost_api_equivalent": True, "failed_chunks": None}
 
 
 @pytest.mark.usefixtures("cost_reviewer")

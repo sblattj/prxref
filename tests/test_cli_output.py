@@ -44,12 +44,12 @@ JSON_KEYS = [
     "input_tokens", "output_tokens", "cost_usd", "cost_estimated", "posted",
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "repo_context", "parse_retries", "context_followup", "suggestions", "incremental",
-    "degraded", "config_file",
+    "degraded", "config_file", "failed_chunks",
 ]
 NEW_RECORD_KEYS = [
     "cost_usd", "cost_estimated", "review_rules", "ticket_context", "spec_grounding", "size_advisory",
     "prompt_templates", "scoped_rules", "rule_counts", "repo_context", "parse_retries",
-    "context_followup", "suggestions", "incremental", "degraded", "config_file",
+    "context_followup", "suggestions", "incremental", "degraded", "config_file", "failed_chunks",
 ]
 FINDING_KEYS = [
     "file", "line", "severity", "confidence", "scope", "rule", "suggestion", "suggestion_end_line",

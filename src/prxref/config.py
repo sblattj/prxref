@@ -26,7 +26,7 @@ LLM / pipeline:
   PRXREF_LLM_TIMEOUT            Wall-clock deadline for one model's review
                                 call, in seconds; the chain then tries the
                                 next model, so a run can exceed it. Must be
-                                greater than 0 (default 45.0)
+                                greater than 0 (default 120.0)
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
                                 >= 0, no upper bound (provider-specific).
                                 Unset or empty sends the built-in default
@@ -535,7 +535,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_models": [],
     "llm_reasoning_effort": "",
     "llm_max_tokens": 4096,
-    "llm_timeout": 45.0,
+    "llm_timeout": 120.0,
     "llm_temperature": "",
     # ``None`` is the declared unset: no seed is configured, so the factory
     # falls back to its once-per-process seed. Unlike ``llm_temperature``

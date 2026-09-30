@@ -8,6 +8,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+A partial review names what it did not review (#72). A run where some
+review units fail still completes, and its record now carries
+`failed_chunks`: one `{unit, kind, files, error}` per failed unit, in
+review order (`kind` is `chunk` with that chunk's files, or `sweep` with
+none). `--format json` gains the key after `chunks_failed` (`[]` when
+every unit completed), and the text summary prints `not reviewed:` with
+the files after the `coverage:` line, plus a `hint:` naming `--timeout`
+when a failure was a model deadline. The verdict and the `degraded` key
+keep their meaning: `degraded` still reports post failures only.
+
+The `PRXREF_LLM_TIMEOUT` default rises from 45 to 120 seconds. Reasoning
+models routinely take 50 s or more on a large chunk over HTTP, so the old
+default dropped normal chunks on every run; a lower deadline stays one
+environment variable or `--timeout` away.
+
 ## [0.28.0] — 2026-09-29
 
 Team rules reach the model whole (#63). The
