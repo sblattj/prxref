@@ -248,7 +248,7 @@ class TestCliBackendWiring:
         assert args == (backend,)
         assert kwargs == {
             "models": ["sonnet", "haiku"],
-            "default_timeout": 45.0,
+            "default_timeout": 120.0,
             "reasoning_effort": None,
             "cli_path": "",
             "concurrency": DEFAULT_CLI_CONCURRENCY,

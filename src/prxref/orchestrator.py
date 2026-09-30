@@ -1417,7 +1417,7 @@ def orchestrate_review(
             reason = f"the only review unit failed ({results[-1]['error']})"
         logger.error("Total LLM failure: %s", reason)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
-        return _run_record(_error_run(
+        return _run_record({**_error_run(
             forge, ref, post, len(chunks) + 1, reason, t0, tracer=tracer,
             model=model, input_tokens=input_tokens, output_tokens=output_tokens,
             post_mode=post_mode, sampling=sampling, cost_label=cost_label,
@@ -1425,10 +1425,11 @@ def orchestrate_review(
             reviewed_head=_mark_reviewed_head(
                 run_inputs, scope, pr, post_mode=post_mode, complete=False,
             ),
-        ), run_inputs)
+        ), "failed_chunks": _failed_chunks(chunks, results)}, run_inputs)
 
     chunks_failed = sum(1 for r in results if r["error"])
     chunks_reviewed = len(results) - chunks_failed
+    failed_units = _failed_chunks(chunks, results)
 
     # Sweep findings trail the chunk findings by construction (results[:-1]
     # are the chunk workers), which is the boundary the sweep-dedup pass
@@ -1771,6 +1772,7 @@ def orchestrate_review(
         "chunk_count": len(chunks) + 1,
         "chunks_reviewed": chunks_reviewed,
         "chunks_failed": chunks_failed,
+        "failed_chunks": failed_units,
         "elapsed_ms": elapsed_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -2064,7 +2066,8 @@ def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
     semantics — a key the exit's own dict already carries wins — except
     ``replay``, which is written only when it is not ``None``: a normal run's
     record has no ``replay`` key at all, and a replay's is a copy of the
-    stamp, never the caller's mapping. ``cost_api_equivalent`` is written
+    stamp, never the caller's mapping. ``failed_chunks`` (issue #72) is
+    ``None`` on an exit that never reached review. ``cost_api_equivalent`` is written
     only when it is ``True``, so a run not priced by claude-cli has the same
     record it had before the label existed. Returns ``result`` itself.
     """
@@ -2077,6 +2080,7 @@ def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
                 result.setdefault(key, True)
         else:
             result.setdefault(key, value)
+    result.setdefault("failed_chunks", None)
     return result
 
 
@@ -2933,6 +2937,28 @@ def _run_workers(
             return results
         finally:
             done.set()
+
+
+def _failed_chunks(chunks: Sequence[Sequence[Any]], results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The review units that failed, in review order (issue #72).
+
+    One ``{"unit", "kind", "files", "error"}`` per failed unit: ``unit`` is
+    its 1-based position among the ``chunk_count`` units, ``kind`` is
+    ``"chunk"`` for a worker chunk (``files`` its paths, in chunk order) or
+    ``"sweep"`` for the whole-PR systemic sweep (``files`` empty: it saw
+    every file only as a digest, and the chunks own file coverage). An
+    empty list means every unit that ran completed.
+    """
+    failed: list[dict[str, Any]] = []
+    for i, r in enumerate(results):
+        if not r.get("error"):
+            continue
+        if i < len(chunks):
+            files = [getattr(f, "path", str(f)) for f in chunks[i]]
+            failed.append({"unit": i + 1, "kind": "chunk", "files": files, "error": r["error"]})
+        else:
+            failed.append({"unit": i + 1, "kind": "sweep", "files": [], "error": r["error"]})
+    return failed
 
 
 def _is_timeout_error(error: str) -> bool:

@@ -566,7 +566,7 @@ class TestConfiguredKnobsReachTheOrchestrator:
     ):
         monkeypatch.delenv("PRXREF_LLM_TIMEOUT", raising=False)
         assert self._review(monkeypatch) == 0
-        assert fake_runtime["llm_calls"][0]["llm_timeout"] == 45.0
+        assert fake_runtime["llm_calls"][0]["llm_timeout"] == 120.0
 
     def test_quality_gate_knobs_reach_the_orchestrator(self, fake_runtime, monkeypatch):
         """Regression: apply_quality_gate() was called with no arguments."""

@@ -621,7 +621,9 @@ def _print_summary(
 ) -> None:
     """Print the text-mode summary of one review.
 
-    Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
+    Always printed: ``verdict:``; ``coverage:`` when a chunk failed, then
+    ``not reviewed:`` naming each failed chunk's files (and the cross-file
+    sweep when it failed) and a ``hint:`` when a failure was a deadline;
     ``chunks:`` when a chunk ran over the token budget or a file was placed
     past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
     when the PR-size advisory fired; and ``replay:`` when the run was a
@@ -649,6 +651,15 @@ def _print_summary(
     if failed:
         reviewed = record.get("chunks_reviewed", 0)
         print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
+        units = record.get("failed_chunks")
+        units = [u for u in units if isinstance(u, dict)] if isinstance(units, list) else []
+        files = [p for u in units for p in (u.get("files") or [])]
+        if files:
+            print(f"not reviewed: {', '.join(files)}", file=target)
+        if any(u.get("kind") == "sweep" for u in units):
+            print("not reviewed: cross-file sweep", file=target)
+        if any("timeout" in str(u.get("error", "")).lower() for u in units):
+            print("hint: a review unit hit the model deadline; raise --timeout or PRXREF_LLM_TIMEOUT", file=target)
     chunks_line = _chunk_pressure_line(record)
     if chunks_line:
         print(chunks_line, file=target)
@@ -903,8 +914,9 @@ def _build_json_result(result: Any) -> dict:
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``repo_context``, ``parse_retries``, ``context_followup``,
-    ``suggestions``, ``incremental``, ``degraded``, ``config_file``, then
-    ``sampling`` and ``replay`` when present.
+    ``suggestions``, ``incremental``, ``degraded``, ``config_file``,
+    ``failed_chunks`` (issue #72), then ``sampling`` and ``replay`` when
+    present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -977,6 +989,7 @@ def _build_json_result(result: Any) -> dict:
         "incremental": result.get("incremental"),
         "degraded": result.get("degraded"),
         "config_file": result.get("config_file"),
+        "failed_chunks": result.get("failed_chunks"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
