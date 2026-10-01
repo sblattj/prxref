@@ -233,10 +233,11 @@ LLM / pipeline:
                                 (recorded in the run record's
                                 ``metadata_rules`` stamp, never a finding)
                                 when unconfigured or when the PR offers
-                                nothing to check. Violations are
-                                deterministic warning/outofscope findings,
-                                summary-only, and never change the verdict
-                                or the exit code.
+                                nothing to check. Violations are summary
+                                notes in a "PR metadata" section, never
+                                findings: never posted inline, never
+                                capped, and never changing the verdict or
+                                the exit code (PRXREF_FAIL_ON included).
   PRXREF_BRANCH_PATTERNS        Branch-name check: "type=regex" entries
                                 mapping a PR type to the fullmatch pattern
                                 its source branch must satisfy (matched
@@ -251,8 +252,8 @@ LLM / pipeline:
   PRXREF_COMMIT_REFERENCE       Commit-subject check: a regex every
                                 non-merge commit subject (first line of the
                                 message) of the PR must CONTAIN (re.search),
-                                e.g. "PROJ-[0-9]+". One outofscope finding
-                                per offending commit. Needs the forge's
+                                e.g. "PROJ-[0-9]+". One summary note per
+                                offending commit. Needs the forge's
                                 commit listing (GitHub, Gitea); without one,
                                 or on a --diff-file run, the check skips
                                 with "skipped: no commit source". Empty
@@ -264,7 +265,7 @@ LLM / pipeline:
                                 matches zero directories). A path matching
                                 no area is ignored. More distinct areas
                                 than PRXREF_MAX_AREAS_PER_PR makes one
-                                file-level warning listing the areas.
+                                summary note listing the areas.
                                 Empty (default) skips the check.
   PRXREF_MAX_AREAS_PER_PR       Most distinct areas a PR may touch before
                                 the area check flags it; >= 0 (default 2).

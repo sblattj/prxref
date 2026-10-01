@@ -173,7 +173,10 @@ PRXREF_PROMPTS_DIR: prompt template 'prompts/summary.md' has no {findings} and n
 and at render time any finding in such a group is added under
 `**Other findings (N)**`, with a warning in the log. That block, followed by
 the inline accounting when the template has neither `{findings}` nor
-`{inline_accounting}`, goes just above the footer: the attribution, together
+`{inline_accounting}`, goes just above the footer. The `**PR metadata**`
+section (#70, present only when `PRXREF_METADATA_RULES` found a violation)
+goes there too, ahead of both, on every template — it has no slot. The
+footer is the attribution, together
 with a `---` rule directly over it if there is one. A template that dropped
 `{attribution}` gets them at the end of the body, with the attribution
 appended after them. The partial-review banner always comes last.
