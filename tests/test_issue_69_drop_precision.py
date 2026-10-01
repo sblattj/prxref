@@ -105,6 +105,74 @@ class TestDirectiveClaimsAreKept:
         )
 
 
+BOTH_HEADERS = (
+    "HTTP/1.1 200 OK\nStrict-Transport-Security: max-age=300\n"
+    "Cache-Control: max-age=60\nContent-Security-Policy: default-src 'self'"
+)
+
+
+class TestBareDirectiveAfterTheName:
+    """A bare directive after the header name is an object, in either order."""
+
+    @pytest.mark.parametrize("title", [
+        "Missing Strict-Transport-Security includeSubDomains",
+        "Missing Strict-Transport-Security preload",
+        "Missing Cache-Control immutable",
+        "No Cache-Control private for authenticated responses",
+        "No Cache-Control no-store",
+        "Missing Cache-Control no-store",
+        "No Content-Security-Policy frame-ancestors",
+        "Missing Strict-Transport-Security: includeSubDomains",
+        "Lacks Cache-Control private and no-store",
+        "Missing Strict-Transport-Security (HSTS) includeSubDomains",
+    ])
+    def test_keyword_first_directive_claim_is_kept(self, title):
+        assert _drop(title, BOTH_HEADERS) is None
+
+    @pytest.mark.parametrize("title", [
+        "Strict-Transport-Security lacks includeSubDomains",
+        "Strict-Transport-Security has no preload",
+        "Cache-Control lacks immutable",
+        "Cache-Control is missing private",
+        "Cache-Control without no-store",
+        "Content-Security-Policy lacks frame-ancestors",
+        "Strict-Transport-Security does not include includeSubDomains",
+    ])
+    def test_name_first_directive_claim_is_kept(self, title):
+        assert _drop(title, BOTH_HEADERS) is None
+
+    @pytest.mark.parametrize("title", [
+        "Missing Cache-Control header",
+        "No Cache-Control header",
+        "Missing Strict-Transport-Security",
+        "Missing Strict-Transport-Security (HSTS) header",
+        "Missing Strict-Transport-Security (HSTS)",
+        "Missing Strict-Transport-Security to enforce HTTPS",
+        "No Cache-Control for authenticated responses",
+        "Missing Cache-Control header allows proxies to cache",
+        "Missing Strict-Transport-Security which allows downgrade",
+        "Response lacks a Cache-Control header",
+        "The server does not send Strict-Transport-Security",
+        "No Cache-Control is sent",
+    ])
+    def test_keyword_first_header_claim_still_drops(self, title):
+        assert _drop(title, BOTH_HEADERS) == (
+            f"contradicted by execution evidence: {ROOT_PROBE}"
+        )
+
+    @pytest.mark.parametrize("title", [
+        "Cache-Control header is not set",
+        "Strict-Transport-Security missing",
+        "Strict-Transport-Security header missing which allows downgrade",
+        "Cache-Control is never set by the server",
+        "Cache-Control is missing from responses",
+    ])
+    def test_name_first_header_claim_still_drops(self, title):
+        assert _drop(title, BOTH_HEADERS) == (
+            f"contradicted by execution evidence: {ROOT_PROBE}"
+        )
+
+
 class TestUnknownExitSettlesNothing:
     """An item with no exit status carries no drop power and raises nothing."""
 
