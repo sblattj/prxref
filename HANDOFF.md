@@ -1,4 +1,156 @@
-# HANDOFF — v0.28.0 shipped: team-rules cap default raised to 24000 (#63)
+# HANDOFF — v0.29.0 shipped: ten issues, one swarm (#66–#75)
+
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-30 · **Supersedes** the
+v0.28.0 handoff.
+
+0.29.0 is the first swarm-cut release: one run, 25 seats, eight waves,
+every issue from #66 through #75 fixed, each verified against its own
+acceptance criteria on the integrated branch, and batched into this
+release. The theme the issues share is honesty about what a review
+actually did: a partial review now says `Incomplete` instead of
+`Approved` (#72), a finding that matches a resolved or outdated thread is
+posted again with a "Previously raised" note instead of silently
+vanishing (#73), an anchor that cannot be proven is marked
+`anchor_unverified` instead of guessed (#74), and a finding that names a
+rule which does not cover it loses the label instead of grouping under it
+(#75). Around that core the release adds four review inputs (in-repo
+standards documents #68, caller-supplied execution evidence #69,
+CI-wiring detection #66, deterministic PR-metadata rules #70), a worker
+instruction for matching-rule capture (#67), and — off by default —
+stable finding ids with a persisted verdict store (#71).
+
+## What landed
+
+- **#72** `Incomplete` verdict (Error → Request-Changes → Incomplete →
+  Approved); `degraded` carries the failed chunks; `NOT reviewed:` in the
+  coverage line; `FAIL_ON error|any` exits 1 on it. The default deadline
+  scales `min(900, 20 + 1.6·input_tokens/1000)` —
+  `PRXREF_LLM_TIMEOUT_PER_1K` — only while the timeout is at its default;
+  an explicit `--timeout`/`PRXREF_LLM_TIMEOUT` disables scaling.
+- **#73** only an open, current thread suppresses; `Thread` gained
+  `outdated` and `url`; GitHub stopped re-anchoring outdated comments
+  (`original_line` laundering) and reads review-thread resolution via a
+  best-effort GraphQL second read. `thread_dedup` record stamp.
+- **#74** anchor snapping to quoted evidence (±80 lines in the head
+  file), "Also at" location verification, line-0 findings join the
+  reworded-duplicate tier, `anchor_unverified` + confidence −0.1 when an
+  anchor cannot be proven.
+- **#75** `RULE_REQUEST` rewritten (a finding does not need a rule);
+  `scope:` lines under rules-file headings; a deterministic pass clears
+  wrong-rule labels and keeps the finding; `rule_scope_cleared` key.
+- **#66** `--ci-wiring` flags verification checks the PR adds that no CI
+  job runs; `spec` severity when the ticket asks for regression checks,
+  `warning` otherwise.
+- **#67** the worker prompt gained a `## Matching rules` section (prompt
+  hashes change this release).
+- **#68** standards documents (`docs/standards/**`, `docs/adr/**`,
+  `STANDARDS*.md`, `SECURITY.md`, `CONTRIBUTING.md`) sliced into chunk
+  context at `PRXREF_REPO_CONTEXT=repo`; `PRXREF_CONTEXT_STANDARDS_GLOBS=off`
+  disables; citations ride in the finding body.
+- **#69** `--evidence-file` execution evidence (JSON or lenient text);
+  the model may answer `"evidence": "contradicts"`, which a deterministic
+  pass downgrades to `warning`.
+- **#70** opt-in deterministic metadata rules — flat keys, deliberately
+  not the issue's `[metadata]` table, because the config file is flat by
+  contract (a nested table is a `ConfigError`); summary-only findings by
+  object identity, never by rule-name magic; `metadata_rules` stamps both
+  the run record and `--format json`.
+- **#71** `PRXREF_STABLE_IDS` (default off) + `PRXREF_VERDICT_STORE`:
+  `file#rule#12-hex-sorted-token-claim-hash`, stable across rewording and
+  one-key anchor drift; `stable_id_reuse` churn metric in `eval compare`.
+- **Counts.** 78 → 92 configuration keys (62 file, 30 environment-only;
+  93 accepted names with the one alias).
+
+## What this release taught (swarm shape)
+
+1. **Persist research briefs at seat-return.** Subagent output truncates
+   in the orchestrator's context; the full text lives only in the child
+   session. Continuing that session by id ("write your brief to <path>")
+   recovers it byte-exact. Every wave after the first wrote its briefs to
+   the run directory before dispatching implementers.
+2. **Wave merges are union merges of the same pin families.** RECORD_KEYS,
+   JSON_KEYS, the env-vars counts, sampling offsets, BASE_JSON replace
+   chains, README key lists — every conflict across ten branches was a
+   union, never a semantic disagreement. The computed counts in
+   `tests/test_docs_consistency.py` verify the union arithmetic: a wrong
+   sum fails the suite. Resolve by union, run the suite, trust the pins.
+3. **Trailing Finding fields are merge bait.** `previous_thread` (#73),
+   `anchor_unverified` (#74) and `evidence` (#69) each claimed the last
+   slot; the resolution is HEAD-order + append, and the order pins follow
+   whatever the dataclass says. The next new field appends after
+   `evidence`.
+4. **"Do not touch README" is unenforceable.** Four seats were forced to
+   edit README by tests that structurally pin its content (key lists,
+   counts, flag bullets). The docs pass should own those edits next time.
+5. **Verify after integration, not per seat.** The verifier wave found
+   what no implementing seat could see: two doc lines still teaching the
+   pre-#73 rule, and a `--format json` key the docs promised but the code
+   never emitted (`metadata_rules` — fixed before tagging). Read-only
+   verifier seats driving the real API are cheap and catch exactly this.
+
+## The coupling that will catch the next person (counts updated)
+
+Current values, counted from `config._DEFAULTS` and
+`config._LEGACY_ENV_ALIASES` at this release: **92** keys (62 file, 30
+environment-only), **1** legacy alias, **93** accepted names. 0.29.0
+added `llm_timeout_per_1k`; `ci_wiring` + `ci_wiring_globs`; the five
+metadata keys (`metadata_rules`, `branch_patterns`, `commit_reference`,
+`area_globs`, `max_areas_per_pr`); `evidence_files` +
+`evidence_max_chunk_chars`; `context_standards_globs` +
+`context_standards_max_chars`; and `stable_ids` + `verdict_store`. New
+pinned surfaces they dragged in: the `tests/test_cli_scoped_rules.py`
+sampling offset (now `+14`), the README `--format` key-list pin (the
+suite cannot go green without it naming every payload key in order), and
+`OPTIONAL_PLACEHOLDERS` gaining `evidence_block` (prompt overrides stay
+valid). The full 0.28.0 coupling inventory below still holds; only the
+counts moved.
+
+## Release shape (follow this next time)
+
+Same as 0.28.0: bump `pyproject.toml` and `src/prxref/__init__.py`,
+`uv lock`, push the release branch, open the PR with `Fixes #NN` for
+every closed issue, merge, then `git tag v0.29.0 && git push origin
+v0.29.0`. The tag runs `.github/workflows/release.yml` (GitHub release
+with wheel **and** sdist; PyPI by OIDC trusted publishing).
+
+## Verified at release
+
+```
+10506 passed                                  uv run pytest -q
+All checks passed!                            uv run ruff check src tests
+0.29.0                                        uv run prxref --version
+```
+
+Both verifier seats re-ran each issue's acceptance criteria against the
+integrated branch: 24 pass, 0 fail, one partial (#73's summary counts
+suppressions but does not name which thread each suppressed finding
+matched) and two advisory non-goals (#74's own "could" wording on a
+file-level marker; #75's semantic scope cases stay prompt-side). Their
+reports live at
+`~/.local/state/opencode/swarm/2026-09-30-prxref-66-75/seat-22.md` and
+`seat-23.md`.
+
+## Still open — not part of this release
+
+- **#73's suppressed findings do not name their thread.** The summary
+  counts them and resolved matches link out, but a `duplicate of existing
+  thread` drop does not say which thread matched.
+- **#67's live-model compliance is unmeasured.** The instruction, its
+  placement and its plumbing are pinned with fake-LLM tests; whether real
+  models enumerate newly-captured inputs needs an eval case.
+- **#75's scope check is token-shaped.** "Stretched to fit" and
+  correctly-scoped-but-unrelated rules are handled by the prompt's
+  leave-the-rule-out rule, not by a text-vs-claim check.
+- **#71 ships off by default and JVM-sparse.** `anchor_block` extraction
+  falls back to `None` for Java/Kotlin methods (the block is metadata,
+  never part of the id); flipping the default wants real-world churn data
+  from `stable_id_reuse`.
+- The 0.28.0 carryovers below (the 12000-vs-24000 A/B, #61's defaults,
+  #50's ledger) all remain open.
+
+---
+
+# v0.28.0 handoff (superseded; its lessons hold)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-29 · **Supersedes** the
 v0.27.0 handoff.
@@ -690,8 +842,8 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.28.0` (minor: `PRXREF_REVIEW_RULES_MAX_CHARS` default 12000 → 24000, #63; no new config key, adapter or `Forge` method) |
-| Registration points | config-file classification: `config.FILE_KEYS` / `config.ENV_ONLY_KEYS` with `_ENV_ONLY_REASONS`, and `_FILE_PATH_KEYS` for contained paths; CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`, where order matters only as a guard, and Gitea's any-host pattern must keep refusing the other forges' hosts) and the `impls` dict in `config.py` (`make_forge`); webhooks: the header dispatch in `webhooks.verify_signature`, where a forge that also sends GitHub's headers must be checked before GitHub; repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter; the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank; LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` |
+| Released version | `0.29.0` (minor: ten issues #66–#75; new config keys ×14, `Thread.outdated`/`url`, optional `Forge.get_commits`, `Finding` trailing `previous_thread`/`anchor_unverified`/`evidence`/`id`/`anchor_block`/`id_reused_from`, `Incomplete` verdict) |
+| Registration points | config-file classification: `config.FILE_KEYS` / `config.ENV_ONLY_KEYS` with `_ENV_ONLY_REASONS`, and `_FILE_PATH_KEYS` for contained paths; CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`, where order matters only as a guard, and Gitea's any-host pattern must keep refusing the other forges' hosts) and the `impls` dict in `config.py` (`make_forge`); webhooks: the header dispatch in `webhooks.verify_signature`, where a forge that also sends GitHub's headers must be checked before GitHub; repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter, and the optional `Forge.get_commits` (GitHub and Gitea only, #70); thread currency: `Thread.outdated`/`Thread.url` (#73); verdicts: `verdicts.py`'s version-1 store shape (#71); rules scopes: `scope:` lines under rules-file headings, parsed by `rules.parse_rule_sections` (#75); the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank (0.29.0 added the `standard` reason; standards sections flow through `repo_standards` and the `standards` kind); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` (0.29.0 added `evidence_block`) |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |
