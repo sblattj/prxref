@@ -885,6 +885,12 @@ def apply_line_align(
     way whenever the file also carries token-bearing added lines, so a
     blank line never outranks the line the evidence lives on.
 
+    A deterministic finding (:func:`prxref.heuristics.is_deterministic`)
+    whose line is an added line keeps it: the check's own position (a
+    toggle call, a failing linter's ``path:line``) is the evidence, so no
+    content pass second-guesses it. On any other line it snaps like a
+    model anchor, so it never posts outside the diff.
+
     When ``added_lines_by_file`` is omitted or has no entry for a file,
     the finding's line is dropped to 0 (file-level). A file-level
     citation stays file-level.
@@ -895,6 +901,9 @@ def apply_line_align(
     for f in findings:
         added = by_file.get(f.file, set())
         hunks = hunks_by_file.get(f.file)
+        if f.line > 0 and f.line in added and heuristics.is_deterministic(f):
+            result.append(f)
+            continue
         new_line = (
             _resolve_body_cited_anchor(f, hunks, added, tolerance=tolerance)
             if hunks

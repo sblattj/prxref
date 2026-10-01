@@ -107,7 +107,7 @@ it (noted in the table).
 | 1 | `apply_example_echo_check` | Drops a finding whose title, normalized, equals the title of the example finding in the worker or sweep prompt template the run used. See [Example echoes](#example-echoes). The first pass that drops, deliberately, so an echo never reaches the thread, consistency or grouping comparisons, a cap, or sweep dedup, and its audit copy keeps the model's own anchor. |
 | 2 | `apply_location_validation` | Drops a finding whose `file` names no path of the parsed diff. |
 | 3 | `apply_manifest_claim_check` | Manifests and npm-family lockfiles (`package.json`, `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`). When the anchor's hunk holds no section header, the served full-file lines decide the enclosing section. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
-| 4 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
+| 4 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. A deterministic finding already on an added line (a pinned toggle, a failing linter's `path:line`) keeps its line. |
 | 5 | `apply_anchor_snap` | #74. Reads the finding's own file at the head sha — the same reader the chunk context uses — and anchors it on the nearest occurrence of its quoted code: a backticked span first, then a double-quoted one, then the interior of `catch (…` / `if (…` / `for (…` / `while (…`, within 100 lines of the line the MODEL reported (captured before line align, so a demoted finding is searched from where the model said the defect sits, not where the hunk-bounded passes gave up). Moves only what needs moving: a file-level (line 0) anchor, or one further than 5 lines from the match. A file-level finding whose snippet occurs only outside the 100-line window anchors on the snippet's single whole-file occurrence; when that occurrence is not unique it is marked `anchor_unverified` instead of staying silently at line 0. A finding whose snippet the head file does not hold, whose multi-match nothing breaks, or that sits file-level with no snippet parseable at all is marked `anchor_unverified`; its confidence is unchanged. An unreadable file, a dropped finding and a deterministic check's finding are untouched; without a reader the pass changes nothing. See [Anchor snapping and Also-at verification](#anchor-snapping-and-also-at-verification-74). |
 | 6 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
 | 7 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
@@ -270,6 +270,42 @@ dropped N finding(s) the execution evidence contradicts` at INFO, the JSONL
 trace gets one `evidence drop` event with `findings: N`, and the summary's
 evidence note says how many were dropped. Without evidence the pass does not
 run.
+
+### Failing evidence raises findings
+
+The other direction is deterministic too. An evidence item with a non-zero
+exit code is read line by line, and a line whose first position token names a
+changed file of the PR raises one finding there:
+
+- **Positions.** `path:line`, `path:line:col` and `path(line,col)`, a trailing
+  colon allowed — how ruff, flake8, mypy, ESLint's unix format, tsc, pytest and
+  most compilers print a location. The path must name exactly one changed file:
+  equal to it, a path-segment suffix of it (`app.py` for `src/app.py`), or an
+  absolute CI path ending in it. A path outside the PR, one matching two
+  changed files, line `0` and the command line itself raise nothing.
+- **The finding.** A `warning` at confidence `1.0` on that file and line,
+  titled `Failing check: <the rest of the output line>`, whose body cites the
+  command, its exit code and the fenced output line, and ends with
+  ` (deterministic check, no model)`. It joins the release-shape, toggle and
+  CI-wiring findings at the chunk/sweep boundary, so it runs the same passes
+  and severity consistency leaves it alone. On an added line it keeps its
+  line through `apply_line_align`; on any other line it snaps like a model
+  anchor, or goes file-level, so it never posts outside the diff.
+- **The cap.** At most 10 per run, across every item, in item and output order;
+  a position named twice raises once.
+- **No duplicate comment.** Just before they join, a model finding on the
+  same file and line that names the failure — a code from the output line
+  (`F401`, `TS2322`, `no-unused-vars`) or the command's tool (`ruff`, past
+  wrappers such as `uv run` or `npx`) — is dropped as
+  `restates execution evidence: <cmd>`. A different claim on the same line is
+  kept.
+
+When anything is raised or restated, prxref logs `evidence: raised N
+finding(s) from failing execution evidence (...)` at INFO and the JSONL trace
+gets one `evidence raise` event with `findings`, `capped` (positions left out
+past the cap) and `restated`. An empty or all-binary diff raises them too.
+Because they are ordinary active warnings, `PRXREF_FAIL_ON=any` exits `1` on
+one; `never` (the default) still exits `0`, and `error` ignores them.
 
 ## Ticket scope
 
@@ -442,6 +478,7 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 | `not confirmed by context follow-up (confidence <x> below floor <y>)` | `merge_followup` (context follow-up) | Only with `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo` (#22). The chunk worker's finding was below `PRXREF_CONFIDENCE_FLOOR`, a definition it names was looked up and sent to the model once more, and no finding of that re-run confirmed it: none in the same file at or above the floor that sits within 5 lines of it, has the same normalized title, or names a looked-up symbol. The reason is set in the chunk worker, before every pass on this page, and `apply_quality_gate` keeps it instead of writing its own `confidence <x> below floor <y>`. A confirmed finding is replaced by the re-run's finding, which then runs every pass; the re-run's other findings are discarded, never posted, and counted in the run record's `context_followup`. |
 | `echoes the prompt's example: "<title>"` | `apply_example_echo_check` | The finding's title, normalized, is the title of the example finding in the worker or sweep template the run used. `<title>` is the example's title as the template writes it. |
 | `contradicted by execution evidence: <cmd>` | `apply_evidence_drops` | Only with execution evidence loaded (#69). The finding claims a header is missing, and the exit-0 item `<cmd>` shows that header as a filled `Name: value` line for the resource the finding names. See [Execution evidence](#execution-evidence-69). |
+| `restates execution evidence: <cmd>` | `drop_restated_failures` | Only with execution evidence loaded (#69). The failing item `<cmd>` raised a deterministic finding on the same file and line, and this model finding names the same failure (a code from the output line, or the command's tool). See [Failing evidence raises findings](#failing-evidence-raises-findings). |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
 | `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |
 | `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A manifest/lockfile finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |
