@@ -839,6 +839,13 @@ def _routed_session(summary_feed):
         {"id": 9, "path": "src/app.py", "line": 1,
          "body": f"finding\n\n{ATTRIBUTION_MARKER} · model=m"},
     ]
+    # One merge commit: two parents, multi-line message whose first line is
+    # the subject — the only shape the metadata checks read (issue #70).
+    commits_feed = [
+        {"sha": HEAD_SHA,
+         "commit": {"message": "Merge pull request #42 from dev/feat\n\nbody"},
+         "parents": [{"sha": BASE_SHA}, {"sha": "aaa111"}]},
+    ]
 
     def get(url, headers=None, params=None, **kwargs):
         accept = (headers or {}).get("Accept", "")
@@ -858,6 +865,8 @@ def _routed_session(summary_feed):
             return _mock_response(json_data=summary_feed)
         if url.endswith("/pulls/42/comments"):
             return _mock_response(json_data=review_comments)
+        if url.endswith("/pulls/42/commits"):
+            return _mock_response(json_data=commits_feed)
         if url.endswith("/pulls/42"):
             if "diff" in accept:
                 return _mock_response(text=COMPARE_DIFF)
@@ -911,6 +920,7 @@ def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
             and ForgeImpl(session=existing).get_summary(ref) == f"{MARKER}\nold"
         ),
         "get_pr_history": lambda: forge.get_pr_history(ref).complete,
+        "get_commits": lambda: [c.parent_count for c in forge.get_commits(ref)] == [2],
         "list_paths": lambda: getattr(
             forge.list_paths(ref, sha=HEAD_SHA), "paths", None
         ) == ("src/app.py",),
