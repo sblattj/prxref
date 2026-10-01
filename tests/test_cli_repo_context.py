@@ -127,6 +127,33 @@ def _repo_lines(lines: list[str]) -> list[str]:
 # --------------------------------------------------------------------------- _run_review
 
 
+class TestTheStandardsGlobsFlag:
+    """``--context-standards-globs`` (#68): ``''`` or ``off`` reads no standards."""
+
+    @pytest.mark.parametrize("value", ["", "off"])
+    def test_an_empty_or_off_value_turns_standards_off(self, recorder, value):
+        argv = ["review", "--diff-file", str(DIFF), "--context-standards-globs", value]
+        assert cli.main(argv) == 0
+
+        (kwargs,) = recorder
+        assert kwargs["context_standards_globs"] == []
+
+    def test_a_flag_beats_an_env_value(self, recorder, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_GLOBS", "docs/x/**")
+        argv = ["review", "--diff-file", str(DIFF), "--context-standards-globs", ""]
+        assert cli.main(argv) == 0
+
+        (kwargs,) = recorder
+        assert kwargs["context_standards_globs"] == []
+
+    def test_a_comma_list_replaces_the_built_in_set(self, recorder):
+        argv = ["review", "--diff-file", str(DIFF), "--context-standards-globs", "a/**, B.md"]
+        assert cli.main(argv) == 0
+
+        (kwargs,) = recorder
+        assert kwargs["context_standards_globs"] == ["a/**", "B.md"]
+
+
 class TestTheFourSettingsReachOrchestrate:
     def test_the_defaults_arrive_when_nothing_is_set(self, recorder):
         assert cli.main(["review", "--diff-file", str(DIFF)]) == 0

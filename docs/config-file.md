@@ -165,7 +165,7 @@ its `PRXREF_` name.
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
-| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at `repo`; replaces the built-in set — only `PRXREF_CONTEXT_STANDARDS_GLOBS=off` in the pipeline turns them off ([more](env-vars.md#llm--pipeline)). |
+| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at `repo`; replaces the built-in set; `[]` or `"off"` turns them off ([more](env-vars.md#llm--pipeline)). |
 | `context_standards_max_chars` | integer | Characters of standards-section text one chunk worker receives ([more](env-vars.md#llm--pipeline)). |
 | `chunk_context_lines` | integer | Context lines kept around each change in a chunk ([more](env-vars.md#llm--pipeline)). |
 
