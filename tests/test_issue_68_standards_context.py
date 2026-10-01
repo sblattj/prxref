@@ -37,13 +37,14 @@ pinned here:
 """
 from __future__ import annotations
 
+import json
 import threading
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from prxref import config, orchestrator
+from prxref import cli, config, orchestrator
 from prxref.chunk_context import STANDARDS_HEADER
 from prxref.config import load_config
 from prxref.forges.base import PathListing
@@ -700,3 +701,79 @@ class TestStandardsRunWithoutRepoContext:
         assert cfg["repo_context"] == "off"
         assert cfg["context_standards_globs"] == BUILTIN_GLOBS
         assert cfg["context_standards_max_chars"] > 0
+
+
+# ------------------------------------------------- the citation survives the gates
+
+
+CITING_FINDING = {
+    "file": "app/middleware.py", "line": 2, "severity": "error", "confidence": 0.9,
+    "title": "HSTS lifetime below the standard",
+    "body": (
+        f"max-age=15552000 contradicts {STANDARDS_DOC}:12 (## HSTS), which "
+        "requires max-age=63072000; the shorter lifetime is a security downgrade."
+    ),
+}
+
+
+class _FindingLLM(_RecordingLLM):
+    """Answers each chunk worker with the citing finding; the first ``timeouts`` raise a deadline error."""
+
+    def __init__(self, timeouts: int = 0):
+        super().__init__()
+        self.timeouts = timeouts
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        is_worker = "### Diff" in user
+        with self._lock:
+            self.calls.append((system, user))
+            timed_out = is_worker and self.timeouts > 0
+            if timed_out:
+                self.timeouts -= 1
+        if timed_out:
+            raise TimeoutError("fake-model: timeout after 60s")
+        findings = [CITING_FINDING] if is_worker else []
+        return InvokeResult(
+            text=json.dumps({"findings": findings, "escalations": []}),
+            input_tokens=10, output_tokens=5, model="fake-model", backend="fake", elapsed_ms=1,
+        )
+
+
+class TestTheCitationSurvivesTheGates:
+    def test_a_finding_citing_the_standard_reaches_the_comment_and_the_json_row(
+        self, tmp_path,
+    ):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(HSTS_DIFF, tmp_path)
+        res = orchestrator.orchestrate_review(
+            forge, REF, _FindingLLM(), post=True, repo_context="repo",
+            max_files_per_chunk=1, context_standards_globs=STANDARD_GLOBS,
+        )
+
+        citation = f"{STANDARDS_DOC}:12"
+        assert [f.title for f in res["findings_active"]] == [CITING_FINDING["title"]]
+        assert citation in res["findings_active"][0].body
+        (batch,) = forge.inline_batches
+        assert [c.path for c in batch] == ["app/middleware.py"]
+        assert citation in batch[0].body
+        rows = cli._build_json_result(res)["findings"]
+        assert [r["drop_reason"] for r in rows] == [None]
+        assert citation in rows[0]["body"]
+
+    def test_the_timeout_retry_drops_the_standards_block(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        llm = _FindingLLM(timeouts=1)
+        res = orchestrator.orchestrate_review(
+            _RepoForge(HSTS_DIFF, tmp_path), REF, llm, post=False,
+            repo_context="repo", max_files_per_chunk=1,
+            context_standards_globs=STANDARD_GLOBS,
+        )
+
+        workers = [user for _system, user in llm.calls if "### Diff" in user]
+        assert len(workers) == 2
+        first, retry = workers
+        assert STANDARDS_HEADER in first
+        assert STANDARDS_HEADER not in retry
+        assert res["chunks_failed"] == 0
+        (row,) = res["repo_context"]["units"]["chunks"]
+        assert row["retry_dropped"] is True
