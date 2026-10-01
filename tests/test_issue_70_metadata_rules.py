@@ -747,3 +747,49 @@ class TestViolationsAreSummaryNotes:
         [note] = notes
         assert isinstance(note, metadata_rules.MetadataNote)
         assert note.check == "branch_pattern"
+
+
+class TestSkippedChecksAreNamed:
+    def _skipped_run(self):
+        forge = FakeForge(
+            pr=PRData(
+                title="update things", description="", author="alice",
+                source_branch="work/42", target_branch="main",
+                source_sha="a" * 40, target_sha="b" * 40, raw={},
+            ),
+            diff=_added_file_diff("src/app.py", 20),
+        )
+        res = orchestrator.orchestrate_review(
+            forge, REF, NO_FINDINGS,
+            metadata_rules="on", branch_patterns=["fix=fix/.*"],
+            commit_reference="ACME-\\d+",
+        )
+        return forge, res
+
+    def test_a_skipped_configured_check_is_named_in_the_summary(self):
+        forge, _ = self._skipped_run()
+        summary = forge.summaries[-1]
+        assert "**PR metadata**" in summary
+        assert "no commit source" in summary
+        assert "no PR type" in summary
+        assert "area" not in summary.split("**PR metadata**")[1].lower()
+
+    def test_a_missing_commit_source_logs_a_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._skipped_run()
+        assert any("no commit source" in r.getMessage() for r in caplog.records)
+
+    def test_a_passing_run_prints_no_metadata_section(self):
+        forge = FakeForge(
+            pr=PRData(
+                title="fix: handle empty input", description="", author="alice",
+                source_branch="fix/42", target_branch="main",
+                source_sha="a" * 40, target_sha="b" * 40, raw={},
+            ),
+            diff=_added_file_diff("src/app.py", 20),
+        )
+        orchestrator.orchestrate_review(
+            forge, REF, NO_FINDINGS,
+            metadata_rules="on", branch_patterns=["fix=fix/.*"],
+        )
+        assert "PR metadata" not in forge.summaries[-1]
