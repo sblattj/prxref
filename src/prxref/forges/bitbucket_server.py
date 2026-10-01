@@ -21,6 +21,7 @@ from prxref.forges.base import (
     PRData,
     PRRef,
     Thread,
+    says_wont_fix,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -587,6 +588,7 @@ class ForgeImpl:
                             resolved=_is_resolved(comment),
                             author=author.get("name") or author.get("slug") or "",
                             body_snippet=(comment.get("text") or "")[:200],
+                            wont_fix=says_wont_fix(comment.get("text")),
                         )
                     )
         except FeedReadError as e:
