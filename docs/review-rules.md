@@ -250,8 +250,15 @@ scope: openapi, docs
   `scope:` line anywhere else in a section is ordinary rules text, and so
   is one the character cap already cut off: the walk reads the capped body
   the prompt shows, so a section the cap removed is not checked either.
-- A heading with no `scope:` line, or one whose line names no token,
-  declares nothing. A body with no scoped section at all — every rules
+- `Applies to: <token>[, <token>]…` is accepted as a synonym of `scope:`.
+- A heading with no scope line infers one from the language or artifact
+  nouns in its own text: `java`, `jvm`, `python`, `typescript`,
+  `javascript`, `ts`, `js`, `markdown`, `openapi` (so `## Java module
+  boundaries` is scoped to `java`). Ambiguous words such as `tests` or
+  `docs` never infer, so `## Testing` and `## General style` stay
+  unscoped. An explicit scope line always wins over the heading.
+- A heading with no scope line and no such noun, or one whose scope line
+  names no token, declares nothing. A body with no scoped section at all — every rules
   file written before this — renders byte-identically and every
   rule-scope feature stays off.
 - Front matter is not read: scopes are per section by design, so a

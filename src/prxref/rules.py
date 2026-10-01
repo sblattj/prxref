@@ -88,9 +88,13 @@ _ENTRY_RE = re.compile(
 # An ATX heading that opens a rules-body section (#75): one to four ``#`` at
 # the start of the line, then a space or tab, then non-empty heading text.
 _SECTION_RE = re.compile(r"^#{1,4}[ \t]+(.+?)[ \t]*$")
-# A section's scope declaration (#75): ``scope:`` (the key case-insensitive)
-# followed by tokens split on commas and whitespace.
-_SCOPE_LINE_RE = re.compile(r"^scope[ \t]*:(.*)$", re.IGNORECASE)
+# A section's scope declaration (#75): ``scope:`` or ``applies to:`` (the key
+# case-insensitive) followed by tokens split on commas and whitespace.
+_SCOPE_LINE_RE = re.compile(r"^(?:scope|applies[ \t]+to)[ \t]*:(.*)$", re.IGNORECASE)
+_HEADING_WORD_RE = re.compile(r"[A-Za-z]+")
+_HEADING_SCOPE_NOUNS: frozenset[str] = frozenset(
+    {"java", "jvm", "python", "typescript", "javascript", "ts", "js", "markdown", "openapi"}
+)
 _SCOPE_SPLIT_RE = re.compile(r"[,\s]+")
 
 
@@ -314,13 +318,34 @@ def _scope_tokens(line: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
+def _scope_line_absent(lines: Sequence[str], rest: int) -> bool:
+    """True when the line at ``rest`` is not an explicit scope line, so a heading may infer its scope."""
+    return rest >= len(lines) or _SCOPE_LINE_RE.match(lines[rest].strip()) is None
+
+
+def _heading_scope_tokens(name: str) -> tuple[str, ...]:
+    """The scope tokens a heading's own language or artifact nouns imply, casefolded, in heading order.
+
+    Only the unambiguous vocabulary in :data:`_HEADING_SCOPE_NOUNS` counts, so
+    ordinary headings such as ``Testing`` or ``Documentation`` infer nothing.
+    """
+    tokens: list[str] = []
+    for word in _HEADING_WORD_RE.findall(name):
+        folded = word.casefold()
+        if folded in _HEADING_SCOPE_NOUNS and folded not in tokens:
+            tokens.append(folded)
+    return tuple(tokens)
+
+
 def _scoped_sections(lines: Sequence[str]):
     """Yield ``(heading line index, name, scope tokens)`` for each scoped section of ``lines``.
 
     The walk that both the parser and the prompt annotation run: a section starts
     at an ATX heading (:data:`_SECTION_RE`) and its scope, when it has one,
     is the section's FIRST non-blank line after the heading read as a
-    ``scope:`` line (:data:`_SCOPE_LINE_RE`). A ``scope:`` line anywhere
+    ``scope:`` or ``applies to:`` line (:data:`_SCOPE_LINE_RE`); a heading
+    with no such line infers its scope from the language or artifact nouns it
+    names (:func:`_heading_scope_tokens`). A ``scope:`` line anywhere
     else in a section is ordinary rules text, and so is one the character
     cap already cut off — the walk reads the capped body the prompt shows.
     Only a heading with both a name and at least one token is yielded, in
@@ -341,6 +366,11 @@ def _scoped_sections(lines: Sequence[str]):
         tokens = _scope_tokens(lines[rest]) if rest < len(lines) else ()
         if name and tokens:
             yield index, name, tokens
+            index = rest
+            continue
+        inferred = _heading_scope_tokens(name) if _scope_line_absent(lines, rest) else ()
+        if inferred:
+            yield index, name, inferred
         index = rest
 
 
@@ -351,8 +381,11 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
     start of the line followed by a space or tab — and its name is the
     heading text with whitespace collapsed. Its scope sits on the section's
     first non-blank line after the heading and reads
-    ``scope: <token>[, <token>]...`` (the key case-insensitive, the tokens
-    casefolded and split on commas and whitespace). Callers pass the CAPPED
+    ``scope: <token>[, <token>]...`` or ``applies to: ...`` (the key
+    case-insensitive, the tokens casefolded and split on commas and
+    whitespace). A heading with no such line infers its scope from a language
+    or artifact noun it names (``java``, ``python``, ``typescript``,
+    ``javascript``, ``jvm``, ``ts``, ``js``, ``markdown``, ``openapi``). Callers pass the CAPPED
     body the prompt shows, so a section the cap cut away is not parsed
     either: the model cannot see it, so it is not one a label can be
     checked against.
