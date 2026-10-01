@@ -262,6 +262,30 @@ class TestVerdictStore:
         assert out[0].drop_reason is None
         assert out[0].id_reused_from == REUSED_FROM_VERDICT
 
+    def test_an_unknown_verdict_label_warns_naming_the_id_and_drops_nothing(self, caplog):
+        f = _finding()
+        fid = finding_id(f)
+        store = {"version": 1, "verdicts": {fid: {"verdict": "disputed"}}}
+        with caplog.at_level(logging.WARNING, logger="prxref.stable_ids"):
+            out = apply_stable_ids([f], [], store)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert fid in warnings[0].getMessage()
+        assert out[0].drop_reason is None
+
+    def test_a_padded_cased_refuted_label_still_drops(self):
+        f = _finding()
+        fid = finding_id(f)
+        store = {"version": 1, "verdicts": {fid: {"verdict": "Refuted "}}}
+        assert apply_stable_ids([f], [], store)[0].drop_reason == f"refuted in earlier run ({fid})"
+
+    def test_an_accepted_label_is_a_quiet_no_op(self, caplog):
+        f = _finding()
+        store = {"version": 1, "verdicts": {finding_id(f): {"verdict": "accepted"}}}
+        with caplog.at_level(logging.WARNING, logger="prxref.stable_ids"):
+            apply_stable_ids([f], [], store)
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
     def test_no_store_and_no_entry_match_nothing(self):
         out = apply_stable_ids([_finding()], [])
         assert out[0].drop_reason is None
