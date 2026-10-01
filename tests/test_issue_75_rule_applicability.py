@@ -525,3 +525,29 @@ class TestRuleRequestWording:
 
     def test_the_request_keeps_the_rule_names_heading(self):
         assert RULE_REQUEST.startswith("## Rule names\n\n")
+
+
+class TestRuleScopingKey:
+    def test_off_keeps_the_label_and_leaves_the_record_null(self):
+        res, _llm = TestOrchestratorWiring()._run(group_findings=True, rule_scoping="off")
+        assert res["rule_scope_cleared"] is None
+        assert "Java module boundaries" in [f.rule for f in res["findings_active"]]
+
+    def test_default_on_clears_the_label(self):
+        res, _llm = TestOrchestratorWiring()._run(group_findings=True)
+        assert res["rule_scope_cleared"] == 2
+
+    def test_an_unknown_value_is_a_value_error(self):
+        with pytest.raises(ValueError):
+            TestOrchestratorWiring()._run(rule_scoping="maybe")
+
+    def test_the_config_key_defaults_on_validates_and_is_a_file_key(self, monkeypatch):
+        from prxref import config
+
+        assert config._DEFAULTS["rule_scoping"] == "on"
+        assert "rule_scoping" in config.FILE_KEYS
+        monkeypatch.setenv("PRXREF_RULE_SCOPING", "off")
+        assert config.load_config()["rule_scoping"] == "off"
+        monkeypatch.setenv("PRXREF_RULE_SCOPING", "maybe")
+        with pytest.raises(config.ConfigError, match="PRXREF_RULE_SCOPING"):
+            config.load_config()
