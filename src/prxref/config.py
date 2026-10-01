@@ -528,6 +528,14 @@ LLM / pipeline:
                                 decision. A missing file reads as empty;
                                 an unreadable or malformed one is a
                                 configuration error (exit 2)
+  PRXREF_RULE_SCOPING           Rule scope check (#75): "on" (the default)
+                                clears the rule label of a finding whose
+                                cited section declares a scope that does
+                                not cover the file, keeping the finding;
+                                "off" leaves every label as the model wrote
+                                it and the run record's "rule_scope_cleared"
+                                null. Matched exactly; any other value is a
+                                configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -851,6 +859,7 @@ _DEFAULTS: dict[str, object] = {
     # switch is on and a path is set (None = no persistence, in-run
     # reuse only), and the pipeline never writes it.
     "stable_ids": False,
+    "rule_scoping": "on",
     "verdict_store": None,
     "branch_patterns": [],
     "commit_reference": "",
@@ -914,6 +923,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
+    "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
@@ -1064,7 +1074,7 @@ FILE_KEYS = frozenset({
     "metadata_rules", "branch_patterns", "commit_reference",
     "area_globs", "max_areas_per_pr",
     "ci_wiring", "ci_wiring_globs",
-    "stable_ids", "verdict_store",
+    "stable_ids", "verdict_store", "rule_scoping",
 })
 
 _ENV_ONLY_REASONS: dict[str, str] = {
