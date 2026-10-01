@@ -81,9 +81,9 @@ commit subjects and the touched areas with zero model calls and report
 a violation in a `PR metadata` section of the summary, never as a finding,
 so it is never posted inline and never moves the verdict or
 `PRXREF_FAIL_ON`; and the
-execution-evidence verdict (#69, `--evidence-file`), which downgrades a
-finding the model itself concedes is contradicted by the evidence to
-`warning`.
+execution-evidence drop (#69, `--evidence-file`), which drops a finding
+claiming a header is missing when an exit-0 evidence item shows that header
+as a `Name: value` line for the resource the finding names.
 
 The passes, the checks, every `drop_reason` string, and which of them have a
 knob: [docs/quality.md](docs/quality.md).
