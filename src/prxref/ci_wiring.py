@@ -326,7 +326,9 @@ def _make_target_candidates(
     Through ``read``, a target the head Makefile defines on more rule
     lines than the diff adds is old too: an added prerequisite-only line
     (``check: extra-dep``) extends a rule defined elsewhere in the file.
-    A missing, raising or non-text read changes nothing.
+    The head Makefile is read only when the diff adds a check-shaped
+    target not already on a removed or context line. A missing, raising
+    or non-text read changes nothing.
     """
     existing: set[str] = set()
     added: dict[str, None] = {}
@@ -340,7 +342,10 @@ def _make_target_candidates(
                 added.update(dict.fromkeys(targets))
                 for target in targets:
                     added_count[target] = added_count.get(target, 0) + 1
-    head_count = _head_rule_counts(file.path, read) if added else {}
+    confirm = any(
+        name not in existing and _target_hint(name) is not None for name in added
+    )
+    head_count = _head_rule_counts(file.path, read) if confirm else {}
     out: list[CiCandidate] = []
     for name in added:
         hint = _target_hint(name)
@@ -446,7 +451,8 @@ def candidate_checks(
     defines it (``read`` is handed through for the package.json check).
     The result is sorted by path, then target, so both the findings and
     the run record are deterministic. Reads nothing but the parsed diff
-    and, for a package.json target, the head manifest.
+    and, for a runner target, the head Makefile or package.json (one read
+    each, only when the diff adds a check-shaped target to it).
     """
     candidates: dict[str, tuple[str, bool]] = {}
     for file in files:
@@ -927,7 +933,9 @@ def ci_wiring_findings(
     finding sits on the root Makefile or package.json, titled with the
     command that would run it (``make verify``, ``npm run smoke``), and a
     package.json in the diff is read once to confirm the entry is a
-    script — the same read the runner hop reuses. Each path is read at
+    script — the same read the runner hop reuses — and a Makefile adding
+    a check-shaped rule is read once to drop a rule line that only
+    extends a target defined elsewhere. Each path is read at
     most once per run. Deterministic: no model, no randomness, the only
     I/O the ``read`` callable.
     """

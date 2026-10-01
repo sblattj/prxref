@@ -592,3 +592,10 @@ def test_a_finding_quoting_the_comment_text_keeps_its_comment_anchor():
 
 def test_a_finding_about_code_still_moves_off_a_comment_line():
     assert _snap("Unchecked `itemIndex` lookup", "Index may be out of range.") == 70
+
+
+def test_a_passing_comment_mention_in_the_body_still_moves_off_a_comment_line():
+    assert _snap(
+        "Unchecked `itemIndex` lookup",
+        "Index may be out of range; add a comment or a bounds check.",
+    ) == 70
