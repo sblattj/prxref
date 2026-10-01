@@ -698,8 +698,16 @@ class TestRunnerHop:
         makefile = "verify:\n\tpytest -q\n\nsmoke:\n\t./scripts/verify.sh\n"
         assert not self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
 
-    def test_one_hop_only_a_prerequisite_is_not_followed(self):
-        makefile = "verify: smoke\n\t@echo done\n\nsmoke:\n\t./scripts/verify.sh\n"
+    def test_a_prerequisite_inside_the_same_makefile_is_followed(self):
+        makefile = "verify: lint smoke | out\n\t@echo done\n\nsmoke:\n\t./scripts/verify.sh\n"
+        assert self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
+
+    def test_a_prerequisite_cycle_terminates_unwired(self):
+        makefile = "verify: a\n\ttrue\na: verify\n\techo a\n"
+        assert not self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
+
+    def test_a_nested_make_call_is_not_followed(self):
+        makefile = "verify:\n\t$(MAKE) smoke\n\nsmoke:\n\t./scripts/verify.sh\n"
         assert not self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
 
     def test_a_commented_recipe_line_stays_unwired(self):
