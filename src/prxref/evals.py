@@ -940,6 +940,15 @@ def eval_compare(args: argparse.Namespace) -> int:
       The change is ``unknown``, never a number, when either side is unknown:
       a ``None`` value, a missing key, or a total that leaves some case out.
       A run with no judge has the judge cost ``none``, counted as 0.
+    - ``## Stable-id reuse``, between Metrics and Changed labels, ONLY
+      when at least one case both runs score carries finding ids in its
+      ``record.json`` (a ``PRXREF_STABLE_IDS=1`` run; two runs without
+      ids print nothing here, byte-identical to a prxref without the
+      section): the table ``| Case | A ids | B ids | Reuse |``, one row
+      per shared case with ids on at least one side, the reuse being the
+      fraction of B's active finding ids A already held
+      (:func:`stable_id_reuse`); a side with no ids is ``n/a``, and so
+      is its reuse.
     - ``## Changed labels``: a table ``| Case | Label | Location | A | B |``
       of every label, keyed by case id and label id and sorted by that key,
       whose ``grade`` or ``credit`` differs between the runs. A grade reads
@@ -1092,11 +1101,74 @@ def _warn_replay(run_a: _ScoredRun, run_b: _ScoredRun) -> None:
             )
 
 
+def _case_record(run: _ScoredRun, case_id: str) -> Any:
+    """The case's ``record.json``, or ``None`` when the run holds none."""
+    path = run.run_dir / "cases" / case_id / "record.json"
+    if not path.is_file():
+        return None
+    return _read_compare_json(run.argument, path)
+
+
+def _active_ids(record: Any) -> set[str]:
+    """The active (no ``drop_reason``) finding ids a case's record carries."""
+    findings = record.get("findings") if isinstance(record, dict) else None
+    return {
+        row["id"]
+        for row in findings or []
+        if isinstance(row, dict) and row.get("drop_reason") is None
+        and isinstance(row.get("id"), str)
+    }
+
+
+def stable_id_reuse(record_a: Any, record_b: Any) -> float | None:
+    """The id churn between two records of one case (#71): shared ids over B's.
+
+    ``|A ids ∩ B ids| / |B ids|`` over the ACTIVE finding ids each record's
+    findings carry — 1.0 when B re-raised exactly A's findings, 0.0 when
+    the two share none. ``None`` when either record carries no id at all
+    (stable ids off, no record, or no active finding with an id), because
+    a missing side is not zero reuse: it is nothing to measure.
+    """
+    ids_a, ids_b = _active_ids(record_a), _active_ids(record_b)
+    if not ids_a or not ids_b:
+        return None
+    return len(ids_a & ids_b) / len(ids_b)
+
+
+def _stable_id_rows(run_a: _ScoredRun, run_b: _ScoredRun) -> list[str]:
+    """The ``Stable-id reuse`` table: per-case id churn between the runs.
+
+    One row per case both runs score whose records carry ids on at least
+    one side — a comparison of two runs that never stamped ids emits
+    nothing at all, so its output is byte-identical to a prxref without
+    the section. A side with no ids renders ``n/a`` and the reuse with
+    it: the metric is measurable only when both sides stamped ids.
+    """
+    rows: list[str] = []
+    for case_id in sorted(_case_ids(run_a.score) & _case_ids(run_b.score)):
+        record_a, record_b = _case_record(run_a, case_id), _case_record(run_b, case_id)
+        ids_a, ids_b = _active_ids(record_a), _active_ids(record_b)
+        if not ids_a and not ids_b:
+            continue
+        reuse = stable_id_reuse(record_a, record_b)
+        cell_a = str(len(ids_a)) if ids_a else "n/a"
+        cell_b = str(len(ids_b)) if ids_b else "n/a"
+        cell_reuse = f"{reuse:.0%}" if reuse is not None else "n/a"
+        rows.append(f"| {_cell(case_id)} | {cell_a} | {cell_b} | {cell_reuse} |")
+    return rows
+
+
 def _compare_text(run_a: _ScoredRun, run_b: _ScoredRun) -> str:
     """Render the comparison printed to standard output."""
     score_a, score_b = run_a.score, run_b.score
     lines = ["# prxref eval compare", "", f"- A: {run_a.given}", f"- B: {run_b.given}"]
     lines += ["", "## Metrics", "", *_metric_table(score_a, score_b)]
+    reuse_rows = _stable_id_rows(run_a, run_b)
+    if reuse_rows:
+        lines += [
+            "", "## Stable-id reuse", "",
+            "| Case | A ids | B ids | Reuse |", "|---|---:|---:|---:|", *reuse_rows,
+        ]
     lines += ["", "## Changed labels", "", *_changed_labels(score_a, score_b)]
     lines += ["", "## Only in one run", "", *_only_in_one_run(score_a, score_b)]
     return "\n".join(lines) + "\n"

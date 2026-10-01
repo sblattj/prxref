@@ -495,6 +495,37 @@ LLM / pipeline:
                                 posts or chunks failed and why; the exit
                                 code never changes. Matched exactly; any
                                 other value is a configuration error
+  PRXREF_STABLE_IDS             Stable finding ids (#71): "0" (the
+                                default) leaves every prompt, call, post
+                                and finding as before — the id pass never
+                                runs, every finding's "id",
+                                "anchor_block" and "id_reused_from" are
+                                null, and the run record's "stable_ids"
+                                is null. "1" stamps every finding with a
+                                content-derived id
+                                (<file>#<rule or norule>#<12-hex claim
+                                hash>) that survives reworded titles and
+                                anchor drift, plus the anchor block (the
+                                enclosing function, YAML key or manifest
+                                key — metadata the id excludes) and an
+                                id_reused_from label saying where a
+                                reused id came from ("run", "verdict" or
+                                "thread"). Literal "1" only, like
+                                PRXREF_GROUP_FINDINGS
+  PRXREF_VERDICT_STORE          Stable finding ids (#71): path to the JSON
+                                verdict store earlier runs' verdicts are
+                                read from, keyed by stable id. Read only
+                                when PRXREF_STABLE_IDS is "1"; a finding
+                                whose id the store holds as "refuted" is
+                                dropped with drop_reason "refuted in
+                                earlier run (<id>)". Unset (the default)
+                                = no persistence; ids are still stamped
+                                but nothing from an earlier run can
+                                match. The review never writes the
+                                store; recording a verdict is a caller's
+                                decision. A missing file reads as empty;
+                                an unreadable or malformed one is a
+                                configuration error (exit 2)
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -770,6 +801,13 @@ _DEFAULTS: dict[str, object] = {
     # Empty / "off" defaults keep every check off and the run record free
     # of the metadata_rules key.
     "metadata_rules": "off",
+    # Stable finding ids (#71): the opt-in switch plus the persisted
+    # verdict store's path. Off (the default) the id pass never runs and
+    # every finding keeps a null ``id``; the store is read only when the
+    # switch is on and a path is set (None = no persistence, in-run
+    # reuse only), and the pipeline never writes it.
+    "stable_ids": False,
+    "verdict_store": None,
     "branch_patterns": [],
     "commit_reference": "",
     "area_globs": [],
@@ -813,6 +851,7 @@ _FLOAT_KEYS = frozenset({
 })
 _BOOL_KEYS = frozenset({
     "allow_unsigned", "dry_run", "post_verdict", "post_cost", "group_findings",
+    "stable_ids",
 })
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
@@ -970,6 +1009,7 @@ FILE_KEYS = frozenset({
     "metadata_rules", "branch_patterns", "commit_reference",
     "area_globs", "max_areas_per_pr",
     "ci_wiring", "ci_wiring_globs",
+    "stable_ids", "verdict_store",
 })
 
 _ENV_ONLY_REASONS: dict[str, str] = {
@@ -1013,7 +1053,7 @@ ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 
 _FILE_PATH_KEYS = frozenset({
     "review_rules", "scoped_rules", "prompts_dir", "ticket_context_file",
-    "spec_sources", "evidence_files",
+    "spec_sources", "evidence_files", "verdict_store",
 })
 
 
