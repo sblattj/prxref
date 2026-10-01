@@ -987,6 +987,15 @@ class TestTargetWiring:
         )
         assert findings == []
 
+    def test_a_recipe_calling_make_var_on_the_target_wires_it(self):
+        workflow = "jobs:\n  t:\n    steps:\n      - run: make ci\n"
+        wired = MAKEFILE_AFTER + "\nci:\n\t$(MAKE) lint\n\t${MAKE} verify\n"
+        findings, _ = self._run(VERIFY_TARGET_DIFF, {WORKFLOW_PATH: workflow, "Makefile": wired})
+        assert findings == []
+        unwired = MAKEFILE_AFTER + "\nci:\n\t$(MAKE) build\n"
+        findings, _ = self._run(VERIFY_TARGET_DIFF, {WORKFLOW_PATH: workflow, "Makefile": unwired})
+        assert len(findings) == 1
+
     def test_a_ci_make_goal_not_reaching_the_target_stays_unwired(self):
         workflow = "jobs:\n  t:\n    steps:\n      - run: make build\n"
         findings, _ = self._run(
