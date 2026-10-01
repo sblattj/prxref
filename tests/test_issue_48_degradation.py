@@ -470,5 +470,7 @@ class TestASuccessfulPostIsUnchanged:
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]
+        for row in payload["findings"]:
+            assert row.pop("anchor_unverified") is False  # 0.3x (#74): null-free, never stamped here
         assert _sha(json.dumps(payload)) == BASE_JSON_SHA
         assert not (tmp_path / GITLAB_REPORT_FILE).exists()

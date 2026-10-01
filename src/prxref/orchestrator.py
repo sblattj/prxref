@@ -87,7 +87,17 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``package.json`` claim whose dependency is not the key on the anchored
    line, or whose asserted section disagrees with the actual one; it must
    precede line align, which is what makes it read the model's RAW
-   anchor) → ``apply_line_align`` → ``apply_thread_dedup`` (existing
+   anchor) → ``apply_line_align`` → ``apply_anchor_snap`` (#74: the
+   hunk-bounded align passes cannot reach a defect the model quoted
+   outside every hunk, so the anchor is settled by the finding's own
+   quoted code — backticked, double-quoted, or a ``catch (``/``if (``
+   interior — against the head file the chunk-context reader serves,
+   within 80 lines of the model's RAW line, which the same capture the
+   suggestion pass reads supplies; a finding whose snippet the file does
+   not hold, whose multi-match nothing breaks, or that sits file-level
+   with no snippet at all is marked ``anchor_unverified`` and loses 0.1
+   confidence, and without a reader the pass changes nothing) →
+   ``apply_thread_dedup`` (existing
    threads fetched best-effort BEFORE the workers run, and after the
    stale-inline prune; failure means no threads; a resolved or outdated
    thread never suppresses, issue #73) →
@@ -127,6 +137,13 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    dropped as ``rule cap exceeded (max <n>): listed at <file>:<line>``;
    sweep findings are never capped; one INFO line and one ``rulecap ok``
    trace event count the folded findings and the rules over the cap) →
+   ``apply_location_verification`` (#74, once ``locations`` is final:
+   each ``Also at:`` site of a grouped or capped representative is
+   re-checked against the head file for the representative's own quoted
+   snippets within 80 lines of the site, and a site nothing corroborates
+   is dropped from the list and the paragraph — an unreadable file keeps
+   every site, folded members keep their drop reasons, and without a
+   reader the pass changes nothing) →
    ``apply_quality_gate(confidence_floor=, max_errors=,
    max_warning_findings=, max_outofscope_findings=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
@@ -138,10 +155,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    finding from suppressing its higher-confidence sweep duplicate and
    then dying at the gate itself. With ``dedup_similarity`` set, a
    reworded tier also compares findings in the same file on the same
-   line: a sweep copy no more severe than a chunk copy is dropped, and of
+   line, or two file-level (line 0) findings of the same file (#74): a
+   sweep copy no more severe than a chunk copy is dropped, and of
    two copies on one side the less severe, then less confident, one is;
-   a chunk copy is never dropped for a sweep copy, and line 0 is never
-   compared) → ``apply_containment_note`` (a throw
+   a chunk copy is never dropped for a sweep copy) → ``apply_containment_note`` (a throw
    / panic / crash / unhandled-rejection finding that never names its
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
@@ -258,11 +275,13 @@ from .quality import (
     SUGGESTION_CLEAR_REASONS,
     _resolve_confidence_floor,
     active,
+    apply_anchor_snap,
     apply_containment_note,
     apply_example_echo_check,
     apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
+    apply_location_verification,
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
@@ -1737,6 +1756,29 @@ def orchestrate_review(
     findings = apply_manifest_claim_check(findings, files, read=reader)
     model_lines = [f.line for f in findings]
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
+    # AFTER line align, deliberately, on the RAW model anchor: the window is
+    # centred where the model said the defect sits, not where the hunk-bounded
+    # passes gave up on it (#74). A demoted (line 0) finding is exactly the
+    # shape this pass exists to rescue, and re-running align after it would
+    # re-demote any move beyond its 5-line tolerance.
+    snapped = apply_anchor_snap(
+        findings, files, read=reader, model_lines=model_lines,
+    )
+    anchor_moves = sum(
+        1 for before, after in zip(findings, snapped, strict=True)
+        if after.line != before.line
+    )
+    anchor_unverified = sum(
+        1 for before, after in zip(findings, snapped, strict=True)
+        if after.anchor_unverified and not before.anchor_unverified
+    )
+    if anchor_moves or anchor_unverified:
+        logger.info(
+            "anchor snap: moved %d anchor(s) to quoted evidence, "
+            "marked %d unverified",
+            anchor_moves, anchor_unverified,
+        )
+    findings = snapped
     before_threads = findings
     findings = apply_thread_dedup(findings, threads)
     findings = apply_settled_thread_suppression(findings, threads)
@@ -1795,6 +1837,22 @@ def orchestrate_review(
             findings, cap=max_findings_per_rule, confidence_floor=confidence_floor,
             sweep_start=sweep_start, tracer=tracer,
         )
+    # AFTER grouping and the cap (#74): ``locations`` is final here, and the
+    # verification shrinks only the representative's list — a folded member's
+    # own drop reason names where it was folded, which stays true. BEFORE the
+    # gate and the suggestion pass, so both read the verified locations.
+    verified = apply_location_verification(findings, read=reader)
+    unverified_sites = sum(
+        1 for before, after in zip(findings, verified, strict=True)
+        if after is not before
+    )
+    if unverified_sites:
+        logger.info(
+            "location verification: rewrote %d grouped finding(s) "
+            "with an unverifiable Also-at site",
+            unverified_sites,
+        )
+    findings = verified
     cleared_suggestions: list[tuple[Finding, str]] = []
     if suggestions == "on":
         findings, suggestion_reasons = apply_suggestion_validation(
