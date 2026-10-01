@@ -264,12 +264,14 @@ every unit's `## Team review rules` block, so the model sees which
 sections cannot cover the file it is reading.
 
 **The clearing pass.** Once any loaded section declares a scope, a
-finding's `rule` label survives only when it names a section of the loaded
-rules — the label and the heading text, both whitespace-collapsed and
-casefolded, are equal, or the label is the heading's leading words (a
-model that drops a heading's trailing words still matches; one that cites
-a single mid-heading word does not) — **and** every `scope:` token of that
-section covers the finding's path. Every other label is cleared to `null`;
+finding's `rule` label is cleared only when it names a scoped section and
+no such section covers the path. A label names a section when it equals
+the heading text or one of the section's bullet or numbered rule lines, or
+is their leading words (both whitespace-collapsed and casefolded; a
+single mid-heading word does not match), and a section covers the path
+when every `scope:` token covers it. Every other label is kept: an unknown
+name, a rule from an unscoped section, and any label on a finding with an
+empty path. A cleared label becomes `null`;
 the finding itself is never dropped, so it rejoins the ruleless findings
 downstream: grouping keys it on its normalized title and the per-rule cap
 caps it by title. The run record and `--format json` carry the count as
