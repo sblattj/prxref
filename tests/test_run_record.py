@@ -53,12 +53,12 @@ RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
-    "suggestions", "incremental", "degraded",
+    "suggestions", "incremental", "ci_wiring", "degraded",
 }
 NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
     "scoped_rules", "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries",
-    "context_followup", "suggestions", "incremental", "degraded",
+    "context_followup", "suggestions", "incremental", "ci_wiring", "degraded",
 )
 
 REPLAY = {

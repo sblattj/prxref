@@ -221,6 +221,7 @@ from . import (
     systemic,
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
+from .ci_wiring import ci_wiring_findings
 from .forges.base import (
     ATTRIBUTION_MARKER,
     CommitData,
@@ -540,6 +541,8 @@ def orchestrate_review(
     commit_reference: str = "",
     area_globs: Sequence[str] = (),
     max_areas_per_pr: int = 2,
+    ci_wiring: str = "off",
+    ci_wiring_globs: Sequence[str] = (),
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -549,10 +552,10 @@ def orchestrate_review(
     output_tokens, posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions, incremental, degraded}``, plus
+    suggestions, incremental, ci_wiring, degraded}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
-    :func:`_run_record`, so the last fifteen keys are always present and are
+    :func:`_run_record`, so the last sixteen keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``; ``parse_retries``: ``0`` before any review unit when the
     parse retry is on) when their feature is off or the run never reached it.
@@ -706,6 +709,31 @@ def orchestrate_review(
     ``"pass"``/``"fail"``/``"skipped: <reason>"``, echoed by one
     ``metadata_rules ok`` trace event. None of it touches the verdict or
     the exit code.
+
+    ``ci_wiring`` (issue #66) turns on the CI-wiring check:
+    ``ci_wiring_globs`` (``PRXREF_CI_WIRING_GLOBS``; the default restates
+    :data:`prxref.ci_wiring.DEFAULT_CI_GLOBS`) selects the CI
+    configuration files, where a set value replaces the built-in set. The
+    check flags a check-shaped file the PR adds — a script whose name or a
+    ``--flag`` it gains says verify, smoke or check, a file that gains a
+    shebang, or a new test file outside the runner's default include
+    (:func:`prxref.ci_wiring.default_include`) — that no CI file invokes
+    by full path or bare basename: one finding per unwired check,
+    file-level on its own path, ``spec`` when the ticket text mentions
+    regression checks, CI, pipelines or automated tests (relabelled
+    ``warning`` by spec grounding on an ungrounded run) and ``warning``
+    otherwise, an INLINE candidate like the heuristic findings rather
+    than summary-only. It reads the repository through its own reader —
+    the forge's head-sha reads or ``--repo-dir``, gated on the reader and
+    NOT on ``repo_context`` — at most
+    :data:`prxref.ci_wiring.MAX_CI_FILES` file reads, never the
+    ``repo_context`` reader whose caps a CI file could starve on; with no
+    reader the run logs one WARNING naming ``PRXREF_CI_WIRING`` and the
+    record says why. Off (the default) nothing runs, nothing is read, and
+    the record's ``ci_wiring`` key is ``None``; on, it carries
+    ``{candidates, ci_files, picked_up_default, triggered}``, echoed by
+    one ``ci_wiring ok`` trace event. Never changes the verdict or the
+    exit code.
 
     ``replay`` is the evaluation-replay stamp built by the CLI
     (``{base_sha, head_sha, threads, diff_file, description, as_of,
@@ -1013,6 +1041,10 @@ def orchestrate_review(
         raise ValueError(
             f"incremental must be one of {INCREMENTAL_MODES}, got {incremental!r}"
         )
+    if ci_wiring not in CI_WIRING_MODES:
+        raise ValueError(
+            f"ci_wiring must be one of {CI_WIRING_MODES}, got {ci_wiring!r}"
+        )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
     sampling = _sampling(llm)
@@ -1040,6 +1072,7 @@ def orchestrate_review(
         "context_followup": _followup_record() if context_followup == "on" else None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
+        "ci_wiring": None,
         "degraded": None,
         "chunks_over_budget": 0,
         "largest_chunk_tokens": 0,
@@ -1191,6 +1224,49 @@ def orchestrate_review(
                 "metadata_rules", "fail", reason=f"{e.__class__.__name__}: {e}"
             )
 
+    # CI wiring (#66), computed on the same pre-dispatch doctrine: the
+    # check makes no LLM call, so nothing below can schedule one on its
+    # behalf. Opt-in like metadata_rules, but it READS the repository —
+    # through its own reader, the forge's head-sha reads or --repo-dir,
+    # never the repo_context reader (a CI file starved by that reader's
+    # chunk caps would false-positive "no CI runs it") — with the module's
+    # MAX_CI_FILES bound. Gated on the reader, not on repo_context: the
+    # acceptance runs --repo-dir alone. A readerless run warns once and
+    # records why; a crash in the stage disables it, never the review.
+    ci_findings: list[Finding] = []
+    if ci_wiring == "on":
+        ci_reader = repo_reader.forge_reader(
+            forge, ref, getattr(pr, "source_sha", "") or "",
+        )
+        if ci_reader is None and repo_dir is not None:
+            ci_reader = repo_reader.repo_dir_reader(repo_dir)
+        if ci_reader is None:
+            logger.warning(CI_WIRING_INACTIVE_WARNING)
+            run_inputs["ci_wiring"] = {"triggered": False, "reason": "no reader"}
+            tracer.event("ci_wiring", "ok", triggered=False, reason="no reader")
+        else:
+            ci_listing = ci_reader.listing()
+            try:
+                ci_findings, ci_stamp = ci_wiring_findings(
+                    files,
+                    read=ci_reader.read,
+                    listing=ci_listing.paths if ci_listing is not None else None,
+                    globs=ci_wiring_globs,
+                    ticket_text=ticket.text if ticket is not None else None,
+                )
+                run_inputs["ci_wiring"] = ci_stamp
+                tracer.event("ci_wiring", "ok", **ci_stamp)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ci wiring failed (continuing without it): %s", e)
+                ci_findings = []
+                run_inputs["ci_wiring"] = {
+                    "triggered": False,
+                    "reason": f"skipped: ci wiring stage failed: {e.__class__.__name__}",
+                }
+                tracer.event(
+                    "ci_wiring", "fail", reason=f"{e.__class__.__name__}: {e}"
+                )
+
     try:
         with tracer.span("build_chunks") as sp:
             plan = plan_chunks(
@@ -1225,7 +1301,7 @@ def orchestrate_review(
         # needs an added, non-binary line, so it rarely fires on this path.
         release_shape = heuristics.release_shape_findings(files)
         toggle_findings = heuristics.toggle_pinned_off_findings(files)
-        deterministic_findings = release_shape + toggle_findings + metadata_findings
+        deterministic_findings = release_shape + toggle_findings + metadata_findings + ci_findings
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
             **_cost_meta(run_inputs),
@@ -1237,6 +1313,7 @@ def orchestrate_review(
             sampling=sampling, release_shape_findings=release_shape,
             toggle_findings=toggle_findings,
             metadata_findings=metadata_findings,
+            ci_findings=ci_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
             max_outofscope_findings=max_outofscope_findings,
@@ -1577,8 +1654,14 @@ def orchestrate_review(
     # chunk-side standing; they are file-level (line 0) like
     # release_shape, so the reworded-dedup tier never compares them, and
     # severity consistency exempts them through the shared deterministic
-    # body suffix.
-    deterministic_findings = release_shape + toggle_findings + metadata_findings
+    # body suffix. CI-wiring findings (#66) join them the same way —
+    # file-level on the check's own path, and INLINE candidates rather
+    # than summary-only: unlike the metadata findings they never thread
+    # through the exclusion set below, so a genuinely unwired check
+    # reaches the PR as a comment on the file that adds it.
+    deterministic_findings = (
+        release_shape + toggle_findings + metadata_findings + ci_findings
+    )
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
     )
@@ -3088,6 +3171,14 @@ FOLLOWUP_INACTIVE_WARNING = (
     "the context follow-up is off for this run"
 )
 
+CI_WIRING_MODES = ("off", "on")
+
+CI_WIRING_INACTIVE_WARNING = (
+    "PRXREF_CI_WIRING=on, but there is no repository reader (the forge cannot "
+    "read files at the PR head and no repository directory was given); the CI "
+    "wiring check is off for this run"
+)
+
 _FOLLOWUP_TOTALS = ("confirmed", "unconfirmed", "discarded", "input_tokens", "output_tokens")
 
 
@@ -4211,6 +4302,7 @@ def _summary_only_run(
     release_shape_findings: list[Finding] | None = None,
     toggle_findings: list[Finding] | None = None,
     metadata_findings: list[Finding] | None = None,
+    ci_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
@@ -4228,8 +4320,9 @@ def _summary_only_run(
     and quality passes a chunk-sourced finding gets
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
     they reach ``findings_active`` / ``verdict`` / the summary. The
-    PR-metadata findings (#70, ``metadata_findings``) join them the same
-    way; no inline batch is ever posted from this exit, so their
+    PR-metadata findings (#70, ``metadata_findings``) and the CI-wiring
+    findings (#66, ``ci_findings``) join them the same
+    way; no inline batch is ever posted from this exit, so the
     summary-only contract needs no enforcement here. Location validation
     runs only when the diff holds files: a metadata finding about a branch
     name exists even on an empty diff, where it anchors on ``""`` and
@@ -4266,7 +4359,7 @@ def _summary_only_run(
 
     findings = (
         list(release_shape_findings or []) + list(toggle_findings or [])
-        + list(metadata_findings or [])
+        + list(metadata_findings or []) + list(ci_findings or [])
     )
     if findings:
         if files:

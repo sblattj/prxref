@@ -212,6 +212,8 @@ Flat keys, not a `[metadata]` table — the file is flat, so a table is a config
 | `commit_reference` | string | Regex every non-merge commit subject must contain ([more](env-vars.md#llm--pipeline)). |
 | `area_globs` | array of strings | `name=glob` pairs classifying diff paths into areas ([more](env-vars.md#llm--pipeline)). |
 | `max_areas_per_pr` | integer | Most distinct areas a PR may touch before the area check flags it ([more](env-vars.md#llm--pipeline)). |
+| `ci_wiring` | string | `on` flags a check the PR adds that no CI configuration file invokes; `off` (the default) reads nothing ([more](env-vars.md#llm--pipeline)). |
+| `ci_wiring_globs` | array of strings | Globs selecting the CI configuration files the CI wiring check reads; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 
 ## Settings a repository file cannot set
 

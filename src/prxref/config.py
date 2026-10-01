@@ -390,6 +390,37 @@ LLM / pipeline:
                                 budget (see PRXREF_LLM_MAX_TOKENS) when that is
                                 left unset; an explicit budget is respected as
                                 given
+  PRXREF_CI_WIRING              CI wiring (#66): "off" (the default) reads
+                                nothing, changes no byte of the review and
+                                stamps ci_wiring=null on the run record.
+                                "on" flags a check-shaped file the PR adds
+                                (a script whose name or a --flag it gains
+                                says verify/smoke/check, a file that gains
+                                a shebang, a new test file outside the
+                                runner's default include) that no CI
+                                configuration file invokes: one finding per
+                                unwired check, "spec" when the ticket
+                                mentions regression checks, CI, pipelines
+                                or automated tests ("warning" otherwise),
+                                listing the CI files searched. Needs the
+                                forge's head-sha file reads or --repo-dir;
+                                without a reader the run logs one WARNING
+                                naming PRXREF_CI_WIRING and records why.
+                                Matched exactly; any other value is a
+                                configuration error. Never changes the
+                                verdict or the exit code
+  PRXREF_CI_WIRING_GLOBS        CI wiring (#66): globs (matched like
+                                PRXREF_SIZE_IGNORE_GLOBS) selecting the CI
+                                configuration files the check reads. A set
+                                value REPLACES the built-in set below
+                                rather than adding to it, and an empty
+                                value reads as unset (the built-in set
+                                stays); at most 12 CI files are read per
+                                run. Built-in set:
+                                .github/workflows/*.y*ml, .gitlab-ci.yml,
+                                azure-pipelines.yml, .circleci/config.yml,
+                                Jenkinsfile, bitbucket-pipelines.yml,
+                                .drone.yml, cloudbuild.yaml, .travis.yml
   PRXREF_INCREMENTAL            Incremental re-review on push (#34): "off"
                                 (the default) reviews every file on every run
                                 and writes no marker. "on" stamps each summary
@@ -513,8 +544,8 @@ Webhooks:
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
 PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS,
-PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS and PRXREF_AREA_GLOBS)
-split on any run of commas and/or
+PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS, PRXREF_AREA_GLOBS and
+PRXREF_CI_WIRING_GLOBS) split on any run of commas and/or
 whitespace, so no item can contain either; a glob that must match a
 literal space writes it as ``?``.
 
@@ -682,6 +713,23 @@ _DEFAULTS: dict[str, object] = {
         "**/migrations/**",
     ],
     "context_exclude_globs": [],
+    # CI wiring (#66): the opt-in switch plus the CI-file globs. The globs
+    # default is non-empty and replace-not-append like
+    # ``context_contract_globs`` above; the list restates
+    # ``ci_wiring.DEFAULT_CI_GLOBS`` (config stays a leaf module), pinned
+    # together by tests/test_issue_66_ci_wiring.py.
+    "ci_wiring": "off",
+    "ci_wiring_globs": [
+        ".github/workflows/*.y*ml",
+        ".gitlab-ci.yml",
+        "azure-pipelines.yml",
+        ".circleci/config.yml",
+        "Jenkinsfile",
+        "bitbucket-pipelines.yml",
+        ".drone.yml",
+        "cloudbuild.yaml",
+        ".travis.yml",
+    ],
     # PR-metadata rules (#70): the single opt-in switch plus one key per
     # check. Flat, like every other key — the config file is a flat TOML
     # document, so a [metadata] table would be rejected by the reader.
@@ -735,7 +783,7 @@ _BOOL_KEYS = frozenset({
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
-    "branch_patterns", "area_globs",
+    "branch_patterns", "area_globs", "ci_wiring_globs",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -751,6 +799,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
     "metadata_rules": frozenset({"off", "on"}),
+    "ci_wiring": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
@@ -884,6 +933,7 @@ FILE_KEYS = frozenset({
     "context_contract_globs", "context_exclude_globs",
     "metadata_rules", "branch_patterns", "commit_reference",
     "area_globs", "max_areas_per_pr",
+    "ci_wiring", "ci_wiring_globs",
 })
 
 _ENV_ONLY_REASONS: dict[str, str] = {
