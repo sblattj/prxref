@@ -419,7 +419,20 @@ LLM / pipeline:
                                 budget (see PRXREF_LLM_MAX_TOKENS) when that is
                                 left unset; an explicit budget is respected as
                                 given
-  PRXREF_CI_WIRING              CI wiring (#66): "off" (the default) reads
+  PRXREF_ROUTING_PROBE          Matching-rules probe (#67): "on" (the
+                                default) keeps the worker prompt's
+                                "## Matching rules" section, which asks the
+                                model, for each added or widened rule that
+                                decides which inputs match (a web-server
+                                location or rewrite, a router pattern, a
+                                glob, a regex validator), which inputs it
+                                newly captures. "off" cuts that section
+                                out, so the worker prompt is the template
+                                without it byte for byte. No extra call or
+                                read either way; the sweep prompt never
+                                carries it. Matched exactly; any other
+                                value is a configuration error
+  PRXREF_CI_WIRING             CI wiring (#66): "off" (the default) reads
                                 nothing, changes no byte of the review and
                                 stamps ci_wiring=null on the run record.
                                 "on" flags a check-shaped file the PR adds
@@ -796,6 +809,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
     "suggestions": "off",
+    "routing_probe": "on",
     "incremental": "off",
     "fallback": "auto",
     # The built-in contract-glob set. Unlike the
@@ -928,6 +942,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "context_followup": frozenset({"off", "on"}),
     "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
+    "routing_probe": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
     "metadata_rules": frozenset({"off", "on"}),
@@ -1071,7 +1086,7 @@ FILE_KEYS = frozenset({
     "evidence_files", "evidence_max_chunk_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
-    "suggestions", "incremental",
+    "suggestions", "routing_probe", "incremental",
     "context_contract_globs", "context_exclude_globs",
     "context_standards_globs", "context_standards_max_chars",
     "metadata_rules", "branch_patterns", "commit_reference",
