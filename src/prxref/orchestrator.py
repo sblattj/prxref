@@ -299,6 +299,7 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    open_thread_for_drop,
     previously_discussed_thread,
     prompt_example_titles,
     rule_cap_counts,
@@ -1936,12 +1937,25 @@ def orchestrate_review(
     # what they drop here was dropped against OPEN, CURRENT threads only, and
     # what they let through can still restate a subject a closed thread
     # raised — which earns the finding a previously-raised note, not a drop.
-    thread_suppressed = sum(
-        1
+    suppressed_detail = [
+        _thread_detail(before, open_thread_for_drop(before, threads), after.drop_reason)
         for before, after in zip(before_threads, findings, strict=True)
         if before.drop_reason is None and after.drop_reason is not None
-    )
+    ]
+    thread_suppressed = len(suppressed_detail)
+    before_noted = findings
     findings, thread_matched_resolved = _note_previously_raised(findings, threads)
+    matched_resolved_detail = [
+        _thread_detail(
+            before, previously_discussed_thread(before, threads), None,
+        )
+        for before, after in zip(before_noted, findings, strict=True)
+        if after.previous_thread and not before.previous_thread
+    ]
+    thread_accounting_args = (
+        thread_suppressed, thread_matched_resolved,
+        suppressed_detail, matched_resolved_detail,
+    )
     if threads:
         run_inputs["thread_dedup"] = {
             "suppressed": thread_suppressed,
@@ -1950,6 +1964,8 @@ def orchestrate_review(
             # Threads that can no longer suppress anything: resolved OR
             # outdated, the same predicate both gates skip on.
             "threads_resolved": sum(1 for t in threads if t.lapsed),
+            "suppressed_detail": suppressed_detail,
+            "matched_resolved_detail": matched_resolved_detail,
         }
     # AFTER both thread gates and the previously-raised note (#71): the
     # ids inherit the gates' verdict — a finding a thread already
@@ -2113,7 +2129,7 @@ def orchestrate_review(
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
-                thread_suppressed, thread_matched_resolved,
+                *thread_accounting_args,
             ),
             incremental_note=incremental_note,
         )
@@ -2194,7 +2210,7 @@ def orchestrate_review(
                 failed=inline_failed, cap=max_inline_comments,
             ),
             thread_accounting=_thread_dedup_accounting(
-                thread_suppressed, thread_matched_resolved,
+                *thread_accounting_args,
             ),
             incremental_note=incremental_note,
         )
@@ -2221,7 +2237,7 @@ def orchestrate_review(
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
-                thread_suppressed, thread_matched_resolved,
+                *thread_accounting_args,
             ),
             incremental_note=incremental_note,
         )
@@ -2964,23 +2980,63 @@ def _inline_accounting(
     return f"Inline comments: {posted} of {active} findings ({detail})."
 
 
-def _thread_dedup_accounting(suppressed: int, matched_resolved: int) -> str:
-    """Render the thread-dedup reconciliation line (issue #73).
+def _thread_detail(
+    finding: Finding, thread: Thread | None, drop_reason: str | None,
+) -> dict[str, object]:
+    """One finding's thread-gate record: where it sat, what it was, and the
+    thread it matched (:func:`_thread_reference`), plus the gate's
+    ``drop_reason`` for a suppressed finding (issue #73)."""
+    detail: dict[str, object] = {
+        "file": finding.file,
+        "line": finding.line,
+        "title": finding.title,
+        "thread": _thread_reference(thread) if thread is not None else "",
+    }
+    if drop_reason is not None:
+        detail["drop_reason"] = drop_reason
+    return detail
+
+
+def _thread_detail_line(detail: dict[str, object]) -> str:
+    line = detail["line"]
+    where = f"{detail['file']}:{line if isinstance(line, int) and line > 0 else '—'}"
+    ref = detail["thread"]
+    suffix = f" — {ref}" if ref else ""
+    return f"- `{where}` — {detail['title']}{suffix}"
+
+
+def _thread_dedup_accounting(
+    suppressed: int,
+    matched_resolved: int,
+    suppressed_detail: Sequence[dict[str, object]] = (),
+    matched_resolved_detail: Sequence[dict[str, object]] = (),
+) -> str:
+    """Render the thread-dedup reconciliation block (issue #73).
 
     The summary used to be silent about both halves of the thread gates: a
     finding suppressed as a duplicate vanished without a trace, and a finding
     that matched a resolved thread was re-posted with nothing saying it had
-    history. This line names both counts; ``""`` when neither happened, so a
-    run without thread history keeps a byte-identical summary. "Resolved"
-    here covers outdated threads too — anything the gates skip.
+    history. The first line names both counts; one bullet per suppressed
+    finding follows, ``file:line — title — <thread ref>``, naming the thread
+    it matched (its URL when the forge reports one), and one per finding
+    that matched a resolved thread. ``""`` when neither count is non-zero,
+    so a run without thread history keeps a byte-identical summary.
+    "Resolved" here covers outdated threads too — anything the gates skip.
     """
     if not suppressed and not matched_resolved:
         return ""
-    return (
+    lines = [
         f"Thread dedup: {suppressed} suppressed as duplicates of open "
         f"threads; {matched_resolved} matched resolved threads and are "
         f"posted below."
-    )
+    ]
+    if suppressed_detail:
+        lines.append("Suppressed:")
+        lines.extend(_thread_detail_line(d) for d in suppressed_detail)
+    if matched_resolved_detail:
+        lines.append("Matched resolved threads:")
+        lines.extend(_thread_detail_line(d) for d in matched_resolved_detail)
+    return "\n".join(lines)
 
 
 def _thread_reference(t: Thread) -> str:

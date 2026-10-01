@@ -1364,6 +1364,47 @@ def apply_settled_thread_suppression(
     return result
 
 
+def open_thread_for_drop(
+    finding: Finding,
+    threads: Sequence[Thread],
+    line_window: int = 30,
+    min_shared_tokens: int = 2,
+    min_shared_for_distant: int = 4,
+    min_shared_settled: int = SETTLED_MIN_SHARED_TOKENS,
+) -> Thread | None:
+    """The open, current thread a thread gate suppressed this finding against.
+
+    The open-thread twin of :func:`previously_discussed_thread`: the first
+    thread that matches under :func:`apply_thread_dedup`'s tiered rule, else
+    under :func:`apply_settled_thread_suppression`'s same-path rule, so the
+    summary and the run record can name the thread behind each
+    ``duplicate of existing thread`` or ``settled in thread`` drop (issue
+    #73). Returns ``None`` when no open thread matches.
+    """
+    finding_tokens = _tokens(f"{finding.title} {finding.body}")
+    if not finding_tokens:
+        return None
+    for t in threads:
+        if t.lapsed:
+            continue
+        if _duplicate_matches_thread(
+            finding, t, finding_tokens,
+            line_window=line_window,
+            min_shared_tokens=min_shared_tokens,
+            min_shared_for_distant=min_shared_for_distant,
+        ):
+            return t
+    for t in threads:
+        if t.lapsed or t.path is None:
+            continue
+        if _normalised_path(t.path) != _normalised_path(finding.file):
+            continue
+        body_tokens = _tokens(t.body_snippet or "")
+        if len(finding_tokens & body_tokens) >= min_shared_settled:
+            return t
+    return None
+
+
 def previously_discussed_thread(
     finding: Finding,
     threads: Sequence[Thread],
