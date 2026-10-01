@@ -262,14 +262,15 @@ def ci_config_paths(
 
     Every path of ``listing`` (the head-sha file listing, or None when the
     source cannot list) :func:`~prxref.rules.match_globs` selects with
-    ``globs`` counts, and every literal glob counts even without a listing
-    (precedent: the contract files' literal reads). With no listing the
-    glob entries — ``.github/workflows/*.y*ml`` among the built-ins —
-    cannot match, and the literal entries are the fallback the check
-    reads. Pure: reads neither the repository nor the diff.
+    ``globs`` counts. A literal glob counts only when the listing shows it,
+    so a literal that does not exist never spends the read budget; with no
+    listing at all the glob entries — ``.github/workflows/*.y*ml`` among
+    the built-ins — cannot match, and the literal entries are the fallback
+    the check reads. Pure: reads neither the repository nor the diff.
     """
     selected = {path for path in (listing or ()) if path and match_globs(path, globs)}
-    selected.update(_literal_globs(globs))
+    if listing is None:
+        selected.update(_literal_globs(globs))
     return sorted(selected)
 
 
@@ -394,13 +395,14 @@ def ci_wiring_findings(
         for ci_path in ci_files
         if isinstance(text := read(ci_path), str)
     ]
+    read_files = [ci_path for ci_path, _ in texts]
 
     severity = (
         "spec" if ticket_text and _SPEC_TICKET_RE.search(ticket_text) else "warning"
     )
     searched = (
-        "\n".join(f"- `{ci_path}`" for ci_path in ci_files)
-        if ci_files
+        "\n".join(f"- `{ci_path}`" for ci_path in read_files)
+        if read_files
         else "- (no CI configuration file was found)"
     )
     findings: list[Finding] = []
@@ -425,7 +427,7 @@ def ci_wiring_findings(
         ))
     record = {
         "candidates": [candidate.path for candidate in candidates],
-        "ci_files": list(ci_files),
+        "ci_files": read_files,
         "picked_up_default": picked_up_default,
         "triggered": bool(findings),
     }
