@@ -732,8 +732,11 @@ def orchestrate_review(
     ``size_advisory``, and a triggered advisory is prepended to every posted
     summary. It never touches the verdict.
 
-    ``metadata_rules`` (issue #70) turns on the deterministic PR-metadata
-    checks: ``branch_patterns`` (``type=regex``; the PR's type from its
+    ``metadata_rules`` (issue #70) is ``"on"`` or ``"off"``; on turns on
+    the deterministic PR-metadata checks. The CLI resolves a rules-file
+    path to ``"on"`` plus that file's four settings
+    (:func:`prxref.cli._metadata_rule_kwargs`), so a path never reaches
+    this function. The checks: ``branch_patterns`` (``type=regex``; the PR's type from its
     labels, else its title's conventional-commit prefix, must own a pattern
     the source branch fully matches), ``commit_reference`` (a regex every
     non-merge commit subject must contain; needs the forge's optional
