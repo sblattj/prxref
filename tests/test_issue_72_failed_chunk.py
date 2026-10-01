@@ -233,14 +233,13 @@ class TestTheTimeoutReasonIsRewritten:
     TIMEOUT = "LLMError: all models failed: m1: timeout (ReadTimeout)"
 
     def test_a_persistent_timeout_names_the_chunk_and_the_lever(self, monkeypatch):
-        counter = itertools.count(1)
-
         def _rc(llm, files, **kwargs):
-            # Calls 1 and 2 are chunk 1's two attempts (the original and the
-            # timeout retry); both time out, so the chunk stays failed and
-            # the FINAL error is the rewritten one. Call 3 is chunk 2, which
-            # succeeds, keeping this a partial run rather than a total one.
-            failed = next(counter) <= 2
+            # Both of chunk 1's attempts (the original and the timeout retry)
+            # time out, so the chunk stays failed and the FINAL error is the
+            # rewritten one. Chunk 2 succeeds, keeping this a partial run
+            # rather than a total one. Keyed on the chunk's files, not call
+            # order, because chunks run concurrently.
+            failed = any(f.path == "src/one.py" for f in files)
             return [], {
                 "escalations": [], "input_tokens": 0, "output_tokens": 0,
                 "model": "", "elapsed_ms": 47000,
