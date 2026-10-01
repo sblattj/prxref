@@ -1484,3 +1484,23 @@ class TestRulesFileLoader:
         assert metadata_rules.load_metadata_rules(
             value, max_chars=metadata_rules.RULES_FILE_MAX_CHARS, source="SRC",
         ) is None
+
+
+class TestStageFailureSkip:
+    def test_stage_failed_record_is_a_visible_skip(self):
+        from prxref import orchestrator as o
+
+        record = {"checks": "skipped: metadata stage failed: ValueError", "violations": []}
+        skips = o._metadata_skips(record)
+        assert skips == [("metadata", "metadata stage failed: ValueError")]
+        section = o._metadata_section([], skips)
+        assert "Skipped metadata check: metadata stage failed: ValueError" in section
+
+    def test_passing_record_stays_silent(self):
+        from prxref import orchestrator as o
+
+        record = {
+            "branch_pattern": "pass", "commit_reference": "pass",
+            "area_globs": "pass", "violations": [],
+        }
+        assert o._metadata_skips(record) == []
