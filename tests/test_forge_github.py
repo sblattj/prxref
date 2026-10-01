@@ -366,6 +366,35 @@ def test_graphql_patch_joins_outdated_threads_on_the_same_path_by_root_id(monkey
     assert (by_author["carol"].url, by_author["carol"].resolved) == ("U-B", True)
 
 
+@pytest.mark.parametrize(("reply", "wont_fix"), [
+    ("Won't fix: intentional", True),
+    ("Good catch, fixed.", False),
+    (f"Won't fix: intentional\n\n*{ATTRIBUTION_MARKER} · model=m*", False),
+])
+def test_a_wont_fix_reply_marks_its_whole_thread(monkeypatch, reply, wont_fix):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {"id": 30, "path": "a.py", "line": 4, "user": {"login": "prxref-bot"},
+             "body": "x " * 80 + "Null deref: x may be None"},
+            {"id": 31, "path": "a.py", "line": 4, "in_reply_to_id": 30,
+             "user": {"login": "dev"}, "body": reply},
+            {"id": 40, "path": "b.py", "line": 9, "user": {"login": "bob"}, "body": "other"},
+        ]
+    )
+    session.post.return_value = _graphql_nodes(_node(30, "U-30", True, False))
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    by_author = {t.author: t for t in threads}
+    assert by_author["prxref-bot"].resolved is True
+    assert by_author["prxref-bot"].wont_fix is wont_fix
+    assert by_author["prxref-bot"].lapsed is not wont_fix
+    assert by_author["dev"].wont_fix is wont_fix
+    assert by_author["bob"].wont_fix is False
+
+
 def test_graphql_patch_joins_current_threads_on_one_line_by_root_id(monkeypatch):
     monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
     session = MagicMock(spec=requests.Session)

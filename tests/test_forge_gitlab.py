@@ -514,6 +514,38 @@ def test_post_summary_stops_reading_as_soon_as_it_finds_the_marker():
     assert session.get.call_count == 1
 
 
+@pytest.mark.parametrize(("reply", "wont_fix"), [
+    ("Won't fix, by design.", True),
+    ("Fixed in latest commit", False),
+])
+def test_list_threads_a_wont_fix_note_marks_its_whole_discussion(reply, wont_fix):
+    session = MagicMock(spec=requests.Session)
+    forge = ForgeImpl(session=session)
+    discussions = [
+        {
+            "id": "disc1",
+            "resolved": True,
+            "notes": [
+                {"id": 1, "author": {"username": "reviewer1"}, "body": "Null deref here",
+                 "position": {"new_path": "src/app.py", "new_line": 25}, "resolved": True},
+                {"id": 2, "author": {"username": "dev"}, "body": reply, "resolved": True},
+            ],
+        },
+        {
+            "id": "disc2",
+            "resolved": True,
+            "notes": [{"id": 3, "author": {"username": "r2"}, "body": "unrelated"}],
+        },
+    ]
+    session.get.return_value = _mock_response(200, json_data=discussions)
+    ref = PRRef("gitlab", "gitlab.com", "group", "repo", 3, "https://gitlab.com/group/repo/-/merge_requests/3")
+
+    threads = forge.list_threads(ref)
+
+    assert [t.wont_fix for t in threads] == [wont_fix, wont_fix, False]
+    assert threads[0].lapsed is not wont_fix
+
+
 def test_list_threads_pages_past_the_first_page():
     session = MagicMock(spec=requests.Session)
     session.get.side_effect = [
