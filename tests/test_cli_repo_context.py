@@ -138,8 +138,8 @@ class TestTheFourSettingsReachOrchestrate:
         assert len(kwargs["context_contract_globs"]) == 8
         assert list(kwargs["context_exclude_globs"]) == []
         assert kwargs["context_standards_globs"] == config._DEFAULTS["context_standards_globs"]
-        assert len(kwargs["context_standards_globs"]) == 5
-        assert kwargs["context_standards_max_chars"] == 4000
+        assert len(kwargs["context_standards_globs"]) == 7
+        assert kwargs["context_standards_max_chars"] == 6000
         assert kwargs["repo_dir"] is None
 
     def test_the_environment_values_arrive(self, recorder, monkeypatch):
