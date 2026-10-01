@@ -558,3 +558,35 @@ class TestTheOffSentinel:
         cfg = load_config()
         assert cfg["context_standards_globs"] == []
         assert cfg["context_standards_max_chars"] == 2500
+
+
+class TestAZeroBudgetDisablesTheStandards:
+    def test_env_zero_loads_as_zero(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_MAX_CHARS", "0")
+
+        assert load_config()["context_standards_max_chars"] == 0
+
+    def test_a_negative_budget_is_still_a_config_error(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_MAX_CHARS", "-1")
+
+        with pytest.raises(config.ConfigError):
+            load_config()
+
+    def test_a_review_with_budget_zero_reads_no_standards_document(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(TWO_CHUNK_DIFF, tmp_path)
+        _, llm = _review(forge, context_standards_max_chars=0)
+
+        assert forge.content_calls[STANDARDS_DOC] == 0
+        for prompts in _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"]).values():
+            for prompt in prompts:
+                assert STANDARDS_HEADER not in prompt
+
+    def test_the_same_review_with_the_default_budget_reads_and_renders_it(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(TWO_CHUNK_DIFF, tmp_path)
+        _, llm = _review(forge)
+
+        assert forge.content_calls[STANDARDS_DOC] > 0
+        prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
+        assert STANDARDS_HEADER in prompts["app/middleware.py"][0]
