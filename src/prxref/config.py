@@ -516,6 +516,28 @@ LLM / pipeline:
                                 **/expected.json, **/cases.json, **/case.json,
                                 **/prxref-eval/**, **/.env*, **/*.pem,
                                 **/*.key. Empty (the default) adds nothing
+  PRXREF_CONTEXT_STANDARDS_GLOBS
+                                 In-repo standards (#68): globs (matched like
+                                 PRXREF_SIZE_IGNORE_GLOBS) selecting the
+                                 repository's own standards documents - the
+                                 security standard, the ADRs, CONTRIBUTING -
+                                 whose matching sections are excerpted under
+                                 PRXREF_REPO_CONTEXT="repo" only, ranked by
+                                 what the chunk's own changes name and capped
+                                 by PRXREF_CONTEXT_STANDARDS_MAX_CHARS. A set
+                                 value REPLACES the built-in set below rather
+                                 than adding to it; a bare empty value reads
+                                 as unset (the house rule), so the built-in
+                                 set stays - the exact value "off" (lowercase,
+                                 the PRXREF_LLM_SEED precedent) is the one way
+                                 to turn standards excerpts off on their own.
+                                 Built-in set: docs/standards/**, docs/adr/**,
+                                 STANDARDS*.md, SECURITY.md, CONTRIBUTING.md
+  PRXREF_CONTEXT_STANDARDS_MAX_CHARS
+                                 In-repo standards (#68): per-chunk character
+                                 budget for the standards sections admitted
+                                 into one worker prompt. Must be greater
+                                 than 0 (default 4000)
 
 Spec sources / Jira:
   PRXREF_JIRA_BASE_URL          Jira base URL (scheme://host plus any
@@ -571,8 +593,9 @@ Webhooks:
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
 PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS,
-PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS, PRXREF_AREA_GLOBS and
-PRXREF_CI_WIRING_GLOBS) split on any run of commas and/or
+PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS, PRXREF_AREA_GLOBS,
+PRXREF_CI_WIRING_GLOBS and PRXREF_CONTEXT_STANDARDS_GLOBS) split on any run
+of commas and/or
 whitespace, so no item can contain either; a glob that must match a
 literal space writes it as ``?``.
 
@@ -747,6 +770,21 @@ _DEFAULTS: dict[str, object] = {
         "**/migrations/**",
     ],
     "context_exclude_globs": [],
+    # In-repo standards documents (#68): sections of the repository's own
+    # rules offered to each chunk worker at the ``repo`` level, like the
+    # contract globs above. The default is non-empty and
+    # replace-not-append, with the same house rule that a bare empty value
+    # reads as unset; the exact value ``off``
+    # (``PRXREF_CONTEXT_STANDARDS_GLOBS=off``) is the one way to turn the
+    # feature off on its own, the ``llm_seed`` precedent.
+    "context_standards_globs": [
+        "docs/standards/**",
+        "docs/adr/**",
+        "STANDARDS*.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+    ],
+    "context_standards_max_chars": 4000,
     # CI wiring (#66): the opt-in switch plus the CI-file globs. The globs
     # default is non-empty and replace-not-append like
     # ``context_contract_globs`` above; the list restates
@@ -807,6 +845,7 @@ _INT_KEYS = frozenset({
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "max_areas_per_pr", "evidence_max_chunk_chars",
+    "context_standards_max_chars",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -818,6 +857,7 @@ _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
     "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
+    "context_standards_globs",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -840,6 +880,13 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
 # (lowercase), like every _CHOICE_KEYS value; restated from
 # prxref.llm_backends.SEED_OFF, because config stays a leaf module.
 _SEED_OFF = "off"
+
+# ``context_standards_globs``'s one non-glob value (#68): read no standards
+# document at all. Matched exactly (lowercase) like ``llm_seed``'s sentinel,
+# because the normal list coercion would read ``off`` as a one-glob list. A
+# bare empty value keeps the house rule instead: it reads as unset, so the
+# built-in set stays.
+_STANDARDS_GLOBS_OFF = "off"
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
 # prxref.orchestrator (config stays a leaf module); pinned together by
@@ -927,6 +974,7 @@ _RANGES: dict[str, _Range] = {
     "repo_context_max_chunk_reads": _Range(0),
     "max_areas_per_pr": _Range(0, low_inclusive=True),
     "evidence_max_chunk_chars": _Range(0),
+    "context_standards_max_chars": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
@@ -967,6 +1015,7 @@ FILE_KEYS = frozenset({
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "incremental",
     "context_contract_globs", "context_exclude_globs",
+    "context_standards_globs", "context_standards_max_chars",
     "metadata_rules", "branch_patterns", "commit_reference",
     "area_globs", "max_areas_per_pr",
     "ci_wiring", "ci_wiring_globs",
@@ -1236,6 +1285,8 @@ def _coerce_env(key: str, raw: str, source: str) -> object:
     try:
         if key == "llm_seed" and raw.strip() == _SEED_OFF:
             return _SEED_OFF
+        if key == "context_standards_globs" and raw.strip() == _STANDARDS_GLOBS_OFF:
+            return []
         if key in _INT_KEYS:
             return int(raw.strip())
         if key in _FLOAT_KEYS:

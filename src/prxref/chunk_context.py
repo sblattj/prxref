@@ -43,6 +43,15 @@ DEFINITIONS_HEADER = "### Definitions referenced by this chunk"
 SIBLING_HEADER = "### Other files changed in this PR"
 CONTRACT_HEADER = "### Contract excerpts"
 READER_HEADER = "### Code elsewhere that reads state this chunk writes"
+STANDARDS_HEADER = "### In-repo standards for this chunk"
+STANDARDS_GUIDANCE = (
+    "The repository's own standards documents, one section per "
+    "`path:line:` row. If a changed line contradicts one, report it and "
+    "cite the standard as `<path>:<line>` in the finding body (the "
+    "finding's own file and line stay on the diff). If two sections here "
+    "disagree with each other, report the disagreement instead of picking "
+    "a side."
+)
 
 _JS_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
 
@@ -489,6 +498,7 @@ def render_context_blocks(
     extra_def_lines: Sequence[str] = (),
     contract_lines: Sequence[str] = (),
     reader_lines: Sequence[str] = (),
+    standards_lines: Sequence[str] = (),
 ) -> str:
     """Render the prompt blocks, omitting each when it has no lines.
 
@@ -496,13 +506,17 @@ def render_context_blocks(
     ``def_lines`` followed by ``extra_def_lines`` (repository-context
     definitions) under one :data:`DEFINITIONS_HEADER`, and is present when
     either is non-empty. The contracts block, ``contract_lines`` under
-    :data:`CONTRACT_HEADER`, comes next, and the readers block,
+    :data:`CONTRACT_HEADER`, comes next, then the readers block,
     ``reader_lines`` (code outside the diff that reads state the chunk
-    writes) under :data:`READER_HEADER`, comes last. With the three optional
-    arguments empty, the output is exactly the two-block rendering repository
-    context predates, and with ``reader_lines`` empty it is exactly the
-    rendering without a readers block. Returns the empty string when every
-    list is empty, so the prompt slot leaves no stray header behind.
+    writes) under :data:`READER_HEADER`, and last the standards block,
+    ``standards_lines`` (the repository's own standards documents) under
+    :data:`STANDARDS_HEADER` behind one :data:`STANDARDS_GUIDANCE` line,
+    because that block carries its own how-to-cite rule. With the four
+    optional arguments empty, the output is exactly the two-block rendering
+    repository context predates, with ``reader_lines`` empty it is exactly
+    the rendering without a readers block, and so on. Returns the empty
+    string when every list is empty, so the prompt slot leaves no stray
+    header behind.
     """
     blocks: list[str] = []
     if dep_lines:
@@ -514,6 +528,8 @@ def render_context_blocks(
         blocks.append(CONTRACT_HEADER + "\n\n" + "\n".join(contract_lines))
     if reader_lines:
         blocks.append(READER_HEADER + "\n\n" + "\n".join(reader_lines))
+    if standards_lines:
+        blocks.append(STANDARDS_HEADER + "\n\n" + STANDARDS_GUIDANCE + "\n\n" + "\n".join(standards_lines))
     return "\n\n".join(blocks)
 
 
