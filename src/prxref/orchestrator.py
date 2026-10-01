@@ -1359,7 +1359,9 @@ def orchestrate_review(
             tracer.event(
                 "metadata_rules", "fail", reason=f"{e.__class__.__name__}: {e}"
             )
-    metadata_section = _metadata_section(metadata_notes)
+    metadata_section = _metadata_section(
+        metadata_notes, _metadata_skips(run_inputs.get("metadata_rules")),
+    )
 
     # CI wiring (#66), computed on the same pre-dispatch doctrine: the
     # check makes no LLM call, so nothing below can schedule one on its
@@ -3123,6 +3125,7 @@ def _fetch_pr_commits(
     head = getattr(pr, "source_sha", "") or ""
     base = getattr(pr, "target_sha", "") or ""
     if getter is None or not head or not base:
+        logger.warning("metadata rules: no commit source for the PR commit list")
         return None, "no commit source"
     try:
         return list(getter(ref, base_sha=base, head_sha=head)), ""
@@ -4414,18 +4417,50 @@ def _plural(n: int, unit: str) -> str:
     return unit if n == 1 else f"{unit}s"
 
 
-def _metadata_section(notes: Sequence[MetadataNote]) -> str:
-    """The ``PR metadata`` summary section for ``notes``, or ``""`` for none.
+_UNCONFIGURED_SKIPS = frozenset({
+    "no branch patterns", "no commit reference pattern", "no area globs",
+})
+
+
+def _metadata_skips(record: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    """The configured metadata checks that were skipped, as ``(check, reason)``.
+
+    Reads the ``metadata_rules`` run-record entry. A check that was never
+    configured (its own "no ... pattern/globs" status) is not worth naming;
+    a configured check that could not run (no PR type, no source branch,
+    no commit source) is, so a reader can tell it from a pass.
+    """
+    skips: list[tuple[str, str]] = []
+    for check in ("branch_pattern", "commit_reference", "area_globs"):
+        status = (record or {}).get(check)
+        if not isinstance(status, str) or not status.startswith("skipped: "):
+            continue
+        reason = status[len("skipped: "):]
+        if reason not in _UNCONFIGURED_SKIPS:
+            skips.append((check, reason))
+    return skips
+
+
+def _metadata_section(
+    notes: Sequence[MetadataNote],
+    skips: Sequence[tuple[str, str]] = (),
+) -> str:
+    """The ``PR metadata`` summary section, or ``""`` when there is nothing to say.
 
     A bold ``PR metadata`` heading, then one ``- <title> — <detail>``
-    bullet per violation in check order, closed by the reminder that the
-    checks are deterministic and never change the verdict. The orchestrator
-    hands it to every summary render (:func:`_render_summary`), which places
-    it above the footer.
+    bullet per violation in check order, then one ``- Skipped <check>
+    check: <reason>`` bullet per configured check that could not run,
+    closed by the reminder that the checks are deterministic and never
+    change the verdict. The orchestrator hands it to every summary render
+    (:func:`_render_summary`), which places it above the footer.
     """
-    if not notes:
+    if not notes and not skips:
         return ""
-    bullets = "\n".join(f"- {n.title} — {n.detail}" for n in notes)
+    lines = [f"- {n.title} — {n.detail}" for n in notes]
+    lines += [
+        f"- Skipped {check.replace('_', ' ')} check: {reason}" for check, reason in skips
+    ]
+    bullets = "\n".join(lines)
     return (
         f"**PR metadata**\n\n{bullets}\n\n"
         "_Deterministic checks, no model; they never change the verdict._"
