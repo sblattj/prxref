@@ -87,6 +87,26 @@ REUSED_FROM_VERDICT = "verdict"
 REUSED_FROM_THREAD = "thread"
 
 
+_SUFFIXES: tuple[str, ...] = ("ing", "ed", "es", "s", "e")
+
+
+def _stem(word: str) -> str:
+    """Light suffix stemming so inflections of one word hash alike.
+
+    Strips one of ``ing``, ``ed``, ``es``, ``s``, ``e`` (first match,
+    longest first), keeping at least three characters and never stripping
+    the ``s`` of a ``ss`` ending. "derived", "derive", "deriving" and
+    "derives" all become "deriv"; "access" stays whole.
+    """
+    for suffix in _SUFFIXES:
+        if not word.endswith(suffix) or len(word) - len(suffix) < 3:
+            continue
+        if suffix == "s" and word.endswith("ss"):
+            continue
+        return word[: -len(suffix)]
+    return word
+
+
 def claim_hash(title: str) -> str:
     """The order-insensitive claim hash of a finding title.
 
@@ -94,11 +114,12 @@ def claim_hash(title: str) -> str:
     or more characters, minus stopwords and remedy verbs, hyphens
     split); sorting them makes the hash a function of the claim's word
     SET, so "Drain duration hardcoded" and "Hardcoded drain duration"
-    hash identically. An empty token set hashes the empty string — a
+    hash identically; :func:`_stem` folds inflections ("derived" and
+    "derive") into one token. An empty token set hashes the empty string — a
     title of stopwords only still gets an id, just one shared with every
     other stopword-only title of that file and rule.
     """
-    words = " ".join(sorted(_title_tokens(title)))
+    words = " ".join(sorted({_stem(token) for token in _title_tokens(title)}))
     return hashlib.sha256(words.encode("utf-8")).hexdigest()[:CLAIM_HASH_CHARS]
 
 
