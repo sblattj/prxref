@@ -982,6 +982,19 @@ def _nearest_snippet_match(
     return nearest, tie > 1
 
 
+def _unique_file_match(lines: Sequence[str], snippets: Sequence[str]) -> int | None:
+    """Line of the first snippet that occurs on exactly one line of the file.
+
+    Returns ``None`` when no snippet occurs, or the first snippet that does
+    occur is shared by several lines.
+    """
+    for snippet in snippets:
+        matches = [n for n, line in enumerate(lines, 1) if snippet in line]
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    return None
+
+
 def _mark_anchor_unverified(finding: Finding) -> Finding:
     """Stamp ``anchor_unverified`` and leave the confidence untouched."""
     return replace(finding, anchor_unverified=True)
@@ -1022,6 +1035,10 @@ def apply_anchor_snap(
     applies when the file reads but no snippet occurs anywhere in it, and
     when a finding sits file-level (line 0) with no snippet parseable at
     all: in each case the claim quotes code the head file cannot show.
+    A file-level (line 0) finding whose snippet occurs only outside the
+    window anchors on the snippet's single whole-file occurrence; when that
+    occurrence is not unique it is marked ``anchor_unverified`` instead, so
+    a line-level claim is never left silently at line 0.
 
     Otherwise the anchor moves to the matched line only when the move is
     real — the finding is file-level, or the match lies beyond
@@ -1067,6 +1084,13 @@ def apply_anchor_snap(
             # hold at all — or a file-level claim with no snippet to look
             # for at all — is unverified quoted evidence.
             unverified = (f.line <= 0) if not snippets else not present
+            if f.line <= 0 and present:
+                far = _unique_file_match(lines, snippets)
+                if far is None:
+                    result.append(_mark_anchor_unverified(f))
+                else:
+                    result.append(replace(f, line=far))
+                continue
             result.append(_mark_anchor_unverified(f) if unverified else f)
             continue
         if ambiguous:
