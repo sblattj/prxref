@@ -273,6 +273,10 @@ scope: openapi, docs
   file unscoped and every unit still sees every rule. A sub-section under
   the title still infers its own scope (`## Java naming` under it is
   `java`), and an explicit scope line under the title still binds.
+- A `#` line inside a fenced code block (opened by ```` ``` ```` or `~~~`)
+  is code, not a heading: it does not open a section, end one, or unseat
+  the document title, so a `# run the linter first` comment in a shell
+  sample leaves the title above it a title.
 - A heading with no scope line and no such noun, or one whose scope line
   names no token, declares nothing. A body with no scoped section at all —
   no scope line and no heading naming one of those nouns — renders
@@ -315,7 +319,10 @@ the whole body.
 ` (applies to: <token>, <token>)` with the tokens in file order, in the
 unit's `## Team review rules` block, so the model sees which scope a
 section it is shown carries; a scope inferred from a heading naming
-several nouns joins them with ` or ` instead.
+several nouns joins them with ` or ` instead. Which headings carry one is
+decided on the whole body before anything is left out, so a section keeps
+its annotation even when the unit's paths left out the peer section that
+made it a section rather than the document title.
 
 **The clearing pass.** Once any loaded section declares a scope, a
 finding's `rule` label is cleared only when it names a scoped section and
