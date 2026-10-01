@@ -219,17 +219,32 @@ class TestApplyRuleScopeCheck:
         )
         assert cleared == 0 and out[0].rule == "TypeScript style"
 
-    def test_an_invented_label_is_cleared(self):
+    def test_an_unknown_label_is_kept(self):
         out, cleared = apply_rule_scope_check(
             [_f(3, rule="made-up rule")], sections=SCOPED_SECTIONS,
         )
-        assert cleared == 1 and out[0].rule is None
+        assert cleared == 0 and out[0].rule == "made-up rule"
 
-    def test_a_rule_from_an_unscoped_section_is_cleared_once_any_scope_exists(self):
+    def test_a_rule_from_an_unscoped_section_is_kept(self):
         out, cleared = apply_rule_scope_check(
-            [_f(3, rule="General style")], sections=SCOPED_SECTIONS,
+            [_f(3, rule="General style"), _f(4, rule="Name every data limit")],
+            sections=SCOPED_SECTIONS,
         )
-        assert cleared == 1 and out[0].rule is None
+        assert cleared == 0 and [f.rule for f in out] == ["General style", "Name every data limit"]
+
+    def test_a_bullet_label_is_kept_on_a_covered_path_and_cleared_on_another(self):
+        label = "Controllers never call Controllers"
+        out, cleared = apply_rule_scope_check(
+            [_f(3, file=FOO_JAVA, rule=label), _f(4, rule=label)],
+            sections=SCOPED_SECTIONS,
+        )
+        assert cleared == 1 and [f.rule for f in out] == [label, None]
+
+    def test_an_empty_path_keeps_its_label(self):
+        out, cleared = apply_rule_scope_check(
+            [_f(3, file="", rule="Java module boundaries")], sections=SCOPED_SECTIONS,
+        )
+        assert cleared == 0 and out[0].rule == "Java module boundaries"
 
     def test_the_label_match_collapses_case_and_whitespace(self):
         out, _cleared = apply_rule_scope_check(
@@ -250,7 +265,7 @@ class TestApplyRuleScopeCheck:
         out, cleared = apply_rule_scope_check(
             [_f(3, file=FOO_JAVA, rule="boundaries")], sections=SCOPED_SECTIONS,
         )
-        assert cleared == 1
+        assert cleared == 0 and out[0].rule == "boundaries"
 
     def test_ruleless_and_dropped_findings_pass_through_untouched(self):
         ruleless = _f(3, rule=None)
@@ -372,13 +387,13 @@ class TestOrchestratorWiring:
         )
         return res, llm
 
-    def test_wrong_and_invented_labels_are_cleared_and_counted(self):
+    def test_wrong_scope_labels_are_cleared_and_unknown_ones_kept(self):
         res, _llm = self._run(group_findings=True)
-        assert res["rule_scope_cleared"] == 3
+        assert res["rule_scope_cleared"] == 2
         rules = sorted(f.rule is None for f in res["findings_active"])
-        assert rules == [False, True, True, True]
-        kept = [f.rule for f in res["findings_active"] if f.rule is not None]
-        assert kept == ["TypeScript style"]
+        assert rules == [False, False, True, True]
+        kept = sorted(f.rule for f in res["findings_active"] if f.rule is not None)
+        assert kept == ["TypeScript style", "made-up rule"]
 
     def test_the_cleared_labels_leave_only_title_rows_in_rule_counts(self):
         # Grouping off, the default cap on: two same-title cleared findings
@@ -419,13 +434,13 @@ class TestOrchestratorWiring:
             logger.removeHandler(handler)
             logger.setLevel(old_level)
         assert any(
-            "rule scope: cleared 3 rule label(s) that no section covers" in line
+            "rule scope: cleared 2 rule label(s) whose scoped section does not cover the file" in line
             for line in handler.lines
         )
         events = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
         matches = [e for e in events if e.get("node") == "rulescope"]
         assert [(e["node"], e["phase"], e["meta"]) for e in matches] == [
-            ("rulescope", "ok", {"cleared": 3}),
+            ("rulescope", "ok", {"cleared": 2}),
         ]
 
     def test_the_check_runs_on_its_own_guard_with_grouping_and_cap_off(self):
@@ -442,7 +457,7 @@ class TestOrchestratorWiring:
         assert "## Java module boundaries (applies to: java)" in system
         assert "## TypeScript style (applies to: typescript)" in system
         assert system.endswith(RULE_REQUEST)
-        assert res["rule_scope_cleared"] == 3
+        assert res["rule_scope_cleared"] == 2
 
     def test_cleared_labels_group_by_title_through_the_whole_run(self):
         chunk = [

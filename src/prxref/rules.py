@@ -280,11 +280,25 @@ class RuleSection:
     A section without a ``scope:`` line — or one whose ``scope:`` line names
     no token — is not returned by :func:`parse_rule_sections` at all, so a
     body with no such line parses to ``()`` and every rule-scope feature
-    stays off.
+    stays off. ``items`` holds the section's bullet and numbered rule lines
+    (markup stripped, whitespace collapsed), so a label that names a rule
+    rather than the heading still maps to its section.
     """
 
     name: str
     scopes: tuple[str, ...]
+    items: tuple[str, ...] = ()
+
+
+_ITEM_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.+?)[ \t]*$")
+
+
+def _item_text(line: str) -> str:
+    """The text of one rule-item (bullet or numbered) line, markup stripped; ``""`` for any other line."""
+    match = _ITEM_LINE_RE.match(line)
+    if match is None:
+        return ""
+    return " ".join(match.group(1).replace("**", "").replace("__", "").replace("`", "").split())
 
 
 def _scope_tokens(line: str) -> tuple[str, ...]:
@@ -350,10 +364,18 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
     file-global ``scope`` would trip the ignored-keys path, and scopes are
     per section by design.
     """
-    return tuple(
-        RuleSection(name=name, scopes=tokens)
-        for _index, name, tokens in _scoped_sections(body.split("\n"))
-    )
+    lines = body.split("\n")
+    sections: list[RuleSection] = []
+    for index, name, tokens in _scoped_sections(lines):
+        items: list[str] = []
+        for line in lines[index + 1:]:
+            if _SECTION_RE.match(line):
+                break
+            text = _item_text(line)
+            if text:
+                items.append(text)
+        sections.append(RuleSection(name=name, scopes=tokens, items=tuple(items)))
+    return tuple(sections)
 
 
 def _annotate_rule_scopes(text: str) -> str:
