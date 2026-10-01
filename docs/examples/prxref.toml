@@ -107,3 +107,15 @@ ci_wiring_globs = [".github/workflows/*.y*ml", ".gitlab-ci.yml", "Jenkinsfile"]
 evidence_files = [".prxref/evidence/run.json"]
 # Evidence characters one review unit receives; 0 turns the block off.
 evidence_max_chunk_chars = 4000
+
+# --- Stable finding ids (#71) ---------------------------------------------------
+# true stamps every finding with a content-derived id (file#rule#12-hex claim
+# hash) that survives reworded titles and anchor drift; false (the default)
+# never runs the pass and every id stays null. See docs/env-vars.md.
+
+# stable_ids = true
+# JSON verdict store earlier runs' refuted verdicts are read from, keyed by
+# stable id; the review reads it and never writes it. Read only with
+# stable_ids = true. Missing reads as empty; malformed is a configuration
+# error. Path relative to THIS file's directory.
+# verdict_store = ".prxref/verdicts.json"

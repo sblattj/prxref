@@ -236,6 +236,7 @@ from . import (
     reviewer,
     specs,
     systemic,
+    verdicts,
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
 from .ci_wiring import ci_wiring_findings
@@ -304,6 +305,7 @@ from .quality import (
 )
 from .repo_context import exclude_predicate
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
+from .stable_ids import REUSED_FROM_THREAD, REUSED_FROM_VERDICT, apply_stable_ids, stable_id_collisions
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
@@ -568,6 +570,8 @@ def orchestrate_review(
     ci_wiring_globs: Sequence[str] = (),
     evidence: Any = None,
     evidence_max_chunk_chars: int = 4000,
+    stable_ids: bool = False,
+    verdict_store: str | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -577,7 +581,7 @@ def orchestrate_review(
     output_tokens, posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions, incremental, ci_wiring, evidence, degraded}``, plus
+    suggestions, incremental, ci_wiring, evidence, stable_ids, degraded}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
     :func:`_run_record`, so the last sixteen keys are always present and are
@@ -893,6 +897,29 @@ def orchestrate_review(
     of that severity. ``outofscope`` is the minor severity, not the ticket
     scope ``out``.
 
+    ``stable_ids`` turns on stable finding ids (issue #71,
+    ``PRXREF_STABLE_IDS``). After both thread gates and before the
+    severity-consistency pass, :func:`prxref.stable_ids.apply_stable_ids`
+    stamps every finding with a content-derived ``id``
+    (``<file>#<rule or norule>#<12-hex claim hash>``, stable across
+    reworded titles and anchor drift), an ``anchor_block`` (the smallest
+    enclosing function, YAML key or manifest key at the anchor —
+    metadata the id deliberately excludes) and an ``id_reused_from``
+    label (``run`` for an id a near-identical earlier finding of the
+    same run proposed, ``verdict`` for a stored-verdict match,
+    ``thread`` for a closed-thread match). ``verdict_store``
+    (``PRXREF_VERDICT_STORE``, default ``None``) names a JSON store of
+    earlier runs' verdicts keyed by id; loaded before any stage runs (a
+    store that cannot be trusted is a configuration error, exit 2), read
+    only — recording is a caller's decision
+    (:func:`prxref.verdicts.record`) — and a finding whose id it holds
+    as ``refuted`` is dropped with ``refuted in earlier run (<id>)``.
+    The run record's ``stable_ids`` is ``{"assigned", "reused_from_verdict",
+    "reused_from_thread", "collisions"}`` when on, ``null`` when off.
+    Off (the default), the pass never runs, every finding keeps
+    ``id=None``, and the prompts, posts, trace and logs are exactly a
+    run without the feature.
+
     ``repo_context`` is the repository-context level
     (``PRXREF_REPO_CONTEXT``): ``"off"`` (the default), ``"diff"`` or
     ``"repo"`` (:data:`prxref.repo_unit.MODES`). Any other value raises
@@ -1136,6 +1163,7 @@ def orchestrate_review(
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "ci_wiring": None,
         "evidence": None,
+        "stable_ids": None,
         "degraded": None,
         "chunks_over_budget": 0,
         "largest_chunk_tokens": 0,
@@ -1182,6 +1210,14 @@ def orchestrate_review(
             "matched_chunks": 0,
             "max_chars": evidence_max_chunk_chars,
         }
+    # Issue #71: load the verdict store BEFORE any stage runs, so a store
+    # the pass cannot trust is a configuration error (exit 2), never a
+    # degraded review that silently ignored it. Read-only from here on:
+    # recording a verdict is a caller's decision (prxref.verdicts.record),
+    # so a review never writes the store itself.
+    verdict_store_loaded: dict[str, Any] | None = None
+    if stable_ids and verdict_store:
+        verdict_store_loaded = verdicts.load(verdict_store)
     summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
     ticket_note = ticket.note() if ticket is not None else ""
@@ -1911,6 +1947,23 @@ def orchestrate_review(
             # outdated, the same predicate both gates skip on.
             "threads_resolved": sum(1 for t in threads if t.resolved or t.outdated),
         }
+    # AFTER both thread gates and the previously-raised note (#71): the
+    # ids inherit the gates' verdict — a finding a thread already
+    # suppressed never reaches the store's attention — and BEFORE
+    # severity consistency, so the refuted drop is not counted, raised or
+    # grouped by anything downstream. Off entirely (run record
+    # ``stable_ids`` stays ``null``, every ``id`` stays ``null``) unless
+    # the caller turns the feature on.
+    if stable_ids:
+        findings = apply_stable_ids(findings, files, verdict_store_loaded, threads)
+        collisions = stable_id_collisions(findings)
+        run_inputs["stable_ids"] = {
+            "assigned": sum(1 for f in findings if f.id is not None),
+            "reused_from_verdict": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_VERDICT),
+            "reused_from_thread": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_THREAD),
+            "collisions": len(collisions),
+        }
+        tracer.event("stableids", "ok", **run_inputs["stable_ids"])
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1

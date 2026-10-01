@@ -320,7 +320,8 @@ class TestTheCliEmits:
         }
         assert list(payload)[list(payload).index("incremental") + 1] == "ci_wiring"
         assert list(payload)[list(payload).index("incremental") + 2] == "evidence"
-        assert list(payload)[list(payload).index("incremental") + 3] == "degraded"
+        assert list(payload)[list(payload).index("incremental") + 3] == "stable_ids"
+        assert list(payload)[list(payload).index("incremental") + 4] == "degraded"
         assert DEGRADED_SUMMARY_KEY not in payload
         assert (tmp_path / "s.md").is_file()
 
@@ -469,10 +470,13 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("rule_scope_cleared") is None  # 0.29 (#75): null when no scope declared
         assert payload.pop("ci_wiring") is None
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
+        assert payload.pop("stable_ids") is None  # #71: null when PRXREF_STABLE_IDS is off
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]
         for row in payload["findings"]:
             assert row.pop("anchor_unverified") is False  # 0.3x (#74): null-free, never stamped here
+            # #71: null on every row of a run with stable ids off.
+            assert (row.pop("id"), row.pop("anchor_block"), row.pop("id_reused_from")) == (None, None, None)
         assert _sha(json.dumps(payload)) == BASE_JSON_SHA
         assert not (tmp_path / GITLAB_REPORT_FILE).exists()

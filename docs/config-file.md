@@ -219,6 +219,13 @@ Flat keys, not a `[metadata]` table — the file is flat, so a table is a config
 | `ci_wiring` | string | `on` flags a check the PR adds that no CI configuration file invokes; `off` (the default) reads nothing ([more](env-vars.md#llm--pipeline)). |
 | `ci_wiring_globs` | array of strings | Globs selecting the CI configuration files the CI wiring check reads; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 
+### Stable finding ids
+
+| Key | Type | Meaning |
+|---|---|---|
+| `stable_ids` | boolean | `true` stamps every finding with a content-derived id that survives reworded titles and anchor drift, and drops a finding the verdict store refuted in an earlier run; `false` (the default) keeps every `id` null ([more](env-vars.md#llm--pipeline)). |
+| `verdict_store` | string | Path to the JSON verdict store `refuted` verdicts are read from, keyed by stable id; the review reads it and never writes it ([more](env-vars.md#llm--pipeline)). |
+
 ## Settings a repository file cannot set
 
 Whoever can change the repository controls this file, and on a pull request
