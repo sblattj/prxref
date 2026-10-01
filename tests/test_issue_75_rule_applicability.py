@@ -6,7 +6,8 @@ Two halves, both pinned here:
   a rule and must not name one whose stated scope sits elsewhere, and a
   rules body that declares ``scope:`` lines under ATX headings gets each
   scoped section's heading annotated ``(applies to: <tokens>)`` in the
-  team-rules block, nothing removed;
+  team-rules block, and (F15) a unit none of whose paths a scoped section
+  covers is not offered that section at all;
 - the deterministic half — ``quality.apply_rule_scope_check`` clears
   ``rule`` on a finding no scoped section covers and keeps the finding, so
   it groups and caps by normalized title like any ruleless one. The
@@ -43,9 +44,13 @@ from prxref.rules import (
     RULES_HEADING,
     ReviewRules,
     RuleSection,
+    ScopedBlock,
+    ScopedRules,
+    filter_rule_sections,
     load_review_rules,
     load_scoped_rules,
     parse_rule_sections,
+    scope_token_covers,
 )
 from prxref.text_inputs import cap_text
 from prxref.triage import Finding
@@ -457,7 +462,8 @@ class TestOrchestratorWiring:
     def test_the_worker_system_prompt_carries_the_annotations_and_the_request(self):
         res, llm = self._run(group_findings=True)
         (system, _user) = llm.prompts[0]
-        assert "## Java module boundaries (applies to: java)" in system
+        assert "## Java module boundaries" not in system
+        assert "[rules for other languages/file types left out: Java module boundaries]" in system
         assert "## TypeScript style (applies to: typescript)" in system
         assert system.endswith(RULE_REQUEST)
         assert res["rule_scope_cleared"] == 2
@@ -645,3 +651,167 @@ class TestUnmarkedSectionsReproShape:
             [_f(3, file=FOO_JAVA, rule="JVM module boundaries")], sections=sections
         )
         assert cleared == 0 and out[0].rule == "JVM module boundaries"
+
+
+JAVA_RULE_TEXT = "Controllers never call Controllers"
+TS_RULE_TEXT = "Never type boundary-crossing data as `any`"
+GENERAL_RULE_TEXT = "Name every data limit"
+JAVA_LEFT_OUT_NOTE = "[rules for other languages/file types left out: Java module boundaries]"
+
+
+def _scoped_rules_obj(body: str, path: str = "team-rules.md") -> ReviewRules:
+    return ReviewRules(
+        path=path,
+        body=cap_text(body.strip(), 24000),
+        severity_map={},
+        sections=parse_rule_sections(body.strip()),
+    )
+
+
+class TestPerUnitSectionFiltering:
+    """F15: a scoped section whose scope covers none of a unit's paths is not offered to it."""
+
+    def test_a_typescript_only_unit_does_not_see_the_java_section_text(self):
+        block = _scoped_rules_obj(SCOPED_BODY).prompt_block("worker", paths=["web/a.ts"])
+        assert JAVA_RULE_TEXT not in block
+        assert "## Java module boundaries" not in block
+        assert TS_RULE_TEXT in block
+        assert GENERAL_RULE_TEXT in block
+        assert "## TypeScript style (applies to: typescript)" in block
+        assert block.endswith(JAVA_LEFT_OUT_NOTE)
+
+    def test_paths_none_renders_the_unfiltered_block_byte_for_byte(self):
+        rules = _scoped_rules_obj(SCOPED_BODY)
+        assert rules.prompt_block("worker", paths=None) == rules.prompt_block("worker")
+        assert JAVA_RULE_TEXT in rules.prompt_block("worker")
+        assert "left out" not in rules.prompt_block("worker")
+
+    def test_a_java_unit_keeps_java_and_leaves_typescript_out(self):
+        block = _scoped_rules_obj(SCOPED_BODY).prompt_block("worker", paths=[FOO_JAVA])
+        assert JAVA_RULE_TEXT in block
+        assert TS_RULE_TEXT not in block
+        assert block.endswith("[rules for other languages/file types left out: TypeScript style]")
+
+    def test_a_mixed_unit_keeps_both_sections_and_adds_no_note(self):
+        rules = _scoped_rules_obj(SCOPED_BODY)
+        block = rules.prompt_block("worker", paths=[FOO_JAVA, "web/a.ts"])
+        assert block == rules.prompt_block("worker")
+
+    def test_empty_paths_filter_nothing(self):
+        rules = _scoped_rules_obj(SCOPED_BODY)
+        assert rules.prompt_block("worker", paths=[]) == rules.prompt_block("worker")
+
+    def test_a_scopeless_body_is_unchanged_by_paths(self):
+        rules = _scoped_rules_obj(SCOPELESS_BODY)
+        assert rules.prompt_block("worker", paths=["web/a.ts"]) == rules.prompt_block("worker")
+
+    def test_a_subheading_leaves_with_its_dropped_parent(self):
+        body = (
+            "## Java rules\n"
+            "\n"
+            "- java one\n"
+            "\n"
+            "### Naming\n"
+            "\n"
+            "- java naming\n"
+            "\n"
+            "## General\n"
+            "\n"
+            "- general one\n"
+        )
+        text, left_out = filter_rule_sections(body, ["web/a.ts"])
+        assert "java one" not in text and "java naming" not in text and "### Naming" not in text
+        assert "## General\n\n- general one" in text
+        assert left_out == ("Java rules",)
+
+    def test_filter_rule_sections_keeps_a_section_any_path_covers(self):
+        text, left_out = filter_rule_sections(SCOPED_BODY, ["web/a.ts", "README.md"])
+        assert JAVA_RULE_TEXT not in text and TS_RULE_TEXT in text
+        assert left_out == ("Java module boundaries",)
+
+    def test_an_unknown_scope_token_never_filters(self):
+        body = "## Odd\nscope: widgets\n- odd rule\n"
+        assert filter_rule_sections(body, ["web/a.ts"]) == (body, ())
+
+    def test_scope_token_covers_lives_in_rules(self):
+        assert scope_token_covers("java", "src/Foo.java")
+        assert not scope_token_covers("java", "web/a.ts")
+        assert scope_token_covers("widgets", "web/a.ts")
+
+    def test_scoped_unit_block_filters_always_on_and_scoped_bodies(self):
+        always_on = _scoped_rules_obj(SCOPED_BODY)
+        scoped_file = _scoped_rules_obj(
+            "## Python services\n\n- py only rule\n\n## Shared\n\n- shared rule\n", path="svc.md",
+        )
+        scoped = ScopedRules(entries=("svc.md",), files=(scoped_file,), severity_map={})
+        block = scoped.unit_block(
+            "worker", ["web/a.ts"], always_on, max_chars=24000, scope_sections=True,
+        )
+        assert JAVA_RULE_TEXT not in block.text and "py only rule" not in block.text
+        assert TS_RULE_TEXT in block.text and "shared rule" in block.text
+        assert block.left_out == ("Java module boundaries", "Python services")
+        assert block.text.endswith(
+            "[rules for other languages/file types left out: Java module boundaries, Python services]"
+        )
+
+    def test_scoped_unit_block_does_not_filter_by_default(self):
+        always_on = _scoped_rules_obj(SCOPED_BODY)
+        scoped = ScopedRules(entries=(), files=(), severity_map={})
+        block = scoped.unit_block("worker", ["web/a.ts"], always_on, max_chars=24000)
+        assert JAVA_RULE_TEXT in block.text and block.left_out == ()
+
+    def test_review_rules_unit_block_carries_the_left_out_headings(self):
+        block = _scoped_rules_obj(SCOPED_BODY).unit_block("worker", ["web/a.ts"])
+        assert isinstance(block, ScopedBlock)
+        assert JAVA_RULE_TEXT not in block.text
+        assert block.left_out == ("Java module boundaries",)
+
+
+class TestPerUnitSectionFilteringInTheRun:
+    def _run(self, *, scoped_rules=None, trace=None, **kw):
+        llm = _ScriptedLLM(chunk=TS_RAW)
+        res = orchestrate_review(
+            FakeForge(diff=ONE_TS_DIFF), REF, llm, post=False, max_workers=1,
+            rules=_scoped_rules_obj(SCOPED_BODY), scoped_rules=scoped_rules,
+            trace_file=str(trace) if trace else None, **kw,
+        )
+        return res, llm
+
+    @staticmethod
+    def _worker_systems(llm):
+        return [system for system, _user in llm.prompts if "systemic sweep" not in system]
+
+    def test_the_chunk_prompt_leaves_the_java_section_out(self):
+        _res, llm = self._run()
+        (system,) = self._worker_systems(llm)
+        assert JAVA_RULE_TEXT not in system
+        assert TS_RULE_TEXT in system and GENERAL_RULE_TEXT in system
+        assert JAVA_LEFT_OUT_NOTE in system
+
+    def test_rule_scoping_off_offers_every_section(self):
+        _res, llm = self._run(rule_scoping="off")
+        (system,) = self._worker_systems(llm)
+        assert JAVA_RULE_TEXT in system and "left out" not in system
+
+    def test_the_chunk_start_event_names_the_left_out_headings(self, tmp_path):
+        trace = tmp_path / "run.jsonl"
+        self._run(trace=trace)
+        events = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
+        starts = [e for e in events if e.get("node") == "chunk" and e.get("phase") == "start"]
+        assert starts and all(
+            e["meta"]["rules_left_out"] == ["Java module boundaries"] for e in starts
+        )
+        assert all("rules" not in e["meta"] for e in starts)
+        sweeps = [e for e in events if e.get("node") == "sweep" and e.get("phase") == "start"]
+        assert [e["meta"].get("rules_left_out") for e in sweeps] == [["Java module boundaries"]]
+
+    def test_scoped_rules_runs_filter_both_bodies(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "svc.md").write_text(
+            "## Python services\n\n- py only rule\n\n## Shared\n\n- shared rule\n", encoding="utf-8",
+        )
+        scoped = load_scoped_rules(["svc.md"], max_chars=24000, source="--scoped-rules")
+        _res, llm = self._run(scoped_rules=scoped)
+        (system,) = self._worker_systems(llm)
+        assert JAVA_RULE_TEXT not in system and "py only rule" not in system
+        assert "shared rule" in system and TS_RULE_TEXT in system

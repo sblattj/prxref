@@ -45,7 +45,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .llm import ConfigError
 from .quality import SEVERITIES
@@ -126,7 +126,7 @@ class ReviewRules:
     applies_to: tuple[str, ...] | None = None
     sections: tuple[RuleSection, ...] = ()
 
-    def prompt_block(self, unit: str) -> str:
+    def prompt_block(self, unit: str, paths: Sequence[str] | None = None) -> str:
         """The system-prompt block for one review unit (``"worker"`` or ``"sweep"``).
 
         The block opens with :data:`RULES_HEADING` and a framing paragraph for
@@ -135,18 +135,42 @@ class ReviewRules:
         listing the map in file order follows when the map is non-empty, then
         the body inside ``<team_rules>`` tags when it is non-empty, then a
         truncation line when the cap cut it. Each ATX section of the body
-        that declares a ``scope:`` line gains `` (applies to: <token>,
-        ...)`` after its heading text (#75) — annotation only, no text
-        removed — and a body with no such section renders byte-identically
-        to the pre-#75 block. Deterministic, and ``""`` when both the body
-        and the map are empty, so an empty file adds nothing. Any other
-        ``unit`` raises ``ValueError``.
+        that declares a scope gains `` (applies to: <token>, ...)`` after its
+        heading text (#75), and a body with no such section renders
+        byte-identically to the pre-#75 block. Deterministic, and ``""`` when
+        both the body and the map are empty, so an empty file adds nothing.
+        Any other ``unit`` raises ``ValueError``.
+
+        ``paths`` are the unit's diff paths. ``None`` (the default) renders
+        every section. Otherwise each scoped section no path falls in is left
+        out of the body (:func:`filter_rule_sections`) and one
+        :data:`RULES_LEFT_OUT_NOTE` line naming them closes the block; when
+        nothing is left out the block is the same as with ``None``.
         """
+        return self.unit_block(unit, paths).text
+
+    def unit_block(self, unit: str, paths: Sequence[str] | None = None) -> ScopedBlock:
+        """:meth:`prompt_block` as a :class:`ScopedBlock`, with ``left_out`` naming the sections it left out.
+
+        ``files`` is always ``()``: this is the always-on file's block alone,
+        which the orchestrator builds per unit when the always-on file
+        declares scoped sections and no path-scoped rules are loaded.
+        """
+        text, left_out = self._render(unit, paths)
+        if text and left_out:
+            text = f"{text}\n\n{_left_out_line(left_out)}"
+        return ScopedBlock(text, left_out=left_out if text else (), scoped=False)
+
+    def _render(self, unit: str, paths: Sequence[str] | None) -> tuple[str, tuple[str, ...]]:
+        """The block without its left-out line, and the headings :func:`filter_rule_sections` left out."""
         if unit not in _FRAMING:
             raise ValueError(f"unit must be one of {', '.join(_UNITS)}, got {unit!r}")
         severity_map = dict(self.severity_map or {})
-        if not self.body.text and not severity_map:
-            return ""
+        body_text, left_out = (
+            (self.body.text, ()) if paths is None else filter_rule_sections(self.body.text, paths)
+        )
+        if not body_text and not severity_map:
+            return "", ()
         parts = [RULES_HEADING, _FRAMING[unit]]
         if severity_map:
             entries = "; ".join(f"`{word}` → `{tier}`" for word, tier in severity_map.items())
@@ -154,14 +178,14 @@ class ReviewRules:
                 f"Team severity words map onto that vocabulary: {entries}. Classify a "
                 "problem by the team's definition, then write the mapped word in `severity`."
             )
-        if self.body.text:
-            parts.append(f"<team_rules>\n{_annotate_rule_scopes(self.body.text)}\n</team_rules>")
+        if body_text:
+            parts.append(f"<team_rules>\n{_annotate_rule_scopes(body_text)}\n</team_rules>")
         if self.body.truncated:
             parts.append(
                 f"[team rules truncated: only the first {self.body.max_chars} of "
                 f"{self.body.chars} characters are shown]"
             )
-        return "\n\n".join(parts)
+        return "\n\n".join(parts), left_out
 
     def record(self) -> dict[str, object]:
         """Return the run-record view: ``path``, ``sha256``, ``chars``,
@@ -423,6 +447,127 @@ def _annotate_rule_scopes(text: str) -> str:
     for index, _name, tokens in _scoped_sections(lines):
         lines[index] = f"{lines[index].rstrip()} (applies to: {', '.join(tokens)})"
     return "\n".join(lines)
+
+
+# Rule-scope vocabulary (#75): which paths one ``scope:`` token of a rules
+# section covers. Matched against the path's BASENAME, case-sensitively, with
+# fnmatch. A token absent from every table here covers every path — it is
+# inert, because an unknown word must not silently suppress rules — and so
+# does the explicit ``comments`` token.
+_JAVA_SCOPE_GLOBS: tuple[str, ...] = ("*.java", "*.kt", "pom.xml", "build.gradle*")
+_TS_SCOPE_GLOBS: tuple[str, ...] = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs")
+_DOCS_SCOPE_GLOBS: tuple[str, ...] = ("*.md", "*.mdx", "*.rst", "*.txt")
+_SCOPE_BASENAME_GLOBS: Mapping[str, tuple[str, ...]] = {
+    "java": _JAVA_SCOPE_GLOBS,
+    "jvm": _JAVA_SCOPE_GLOBS,
+    "python": ("*.py",),
+    "typescript": _TS_SCOPE_GLOBS,
+    "javascript": _TS_SCOPE_GLOBS,
+    "ts": _TS_SCOPE_GLOBS,
+    "js": _TS_SCOPE_GLOBS,
+    "docs": _DOCS_SCOPE_GLOBS,
+    "markdown": _DOCS_SCOPE_GLOBS,
+}
+_SPEC_SCOPE_TOKENS: frozenset[str] = frozenset({"openapi", "specs"})
+_SPEC_SCOPE_SUFFIXES: tuple[str, ...] = (".yaml", ".yml", ".json")
+_SPEC_NAME_MARKS: tuple[str, ...] = ("openapi", "swagger")
+_SPEC_SCOPE_DIRS: frozenset[str] = frozenset({"spec", "specs", "openapi", "swagger"})
+_ANY_HEADING_RE = re.compile(r"^(#+)[ \t]+\S")
+
+RULES_LEFT_OUT_NOTE: str = "[rules for other languages/file types left out: {headings}]"
+"""The one line closing a unit's team-rules block when scoped sections were left out (#75).
+
+``{headings}`` is the left-out section headings, comma-separated in body
+order (always-on file first, then each scoped file in load order).
+"""
+
+
+def scope_token_covers(token: str, path: str) -> bool:
+    """True when one ``scope:`` token covers ``path`` (#75).
+
+    ``token`` is casefolded as :func:`parse_rule_sections` returns it;
+    ``path`` is a diff path, POSIX and relative to the repository root.
+    ``java``/``jvm`` cover ``*.java``, ``*.kt``, ``pom.xml`` and
+    ``build.gradle*``; ``python`` covers ``*.py``; ``typescript``,
+    ``javascript``, ``ts`` and ``js`` cover the TypeScript and JavaScript
+    extensions; ``docs``/``markdown`` cover ``*.md``, ``*.mdx``, ``*.rst``
+    and ``*.txt``; ``openapi``/``specs`` cover ``*.yaml``, ``*.yml`` and
+    ``*.json`` whose basename mentions ``openapi`` or ``swagger`` or that
+    sit under a ``spec``/``specs``/``openapi``/``swagger`` directory. Every
+    token outside the vocabulary returns ``True`` — inert, never filtering —
+    and so does ``comments``. The prompt filter
+    (:func:`filter_rule_sections`) and the post-hoc label check
+    (:func:`prxref.quality.apply_rule_scope_check`) share it, so a section
+    a unit was shown is one whose labels the check keeps.
+    """
+    base = path.rsplit("/", 1)[-1].casefold()
+    globs = _SCOPE_BASENAME_GLOBS.get(token)
+    if globs is not None:
+        return any(fnmatch.fnmatchcase(base, pattern) for pattern in globs)
+    if token in _SPEC_SCOPE_TOKENS:
+        if not any(base.endswith(suffix) for suffix in _SPEC_SCOPE_SUFFIXES):
+            return False
+        directories = (part.casefold() for part in path.split("/")[:-1])
+        return any(mark in base for mark in _SPEC_NAME_MARKS) or any(
+            part in _SPEC_SCOPE_DIRS for part in directories
+        )
+    return True
+
+
+def _heading_level(line: str) -> int:
+    """The ``#`` count of a Markdown ATX heading line (any depth); ``0`` for any other line."""
+    match = _ANY_HEADING_RE.match(line)
+    return len(match.group(1)) if match is not None else 0
+
+
+def filter_rule_sections(text: str, paths: Sequence[str]) -> tuple[str, tuple[str, ...]]:
+    """Leave out the scoped sections of a rules ``text`` that no path of a review unit falls in (#75).
+
+    ``paths`` are the unit's diff paths. A scoped section (one
+    :func:`parse_rule_sections` would return) is kept when at least one
+    path is covered by EVERY token of its scope per
+    :func:`scope_token_covers` — the same predicate the post-hoc label check
+    applies to one finding's path. Any other scoped section is left out:
+    its heading line and every line up to the next heading of the same or a
+    higher level, so its own sub-sections leave with it. Unscoped sections,
+    text before the first heading, and every section an unknown scope token
+    alone scopes are always kept.
+
+    Returns the text with those sections removed and the left-out headings
+    (names as :class:`RuleSection` holds them) in body order, a sub-section
+    of a left-out section not listed on its own. ``paths`` with no non-empty
+    entry filters nothing, so a caller with no paths to judge by gets the
+    whole text, and a text with nothing to leave out comes back
+    byte-identical with ``()``.
+    """
+    if isinstance(paths, str):
+        paths = (paths,)
+    wanted = tuple(path for path in paths if path)
+    if not wanted:
+        return text, ()
+    lines = text.split("\n")
+    removed = [False] * len(lines)
+    left_out: list[str] = []
+    for index, name, tokens in _scoped_sections(lines):
+        if removed[index]:
+            continue
+        if any(all(scope_token_covers(token, path) for token in tokens) for path in wanted):
+            continue
+        level = _heading_level(lines[index])
+        end = index + 1
+        while end < len(lines) and not 0 < _heading_level(lines[end]) <= level:
+            end += 1
+        for position in range(index, end):
+            removed[position] = True
+        left_out.append(name)
+    if not left_out:
+        return text, ()
+    return "\n".join(line for line, gone in zip(lines, removed, strict=True) if not gone).rstrip("\n"), tuple(left_out)
+
+
+def _left_out_line(headings: Sequence[str]) -> str:
+    """The :data:`RULES_LEFT_OUT_NOTE` line naming ``headings``."""
+    return RULES_LEFT_OUT_NOTE.format(headings=", ".join(headings))
 
 
 APPLIES_TO_KEYS: frozenset[str] = frozenset({"applies_to", "applyto"})
@@ -766,7 +911,12 @@ class ScopedBlock:
     that was not omitted, the truncated one included. ``truncated`` is the
     path of the file the per-unit cap cut short, or ``None``; ``omitted``
     holds the paths of the selected files the cap left out entirely, in load
-    order.
+    order. ``left_out`` holds the headings of the scoped sections
+    (:func:`filter_rule_sections`, #75) the block left out because none of
+    the unit's paths falls in their scope, in block order; ``()`` when
+    section filtering is off or left nothing out. ``scoped`` is ``False``
+    only for a block :meth:`ReviewRules.unit_block` built from the always-on
+    file alone, which carries no path-scoped files to report.
 
     Building a block logs nothing. The orchestrator reads ``truncated`` and
     ``omitted`` across every unit of a run and logs one WARNING for the run
@@ -777,6 +927,8 @@ class ScopedBlock:
     files: tuple[ReviewRules, ...] = ()
     truncated: str | None = None
     omitted: tuple[str, ...] = ()
+    left_out: tuple[str, ...] = ()
+    scoped: bool = True
 
 
 @dataclass(frozen=True)
@@ -845,7 +997,13 @@ class ScopedRules:
         return {**always_map, **self.severity_map}
 
     def unit_block(
-        self, unit: str, paths: Sequence[str], always_on: ReviewRules | None, *, max_chars: int
+        self,
+        unit: str,
+        paths: Sequence[str],
+        always_on: ReviewRules | None,
+        *,
+        max_chars: int,
+        scope_sections: bool = False,
     ) -> ScopedBlock:
         """Build the team-rules block for one review unit (``"worker"`` or ``"sweep"``).
 
@@ -883,6 +1041,14 @@ class ScopedRules:
         with a body is omitted, and one marker naming the omitted paths
         closes the block. Pure: it logs nothing (see :class:`ScopedBlock`).
         Any other ``unit``, or ``max_chars`` below 1, raises ``ValueError``.
+
+        ``scope_sections`` (#75, the orchestrator passes ``PRXREF_RULE_SCOPING``
+        on) filters the always-on body and each selected scoped body by
+        ``paths`` with :func:`filter_rule_sections` before the cap counts
+        them, so a scoped section none of the unit's paths falls in is not
+        offered to it; one :data:`RULES_LEFT_OUT_NOTE` line naming every
+        left-out heading then closes the block, and ``left_out`` lists them.
+        ``False`` (the default) leaves every body whole.
         """
         if unit not in _FRAMING:
             raise ValueError(f"unit must be one of {', '.join(_UNITS)}, got {unit!r}")
@@ -891,10 +1057,14 @@ class ScopedRules:
         selected = self.select(paths)
         always_map = dict(always_on.severity_map or {}) if always_on is not None else {}
         merged = self.merged_severity_map(always_on)
+        filter_paths = paths if scope_sections else None
         if not selected and merged == always_map:
-            return ScopedBlock(always_on.prompt_block(unit) if always_on is not None else "")
+            if always_on is None:
+                return ScopedBlock("")
+            return replace(always_on.unit_block(unit, filter_paths), scoped=True)
         body = always_on.body if always_on is not None else _NO_BODY
-        head = ReviewRules(path="", body=body, severity_map=merged).prompt_block(unit)
+        head, head_left_out = ReviewRules(path="", body=body, severity_map=merged)._render(unit, filter_paths)
+        left_out: list[str] = list(head_left_out)
         parts: list[str] = []
         files: list[ReviewRules] = []
         omitted: list[str] = []
@@ -902,6 +1072,9 @@ class ScopedRules:
         room = max_chars
         for rules in selected:
             text = rules.body.text
+            if filter_paths is not None:
+                text, gone = filter_rule_sections(text, filter_paths)
+                left_out.extend(gone)
             if text and not room:
                 omitted.append(rules.path)
                 continue
@@ -920,12 +1093,16 @@ class ScopedRules:
                 f"[team rules omitted: {', '.join(omitted)} (over the {max_chars}-character limit "
                 "on scoped rules for one review unit)]"
             )
+        if left_out and (head or parts):
+            parts.append(_left_out_line(left_out))
         if parts:
             head = head or f"{RULES_HEADING}\n\n{_FRAMING[unit]}"
             text = "\n\n".join([head, *parts])
         else:
             text = head
-        return ScopedBlock(text, tuple(files), truncated, tuple(omitted))
+        return ScopedBlock(
+            text, tuple(files), truncated, tuple(omitted), tuple(left_out) if text else (),
+        )
 
     def record(self) -> dict[str, object]:
         """Return the run-record view, JSON-native values only and never the rules text.
