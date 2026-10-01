@@ -96,6 +96,9 @@ _HEADING_SCOPE_NOUNS: frozenset[str] = frozenset(
     {"java", "jvm", "python", "typescript", "javascript", "ts", "js", "markdown", "openapi"}
 )
 _SCOPE_SPLIT_RE = re.compile(r"[,\s]+")
+# A fenced code block's opening or closing line (#75): up to three spaces,
+# then three or more backticks or tildes, then the info string or nothing.
+_CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 @dataclass(frozen=True)
@@ -173,13 +176,19 @@ class ReviewRules:
         return ScopedBlock(text, left_out=left_out if text else (), scoped=False)
 
     def _render(self, unit: str, paths: Sequence[str] | None) -> tuple[str, tuple[str, ...]]:
-        """The block without its left-out line, and the headings :func:`filter_rule_sections` left out."""
+        """The block without its left-out line, and the headings :func:`filter_rule_sections` left out.
+
+        The ``(applies to: ...)`` annotation is decided on the whole body
+        before the left-out sections are removed, so a section that survives
+        keeps its annotation whatever else the unit's paths left out.
+        """
         if unit not in _FRAMING:
             raise ValueError(f"unit must be one of {', '.join(_UNITS)}, got {unit!r}")
         severity_map = dict(self.severity_map or {})
-        body_text, left_out = (
-            (self.body.text, ()) if paths is None else filter_rule_sections(self.body.text, paths)
-        )
+        lines = self.body.text.split("\n")
+        removed, left_out = _left_out_lines(lines, paths) if paths is not None else ([], ())
+        annotated = _annotated_lines(lines)
+        body_text = _kept_text(annotated, removed) if left_out else "\n".join(annotated)
         if not body_text and not severity_map:
             return "", ()
         parts = [RULES_HEADING, _FRAMING[unit]]
@@ -190,7 +199,7 @@ class ReviewRules:
                 "problem by the team's definition, then write the mapped word in `severity`."
             )
         if body_text:
-            parts.append(f"<team_rules>\n{_annotate_rule_scopes(body_text)}\n</team_rules>")
+            parts.append(f"<team_rules>\n{body_text}\n</team_rules>")
         if self.body.truncated:
             parts.append(
                 f"[team rules truncated: only the first {self.body.max_chars} of "
@@ -380,16 +389,52 @@ def _heading_scope_tokens(name: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def _document_title_index(lines: Sequence[str]) -> int:
+def _code_lines(lines: Sequence[str]) -> list[bool]:
+    """Mark each line of ``lines`` that belongs to a fenced code block, fence lines included (#75).
+
+    A fence opens on a line of three or more backticks or tildes indented at
+    most three spaces (a backtick fence's info string holding no backtick)
+    and closes on a line of the same character, at least as long, with
+    nothing but whitespace after it; an unclosed fence runs to the end of
+    ``lines``. A ``#`` line inside one is code — a shell or Python comment —
+    so the heading reads of scope inference skip every marked line.
+    """
+    marks: list[bool] = []
+    fence = ""
+    for line in lines:
+        match = _CODE_FENCE_RE.match(line)
+        if fence:
+            marks.append(True)
+            marker = match.group(1) if match else ""
+            if marker[:1] == fence[0] and len(marker) >= len(fence) and not match.group(2).strip():
+                fence = ""
+            continue
+        if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+            fence = match.group(1)
+            marks.append(True)
+            continue
+        marks.append(False)
+    return marks
+
+
+def _heading_levels(lines: Sequence[str], code: Sequence[bool]) -> list[int]:
+    """:func:`_heading_level` of each line, ``0`` for a line inside a fenced code block (``code``)."""
+    return [0 if fenced else _heading_level(line) for line, fenced in zip(lines, code, strict=True)]
+
+
+def _document_title_index(lines: Sequence[str], code: Sequence[bool] | None = None) -> int:
     """The line index of ``lines``' document title, ``-1`` when it has none.
 
     The title is the body's first heading (any depth) when no later heading
     has its level or a higher one, so its section runs to the end of the
     body, and it is either an H1 or holds at least one later sub-heading.
     ``# Acme Java backend review rules`` over ``## General style`` is a
-    title; a lone ``## Java conventions`` section is not.
+    title; a lone ``## Java conventions`` section is not. A ``#`` line inside
+    a fenced code block is not a heading (:func:`_code_lines`; ``code`` is
+    its result when the caller has it).
     """
-    headings = [level for level in map(_heading_level, lines) if level]
+    levels = _heading_levels(lines, _code_lines(lines) if code is None else code)
+    headings = [level for level in levels if level]
     if not headings:
         return -1
     level, later = headings[0], headings[1:]
@@ -397,7 +442,7 @@ def _document_title_index(lines: Sequence[str]) -> int:
         return -1
     if level != 1 and not later:
         return -1
-    return next(index for index, line in enumerate(lines) if _heading_level(line))
+    return next(index for index, other in enumerate(levels) if other)
 
 
 def _scoped_sections(lines: Sequence[str]):
@@ -418,12 +463,14 @@ def _scoped_sections(lines: Sequence[str]):
     Only a heading with both a name and at least one token is yielded, in
     body order; the generator resumes AT the candidate line, so a scope
     line is consumed once and a following heading still opens the next
-    section.
+    section. A ``#`` line inside a fenced code block (:func:`_code_lines`)
+    opens no section.
     """
-    title = _document_title_index(lines)
+    code = _code_lines(lines)
+    title = _document_title_index(lines, code)
     index = 0
     while index < len(lines):
-        heading = _SECTION_RE.match(lines[index])
+        heading = None if code[index] else _SECTION_RE.match(lines[index])
         if heading is None:
             index += 1
             continue
@@ -462,7 +509,8 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
     The document title infers nothing: the first heading, when no later
     heading of its level or higher closes it and it is an H1 or holds
     sub-headings, so ``# Acme Java backend review rules`` over ``## General
-    style`` leaves the file unscoped. Callers pass the CAPPED
+    style`` leaves the file unscoped. A ``#`` line inside a fenced code
+    block is code, not a heading. Callers pass the CAPPED
     body the prompt shows, so a section the cap cut away is not parsed
     either: the model cannot see it, so it is not one a label can be
     checked against.
@@ -477,11 +525,12 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
     scopes are per section by design.
     """
     lines = body.split("\n")
+    code = _code_lines(lines)
     sections: list[RuleSection] = []
     for index, name, tokens, any_scope in _scoped_sections(lines):
         items: list[str] = []
-        for line in lines[index + 1:]:
-            if _SECTION_RE.match(line):
+        for line, fenced in zip(lines[index + 1:], code[index + 1:], strict=True):
+            if not fenced and _SECTION_RE.match(line):
                 break
             text = _item_text(line)
             if text:
@@ -503,15 +552,17 @@ def parse_rule_index(body: str) -> tuple[RuleSection, ...]:
     lines (markup stripped, whitespace collapsed). Rule lines above the
     first heading form one leading section named ``""``, so a rules file of
     plain bullets with no heading is indexed too; a heading-less body with
-    no rule line, and the empty body, index to ``()``. Callers pass the
-    capped body the prompt shows.
+    no rule line, and the empty body, index to ``()``. A ``#`` line inside a
+    fenced code block opens no section. Callers pass the capped body the
+    prompt shows.
     """
     lines = body.split("\n")
+    code = _code_lines(lines)
     scopes = {index: (tokens, any_scope) for index, _name, tokens, any_scope in _scoped_sections(lines)}
     sections: list[RuleSection] = []
     name, scope, items = "", ((), False), []
     for index, line in enumerate(lines):
-        heading = _SECTION_RE.match(line)
+        heading = None if code[index] else _SECTION_RE.match(line)
         if heading is None:
             text = _item_text(line)
             if text:
@@ -560,21 +611,23 @@ def claim_kinds(text: str) -> frozenset[str]:
     return frozenset(kind for kind, pattern in _CLAIM_KIND_PATTERNS if pattern.search(folded))
 
 
-def _annotate_rule_scopes(text: str) -> str:
-    """Append each scoped section's ``(applies to: ...)`` after its heading line (#75).
+def _annotated_lines(lines: Sequence[str]) -> list[str]:
+    """``lines`` with each scoped section's ``(applies to: ...)`` after its heading line (#75).
 
     Pure annotation, nothing removed: a heading whose section declares a
     scope gains `` (applies to: <token>, <token>)`` with the tokens in file
     order, so the model sees which sections cannot cover the file it is
     reading; an inferred any-of scope joins its tokens with `` or `` instead
-    (``(applies to: python or typescript)``). Text with no scoped section
-    comes back byte-identical.
+    (``(applies to: python or typescript)``). Lines with no scoped section
+    come back unchanged. Callers pass the whole body, before any filtering,
+    so whether a heading is the document title is decided on the body as
+    written.
     """
-    lines = text.split("\n")
+    annotated = list(lines)
     for index, _name, tokens, any_scope in _scoped_sections(lines):
         joined = (" or " if any_scope else ", ").join(tokens)
-        lines[index] = f"{lines[index].rstrip()} (applies to: {joined})"
-    return "\n".join(lines)
+        annotated[index] = f"{annotated[index].rstrip()} (applies to: {joined})"
+    return annotated
 
 
 # Rule-scope vocabulary (#75): which paths one ``scope:`` token of a rules
@@ -681,31 +734,44 @@ def filter_rule_sections(text: str, paths: Sequence[str]) -> tuple[str, tuple[st
     of a left-out section not listed on its own. ``paths`` with no non-empty
     entry filters nothing, so a caller with no paths to judge by gets the
     whole text, and a text with nothing to leave out comes back
-    byte-identical with ``()``.
+    byte-identical with ``()``. A ``#`` line inside a fenced code block
+    neither opens a section nor ends one (:func:`_code_lines`).
     """
+    lines = text.split("\n")
+    removed, left_out = _left_out_lines(lines, paths)
+    if not left_out:
+        return text, ()
+    return _kept_text(lines, removed), left_out
+
+
+def _left_out_lines(lines: Sequence[str], paths: Sequence[str]) -> tuple[list[bool], tuple[str, ...]]:
+    """Which of ``lines`` :func:`filter_rule_sections` removes for ``paths``, and the left-out headings."""
     if isinstance(paths, str):
         paths = (paths,)
     wanted = tuple(path for path in paths if path)
-    if not wanted:
-        return text, ()
-    lines = text.split("\n")
     removed = [False] * len(lines)
+    if not wanted:
+        return removed, ()
+    levels = _heading_levels(lines, _code_lines(lines))
     left_out: list[str] = []
     for index, name, tokens, any_scope in _scoped_sections(lines):
         if removed[index]:
             continue
         if any(scope_covers(tokens, path, any_token=any_scope) for path in wanted):
             continue
-        level = _heading_level(lines[index])
+        level = levels[index]
         end = index + 1
-        while end < len(lines) and not 0 < _heading_level(lines[end]) <= level:
+        while end < len(lines) and not 0 < levels[end] <= level:
             end += 1
         for position in range(index, end):
             removed[position] = True
         left_out.append(name)
-    if not left_out:
-        return text, ()
-    return "\n".join(line for line, gone in zip(lines, removed, strict=True) if not gone).rstrip("\n"), tuple(left_out)
+    return removed, tuple(left_out)
+
+
+def _kept_text(lines: Sequence[str], removed: Sequence[bool]) -> str:
+    """The lines ``removed`` does not mark, joined, trailing newlines stripped."""
+    return "\n".join(line for line, gone in zip(lines, removed, strict=True) if not gone).rstrip("\n")
 
 
 def _left_out_line(headings: Sequence[str]) -> str:
