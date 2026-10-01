@@ -1031,8 +1031,8 @@ def _build_json_result(result: Any) -> dict:
     otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
     configured, the item count, how many chunk prompts matched items rode,
     and the per-unit character budget; never the evidence text), and so
-    is ``stable_ids`` (#71: ``null`` whenever ``PRXREF_STABLE_IDS`` is
-    off; otherwise ``{assigned, reused_from_verdict, reused_from_thread,
+    is ``stable_ids`` (#71: ``null`` only when ``PRXREF_STABLE_IDS`` is
+    ``0``; otherwise ``{assigned, reused_from_verdict, reused_from_thread,
     collisions}`` over every finding of the run), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",

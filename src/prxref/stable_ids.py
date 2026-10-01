@@ -32,8 +32,7 @@ signal), while the id stays anchor-free.
 :func:`apply_stable_ids` runs after both thread gates and before the
 quality gate, stamps ``id``, ``anchor_block`` and ``id_reused_from`` on
 every finding, and drops a finding whose id a loaded verdict store holds
-as refuted in an earlier run. Nothing runs unless the caller turns
-``stable_ids`` on; with it off every finding keeps ``id=None`` and the
+as refuted in an earlier run. The pass is on by default; with ``stable_ids`` off every finding keeps ``id=None`` and the
 run is byte-identical to one that never heard of the feature.
 """
 from __future__ import annotations

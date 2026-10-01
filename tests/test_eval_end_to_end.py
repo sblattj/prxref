@@ -360,6 +360,14 @@ COMPARE_GOLDEN = """\
 | Review cost | $0.0100 | $0.0100 | $0.0000 |
 | Judge cost | $0.0040 | $0.0040 | $0.0000 |
 
+## Stable-id reuse
+
+| Case | A ids | B ids | Reuse |
+|---|---:|---:|---:|
+| case-001-mcp-protocol-upgrade | 1 | 1 | 100% |
+| case-grouped | 1 | 1 | 100% |
+| case-pinned | 1 | 2 | 50% |
+
 ## Changed labels
 
 | Case | Label | Location | A | B |
