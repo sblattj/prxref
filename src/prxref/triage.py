@@ -71,27 +71,6 @@ def _rule_char_dropped(ch: str) -> bool:
     return ch in _RULE_BIDI_CONTROLS or unicodedata.category(ch) in _RULE_DROPPED_CATEGORIES
 
 
-#: The one ``evidence`` label a finding may carry (#69): the model marked
-#: the finding as contradicted by the execution evidence shown in its
-#: prompt, so the deterministic pass downgrades it to ``warning``.
-EVIDENCE_CONTRADICTS: str = "contradicts"
-
-
-def normalize_evidence(raw: object) -> str | None:
-    """Map a model-supplied ``evidence`` value onto its label, or ``None``.
-
-    Only the exact word ``contradicts`` (any case, surrounding whitespace
-    stripped) survives; every other value — a non-string, ``None``, a
-    misspelling, a free-text explanation — maps to ``None``, because the
-    deterministic pass acts on the label alone and must never guess a
-    contradiction from prose. Never raises.
-    """
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip().lower()
-    return value if value == EVIDENCE_CONTRADICTS else None
-
-
 def normalize_rule(raw: object) -> str | None:
     """Map a model-supplied ``rule`` value onto a short label, or ``None``.
 
@@ -157,15 +136,6 @@ class Finding:
     never stamped); it changes no posting behaviour and is not part of any
     identity or dedup key.
 
-    ``evidence`` is one finding-level verdict execution evidence produced
-    (issue #69): ``"contradicts"``, as normalized by
-    :func:`normalize_evidence`, when the model concedes the evidence shown
-    in its prompt contradicts the finding, and ``None`` otherwise —
-    including on every unit whose prompt carried no evidence. It is not
-    serialized with the finding's JSON, not part of any identity or dedup
-    key, and no pass reads it: the evidence drop
-    (:func:`prxref.quality.apply_evidence_drops`) is deterministic.
-
     ``id``, ``anchor_block`` and ``id_reused_from`` are the stable-id
     fields (issue #71), stamped by
     :func:`prxref.stable_ids.apply_stable_ids` and ``None`` on every
@@ -195,7 +165,6 @@ class Finding:
     suggestion_end_line: int = 0
     previous_thread: str | None = None
     anchor_unverified: bool = False
-    evidence: str | None = None
     id: str | None = None
     anchor_block: str | None = None
     id_reused_from: str | None = None
