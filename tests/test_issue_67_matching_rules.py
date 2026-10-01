@@ -12,9 +12,11 @@ the chunk worker — which sees the full diff text — can carry this rule; the
 tests pin placement, plumbing and the two acceptance behaviours through a
 fake LLM. The fake LLM is prompt-sensitive: it answers with the canned finding only
 when the rendered prompt carries the Matching rules section. The live-model
-half (a real model enumerating the captured inputs) is the eval pair
-tests/evals/case-004-spa-dotted-route (the rule captures a dotted route) and
-case-005-spa-uuid-route (it captures none).
+half (a real model enumerating the captured inputs) is NOT covered by the
+eval suite: EVAL_PINS pins routing_probe off, which cuts the Matching rules
+section from every eval-run prompt, so tests/evals/case-004-spa-dotted-route
+and case-005-spa-uuid-route measure the model without this rule. They are
+dotted-route and UUID-route cases only for a run with routing_probe on.
 """
 from __future__ import annotations
 
