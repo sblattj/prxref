@@ -1,4 +1,4 @@
-"""Deterministic, opt-in CI-wiring check (issue #66).
+"""Deterministic CI-wiring check (issue #66), on by default.
 
 A PR that adds a verification script (a ``scripts/verify.sh`` smoke test, a
 new test file, a check flag) has only partly met an acceptance criterion
@@ -17,7 +17,7 @@ repository's CI files, so every I/O it makes is a ``read`` callable the
 orchestrator passes in (the forge's head-sha reads or ``--repo-dir``,
 never the ``repo_context`` reader whose chunk caps a CI file could starve
 on), bounded by :data:`MAX_CI_FILES` literal reads per run. The check is
-opt-in — ``ci_wiring = "on"`` — and never changes the verdict: a finding
+on by default — ``ci_wiring = "off"`` turns it off — and never changes the verdict: a finding
 is ``spec`` when the ticket mentions regression checks, CI, pipelines or
 automated tests (relabeled ``warning`` by spec grounding on an ungrounded
 run) and ``warning`` otherwise.
@@ -31,6 +31,17 @@ that same Makefile, names it; ``npm run verify``, ``npm test``,
 ``package.json`` ``scripts`` entry. A runner file is read only when a CI
 invocation line names a runner and some check is not invoked directly,
 and only when the listing shows it (or the source cannot list).
+
+A check can also be a runner target (OD10's target kind): a rule the PR
+adds to the root Makefile, or a ``scripts`` entry it adds to the root
+``package.json``, whose name says verify/smoke/check or is a whole
+``test``/``tests``/``e2e`` token. It is wired when a CI invocation line
+runs it (``make verify``, ``npm run smoke``, ``yarn smoke``) or runs a
+runner entry that reaches it one runner file deep — a make goal whose
+prerequisites reach it, or a recipe or script body that runs it
+(``$(MAKE) verify`` included, for a target candidate only). A
+target in a nested Makefile or workspace ``package.json`` is never a
+candidate, since the one-hop follow reads only the root runner files.
 
 Known false negatives (a check reported wired that CI never runs),
 accepted for v1: a CI job that only copies the script
@@ -146,19 +157,35 @@ _YARN_BUILTINS = frozenset({
 _MAKE_RULE_RE = re.compile(r"^(?P<targets>[^\s:=#][^:=#]*?)\s*::?(?!=)(?P<rest>.*)$")
 
 
+_TEST_TARGET_TOKENS = frozenset({"test", "tests", "e2e"})
+
+_MAKE_VAR_RE = re.compile(r"\$[({]MAKE[)}]")
+
+_JSON_STRING_KEY_RE =re.compile(r'^\s*"(?P<key>[^"\\]+)"\s*:\s*"')
+
+
 @dataclass(frozen=True)
 class CiCandidate:
-    """One check-shaped file the PR adds or changes.
+    """One check-shaped file, or runner target, the PR adds or changes.
 
     ``path`` is the diff path; ``reason`` is the human phrase naming why
     the file counts (which hint matched, the shebang, or a test file
     outside the runner's default include) — it rides the finding body and
-    the run record unchanged.
+    the run record unchanged. ``target`` is None for a file candidate and
+    the runner entry (``("make", name)`` or ``("npm", name)``, the shape
+    :func:`runner_targets` returns) for a target candidate, whose ``path``
+    is then the root Makefile or ``package.json`` that defines it.
     """
 
     path: str
     reason: str
     new: bool = True
+    target: tuple[str, str] | None = None
+
+    @property
+    def label(self) -> str:
+        """The finding's subject: the diff path, or the target's command spelling."""
+        return _hop_label(self.target) if self.target is not None else self.path
 
 
 def _added_lines(file: FileDiff):
@@ -234,8 +261,143 @@ def _looks_like_test(path: str) -> bool:
     )
 
 
-def candidate_checks(files: Sequence[FileDiff]) -> list[CiCandidate]:
-    """The check-shaped files among ``files``.
+def _target_hint(name: str) -> str | None:
+    """The word that makes a runner target check-shaped, or None.
+
+    A :data:`CI_SUFFIX_HINT` word inside any name token, or a whole
+    ``test``/``tests``/``e2e`` token: ``verify``, ``smoke-api``,
+    ``test-integration`` and ``e2e`` count, ``latest`` and ``build`` do not.
+    """
+    tokens = _name_tokens(name)
+    return _hint_in_tokens(tokens) or next(
+        (token for token in tokens if token in _TEST_TARGET_TOKENS), None,
+    )
+
+
+def _rule_line(text: str) -> tuple[list[str], bool]:
+    """The targets a Makefile line defines, and whether it is a target-specific assignment.
+
+    A recipe (tab-indented) line or any non-rule line defines nothing. A
+    special (``.PHONY``), pattern (``%``) or variable-built (``$``) target
+    is never returned.
+    """
+    if text.startswith("\t"):
+        return [], False
+    match = _MAKE_RULE_RE.match(text)
+    if match is None:
+        return [], False
+    targets = [
+        target for target in match.group("targets").split()
+        if not target.startswith(".") and "%" not in target and "$" not in target
+    ]
+    return targets, "=" in match.group("rest").partition(";")[0]
+
+
+def _make_target_candidates(file: FileDiff) -> list[CiCandidate]:
+    """The check-shaped make targets an added rule line of a root Makefile defines.
+
+    A target already on a removed or context line of the diff existed
+    before the PR and never counts, and neither does a target-specific
+    variable line (``verify: GOFLAGS=-count=1``), which defines no rule.
+    """
+    existing: set[str] = set()
+    added: dict[str, None] = {}
+    for hunk in file.hunks:
+        for ln in hunk.lines:
+            targets, assignment = _rule_line(ln.text)
+            if ln.kind != "+":
+                existing.update(targets)
+            elif not assignment:
+                added.update(dict.fromkeys(targets))
+    out: list[CiCandidate] = []
+    for name in added:
+        hint = _target_hint(name)
+        if name in existing or hint is None:
+            continue
+        out.append(CiCandidate(
+            file.path, f"it is a new make target whose name mentions {hint!r}",
+            True, ("make", name),
+        ))
+    return out
+
+
+def _npm_target_candidates(
+    file: FileDiff, read: Callable[[str], str | None] | None,
+) -> list[CiCandidate]:
+    """The check-shaped ``scripts`` entries an added line of the root package.json defines.
+
+    An added string-valued ``"name": "..."`` line whose key is on no
+    removed or context line is a candidate only when the head
+    ``package.json`` (through ``read``) lists it under ``scripts`` — a
+    hunk rarely shows the enclosing object, and a dependency named
+    ``check-types`` is not a script. No ``read``, a miss, a raising read
+    or a malformed manifest yields nothing.
+    """
+    existing: set[str] = set()
+    added: dict[str, None] = {}
+    for hunk in file.hunks:
+        for ln in hunk.lines:
+            match = _JSON_STRING_KEY_RE.match(ln.text)
+            if match is None:
+                continue
+            if ln.kind == "+":
+                added.setdefault(match.group("key"))
+            else:
+                existing.add(match.group("key"))
+    wanted = {
+        name: hint for name in added
+        if name not in existing and (hint := _target_hint(name)) is not None
+    }
+    if not wanted or read is None:
+        return []
+    try:
+        text = read(file.path)
+    except Exception:  # noqa: BLE001
+        return []
+    scripts = _npm_scripts(text) if isinstance(text, str) else {}
+    return [
+        CiCandidate(
+            file.path, f"it is a new package.json script whose name mentions {hint!r}",
+            True, ("npm", name),
+        )
+        for name, hint in wanted.items()
+        if name in scripts
+    ]
+
+
+def target_candidates(
+    files: Sequence[FileDiff],
+    read: Callable[[str], str | None] | None = None,
+) -> list[CiCandidate]:
+    """The check-shaped runner targets ``files`` add (OD10's target kind).
+
+    Only the root runner files the one-hop follow reads count: a rule
+    added to a root ``GNUmakefile``/``makefile``/``Makefile``, matched by
+    ``make <name>``, and a ``scripts`` entry added to the root
+    ``package.json``, matched by ``npm run``/``yarn``/``pnpm`` (see
+    :func:`runner_targets`). A target is check-shaped when its name
+    carries a :data:`CI_SUFFIX_HINT` word or a whole ``test``/``tests``/
+    ``e2e`` token. The Makefile scan reads only the diff; a package.json
+    entry is confirmed against the head manifest through ``read`` (one
+    read, and only when the diff adds a check-shaped key). Never raises.
+    """
+    out: list[CiCandidate] = []
+    for file in files:
+        if file.status == "removed" or file.is_binary:
+            continue
+        if file.path in MAKEFILE_NAMES:
+            out.extend(_make_target_candidates(file))
+        elif file.path == PACKAGE_JSON:
+            out.extend(_npm_target_candidates(file, read))
+    return out
+
+
+def candidate_checks(
+    files: Sequence[FileDiff],
+    *,
+    read: Callable[[str], str | None] | None = None,
+) -> list[CiCandidate]:
+    """The check-shaped files and runner targets among ``files``.
 
     A file that is not ``removed`` counts when it is new (any status but
     ``modified``) and its basename contains a :data:`CI_SUFFIX_HINT` word
@@ -243,8 +405,12 @@ def candidate_checks(files: Sequence[FileDiff]) -> list[CiCandidate]:
     gains (on an added line, absent from the removed lines) contains such
     a word — so a modified script counts only for a new flag, and a
     body-only edit never does. A NEW file whose name says test or spec but
-    sits outside every default include counts too. The result is sorted by path, so both the findings and
-    the run record are deterministic. Pure: reads only the parsed diff.
+    sits outside every default include counts too. The
+    :func:`target_candidates` follow, each on the runner file that
+    defines it (``read`` is handed through for the package.json check).
+    The result is sorted by path, then target, so both the findings and
+    the run record are deterministic. Reads nothing but the parsed diff
+    and, for a package.json target, the head manifest.
     """
     candidates: dict[str, tuple[str, bool]] = {}
     for file in files:
@@ -283,10 +449,12 @@ def candidate_checks(files: Sequence[FileDiff]) -> list[CiCandidate]:
                 "it is a new test file outside the runner's default include",
                 True,
             )
-    return [
+    out = [
         CiCandidate(path, reason, fresh)
-        for path, (reason, fresh) in sorted(candidates.items())
+        for path, (reason, fresh) in candidates.items()
     ]
+    out.extend(target_candidates(files, read))
+    return sorted(out, key=lambda candidate: (candidate.path, candidate.target or ("", "")))
 
 
 def _literal_globs(globs: Sequence[str]) -> list[str]:
@@ -533,26 +701,59 @@ def _runner_commands(
     """
     tool, target = hop
     if tool == "make":
-        name = _makefile(runners)
-        if name is None:
-            return []
-        recipes, prereqs, default_goal = _make_recipes(runners[name])
-        goal = target or default_goal
-        if not goal:
-            return []
-        commands: list[str] = []
-        seen: set[str] = set()
-        pending = [goal]
-        while pending:
-            current = pending.pop()
-            if current in seen:
-                continue
-            seen.add(current)
-            commands.extend(recipes.get(current, []))
-            pending.extend(prereqs.get(current, []))
-        return commands
+        return _make_walk(runners, target)[1]
     body = _npm_scripts(runners[PACKAGE_JSON]).get(target) if PACKAGE_JSON in runners else None
     return [body] if body else []
+
+
+def _make_walk(runners: Mapping[str, str], target: str) -> tuple[set[str], list[str]]:
+    """The targets ``make target`` reaches in the root Makefile, and their recipe lines.
+
+    ``""`` is the default goal; every prerequisite inside the same
+    Makefile is visited once, so a cycle terminates. No Makefile, or no
+    goal, reaches nothing.
+    """
+    name = _makefile(runners)
+    if name is None:
+        return set(), []
+    recipes, prereqs, default_goal = _make_recipes(runners[name])
+    goal = target or default_goal
+    if not goal:
+        return set(), []
+    commands: list[str] = []
+    seen: set[str] = set()
+    pending = [goal]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        commands.extend(recipes.get(current, []))
+        pending.extend(prereqs.get(current, []))
+    return seen, commands
+
+
+def _runs_target(
+    runners: Mapping[str, str] | None, hop: tuple[str, str], target: tuple[str, str],
+) -> bool:
+    """True when the CI runner entry ``hop`` runs the runner target ``target``.
+
+    Directly (``make verify`` for ``("make", "verify")``), or one runner
+    file deep: a make goal whose prerequisites in the same Makefile reach
+    the target, or a recipe line or package.json script body ``hop`` runs
+    that itself names the target (``"ci": "npm run lint && npm run
+    smoke"``, or a recipe ``$(MAKE) verify``, read as ``make verify``).
+    """
+    if hop == target:
+        return True
+    if not runners:
+        return False
+    if hop[0] == "make" and target[0] == "make" and target[1] in _make_walk(runners, hop[1])[0]:
+        return True
+    return any(
+        target in runner_targets(_MAKE_VAR_RE.sub("make", command))
+        for command in _runner_commands(runners, hop)
+    )
 
 
 def invokes(
@@ -576,9 +777,21 @@ def invokes(
     target's own recipe or script body names the candidate the same way —
     one hop, never a prerequisite or a nested runner call. Pure: reads
     only the texts it is handed.
+
+    A target candidate (``candidate.target`` set) is invoked by an
+    invocation line whose :func:`runner_targets` include it, or, with
+    ``runners``, by one whose runner entry reaches it one runner file deep
+    (see :func:`_runs_target`); a mention of its runner file's path is
+    not an invocation of the target.
     """
-    basename = PurePosixPath(candidate.path).name
     lines = _invocation_lines(text)
+    if candidate.target is not None:
+        return any(
+            _runs_target(runners, hop, candidate.target)
+            for line in lines
+            for hop in runner_targets(line)
+        )
+    basename = PurePosixPath(candidate.path).name
     if any(_mentions(line, candidate.path, basename) for line in lines):
         return True
     if not runners:
@@ -672,10 +885,25 @@ def ci_wiring_findings(
     runner files it needs (:data:`RUNNER_FILES`, at most one Makefile and
     one package.json) are read too and followed one hop; the body lists
     each one read after the CI files, naming the commands it was followed
-    from, while ``ci_files`` stays the CI files alone. Deterministic: no
-    model, no randomness, the only I/O the ``read`` callable.
+    from, while ``ci_files`` stays the CI files alone. A runner target the
+    PR adds (see :func:`target_candidates`) is a candidate too: its
+    finding sits on the root Makefile or package.json, titled with the
+    command that would run it (``make verify``, ``npm run smoke``), and a
+    package.json in the diff is read once to confirm the entry is a
+    script — the same read the runner hop reuses. Each path is read at
+    most once per run. Deterministic: no model, no randomness, the only
+    I/O the ``read`` callable.
     """
-    candidates = candidate_checks(files)
+    cache: dict[str, str | None] = {}
+    source = read
+
+    def read_once(path: str) -> str | None:
+        if path not in cache:
+            cache[path] = source(path)
+        return cache[path]
+
+    read = read_once
+    candidates = candidate_checks(files, read=read)
     picked_up_default = sorted({
         file.path for file in files
         if file.status == "added" and _looks_like_test(file.path)
@@ -732,14 +960,19 @@ def ci_wiring_findings(
             for ci_path, text in texts
         ):
             continue
+        if candidate.target is None:
+            subject = f"{'adds' if candidate.new else 'changes'} `{candidate.path}`"
+        else:
+            kind = "target" if candidate.target[0] == "make" else "script"
+            subject = f"adds the `{candidate.target[1]}` {kind} to `{candidate.path}`"
         findings.append(Finding(
             file=candidate.path,
             line=0,
             severity=severity,
             confidence=1.0,
-            title=f"`{candidate.path}` is {verb} but no CI job runs it",
+            title=f"`{candidate.label}` is {verb} but no CI job runs it",
             body=(
-                f"This PR {'adds' if candidate.new else 'changes'} `{candidate.path}`, and {candidate.reason}, but no "
+                f"This PR {subject}, and {candidate.reason}, but no "
                 f"CI configuration file the run could read invokes it, so the "
                 f"check runs only when someone remembers to run it locally. CI "
                 f"files searched:\n{searched}\nWire the check into CI (a workflow "
@@ -748,7 +981,11 @@ def ci_wiring_findings(
             ),
         ))
     record = {
-        "candidates": [candidate.path for candidate in candidates],
+        "candidates": [
+            candidate.path if candidate.target is None
+            else f"{candidate.path} ({candidate.label})"
+            for candidate in candidates
+        ],
         "ci_files": read_files,
         "picked_up_default": picked_up_default,
         "triggered": bool(findings),
