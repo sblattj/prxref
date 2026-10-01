@@ -47,7 +47,12 @@ Each review template is split at its first `## Review Context` line:
 - Everything above that line is the **system** prompt, prxref's instructions
   to the model. It is sent as written, and a placeholder in it is not
   filled. When configured, the team rules block and the ticket-scope request
-  are appended after it.
+  are appended after it. One section is switchable: with
+  `PRXREF_ROUTING_PROBE=off`, the `## Matching rules` section of the worker
+  system prompt (its heading and everything up to the next `## ` heading) is
+  cut out, whether it comes from the packaged `worker.md` or from your
+  override. With the default `on` it is sent as written, and an override
+  without that section is unaffected either way.
 - The line itself and everything below it is the **user** prompt, the review
   input. Its placeholders are filled in one pass, so a PR title or a diff that
   contains `{diff}` or any other placeholder is never filled a second time.

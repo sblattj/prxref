@@ -17,15 +17,21 @@ harness.
 """
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
+import pytest
+
+from prxref import config
+from prxref.cli import main
 from prxref.forges.base import PRData, PRRef
-from prxref.llm import InvokeResult
+from prxref.llm import ConfigError, InvokeResult
 from prxref.orchestrator import orchestrate_review
 from prxref.prompt_templates import load_prompt_templates
 from prxref.reviewer import PromptContext, load_prompt, review_chunk
 from prxref.triage import parse_unified_diff
+from tests.test_cli import _install_fake_module
 
 # ---------------------------------------------------------------------------
 # Shared shapes (mirroring the issue-07 file's fake LLM / forge).
@@ -334,3 +340,128 @@ def test_prompts_dir_override_without_the_section_loads_and_renders(tmp_path):
     assert "## Review Context" in combined, (
         "the override's context tail must still render"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test E: PRXREF_ROUTING_PROBE (OD2, default on) gates the section. Off
+# renders the worker system prompt exactly as the template without the
+# section; on (the default) renders it unchanged.
+# ---------------------------------------------------------------------------
+
+_REF_CLI = PRRef(
+    forge="github", host="github.com", owner="acme", repo="widget", number=67,
+    url="https://github.com/acme/widget/pull/67",
+)
+
+
+def _system_prompt(prompt_context: PromptContext) -> str:
+    llm = _CapturingLLM('{"findings":[],"escalations":[]}')
+    review_chunk(llm, parse_unified_diff(MINI_DIFF), prompt_context=prompt_context)
+    (call,) = llm.calls
+    return call["system"]
+
+
+def test_routing_probe_off_drops_the_section_from_the_run():
+    forge = _FakeForge(pr=_make_pr(), diff=SPA_DOTTED_DIFF)
+    llm = _SectionAwareLLM(MATCHING_FINDING_JSON)
+
+    result = orchestrate_review(forge, REF, llm, post=False, routing_probe="off")
+
+    assert llm.calls >= 1
+    assert llm.prompted_with_section == 0
+    assert not [f for f in result["findings_active"] if "/items/v1.2" in f.body]
+
+
+def test_routing_probe_on_is_the_default_and_keeps_the_section():
+    default = inspect.signature(orchestrate_review).parameters["routing_probe"].default
+    assert default == "on"
+    forge = _FakeForge(pr=_make_pr(), diff=SPA_DOTTED_DIFF)
+    llm = _SectionAwareLLM(MATCHING_FINDING_JSON)
+
+    orchestrate_review(forge, REF, llm, post=False, routing_probe="on")
+
+    assert llm.prompted_with_section >= 1
+
+
+def test_routing_probe_off_system_prompt_is_the_template_without_the_section():
+    legacy = _packaged_worker_without_matching_rules()
+    off = _system_prompt(PromptContext(routing_probe=False))
+    without = _system_prompt(PromptContext(worker_template=legacy))
+    assert off == without
+    assert "## Matching rules" not in off
+    assert "\n\n\n" not in off
+
+
+def test_routing_probe_on_system_prompt_is_byte_identical_to_the_template():
+    head = load_prompt("worker.md").partition("## Review Context")[0].strip()
+    assert _system_prompt(PromptContext()) == head
+    assert _system_prompt(PromptContext(routing_probe=True)) == head
+
+
+def test_routing_probe_off_drops_the_section_from_an_override_that_copied_it(tmp_path):
+    d = tmp_path / "prompts"
+    d.mkdir()
+    (d / "worker.md").write_bytes(load_prompt("worker.md").encode("utf-8"))
+    loaded = load_prompt_templates(d, source="PRXREF_PROMPTS_DIR")
+    system = _system_prompt(
+        PromptContext(worker_template=loaded.override("worker"), routing_probe=False)
+    )
+    assert "## Matching rules" not in system
+    assert "## Style" in system
+
+
+def test_routing_probe_unknown_mode_is_a_value_error():
+    forge = _FakeForge(pr=_make_pr(), diff=SPA_DOTTED_DIFF)
+    with pytest.raises(ValueError, match="routing_probe"):
+        orchestrate_review(
+            forge, REF, _CapturingLLM("{}"), post=False, routing_probe="maybe",
+        )
+
+
+def test_routing_probe_config_default_vocabulary_and_partition(monkeypatch):
+    monkeypatch.delenv("PRXREF_ROUTING_PROBE", raising=False)
+    assert config._DEFAULTS["routing_probe"] == "on"
+    assert config.load_config()["routing_probe"] == "on"
+    assert config._CHOICE_KEYS["routing_probe"] == frozenset({"off", "on"})
+    assert "routing_probe" in config.FILE_KEYS
+    monkeypatch.setenv("PRXREF_ROUTING_PROBE", "off")
+    assert config.load_config()["routing_probe"] == "off"
+    monkeypatch.setenv("PRXREF_ROUTING_PROBE", "maybe")
+    with pytest.raises(ConfigError, match="PRXREF_ROUTING_PROBE"):
+        config.load_config()
+
+
+def test_routing_probe_config_file_value_loads(tmp_path, monkeypatch):
+    monkeypatch.delenv("PRXREF_ROUTING_PROBE", raising=False)
+    path = tmp_path / ".prxref.toml"
+    path.write_text('routing_probe = "off"\n', encoding="utf-8")
+    assert config.load_config(config_file=path)["routing_probe"] == "off"
+
+
+@pytest.mark.parametrize("env, want", [(None, "on"), ("off", "off"), ("on", "on")])
+def test_routing_probe_env_reaches_the_orchestrator(monkeypatch, env, want):
+    calls: list[dict] = []
+
+    def fake_orchestrate_review(**kwargs):
+        calls.append(kwargs)
+        return {"verdict": "commented", "findings_active": [], "findings_dropped": []}
+
+    _install_fake_module(monkeypatch, "prxref.llm_backends", create_llm_client=lambda cfg: object())
+    _install_fake_module(monkeypatch, "prxref.orchestrator", orchestrate_review=fake_orchestrate_review)
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: _REF_CLI)
+    if env is None:
+        monkeypatch.delenv("PRXREF_ROUTING_PROBE", raising=False)
+    else:
+        monkeypatch.setenv("PRXREF_ROUTING_PROBE", env)
+    assert main(["review", "--pr-url", _REF_CLI.url, "--no-post"]) == 0
+    (call,) = calls
+    assert call["routing_probe"] == want
+
+
+def test_routing_probe_bogus_env_exits_2_naming_the_variable(monkeypatch, capsys):
+    monkeypatch.setattr("prxref.cli.detect_forge", lambda url: _REF_CLI)
+    monkeypatch.setenv("PRXREF_ROUTING_PROBE", "maybe")
+    rc = main(["review", "--pr-url", _REF_CLI.url, "--no-post"])
+    assert rc == 2
+    _, err = capsys.readouterr()
+    assert "PRXREF_ROUTING_PROBE" in err

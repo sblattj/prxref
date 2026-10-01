@@ -88,6 +88,16 @@ _CONTEXT_MARKER = "## Review Context"
 
 _NO_SPECS_TEXT = "(no specs provided for this review)"
 
+# The worker template's matching-rules section (#67), gated by
+# ``PRXREF_ROUTING_PROBE`` through ``PromptContext.routing_probe``: with the
+# probe off, :func:`_without_matching_rules` cuts this heading and its body up
+# to the next ``## `` heading out of the SYSTEM half.
+MATCHING_RULES_HEADING = "## Matching rules"
+_MATCHING_RULES_RE = re.compile(
+    r"^" + re.escape(MATCHING_RULES_HEADING) + r"[ \t]*\n.*?(?=^## |\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
 # Fills the ``{scope_example}`` slot glued to the example finding's last value
 # in both templates' ``## Output Format``: the comma travels with the key, so
 # the empty value a no-ticket run gets leaves the example valid and unchanged.
@@ -331,6 +341,15 @@ class PromptContext:
     optional ``{evidence_block}`` slot (absent from a pre-#69 override,
     which therefore stays valid), and :attr:`evidence_active` alone decides
     whether a model-supplied ``evidence`` label on a finding is read.
+
+    ``routing_probe`` (``PRXREF_ROUTING_PROBE``, #67, default ``True`` to
+    match the config default ``on``) keeps the worker template's
+    ``## Matching rules`` section. ``False`` cuts that heading and its body,
+    up to the next ``## `` heading, out of the chunk worker's SYSTEM half,
+    whether the template is the packaged one or an override that carries
+    the section; the result is that template without the section byte for
+    byte. An override without the section renders the same either way, and
+    the sweep never carries it.
     """
 
     rules_worker: str = ""
@@ -343,6 +362,7 @@ class PromptContext:
     systemic_template: str = ""
     rule_request: str = ""
     suggestion_request: str = ""
+    routing_probe: bool = True
 
     @property
     def scope_active(self) -> bool:
@@ -372,6 +392,10 @@ NO_PROMPT_CONTEXT = PromptContext()
 def _append_block(system: str, block: str) -> str:
     block = block.strip()
     return f"{system}\n\n{block}" if block else system
+
+
+def _without_matching_rules(head: str) -> str:
+    return _MATCHING_RULES_RE.sub("", head, count=1)
 
 
 def _ticket_context_value(prompt_context: PromptContext) -> str:
@@ -448,6 +472,8 @@ def _render_prompt(
     head, marker, tail = template.partition(_CONTEXT_MARKER)
     if not marker:
         raise ValueError(f"worker.md is missing the {_CONTEXT_MARKER!r} split marker")
+    if not prompt_context.routing_probe:
+        head = _without_matching_rules(head)
     sibling_block = sibling_summary_block(chunk, sibling_files)
     blocks = "\n\n".join(b for b in (sibling_block, context_blocks.strip()) if b)
     user = fill_template(marker + tail, {
