@@ -1946,7 +1946,7 @@ def orchestrate_review(
             "threads_read": len(threads),
             # Threads that can no longer suppress anything: resolved OR
             # outdated, the same predicate both gates skip on.
-            "threads_resolved": sum(1 for t in threads if t.resolved or t.outdated),
+            "threads_resolved": sum(1 for t in threads if t.lapsed),
         }
     # AFTER both thread gates and the previously-raised note (#71): the
     # ids inherit the gates' verdict — a finding a thread already
@@ -3008,7 +3008,7 @@ def _note_previously_raised(
     order-preserving; already-dropped findings pass through untouched.
     Returns the new list and the count of findings stamped.
     """
-    if not any(t.resolved or t.outdated for t in threads):
+    if not any(t.lapsed for t in threads):
         return list(findings), 0
     result: list[Finding] = []
     noted = 0
