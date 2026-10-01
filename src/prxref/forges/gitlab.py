@@ -15,6 +15,7 @@ from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
+    CommitData,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -316,6 +317,38 @@ class ForgeImpl:
                     d.get("new_path") or d.get("old_path"),
                 )
         return _render_diff_entries(diffs)
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the MR's commits, oldest first (issue #70).
+
+        Reads ``/merge_requests/{iid}/commits``, which needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. The listing is
+        walked with ``_iter_pages`` like every other GitLab collection here,
+        so a page that cannot be read, or a listing past the page budget,
+        raises ``FeedReadError`` rather than handing back part of the MR.
+        GitLab lists the commits newest first; they are reversed to the
+        oldest-first order the ``Forge`` contract names. Each entry keeps
+        the ``id`` as the sha, the first line of ``message`` (``title`` when
+        the message is absent) as the subject, and ``len(parent_ids)`` as
+        the parent count, which is 1 when GitLab sends no parent list.
+        """
+        url = f"{self._api_base(ref)}/merge_requests/{ref.number}/commits"
+        commits: list[CommitData] = []
+        for page in self._iter_pages(
+            ref, url, self._get_auth_headers(), what="MR commit list",
+        ):
+            for entry in page:
+                message = entry.get("message") or entry.get("title") or ""
+                parents = entry.get("parent_ids")
+                commits.append(CommitData(
+                    sha=entry.get("id") or "",
+                    subject=message.splitlines()[0] if message else "",
+                    parent_count=len(parents) if isinstance(parents, list) else 1,
+                ))
+        commits.reverse()
+        return commits
 
     def _iter_pages(
         self,

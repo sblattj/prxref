@@ -18,11 +18,15 @@ Three layers, each pinned on its own:
 """
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
+import requests
 
 from prxref import config, metadata_rules, orchestrator
 from prxref.cli import _build_json_result, _fail_on_exit, _print_summary
-from prxref.forges.base import CommitData, PRData
+from prxref.forges import bitbucket, gitlab
+from prxref.forges.base import CommitData, FeedReadError, PRData
 from prxref.llm import ConfigError
 from prxref.triage import FileDiff
 from tests.test_orchestrator import REF, FakeForge, FakeLLM, _added_file_diff, make_pr
@@ -793,3 +797,193 @@ class TestSkippedChecksAreNamed:
             metadata_rules="on", branch_patterns=["fix=fix/.*"],
         )
         assert "PR metadata" not in forge.summaries[-1]
+
+
+# --- forge commit listings: GitLab and Bitbucket Cloud ------------------------
+
+
+def _json_response(body, status: int = 200):
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = status
+    resp.ok = 200 <= status < 300
+    resp.headers = {}
+    resp.json.return_value = body
+    resp.raise_for_status.side_effect = (
+        None if resp.ok else requests.HTTPError(response=resp)
+    )
+    return resp
+
+
+def _session(get):
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def _recording_session(pages, calls):
+    def get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        return _json_response(pages[len(calls) - 1])
+
+    return _session(get)
+
+
+GL_URL = "https://gitlab.com/acme/sub/api/-/merge_requests/7"
+BB_URL = "https://bitbucket.org/acme/api/pull-requests/42"
+
+
+def _gl_commit(sha: str, message: str, parents: int = 1) -> dict:
+    return {
+        "id": sha, "short_id": sha[:8], "title": message.splitlines()[0],
+        "message": message, "parent_ids": [f"p{i}" for i in range(parents)],
+    }
+
+
+def _bb_commit(sha: str, message: str, parents: int = 1) -> dict:
+    return {
+        "hash": sha, "message": message,
+        "parents": [{"hash": f"p{i}", "type": "commit"} for i in range(parents)],
+    }
+
+
+class TestGitLabGetCommits:
+    def test_subjects_and_parent_counts_come_back_oldest_first(self):
+        calls: list = []
+        newest_first = [
+            _gl_commit("c" * 40, "Merge branch 'main' into feature\n", parents=2),
+            _gl_commit("b" * 40, "ACME-2 second\n\nbody text"),
+            _gl_commit("a" * 40, "no ref here\nACME-9 only in the body"),
+        ]
+        forge = gitlab.ForgeImpl(session=_recording_session([newest_first], calls))
+        ref = gitlab.ForgeImpl.parse_pr_url(GL_URL)
+        commits = forge.get_commits(ref, base_sha="b" * 40, head_sha="a" * 40)
+        assert commits == [
+            CommitData(sha="a" * 40, subject="no ref here", parent_count=1),
+            CommitData(sha="b" * 40, subject="ACME-2 second", parent_count=1),
+            CommitData(
+                sha="c" * 40, subject="Merge branch 'main' into feature",
+                parent_count=2,
+            ),
+        ]
+        url, params = calls[0]
+        assert url == (
+            "https://gitlab.com/api/v4/projects/acme%2Fsub%2Fapi"
+            "/merge_requests/7/commits"
+        )
+        assert params["per_page"] == 100 and params["page"] == 1
+
+    def test_the_listing_is_paged_to_its_end(self):
+        calls: list = []
+        first = [_gl_commit(f"{i:040d}", f"ACME-{i} c") for i in range(100, 0, -1)]
+        second = [_gl_commit("0" * 40, "root commit")]
+        forge = gitlab.ForgeImpl(session=_recording_session([first, second], calls))
+        commits = forge.get_commits(gitlab.ForgeImpl.parse_pr_url(GL_URL))
+        assert [p["page"] for _, p in calls] == [1, 2]
+        assert len(commits) == 101
+        assert commits[0].subject == "root commit"
+        assert commits[-1].subject == "ACME-100 c"
+
+    def test_a_failed_page_raises_rather_than_returning_short(self):
+        forge = gitlab.ForgeImpl(
+            session=_session(lambda url, **kw: _json_response({}, 500)),
+        )
+        with pytest.raises(FeedReadError):
+            forge.get_commits(gitlab.ForgeImpl.parse_pr_url(GL_URL))
+
+
+class TestBitbucketCloudGetCommits:
+    def test_subjects_and_parent_counts_come_back_oldest_first(self):
+        calls: list = []
+        page = {"values": [
+            _bb_commit("c" * 40, "Merged main into feature\n", parents=2),
+            _bb_commit("b" * 40, "ACME-2 second\n\nbody"),
+            _bb_commit("a" * 40, "no ref here"),
+        ]}
+        forge = bitbucket.ForgeImpl(session=_recording_session([page], calls))
+        ref = bitbucket.ForgeImpl.parse_pr_url(BB_URL)
+        commits = forge.get_commits(ref, base_sha="b" * 40, head_sha="a" * 40)
+        assert [(c.sha[0], c.subject, c.parent_count) for c in commits] == [
+            ("a", "no ref here", 1),
+            ("b", "ACME-2 second", 1),
+            ("c", "Merged main into feature", 2),
+        ]
+        url, params = calls[0]
+        assert url == (
+            "https://api.bitbucket.org/2.0/repositories/acme/api"
+            "/pullrequests/42/commits"
+        )
+        assert params == {"pagelen": 100}
+
+    def test_the_listing_follows_next_to_its_end(self):
+        calls: list = []
+        next_url = "https://api.bitbucket.org/2.0/next-page-token"
+        pages = [
+            {"values": [_bb_commit("2" * 40, "ACME-2 newer")], "next": next_url},
+            {"values": [_bb_commit("1" * 40, "ACME-1 older")]},
+        ]
+        forge = bitbucket.ForgeImpl(session=_recording_session(pages, calls))
+        commits = forge.get_commits(bitbucket.ForgeImpl.parse_pr_url(BB_URL))
+        assert calls[1] == (next_url, None)
+        assert [c.subject for c in commits] == ["ACME-1 older", "ACME-2 newer"]
+
+    def test_a_failed_page_raises_rather_than_returning_short(self):
+        forge = bitbucket.ForgeImpl(
+            session=_session(lambda url, **kw: _json_response({}, 403)),
+        )
+        with pytest.raises(FeedReadError):
+            forge.get_commits(bitbucket.ForgeImpl.parse_pr_url(BB_URL))
+
+
+def _gitlab_adapter():
+    page = [
+        _gl_commit("2" * 40, "Merge branch 'main' into feature", parents=2),
+        _gl_commit("1" * 40, "no ref here"),
+        _gl_commit("0" * 40, "ACME-1 fine"),
+    ]
+    forge = gitlab.ForgeImpl(session=_session(lambda url, **kw: _json_response(page)))
+    return forge, gitlab.ForgeImpl.parse_pr_url(GL_URL)
+
+
+def _bitbucket_adapter():
+    page = {"values": [
+        _bb_commit("2" * 40, "Merged main into feature", parents=2),
+        _bb_commit("1" * 40, "no ref here"),
+        _bb_commit("0" * 40, "ACME-1 fine"),
+    ]}
+    forge = bitbucket.ForgeImpl(
+        session=_session(lambda url, **kw: _json_response(page)),
+    )
+    return forge, bitbucket.ForgeImpl.parse_pr_url(BB_URL)
+
+
+class _AdapterCommitsForge(FakeForge):
+    """FakeForge whose ``get_commits`` is a real adapter's over a mocked session."""
+
+    def __init__(self, adapter, adapter_ref, **kwargs):
+        super().__init__(**kwargs)
+        self._adapter = adapter
+        self._adapter_ref = adapter_ref
+
+    def get_commits(self, ref, *, base_sha="", head_sha=""):
+        return self._adapter.get_commits(
+            self._adapter_ref, base_sha=base_sha, head_sha=head_sha,
+        )
+
+
+class TestEveryCommitSourceFeedsTheCheck:
+    @pytest.mark.parametrize(
+        "build", [_gitlab_adapter, _bitbucket_adapter], ids=["gitlab", "bitbucket"],
+    )
+    def test_the_commit_check_fails_not_skips(self, build):
+        adapter, adapter_ref = build()
+        forge = _AdapterCommitsForge(
+            adapter, adapter_ref, diff=_added_file_diff("src/app.py", 20),
+        )
+        res = orchestrator.orchestrate_review(
+            forge, REF, NO_FINDINGS,
+            metadata_rules="on", commit_reference="ACME-\\d+",
+        )
+        assert res["metadata_rules"]["commit_reference"] == "fail"
+        titles = [n["title"] for n in res["metadata_rules"]["violations"]]
+        assert len(titles) == 1
+        assert "1111111111" in titles[0]
