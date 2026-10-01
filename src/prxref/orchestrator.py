@@ -320,7 +320,6 @@ from .triage import (
     Finding,
     added_lines_by_file,
     count_size_relevant_changes,
-    normalize_evidence,
     normalize_rule,
     normalize_scope,
     parse_unified_diff,
@@ -3793,7 +3792,6 @@ def _invoke_chunk(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
             accept_suggestion=prompt_context.suggestion_active,
-            accept_evidence=prompt_context.evidence_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -4078,7 +4076,6 @@ def _run_sweep(
         finding = _coerce_finding(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
-            accept_evidence=prompt_context.evidence_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -4116,7 +4113,7 @@ def _run_sweep(
 
 def _coerce_finding(
     item, *, accept_scope: bool = False, accept_rule: bool = False,
-    accept_suggestion: bool = False, accept_evidence: bool = False,
+    accept_suggestion: bool = False,
 ) -> Finding | None:
     if isinstance(item, Finding):
         return item
@@ -4139,7 +4136,6 @@ def _coerce_finding(
                 rule=normalize_rule(item.get("rule")) if accept_rule else None,
                 suggestion=suggestion,
                 suggestion_end_line=suggestion_end_line,
-                evidence=normalize_evidence(item.get("evidence")) if accept_evidence else None,
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)

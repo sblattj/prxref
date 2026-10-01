@@ -73,7 +73,6 @@ from .triage import (
     SCOPE_UNKNOWN,
     FileDiff,
     Finding,
-    normalize_evidence,
     normalize_rule,
     normalize_scope,
     trim_hunk_context,
@@ -339,8 +338,7 @@ class PromptContext:
     ones alone, both built by :meth:`prxref.evidence.EvidenceBundle.
     block_for` and both empty when the unit saw no evidence. It fills the
     optional ``{evidence_block}`` slot (absent from a pre-#69 override,
-    which therefore stays valid), and :attr:`evidence_active` alone decides
-    whether a model-supplied ``evidence`` label on a finding is read.
+    which therefore stays valid).
 
     ``routing_probe`` (``PRXREF_ROUTING_PROBE``, #67, default ``True`` to
     match the config default ``on``) keeps the worker template's
@@ -378,12 +376,6 @@ class PromptContext:
     def suggestion_active(self) -> bool:
         """True when the worker prompt asks for ``suggestion``, so the answer may be kept."""
         return bool(self.suggestion_request)
-
-    @property
-    def evidence_active(self) -> bool:
-        """True when the prompt shows execution evidence, so a finding's
-        model-supplied ``evidence`` label may be kept."""
-        return bool(self.evidence_block)
 
 
 NO_PROMPT_CONTEXT = PromptContext()
@@ -591,7 +583,7 @@ def parse_suggestion(raw: Mapping[str, Any]) -> tuple[str | None, int]:
 
 def _finding_from(
     raw: Any, *, accept_scope: bool = False, accept_rule: bool = False,
-    accept_suggestion: bool = False, accept_evidence: bool = False,
+    accept_suggestion: bool = False,
 ) -> Finding | None:
     if not isinstance(raw, dict):
         return None
@@ -614,7 +606,6 @@ def _finding_from(
         rule=normalize_rule(raw.get("rule")) if accept_rule else None,
         suggestion=suggestion,
         suggestion_end_line=suggestion_end_line,
-        evidence=normalize_evidence(raw.get("evidence")) if accept_evidence else None,
     )
 
 
@@ -753,7 +744,6 @@ def _invoke_and_parse(
     llm: LLMClient, system: str, user: str, *, budget: int, label: str,
     trace_dir: str = "", trace_label: str = "", accept_scope: bool = False,
     accept_rule: bool = False, parse_retries: int = 0, accept_suggestion: bool = False,
-    accept_evidence: bool = False,
 ) -> tuple[list[Finding], dict]:
     """One single-shot invoke plus lenient JSON parse, shared by both reviewers.
 
@@ -779,12 +769,6 @@ def _invoke_and_parse(
     ``accept_suggestion`` does the same for ``suggestion`` and
     ``suggestion_end_line`` (through :func:`parse_suggestion`); false, the
     default, leaves them at ``None`` and 0 whatever the model volunteered.
-
-    ``accept_evidence`` does the same for the ``evidence`` verdict label
-    (through :func:`prxref.triage.normalize_evidence`, which keeps only the
-    word ``contradicts``); false, the default, leaves every finding's
-    ``evidence`` at ``None``, because a prompt that was shown no execution
-    evidence has no contradiction to concede.
 
     ``parse_retries`` (N, default 0) is one retry budget shared by every
     kind of reply that cannot be used as a review. The same request, with
@@ -984,7 +968,7 @@ def _invoke_and_parse(
         f for f in (
             _finding_from(
                 r, accept_scope=accept_scope, accept_rule=accept_rule,
-                accept_suggestion=accept_suggestion, accept_evidence=accept_evidence,
+                accept_suggestion=accept_suggestion,
             )
             for r in raw_findings
         )
@@ -1097,9 +1081,7 @@ def review_chunk(
     :attr:`PromptContext.scope_active`; otherwise it is ``unknown``. Its
     ``rule`` is read only when :attr:`PromptContext.rule_active`; otherwise
     it is ``None``. Its ``suggestion`` and ``suggestion_end_line`` are read
-    only when :attr:`PromptContext.suggestion_active`, and its ``evidence``
-    label only when :attr:`PromptContext.evidence_active` (issue #69: the
-    prompt showed execution evidence). The
+    only when :attr:`PromptContext.suggestion_active`. The
     default :data:`NO_PROMPT_CONTEXT` injects nothing. The orchestrator
     always passes this keyword too, so any test double must accept it.
     """
@@ -1121,7 +1103,6 @@ def review_chunk(
         accept_rule=prompt_context.rule_active,
         parse_retries=parse_retries,
         accept_suggestion=prompt_context.suggestion_active,
-        accept_evidence=prompt_context.evidence_active,
     )
 
 
@@ -1182,5 +1163,4 @@ def review_systemic(
         accept_scope=prompt_context.scope_active,
         accept_rule=prompt_context.rule_active,
         parse_retries=parse_retries,
-        accept_evidence=prompt_context.evidence_active,
     )
