@@ -937,9 +937,9 @@ def _build_json_result(result: Any) -> dict:
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
-    ``repo_context``, ``parse_retries``, ``context_followup``,
-    ``suggestions``, ``incremental``, ``degraded``, ``config_file``, then
-    ``sampling`` and ``replay`` when present.
+    ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
+    ``context_followup``, ``suggestions``, ``incremental``, ``degraded``,
+    ``config_file``, then ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -948,7 +948,9 @@ def _build_json_result(result: Any) -> dict:
     0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts``,
     0.16's ``repo_context`` and 0.17's ``parse_retries`` are always emitted
     and are ``null`` when their feature is off (``rule_counts`` whenever the
-    per-rule cap did not run, ``repo_context`` whenever
+    per-rule cap did not run, ``rule_scope_cleared`` whenever the loaded
+    rules files declare no section scope — 0.29's rule-applicability check
+    (#75) — otherwise the count of rule labels it cleared, ``repo_context`` whenever
     ``PRXREF_REPO_CONTEXT`` is ``off``, ``parse_retries`` whenever
     ``PRXREF_LLM_PARSE_RETRIES`` is ``0``; otherwise it is the run's total
     of parse retries over every chunk and the sweep, ``0`` when none ran),
@@ -1012,6 +1014,7 @@ def _build_json_result(result: Any) -> dict:
         "prompt_templates": result.get("prompt_templates"),
         "scoped_rules": result.get("scoped_rules"),
         "rule_counts": result.get("rule_counts"),
+        "rule_scope_cleared": result.get("rule_scope_cleared"),
         "repo_context": result.get("repo_context"),
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),

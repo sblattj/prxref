@@ -442,8 +442,12 @@ class TestJsonOutput:
         payload = cli._build_json_result(res)
         keys = list(payload)
         assert keys.index("rule_counts") == keys.index("scoped_rules") + 1
-        assert keys[keys.index("rule_counts") + 1] == "repo_context"
+        # rule_scope_cleared (#75) rides between the cap's tally and the
+        # repo-context record, null whenever no rules file declares a scope.
+        assert keys[keys.index("rule_counts") + 1] == "rule_scope_cleared"
+        assert keys[keys.index("rule_scope_cleared") + 1] == "repo_context"
         assert payload["rule_counts"] == [{"rule": "no-bare-except", "kind": "rule", "total": 5, "kept": 2}]
+        assert payload["rule_scope_cleared"] is None
 
     def test_the_best_row_carries_locations_across_files(self):
         res, _forge, _llm = _scripted_run(rules=_rules(), post=False)
@@ -524,7 +528,7 @@ class TestCliWiring:
 RULES_GOLDEN = {
     "rules": "148a3b6651f40d6c59f8dc48e7539176a0acb131b5da125f4cb7ede5877694cd",
     "scoped": "a1cb60afc41f127a81d76c7d3c455b991ffe71a4ed0008caa4dcb69b7c97de81",
-    "rules_grouping": "4d79e198da63c8c39a8ff8c000e9e25cc890e855d3ea738b5682aac6824db33e",
+    "rules_grouping": "ccb55431f1bdde01643640ac222c470dd05059c389feb4d881b20694a8e2f1d5",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 
@@ -613,14 +617,16 @@ class TestOffPathMatchesBase:
         text, res = rules_capture(name, max_findings_per_rule=0)
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
-            "rule_counts", "repo_context", "parse_retries", "context_followup", "suggestions",
-            "incremental", "degraded", *CHUNK_KEYS,
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "suggestions", "incremental", "degraded", *CHUNK_KEYS,
         }
         assert res["rule_counts"] is None
+        assert res["rule_scope_cleared"] is None  # no section scope: #75's check never ran
         assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
         at = A81_JSON_KEYS.index("chunks_failed") + 1
         assert payload == [*A81_JSON_KEYS[:at], *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
+                           "rule_scope_cleared",
                            "repo_context", "parse_retries", "context_followup", "suggestions",
                            "incremental", "degraded", "config_file", "sampling"]
 

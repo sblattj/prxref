@@ -1,11 +1,12 @@
 """Deterministic quality passes over worker findings.
 
-Sixteen passes run before posting, in the order ``orchestrate_review``
+Seventeen passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on, and pass 13 only when a team rules file is loaded
-and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A seventeenth
-deterministic check, the release-shaped-PR heuristic, and an eighteenth,
+severity map, pass 12 only when the loaded rules file declares at least
+one section scope, pass 13 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 14 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. An eighteenth
+deterministic check, the release-shaped-PR heuristic, and a nineteenth,
 the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
@@ -94,7 +95,17 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-12. ``apply_rule_grouping``: fold chunk findings in one file that name the
+12. ``apply_rule_scope_check``: clear ``rule`` on a finding no scoped
+     section of the loaded team rules covers (#75) — the label matches no
+     ATX section that declares a ``scope:`` line, or that section's tokens
+     do not cover the finding's path — leaving the finding itself active,
+     so it groups and caps by normalized title like any ruleless finding.
+     A scope token outside the vocabulary is inert. It drops nothing, runs
+     between ``apply_hedge_gate`` and the grouping/cap passes so a wrong
+     label never keys them, and is skipped entirely (the run record's
+     ``rule_scope_cleared`` stays ``null``) when no loaded section declares
+     a scope.
+13. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -102,7 +113,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-13. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+14. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
     chunk findings per ``rule`` (casefolded), or per normalized title for
     findings that name none, across every file of the review. The kept
     findings are the most severe, then the most confident; the rest are
@@ -113,7 +124,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     it on: a team rules file is loaded and the cap is above 0. It runs
     after grouping, so a group counts once, and before the gate, so the
     severity caps count what it kept.
-14. ``apply_quality_gate``: drop findings below the confidence floor
+15. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -122,7 +133,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-15. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+16. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -136,7 +147,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-16. ``apply_containment_note``: a finding that asserts a throw, panic,
+17. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -144,7 +155,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     changes ``drop_reason`` or severity.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
-runs after pass 13 (after line alignment and every fold, so ``locations``
+runs after pass 14 (after line alignment and every fold, so ``locations``
 is final) and before the gate. It drops nothing: a code suggestion (#30)
 that fails one of its rules is cleared and the finding is kept, so it posts
 as a plain comment.
@@ -155,6 +166,7 @@ so review runstores and logs can explain every filter decision. Use
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -163,10 +175,14 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from . import heuristics
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
+
+if TYPE_CHECKING:
+    from .rules import RuleSection
 
 SEVERITIES: frozenset[str] = frozenset({"error", "warning", "spec", "outofscope"})
 
@@ -1981,6 +1997,112 @@ def apply_hedge_gate(
             continue
         out.append(replace(f, drop_reason=f'hedged: "{span}"'))
     return out
+
+
+# Rule-scope vocabulary (#75): which paths one ``scope:`` token of a rules
+# section covers. Matched against the path's BASENAME, case-sensitively, with
+# fnmatch. A token absent from every table here covers every path — it is
+# inert, because an unknown word must not silently suppress rules — and so
+# does the explicit ``comments`` token.
+_JAVA_SCOPE_GLOBS: tuple[str, ...] = ("*.java", "*.kt", "pom.xml", "build.gradle*")
+_TS_SCOPE_GLOBS: tuple[str, ...] = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs")
+_DOCS_SCOPE_GLOBS: tuple[str, ...] = ("*.md", "*.mdx", "*.rst", "*.txt")
+_SCOPE_BASENAME_GLOBS: Mapping[str, tuple[str, ...]] = {
+    "java": _JAVA_SCOPE_GLOBS,
+    "jvm": _JAVA_SCOPE_GLOBS,
+    "python": ("*.py",),
+    "typescript": _TS_SCOPE_GLOBS,
+    "javascript": _TS_SCOPE_GLOBS,
+    "ts": _TS_SCOPE_GLOBS,
+    "js": _TS_SCOPE_GLOBS,
+    "docs": _DOCS_SCOPE_GLOBS,
+    "markdown": _DOCS_SCOPE_GLOBS,
+}
+_SPEC_SCOPE_TOKENS: frozenset[str] = frozenset({"openapi", "specs"})
+_SPEC_SCOPE_SUFFIXES: tuple[str, ...] = (".yaml", ".yml", ".json")
+_SPEC_NAME_MARKS: tuple[str, ...] = ("openapi", "swagger")
+_SPEC_SCOPE_DIRS: frozenset[str] = frozenset({"spec", "specs", "openapi", "swagger"})
+
+
+def _scope_token_covers(token: str, path: str) -> bool:
+    """True when one ``scope:`` token covers a finding's ``path`` (#75).
+
+    ``token`` is casefolded as :func:`prxref.rules.parse_rule_sections`
+    returns it; ``path`` is a diff path, POSIX and relative to the repository
+    root. Every token outside the vocabulary returns ``True`` — inert, never
+    filtering — and so does ``comments``.
+    """
+    base = path.rsplit("/", 1)[-1].casefold()
+    globs = _SCOPE_BASENAME_GLOBS.get(token)
+    if globs is not None:
+        return any(fnmatch.fnmatchcase(base, pattern) for pattern in globs)
+    if token in _SPEC_SCOPE_TOKENS:
+        if not any(base.endswith(suffix) for suffix in _SPEC_SCOPE_SUFFIXES):
+            return False
+        directories = (part.casefold() for part in path.split("/")[:-1])
+        return any(mark in base for mark in _SPEC_NAME_MARKS) or any(
+            part in _SPEC_SCOPE_DIRS for part in directories
+        )
+    return True
+
+
+def apply_rule_scope_check(
+    findings: Sequence[Finding], *, sections: Sequence[RuleSection]
+) -> tuple[list[Finding], int]:
+    """Clear ``rule`` on a finding no scoped section of the team rules covers (#75).
+
+    A finding's ``rule`` survives only when it names a section of the loaded
+    rules — the label and the section's heading text, both whitespace-collapsed
+    and casefolded, are equal, or the label is the heading's leading words (a
+    model that drops a heading's trailing words still matches; one that cites
+    a single mid-heading word does not) — AND every ``scope:`` token of that
+    section covers the finding's path per :func:`_scope_token_covers`:
+    ``java``/``jvm`` cover ``*.java``, ``*.kt``, ``pom.xml`` and
+    ``build.gradle*``; ``python`` covers ``*.py``; ``typescript``,
+    ``javascript``, ``ts`` and ``js`` cover the TypeScript and JavaScript
+    extensions; ``docs``/``markdown`` cover ``*.md``, ``*.mdx``, ``*.rst``
+    and ``*.txt``; ``openapi``/``specs`` cover ``*.yaml``, ``*.yml`` and
+    ``*.json`` whose basename mentions ``openapi`` or ``swagger`` or that sit
+    under a ``spec``/``specs``/``openapi``/``swagger`` directory; ``comments``
+    covers every path; and a token outside the vocabulary is inert and covers
+    every path too, because an unknown word must not silently suppress rules.
+
+    Every other label — one no section carries (an invented name, or a rule
+    from a section that declares no scope once any section does), or a
+    matching section whose tokens do not cover the file — is cleared to
+    ``None``. The finding itself is never dropped, so it rejoins the ruleless
+    paths downstream: ``apply_rule_grouping`` keys it on its normalized title
+    and ``apply_rule_cap`` caps it by title. Pure and order-preserving:
+    already-dropped findings and ruleless ones pass through untouched, and
+    only ``rule`` moves. Returns the findings and how many labels were
+    cleared.
+
+    ``sections`` is what :func:`prxref.rules.parse_rule_sections` returned
+    from the loaded rules files; the empty tuple clears nothing, and the
+    orchestrator does not call this at all in that case.
+    """
+    scoped = tuple(
+        (" ".join(section.name.split()).casefold(), tuple(section.scopes))
+        for section in sections
+    )
+    if not scoped:
+        return list(findings), 0
+    out: list[Finding] = []
+    cleared = 0
+    for finding in findings:
+        if finding.drop_reason is not None or not isinstance(finding.rule, str) or not finding.rule:
+            out.append(finding)
+            continue
+        label = " ".join(finding.rule.split()).casefold()
+        path = finding.file if isinstance(finding.file, str) else ""
+        covered = any(
+            (label == name or name.startswith(f"{label} "))
+            and all(_scope_token_covers(token, path) for token in tokens)
+            for name, tokens in scoped
+        )
+        out.append(finding if covered else replace(finding, rule=None))
+        cleared += 0 if covered else 1
+    return out, cleared
 
 
 GROUPED_INTO_PREFIX: str = "grouped into "
