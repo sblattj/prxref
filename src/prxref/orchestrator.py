@@ -696,7 +696,13 @@ def orchestrate_review(
     Their ``record()`` fills the ``review_rules`` / ``ticket_context`` keys on
     every exit, and is the meta of one ``rules ok`` / ``ticket ok`` trace
     event. The rules' ``prompt_block("worker")`` / ``("sweep")`` reach every
-    chunk and the sweep through one :class:`reviewer.PromptContext`, and
+    chunk and the sweep through one :class:`reviewer.PromptContext`, except
+    that with ``rule_scoping`` on and at least one scoped section in the
+    always-on body (and no ``scoped_rules``), each chunk gets its own
+    :meth:`~prxref.rules.ReviewRules.unit_block` over its paths, and the
+    sweep one over the union of them, leaving out the scoped sections the
+    unit's files do not fall in (#75; the ``chunk start`` / ``sweep start``
+    events name them as ``rules_left_out``), and
     their ``severity_map`` goes to :func:`quality.apply_severity_map` ahead of
     every quality pass (a ``rules remap`` event counts the rewrites). An
     ACTIVE ticket (``ticket.active``) adds its ``scope_block()`` and
@@ -833,7 +839,9 @@ def orchestrate_review(
     always-on file, and that block replaces ``rules_worker`` in the chunk's
     own copy of the :class:`reviewer.PromptContext`, on the first attempt and
     on the timeout retry alike. The sweep's block, selected by the union of
-    the chunks' paths, replaces ``rules_sweep``. When the cap cuts or omits a
+    the chunks' paths, replaces ``rules_sweep``. With ``rule_scoping`` on,
+    every unit's block leaves out the scoped sections (#75) of the always-on
+    and the scoped bodies that none of the unit's paths falls in. When the cap cuts or omits a
     file in any unit, one WARNING for the run names
     ``PRXREF_SCOPED_RULES_MAX_CHARS`` and every such file. The
     severity-remapping pass applies
@@ -1472,6 +1480,7 @@ def orchestrate_review(
         try:
             scoped_blocks, sweep_block = _scoped_unit_blocks(
                 scoped_rules, chunks, rules, max_chars=scoped_rules_max_chars,
+                scope_sections=rule_scoping == "on",
             )
         except Exception as e:  # noqa: BLE001
             logger.error("scoped rules failed: %s", e)
@@ -1492,6 +1501,8 @@ def orchestrate_review(
             },
         }
         _warn_scoped_cap(scoped_rules, [*scoped_blocks, sweep_block], scoped_rules_max_chars)
+    elif rules is not None and rule_scoping == "on" and getattr(rules, "sections", ()):
+        scoped_blocks, sweep_block = _always_on_unit_blocks(rules, chunks)
 
     # Evidence blocks (#69), built before the fan-out like the scoped
     # blocks: each chunk's unit gets its matched items plus the global
@@ -3513,7 +3524,7 @@ def _followup_record(rows: Sequence[dict[str, Any] | None] | None = None) -> dic
 
 
 def _scoped_unit_blocks(
-    scoped_rules: Any, chunks, always_on, *, max_chars: int,
+    scoped_rules: Any, chunks, always_on, *, max_chars: int, scope_sections: bool = False,
 ) -> tuple[list[Any], Any]:
     """Build every review unit's scoped-rules block: one per chunk, in chunk order, then the sweep's.
 
@@ -3522,17 +3533,64 @@ def _scoped_unit_blocks(
     paths are the union of the chunks' paths, which selects the union of the
     chunks' files. ``always_on`` is the always-on rules file, or ``None``.
     Raises what :meth:`prxref.rules.ScopedRules.unit_block` raises (a
-    ``max_chars`` below 1).
+    ``max_chars`` below 1). ``scope_sections`` (``PRXREF_RULE_SCOPING`` on,
+    #75) leaves each unit's out-of-scope rule sections out of its block.
     """
-    chunk_paths = [[p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks]
+    chunk_paths = _unit_paths(chunks)
     blocks = [
-        scoped_rules.unit_block("worker", paths, always_on, max_chars=max_chars)
+        scoped_rules.unit_block(
+            "worker", paths, always_on, max_chars=max_chars, scope_sections=scope_sections,
+        )
         for paths in chunk_paths
     ]
     sweep = scoped_rules.unit_block(
         "sweep", [p for paths in chunk_paths for p in paths], always_on, max_chars=max_chars,
+        scope_sections=scope_sections,
     )
     return blocks, sweep
+
+
+def _unit_paths(chunks) -> list[list[str]]:
+    """Each chunk's rules paths: every file's ``path`` plus a renamed file's ``old_path``."""
+    return [[p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks]
+
+
+def _always_on_unit_blocks(rules: Any, chunks) -> tuple[list[Any], Any]:
+    """Per-unit blocks of the always-on rules file alone, its out-of-scope sections left out (#75).
+
+    Built when ``PRXREF_RULE_SCOPING`` is on, the always-on file declares
+    at least one scoped section, and no path-scoped rules are loaded: each
+    chunk's block is :meth:`prxref.rules.ReviewRules.unit_block` over the
+    chunk's paths (as :func:`_scoped_unit_blocks` derives them), and the
+    sweep's is over the union of every chunk's paths, so it leaves out only
+    the sections no file of the PR falls in.
+    """
+    chunk_paths = _unit_paths(chunks)
+    blocks = [rules.unit_block("worker", paths) for paths in chunk_paths]
+    sweep = rules.unit_block("sweep", [p for paths in chunk_paths for p in paths])
+    return blocks, sweep
+
+
+def _rules_meta(block: Any) -> dict[str, Any]:
+    """The rules keys of a unit's ``chunk start`` / ``sweep start`` event.
+
+    ``rules`` (the :func:`_scoped_rows` of the unit's path-scoped files)
+    when path-scoped rules are loaded, and ``rules_left_out`` (the
+    headings of the scoped sections the unit's block left out, #75) when it
+    left any out — headings only, never rules text. ``None`` (no per-unit
+    block) adds neither. Read duck-typed, so a block stand-in without
+    ``scoped`` or ``left_out`` reads as a path-scoped block that left
+    nothing out.
+    """
+    if block is None:
+        return {}
+    meta: dict[str, Any] = {}
+    if getattr(block, "scoped", True):
+        meta["rules"] = _scoped_rows(block)
+    left_out = getattr(block, "left_out", ())
+    if left_out:
+        meta["rules_left_out"] = list(left_out)
+    return meta
 
 
 def _scoped_rows(block: Any) -> list[dict[str, Any]]:
@@ -3893,7 +3951,7 @@ def _run_worker(
     tracer.event(
         "chunk", "start", index=index, total=total,
         files=[f.path for f in chunk],
-        **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
+        **_rules_meta(scoped_block),
     )
     unit: repo_unit.UnitContext | None = None
     if repo_plan is not None:
@@ -4051,7 +4109,7 @@ def _run_sweep(
     tracer.event(
         "sweep", "start", files=len(files), digest_chars=len(digest),
         threads=len(discussion),
-        **({"rules": _scoped_rows(scoped_block)} if scoped_block is not None else {}),
+        **_rules_meta(scoped_block),
     )
     try:
         findings_raw, meta = reviewer.review_systemic(

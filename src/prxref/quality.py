@@ -2314,53 +2314,6 @@ def apply_hedge_gate(
     return out
 
 
-# Rule-scope vocabulary (#75): which paths one ``scope:`` token of a rules
-# section covers. Matched against the path's BASENAME, case-sensitively, with
-# fnmatch. A token absent from every table here covers every path — it is
-# inert, because an unknown word must not silently suppress rules — and so
-# does the explicit ``comments`` token.
-_JAVA_SCOPE_GLOBS: tuple[str, ...] = ("*.java", "*.kt", "pom.xml", "build.gradle*")
-_TS_SCOPE_GLOBS: tuple[str, ...] = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs")
-_DOCS_SCOPE_GLOBS: tuple[str, ...] = ("*.md", "*.mdx", "*.rst", "*.txt")
-_SCOPE_BASENAME_GLOBS: Mapping[str, tuple[str, ...]] = {
-    "java": _JAVA_SCOPE_GLOBS,
-    "jvm": _JAVA_SCOPE_GLOBS,
-    "python": ("*.py",),
-    "typescript": _TS_SCOPE_GLOBS,
-    "javascript": _TS_SCOPE_GLOBS,
-    "ts": _TS_SCOPE_GLOBS,
-    "js": _TS_SCOPE_GLOBS,
-    "docs": _DOCS_SCOPE_GLOBS,
-    "markdown": _DOCS_SCOPE_GLOBS,
-}
-_SPEC_SCOPE_TOKENS: frozenset[str] = frozenset({"openapi", "specs"})
-_SPEC_SCOPE_SUFFIXES: tuple[str, ...] = (".yaml", ".yml", ".json")
-_SPEC_NAME_MARKS: tuple[str, ...] = ("openapi", "swagger")
-_SPEC_SCOPE_DIRS: frozenset[str] = frozenset({"spec", "specs", "openapi", "swagger"})
-
-
-def _scope_token_covers(token: str, path: str) -> bool:
-    """True when one ``scope:`` token covers a finding's ``path`` (#75).
-
-    ``token`` is casefolded as :func:`prxref.rules.parse_rule_sections`
-    returns it; ``path`` is a diff path, POSIX and relative to the repository
-    root. Every token outside the vocabulary returns ``True`` — inert, never
-    filtering — and so does ``comments``.
-    """
-    base = path.rsplit("/", 1)[-1].casefold()
-    globs = _SCOPE_BASENAME_GLOBS.get(token)
-    if globs is not None:
-        return any(fnmatch.fnmatchcase(base, pattern) for pattern in globs)
-    if token in _SPEC_SCOPE_TOKENS:
-        if not any(base.endswith(suffix) for suffix in _SPEC_SCOPE_SUFFIXES):
-            return False
-        directories = (part.casefold() for part in path.split("/")[:-1])
-        return any(mark in base for mark in _SPEC_NAME_MARKS) or any(
-            part in _SPEC_SCOPE_DIRS for part in directories
-        )
-    return True
-
-
 def _label_names(label: str, key: str) -> bool:
     """True when a casefolded rule ``label`` names ``key`` (a heading or rule line): equal, or its leading words."""
     if not key or not label or not key.startswith(label):
@@ -2380,7 +2333,7 @@ def apply_rule_scope_check(
     cites a single mid-heading word does not). The label is cleared to
     ``None`` only when it maps to at least one section and NO mapped
     section's ``scope:`` tokens all cover the finding's path per
-    :func:`_scope_token_covers`: ``java``/``jvm`` cover ``*.java``, ``*.kt``,
+    :func:`prxref.rules.scope_token_covers`: ``java``/``jvm`` cover ``*.java``, ``*.kt``,
     ``pom.xml`` and ``build.gradle*``; ``python`` covers ``*.py``;
     ``typescript``, ``javascript``, ``ts`` and ``js`` cover the TypeScript
     and JavaScript extensions; ``docs``/``markdown`` cover ``*.md``,
@@ -2404,6 +2357,8 @@ def apply_rule_scope_check(
     from the loaded rules files; the empty tuple clears nothing, and the
     orchestrator does not call this at all in that case.
     """
+    from .rules import scope_token_covers
+
     scoped = tuple(
         (
             tuple(" ".join(key.split()).casefold() for key in (section.name, *section.items)),
@@ -2425,7 +2380,7 @@ def apply_rule_scope_check(
             tokens for keys, tokens in scoped if any(_label_names(label, key) for key in keys)
         ]
         misses = bool(path) and bool(mapped) and not any(
-            all(_scope_token_covers(token, path) for token in tokens) for tokens in mapped
+            all(scope_token_covers(token, path) for token in tokens) for tokens in mapped
         )
         out.append(replace(finding, rule=None) if misses else finding)
         cleared += 1 if misses else 0
