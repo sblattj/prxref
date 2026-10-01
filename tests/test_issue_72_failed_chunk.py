@@ -503,7 +503,8 @@ class TestPartialRunByteIdentityOfCleanOutput:
         from tests.test_issue_38_cli_config import BASE_JSON
 
         expected = BASE_JSON.replace(
-            '"degraded": null}', '"degraded": null, "config_file": null}',
+            '"incremental": null, "degraded": null}',
+            '"incremental": null, "ci_wiring": null, "degraded": null, "config_file": null}',
         )
         assert json.dumps(_build_json_result({
             "verdict": "Approved", "findings_active": [], "findings_dropped": [],
