@@ -419,6 +419,34 @@ class TestTheAcceptance:
             "triggered": True,
         }
 
+    def test_a_spec_source_mentioning_regression_checks_gives_spec_severity(
+        self, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            orchestrator.specs, "fetch_specs",
+            lambda *a, **k: [SpecSource(
+                origin="docs/spec.md", kind="file",
+                text="## Rules\n\nThe PR MUST add regression checks.\n", error="",
+            )],
+        )
+        forge = CiForge(VERIFY_DIFF, repo_files={})
+        res = self._run(forge, ci_wiring="on", spec_sources=["docs/spec.md"])
+        [f] = _ci_findings(res)
+        assert f.severity == "spec"
+
+    def test_a_failed_spec_source_does_not_raise_severity(self, monkeypatch):
+        monkeypatch.setattr(
+            orchestrator.specs, "fetch_specs",
+            lambda *a, **k: [SpecSource(
+                origin="docs/spec.md", kind="file",
+                text="add regression checks", error="boom",
+            )],
+        )
+        forge = CiForge(VERIFY_DIFF, repo_files={})
+        res = self._run(forge, ci_wiring="on", spec_sources=["docs/spec.md"])
+        [f] = _ci_findings(res)
+        assert f.severity == "warning"
+
     def test_a_workflow_step_invoking_the_script_stays_silent(self):
         forge = CiForge(VERIFY_DIFF, repo_files={WORKFLOW_PATH: WORKFLOW_TEXT})
         res = self._run(forge, ci_wiring="on", ticket=_ticket("Add regression checks."))
