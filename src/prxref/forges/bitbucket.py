@@ -26,6 +26,7 @@ from prxref.forges.base import (
     Thread,
     TitleRename,
     _require_aware,
+    says_wont_fix,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -492,6 +493,7 @@ class ForgeImpl:
                             resolved=_is_deleted(item),
                             author=author,
                             body_snippet=body_snippet,
+                            wont_fix=says_wont_fix(raw_body),
                         )
                     )
         except FeedReadError as e:
