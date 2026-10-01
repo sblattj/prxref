@@ -393,7 +393,8 @@ class TestRelevance:
         # What a block holding only the first item costs: the heading, the
         # trust paragraph, the first item, and the two newlines between them.
         one_only = self._bundle(FAILING).block_for(["src/app.py"], max_chars=10_000)
-        block = bundle.block_for(["src/app.py"], max_chars=len(one_only) + 10)
+        block = bundle.block_for(["src/app.py"], max_chars=len(one_only) + 1 + len(LEFT_OUT_LINE.format(count=1)))
+        assert len(block) <= len(one_only) + 1 + len(LEFT_OUT_LINE.format(count=1))
         assert block.count("\n$ ") == 1
         assert FAILING["command"] in block
         assert PASSING["command"] not in block
@@ -497,7 +498,7 @@ class TestThroughTheRealReviewer:
     def test_a_budget_that_fits_nothing_deactivates_the_unit(self, tmp_path):
         evidence = self._active(tmp_path)
         _forge, llm, res = _run(
-            evidence, findings=[dict(FINDING)], evidence_max_chunk_chars=10,
+            evidence, findings=[dict(FINDING)], evidence_max_chars=10,
         )
         for _system, user in llm.prompts:
             assert HEADING not in user
@@ -509,7 +510,7 @@ class TestThroughTheRealReviewer:
         trace = tmp_path / "run.jsonl"
         _forge, _llm, res = _run(evidence, trace_file=str(trace))
         assert res["evidence"] == {
-            "files": [raw], "items": 2, "matched_chunks": 1, "max_chars": 4000,
+            "files": [raw], "items": 2, "matched_chunks": 1, "max_chars": 8000,
         }
         events = [
             json.loads(line) for line in
@@ -597,7 +598,7 @@ class TestCli:
 
     def _assert_evidenced(self, rig, out: dict, path) -> None:
         assert out["evidence"] == {
-            "files": [str(path)], "items": 1, "matched_chunks": 1, "max_chars": 4000,
+            "files": [str(path)], "items": 1, "matched_chunks": 1, "max_chars": 8000,
         }
         assert [(f["severity"], f["line"]) for f in out["findings"]] == [
             ("error", 0), ("warning", 3),
@@ -855,3 +856,34 @@ def test_finding_has_no_evidence_field_and_label_is_ignored(tmp_path):
 
     assert not hasattr(triage, "normalize_evidence")
     assert not hasattr(triage, "EVIDENCE_CONTRADICTS")
+
+
+def test_evidence_budget_default_is_8000_total():
+    from prxref.config import load_config
+
+    assert load_config()["evidence_max_chars"] == 8000
+    assert "evidence_max_chunk_chars" not in load_config()
+
+
+def test_evidence_budget_env_name_and_legacy_alias(monkeypatch):
+    from prxref.config import load_config
+
+    monkeypatch.setenv("PRXREF_EVIDENCE_MAX_CHARS", "5000")
+    assert load_config()["evidence_max_chars"] == 5000
+    monkeypatch.delenv("PRXREF_EVIDENCE_MAX_CHARS")
+    monkeypatch.setenv("PRXREF_EVIDENCE_MAX_CHUNK_CHARS", "3000")
+    assert load_config()["evidence_max_chars"] == 3000
+
+
+def test_five_2000_char_items_keep_at_most_8000_chars_in_total():
+    from prxref.evidence import EvidenceBundle, EvidenceItem
+
+    items = tuple(
+        EvidenceItem(command=f"probe {n}", exit_code=0, output="x" * 2000)
+        for n in range(5)
+    )
+    bundle = EvidenceBundle(items=items)
+    block = bundle.block_for(("a.py",), 8000)
+    assert 0 < len(block) <= 8000
+    assert block.count("probe ") < 5
+    assert "left out" in block

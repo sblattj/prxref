@@ -578,7 +578,7 @@ def orchestrate_review(
     ci_wiring: str | None = None,
     ci_wiring_globs: Sequence[str] = (),
     evidence: Any = None,
-    evidence_max_chunk_chars: int = 4000,
+    evidence_max_chars: int = 8000,
     stable_ids: bool = True,
     verdict_store: str | None = None,
 ) -> dict:
@@ -787,8 +787,8 @@ def orchestrate_review(
     (:class:`prxref.evidence.EvidenceBundle`, as
     :func:`prxref.evidence.load_evidence` returns it, duck-typed like
     ``rules`` and ``ticket``: ``active``, ``record()``, ``block_for()``,
-    ``global_block()`` and ``matched_for()``), and ``evidence_max_chunk_chars``
-    (``PRXREF_EVIDENCE_MAX_CHUNK_CHARS``; the default restates
+    ``global_block()`` and ``matched_for()``), and ``evidence_max_chars``
+    (``PRXREF_EVIDENCE_MAX_CHARS``; the default restates
     ``config._DEFAULTS`` the way ``MAX_WORKERS`` does) is the per-unit
     character budget of its prompt blocks. ``None`` (an empty list
     configured) turns it off, and an unset run's prompts, posts, record
@@ -1257,7 +1257,7 @@ def orchestrate_review(
         run_inputs["evidence"] = {
             **evidence.record(),
             "matched_chunks": 0,
-            "max_chars": evidence_max_chunk_chars,
+            "max_chars": evidence_max_chars,
         }
     # Issue #71: load the verdict store BEFORE any stage runs, so a store
     # the pass cannot trust is a configuration error (exit 2), never a
@@ -1553,10 +1553,10 @@ def orchestrate_review(
             [p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks
         ]
         evidence_blocks = [
-            evidence.block_for(paths, evidence_max_chunk_chars) for paths in chunk_paths
+            evidence.block_for(paths, evidence_max_chars) for paths in chunk_paths
         ]
         sweep_evidence_block = evidence.global_block(
-            [p for paths in chunk_paths for p in paths], evidence_max_chunk_chars,
+            [p for paths in chunk_paths for p in paths], evidence_max_chars,
         )
         run_inputs["evidence"]["matched_chunks"] = sum(
             1 for paths in chunk_paths if evidence.matched_for(paths)
