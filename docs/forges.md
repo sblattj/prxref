@@ -600,10 +600,15 @@ exception on every forge: a thread a human closed as a deliberate decision to le
 code alone keeps suppressing it. Besides Azure DevOps `wontFix` / `byDesign` statuses,
 prxref reads that decision from the comment text: `won't fix`, `wontfix`, `will not fix`,
 `not going to fix`, `by design`, `working as intended` or `works as designed`, stated on
-its own — at the start of a comment, line or sentence and followed by punctuation or the
-end of the line ("Won't fix: intentional", "Thanks. Wontfix."). The words inside a
-sentence ("retrying won't fix the timeout") do not count, and neither does any comment
-carrying the prxref attribution. GitHub, GitLab and Azure DevOps read every reply of the
-thread, so a "won't fix" reply covers the root comment the finding is matched against;
-Bitbucket Cloud, Bitbucket Server and Gitea/Forgejo read it from the comment the finding
-is matched against.
+its own — at the start of a comment, line or sentence and followed by punctuation other
+than `?` or by the end of the line ("Won't fix: intentional", "Thanks. Wontfix.",
+"Wont fix, this is deliberate"). A comma ends only the "won't fix" forms: "By design,
+this timeout should be configurable." and "Works as intended, except when the pool is
+empty." are a request and a bug report, not declines. The words inside a sentence
+("retrying won't fix the timeout") do not count, nor does a question ("won't fix?"), nor
+any comment carrying the prxref attribution. Every adapter reads the decision from the
+full comment body, never from the truncated snippet kept for matching, so a prxref
+comment whose own text says "By design." is never mistaken for one. GitHub, GitLab and
+Azure DevOps read every reply of the thread, so a "won't fix" reply covers the root
+comment the finding is matched against; Bitbucket Cloud, Bitbucket Server and
+Gitea/Forgejo read it from the comment the finding is matched against.
