@@ -97,7 +97,9 @@ when the completed review carries an active error-severity finding; ``any``
 exits 1 on any active finding; and under either value a review that does not
 complete also exits 1 — it crashes, or it ends with verdict ``Error`` (the
 forge could not be read, the diff could not be parsed or chunked, or every
-chunk review failed) — because a gate that silently passes on a broken run is
+chunk review failed) or verdict ``Incomplete`` (some chunk reviews failed,
+so the review only partially happened; issue #72) — because a gate that
+silently passes on a broken run is
 worse than none. An empty PR diff is not a failure: it is reviewed as
 ``Approved`` and exits 0. An unrecognized PR URL still exits 0 under every
 value — nothing was reviewed, so there is no outcome to gate on. The webhook
@@ -612,6 +614,31 @@ def _scope_counts(result: dict) -> tuple[int, int, int]:
     return n_in, n_out, len(scopes) - n_in - n_out
 
 
+def _unreviewed_files_label(failed_chunks: Any) -> str:
+    """The ``NOT reviewed`` file list for the text ``coverage:`` line (#72).
+
+    ``failed_chunks`` is the run record's list of ``(error, files)`` pairs,
+    one per failed review unit. Files from every failed unit are joined in
+    order, deduplicated (two failed chunks cannot share a file today, but
+    the label must not lie if that ever changes); a unit with an empty file
+    list is the systemic sweep, which names itself in its reason, so it
+    contributes ``systemic sweep`` rather than nothing. Returns ``""`` for
+    anything unshaped — a partial or error-shaped result — so the line
+    keeps exactly its pre-#72 form there.
+    """
+    if not isinstance(failed_chunks, list):
+        return ""
+    names: list[str] = []
+    for entry in failed_chunks:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        files = [f for f in entry[1] if isinstance(f, str)]
+        names.extend(files or ["systemic sweep"])
+    seen: set[str] = set()
+    unique = [n for n in names if not (n in seen or seen.add(n))]
+    return ", ".join(unique)
+
+
 def _print_summary(
     result: Any,
     elapsed_s: float,
@@ -621,7 +648,10 @@ def _print_summary(
 ) -> None:
     """Print the text-mode summary of one review.
 
-    Always printed: ``verdict:``; ``coverage:`` when a chunk failed;
+    Always printed: ``verdict:``; ``coverage:`` when a chunk failed —
+    extended, when the record carries the failed units' file lists, with
+    ``; NOT reviewed: <files>`` (``systemic sweep`` when the failed unit is
+    the sweep, which names itself rather than files);
     ``chunks:`` when a chunk ran over the token budget or a file was placed
     past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
     when the PR-size advisory fired; and ``replay:`` when the run was a
@@ -648,7 +678,11 @@ def _print_summary(
     failed = record.get("chunks_failed", 0)
     if failed:
         reviewed = record.get("chunks_reviewed", 0)
-        print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
+        line = f"coverage: {reviewed}/{reviewed + failed} chunks reviewed"
+        unreviewed = _unreviewed_files_label(record.get("failed_chunks"))
+        if unreviewed:
+            line = f"{line}; NOT reviewed: {unreviewed}"
+        print(line, file=target)
     chunks_line = _chunk_pressure_line(record)
     if chunks_line:
         print(chunks_line, file=target)
@@ -896,7 +930,8 @@ def _build_json_result(result: Any) -> dict:
     """Build the single JSON payload for ``--format json``.
 
     Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
-    ``chunks_failed``, ``chunks_over_budget``, ``largest_chunk_tokens``,
+    ``chunks_failed``, ``failed_chunks`` (a partial run only, see below),
+    ``chunks_over_budget``, ``largest_chunk_tokens``,
     ``overflow_files``, ``chunk_token_budget``, ``elapsed_ms``,
     ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
@@ -927,7 +962,10 @@ def _build_json_result(result: Any) -> dict:
     "since_sha", "files_total", "files_reviewed", "marker_sha"}``), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
-    "annotations"}``, see :func:`_emit_fallback`), and so is
+    "annotations"}`` and, when a review unit failed, a ``chunks`` list of
+    ``{"index", "files", "error"}`` rows — ``cause`` is ``"partial"``
+    there unless a blocked write makes it ``"permission"`` — see
+    :func:`_emit_fallback`), and so is
     ``config_file`` (#38: ``null`` when the run read no repository config
     file; otherwise ``{"path", "sha256", "keys"}``, see
     :func:`_config_file_stamp`);
@@ -953,6 +991,10 @@ def _build_json_result(result: Any) -> dict:
         "chunk_count": result.get("chunk_count"),
         "chunks_reviewed": result.get("chunks_reviewed"),
         "chunks_failed": result.get("chunks_failed"),
+        # Present only on a partial run (#72), like "degraded": a clean
+        # payload's key set is pinned by the golden tests.
+        **({"failed_chunks": result.get("failed_chunks")}
+           if result.get("failed_chunks") else {}),
         "chunks_over_budget": result.get("chunks_over_budget"),
         "largest_chunk_tokens": result.get("largest_chunk_tokens"),
         "overflow_files": result.get("overflow_files"),
@@ -1522,6 +1564,12 @@ def _run_review(
             "because a gate's verdict must see the whole PR", cfg["fail_on"],
         )
         full_review_reason = f"PRXREF_FAIL_ON={cfg['fail_on']}"
+    # Not a config key: a hint this caller adds for the LLM factory, which
+    # the layers know here and the resolved cfg cannot express on its own
+    # (it always carries an llm_timeout value, so default and explicit are
+    # indistinguishable inside the factory). Only a default timeout keeps
+    # the prompt-scaled deadline (issue #72).
+    cfg["LLM_TIMEOUT_IS_DEFAULT"] = layers.get("llm_timeout") == "default"
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
     result = orchestrate(
@@ -1668,11 +1716,12 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     """The exit code a returned review result earns under the ``fail_on`` policy.
 
     ``never`` is always 0. Under ``error`` and ``any``, a result with verdict
-    ``Error`` exits 1 whatever its findings: the orchestrator returns one
-    instead of raising when the forge could not be read, the diff could not be
-    parsed or chunked, or every chunk review failed, so it is a review that did
-    not complete — the same outcome as the crash ``_cmd_review`` gates, and one
-    a gating lane must not read as green.
+    ``Error`` or ``Incomplete`` exits 1 whatever its findings: the
+    orchestrator returns ``Error`` instead of raising when the forge could
+    not be read, the diff could not be parsed or chunked, or every chunk
+    review failed, and ``Incomplete`` when some did (issue #72) — both are
+    reviews that did not complete, the same outcome as the crash
+    ``_cmd_review`` gates, and one a gating lane must not read as green.
 
     Otherwise severity is compared exactly as the verdict is built in the
     orchestrator (``Request-Changes`` iff an active finding has severity
@@ -1685,10 +1734,10 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     """
     if fail_on == "never":
         return 0, None
-    if isinstance(result, dict) and result.get("verdict") == "Error":
+    if isinstance(result, dict) and result.get("verdict") in ("Error", "Incomplete"):
         return 1, (
             f"PRXREF_FAIL_ON={fail_on}: review did not complete "
-            "(verdict Error); exiting 1"
+            f"(verdict {result.get('verdict')}); exiting 1"
         )
     findings = result.get("findings_active") if isinstance(result, dict) else None
     if not isinstance(findings, list):
@@ -1712,7 +1761,9 @@ def _emit_fallback(
     """Emit a degraded review through the CI it runs under (issue #48).
 
     Does nothing unless ``result["degraded"]`` is a dict, i.e. a post
-    failed. The CI is :func:`prxref.ci_fallback.detect_ci` of ``environ``
+    failed or a review unit did (#72: the partial-review banner rides the
+    same summary key). The CI is :func:`prxref.ci_fallback.detect_ci` of
+    ``environ``
     (``os.environ`` by default), and only the active findings are emitted:
 
     - GitHub Actions: the annotation lines on stdout (``github-annotations``,
