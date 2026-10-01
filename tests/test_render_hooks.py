@@ -118,8 +118,8 @@ class TestTicketNote:
         assert "⬜ 1 outofscope\n> T\n\n- 🟥 `a.py:3`" in out
 
     def test_packaged_template_has_the_slot(self):
-        assert "{spec_note}{ticket_note}\n" in orchestrator.reviewer.load_prompt("summary")
-        assert "{spec_note}{ticket_note}\n" in orchestrator._FALLBACK_SUMMARY_TEMPLATE
+        assert "{spec_note}{ticket_note}{evidence_note}\n" in orchestrator.reviewer.load_prompt("summary")
+        assert "{spec_note}{ticket_note}{evidence_note}\n" in orchestrator._FALLBACK_SUMMARY_TEMPLATE
 
 
 class TestCostLabel:
