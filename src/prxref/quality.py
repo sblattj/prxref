@@ -2,8 +2,8 @@
 
 Twenty passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, pass 10 only when ``PRXREF_STABLE_IDS`` turns stable finding
-ids on (#71, ``prxref.stable_ids.apply_stable_ids``), pass 14 only when
+severity map, pass 10 unless ``PRXREF_STABLE_IDS=0`` turns stable finding
+ids off (#71, ``prxref.stable_ids.apply_stable_ids``), pass 14 only when
 the loaded rules file declares at least
 one section scope, pass 15 only when ``PRXREF_GROUP_FINDINGS`` turns
 finding grouping on, and pass 16 only when a team rules file is loaded
@@ -97,9 +97,8 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
    has already demoted a file-level finding to line 0 by this point;
    resolved or outdated threads are skipped here too (issue #73), except
    a won't-fix one (``settled in thread: <author>``).
-10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): opt-in
-    via ``PRXREF_STABLE_IDS`` — off entirely by default, and then never
-    called. When on, it stamps every finding with a content-derived
+10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): on by
+    default; ``PRXREF_STABLE_IDS=0`` skips it entirely. When run, it stamps every finding with a content-derived
     ``id`` (``<file>#<rule or norule>#<12-hex claim hash>`` over the
     title's sorted content words — no model, no embedding), an
     ``anchor_block`` (enclosing function, YAML key path or manifest key,
