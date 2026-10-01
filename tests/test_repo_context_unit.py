@@ -2,7 +2,7 @@
 
 Covers :func:`prxref.repo_unit.build_unit_context` (sources, order, budget,
 the omitted line, exclusion and the guard), :func:`prxref.repo_context.exclude_predicate`
-with :data:`prxref.repo_context.EXCLUDE_FLOOR`, and the two optional arguments
+with :data:`prxref.repo_context.EXCLUDE_FLOOR`, and the three optional arguments
 of :func:`prxref.chunk_context.render_context_blocks`.
 
 The fixture half runs the real parser, chunker, sources and capped reader over
@@ -319,8 +319,8 @@ class TestReadCap:
 
 @pytest.fixture
 def canned(monkeypatch):
-    """Replace the three sources ``repo_unit`` binds with canned entry lists."""
-    sources: dict[str, list[ContextEntry]] = {"diff": [], "contract": [], "resolver": []}
+    """Replace the four sources ``repo_unit`` binds with canned entry lists."""
+    sources: dict[str, list[ContextEntry]] = {"diff": [], "contract": [], "standards": [], "resolver": []}
     called: list[str] = []
 
     def diff(chunk, all_files, read):
@@ -331,12 +331,17 @@ def canned(monkeypatch):
         called.append("contract")
         return list(sources["contract"])
 
+    def standards(chunk, *, standards_paths, read, priority=(), max_chars=4000):
+        called.append("standards")
+        return list(sources["standards"])
+
     def resolver(chunk, all_files, read, **kwargs):
         called.append("resolver")
         return list(sources["resolver"])
 
     monkeypatch.setattr(repo_unit, "diff_definitions", diff)
     monkeypatch.setattr(repo_unit, "contract_entries", contracts)
+    monkeypatch.setattr(repo_unit, "standards_entries", standards)
     monkeypatch.setattr(repo_unit, "_resolver_entries", resolver)
     return SimpleNamespace(sources=sources, called=called)
 
@@ -437,6 +442,7 @@ class TestOrder:
     def test_reason_rank_beats_path(self, canned):
         canned.sources["diff"] = [_entry("a/x.java", 1, "diff-file"), _entry("z/y.java", 1, "cross-chunk")]
         canned.sources["contract"] = [_entry("y/spec.yaml", 1, "contract", kind="contract")]
+        canned.sources["standards"] = [_entry("s/standards.md", 1, "standard", kind="standards")]
         canned.sources["resolver"] = [
             _entry("d/r.java", 1, "shared-state", kind="reader"),
             _entry("a/n.java", 1, "name-search"),
@@ -448,7 +454,8 @@ class TestOrder:
 
         assert [e.reason for e in unit.entries] == list(REASONS)
         assert [e.path for e in unit.entries] == [
-            "z/y.java", "y/spec.yaml", "a/x.java", "c/i.java", "b/p.java", "a/n.java", "d/r.java",
+            "z/y.java", "y/spec.yaml", "s/standards.md", "a/x.java", "c/i.java", "b/p.java", "a/n.java",
+            "d/r.java",
         ]
 
     def test_within_a_reason_path_then_line(self, canned):
@@ -473,7 +480,7 @@ class TestOrder:
 
     def test_sources_are_called_in_rank_order(self, canned):
         _build()
-        assert canned.called == ["diff", "contract", "resolver"]
+        assert canned.called == ["diff", "contract", "standards", "resolver"]
 
     def test_diff_mode_calls_only_the_diff_source(self, canned):
         canned.sources["contract"] = [_entry("spec.yaml", 1, "contract", kind="contract")]

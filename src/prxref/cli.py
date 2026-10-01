@@ -1711,6 +1711,8 @@ def _run_review(
         repo_context_max_chunk_reads=cfg["repo_context_max_chunk_reads"],
         context_contract_globs=cfg["context_contract_globs"],
         context_exclude_globs=cfg["context_exclude_globs"],
+        context_standards_globs=cfg["context_standards_globs"],
+        context_standards_max_chars=cfg["context_standards_max_chars"],
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],

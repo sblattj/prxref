@@ -38,8 +38,11 @@ from dataclasses import dataclass
 from . import chunk_context, jvm_lang
 from .rules import match_globs
 
-REASONS = ("cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search", "shared-state")
-KINDS = ("definition", "contract", "reader")
+REASONS = (
+    "cross-chunk", "contract", "standard", "diff-file", "import", "path-convention",
+    "name-search", "shared-state",
+)
+KINDS = ("definition", "contract", "standards", "reader")
 
 _JAVA_DEF_RE = jvm_lang.JAVA_TYPE_RE
 
