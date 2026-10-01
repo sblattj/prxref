@@ -78,8 +78,11 @@ SCOPED_BODY = (
     "\n"
     "- Name every data limit.\n"
 )
-SCOPELESS_BODY = SCOPED_BODY.replace("scope: java\n\n", "").replace(
-    "scope: typescript\n\n", ""
+SCOPELESS_BODY = (
+    SCOPED_BODY.replace("scope: java\n\n", "")
+    .replace("scope: typescript\n\n", "")
+    .replace("Java module boundaries", "Module boundaries")
+    .replace("TypeScript style", "Typing style")
 )
 SCOPED_SECTIONS = parse_rule_sections(SCOPED_BODY.strip())
 
@@ -138,7 +141,7 @@ class TestParseRuleSections:
         ]
 
     def test_a_section_the_character_cap_cut_off_is_not_parsed(self):
-        capped = cap_text(SCOPED_BODY.strip(), 30)
+        capped = cap_text(SCOPED_BODY.replace("Java module boundaries", "Module boundaries").strip(), 30)
         assert "scope:" not in capped.text
         assert parse_rule_sections(capped.text) == ()
 
@@ -551,3 +554,40 @@ class TestRuleScopingKey:
         monkeypatch.setenv("PRXREF_RULE_SCOPING", "maybe")
         with pytest.raises(config.ConfigError, match="PRXREF_RULE_SCOPING"):
             config.load_config()
+
+
+class TestAppliesToAndHeadingInference:
+    def test_applies_to_line_parses(self):
+        body = "## Module boundaries\nApplies to: java\n\n- a rule\n"
+        (section,) = parse_rule_sections(body)
+        assert section.scopes == ("java",)
+
+    def test_applies_to_key_is_case_insensitive_and_multi_token(self):
+        body = "## Specs\nAPPLIES TO: openapi, docs\n- a rule\n"
+        (section,) = parse_rule_sections(body)
+        assert section.scopes == ("openapi", "docs")
+
+    def test_heading_language_noun_infers_scope(self):
+        body = "## Java module boundaries\n\n- no cross-module imports\n"
+        (section,) = parse_rule_sections(body)
+        assert section.name == "Java module boundaries"
+        assert section.scopes == ("java",)
+        assert section.items == ("no cross-module imports",)
+
+    def test_general_heading_infers_nothing(self):
+        assert parse_rule_sections("## General style\n\n- be nice\n") == ()
+
+    def test_explicit_scope_line_beats_the_heading(self):
+        body = "## Java things\nscope: python\n- a rule\n"
+        (section,) = parse_rule_sections(body)
+        assert section.scopes == ("python",)
+
+    def test_ambiguous_heading_words_infer_nothing(self):
+        assert parse_rule_sections("## Testing\n- t\n\n## Documentation\n- d\n") == ()
+
+    def test_inferred_scope_annotates_the_heading_and_keeps_the_next_line(self):
+        rules = ReviewRules(
+            path="rules.md", body=cap_text("## Java rules\n- first\n", 1000), severity_map={}
+        )
+        text = rules.prompt_block("worker")
+        assert "## Java rules (applies to: java)\n- first" in text
