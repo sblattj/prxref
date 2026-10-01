@@ -88,11 +88,6 @@ def _old_is_duplicate_of_existing(
     return False
 
 
-def _old_github_line(item: dict):
-    """The GitHub thread line mapping before code suggestions existed."""
-    return item.get("line") or item.get("original_line") or item.get("position")
-
-
 # --- a human multi-line thread, start 10, end 14 --------------------------------
 
 HUMAN_RANGE = _thread(14, start_line=10)
@@ -202,14 +197,27 @@ PAYLOADS = [
 
 
 def test_github_threads_keep_the_line_they_had_before_suggestions():
+    # Issue #73: the old `line or original_line or position` fallback
+    # re-anchored an outdated comment — null `line`, the value living in
+    # `original_line` — at its original line, so payload "g" read as a
+    # CURRENT thread anchored at 9. A null `line` now reads as outdated
+    # with no anchor; a comment that still anchors the diff keeps its line
+    # verbatim.
     threads = _github_threads(PAYLOADS)
-    assert [t.line for t in threads] == [_old_github_line(item) for item in PAYLOADS]
+    assert [t.line for t in threads] == [
+        item.get("line") if isinstance(item.get("line"), int) else None
+        for item in PAYLOADS
+    ]
     assert threads[0].line == 14
+    assert threads[6].line is None
+    assert threads[6].outdated is True
 
 
 def test_github_start_line_is_set_only_for_a_real_range():
+    # Payload "g" loses its start_line of 3 with issue #73: without a
+    # current `line` there is no range to anchor, only an outdated thread.
     threads = _github_threads(PAYLOADS)
-    assert [t.start_line for t in threads] == [10, None, None, None, None, None, 3, None, None, None]
+    assert [t.start_line for t in threads] == [10, None, None, None, None, None, None, None, None, None]
 
 
 def test_a_thread_built_without_start_line_is_single_line():

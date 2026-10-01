@@ -256,6 +256,117 @@ def test_list_threads_keeps_what_it_read_and_warns_when_the_feed_read_fails(capl
     assert "incomplete" in caplog.text.lower()
 
 
+def test_list_threads_marks_a_null_line_comment_outdated():
+    # Issue #73: GitHub nulls `line` (keeping the value in `original_line`)
+    # once a comment no longer anchors the current diff. The old
+    # `line or original_line or position` fallback re-anchored such a
+    # comment at its original line, so an outdated thread looked current.
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {
+                "id": 1,
+                "path": "src/app.py",
+                "line": None,
+                "original_line": 12,
+                "position": None,
+                "user": {"login": "reviewer"},
+                "body": "please fix",
+            }
+        ]
+    )
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    assert len(threads) == 1
+    assert threads[0].outdated is True
+    assert threads[0].line is None
+
+    # No token in the environment: the GraphQL patch read must not even try.
+    session.post.assert_not_called()
+
+
+def test_list_threads_patches_resolution_outdated_and_url_from_graphql(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {"id": 1, "path": "src/app.py", "line": 12, "user": {"login": "r"}, "body": "a"},
+            {"id": 2, "path": "src/old.py", "line": None, "original_line": 7,
+             "user": {"login": "r"}, "body": "b"},
+            {"id": 3, "path": "src/gone.py", "line": 5, "user": {"login": "r"}, "body": "c"},
+        ]
+    )
+    url = "https://github.com/acme/api/pull/42/files#discussion_r1"
+    session.post.return_value = _mock_response(
+        json_data={
+            "data": {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [
+                    {"isResolved": True, "isOutdated": False, "url": url,
+                     "comments": {"nodes": [{"path": "src/app.py", "line": 12}]}},
+                    {"isResolved": False, "isOutdated": True,
+                     "url": "https://github.com/acme/api/pull/42/files#discussion_r2",
+                     "comments": {"nodes": [{"path": "src/old.py", "line": None}]}},
+                ],
+            }}}},
+        }
+    )
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    assert session.post.call_args[0][0] == "https://api.github.com/graphql"
+    by_path = {t.path: t for t in threads}
+    assert by_path["src/app.py"].resolved is True
+    assert by_path["src/app.py"].outdated is False
+    assert by_path["src/app.py"].url == url
+    # Joined by (path, line) with nulls equal: the outdated REST comment's
+    # GraphQL twin also reports line null.
+    assert by_path["src/old.py"].outdated is True
+    assert by_path["src/old.py"].resolved is False
+    assert by_path["src/old.py"].url is not None
+    # No GraphQL thread matched this anchor; the REST state stands.
+    assert by_path["src/gone.py"].resolved is False
+    assert by_path["src/gone.py"].outdated is False
+    assert by_path["src/gone.py"].url is None
+
+
+def test_list_threads_degrades_to_rest_only_when_graphql_fails(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {"id": 1, "path": "src/app.py", "line": 12, "user": {"login": "r"}, "body": "a"},
+        ]
+    )
+    session.post.side_effect = requests.ConnectionError("graphql down")
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    assert len(threads) == 1
+    assert threads[0].resolved is False
+    assert threads[0].outdated is False
+    assert threads[0].url is None
+
+
+def test_list_threads_degrades_to_rest_only_on_graphql_errors(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {"id": 1, "path": "src/app.py", "line": 12, "user": {"login": "r"}, "body": "a"},
+        ]
+    )
+    session.post.return_value = _mock_response(
+        json_data={"data": None, "errors": [{"message": "bad field"}]},
+    )
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    assert len(threads) == 1
+    assert threads[0].resolved is False
+
+
 # --- inline comments (unchanged behavior, previously untested) --------------
 
 
