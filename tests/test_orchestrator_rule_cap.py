@@ -580,6 +580,7 @@ def _json_payload(res: dict) -> dict:
 
 def rules_capture(name: str, **knobs) -> tuple[str, dict]:
     diff, extra = RULES_SCENARIOS[name]
+    knobs.setdefault("ci_wiring", "off")
     forge = FakeForge(diff=diff)
     llm = _Recorder(json.dumps({"findings": MODEL_FINDINGS}))
     handler = _ListHandler()

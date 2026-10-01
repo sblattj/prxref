@@ -403,8 +403,9 @@ class TestEvalWiring:
         assert stub_llm.calls == 0
 
     def test_run_config_keys_end_with_the_six_settings_then_the_read_caps(self):
-        assert evals.RUN_CONFIG_KEYS[-8:] == SIX + READ_CAPS
-        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 8
+        assert evals.RUN_CONFIG_KEYS[-10:-2] == SIX + READ_CAPS
+        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 10
+        assert evals.RUN_CONFIG_KEYS[-2:] == ("routing_probe", "ci_wiring")
 
 
 class TestFixtureEvalEndToEnd:
@@ -431,10 +432,11 @@ class TestFixtureEvalEndToEnd:
         assert [entry for entry in entries if entry["kind"] == "contract"] != []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        assert list(run["config"])[-8:] == list(SIX + READ_CAPS)
+        assert list(run["config"])[-10:-2] == list(SIX + READ_CAPS)
         assert run["config"]["repo_context"] == "repo"
         assert run["config"]["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
-        assert run["config"]["context_standards_globs"] == config._DEFAULTS["context_standards_globs"]
+        # The eval harness pins standards discovery off (OD2), whatever the default.
+        assert run["config"]["context_standards_globs"] == []
         assert stub_llm.calls >= 2
 
     def test_control_off_records_null(self, tmp_path, stub_llm, capsys):

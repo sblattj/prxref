@@ -352,8 +352,12 @@ class TestCiWiringFindings:
 class TestConfigSurface:
     def test_the_defaults_and_the_choice(self):
         cfg = config.load_config()
-        assert cfg["ci_wiring"] == "off"
+        assert cfg["ci_wiring"] == "on"
         assert cfg["ci_wiring_globs"] == list(ci_wiring.DEFAULT_CI_GLOBS)
+
+    def test_off_is_still_accepted(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CI_WIRING", "off")
+        assert config.load_config()["ci_wiring"] == "off"
 
     def test_the_builtin_glob_set_is_restated_not_drifted(self):
         assert config._DEFAULTS["ci_wiring_globs"] == list(ci_wiring.DEFAULT_CI_GLOBS)
@@ -477,11 +481,19 @@ class TestSeverity:
 class TestTheReaderGate:
     def test_off_reads_nothing_and_records_null(self):
         forge = CiForge(VERIFY_DIFF, repo_files={WORKFLOW_PATH: WORKFLOW_TEXT})
-        res = orchestrate_review(forge, REF, EMPTY_LLM, post=False)
+        res = orchestrate_review(forge, REF, EMPTY_LLM, post=False, ci_wiring="off")
 
         assert res["ci_wiring"] is None
         assert forge.reads == []
         assert res["findings_active"] == []
+
+    def test_the_default_runs_the_check(self):
+        forge = CiForge(VERIFY_DIFF, repo_files={})
+        res = orchestrate_review(forge, REF, EMPTY_LLM, post=False)
+
+        [f] = _ci_findings(res)
+        assert f.file == "scripts/verify.sh"
+        assert res["ci_wiring"]["triggered"] is True
 
     def test_a_readerless_run_warns_and_records_the_reason(self, caplog):
         forge = FakeForge(diff=VERIFY_DIFF)  # no get_file_content, no repo_dir
@@ -490,7 +502,40 @@ class TestTheReaderGate:
 
         assert res["ci_wiring"] == {"triggered": False, "reason": "no reader"}
         assert res["findings_active"] == []
-        assert any("PRXREF_CI_WIRING" in record.message for record in caplog.records)
+        assert any(
+            "PRXREF_CI_WIRING" in record.message and record.levelname == "WARNING"
+            for record in caplog.records
+        )
+
+    def test_a_readerless_run_on_the_default_notes_it_at_info_only(self, caplog):
+        forge = FakeForge(diff=VERIFY_DIFF)
+        with caplog.at_level("INFO"):
+            res = orchestrate_review(forge, REF, EMPTY_LLM, post=False)
+
+        assert res["ci_wiring"] == {"triggered": False, "reason": "no reader"}
+        notices = [r for r in caplog.records if "PRXREF_CI_WIRING" in r.message]
+        assert [r.levelname for r in notices] == ["INFO"]
+
+    def test_the_cli_passes_a_defaulted_value_as_the_default(self, monkeypatch, tmp_path):
+        from prxref import cli, llm_backends
+
+        seen: list = []
+
+        def fake_orchestrate(*args, **kwargs):
+            seen.append(kwargs["ci_wiring"])
+            return {}
+
+        diff = tmp_path / "pr.diff"
+        diff.write_text(VERIFY_DIFF, encoding="utf-8")
+        monkeypatch.setattr(orchestrator, "orchestrate_review", fake_orchestrate)
+        monkeypatch.setattr(llm_backends, "create_llm_client", lambda cfg: EMPTY_LLM)
+        monkeypatch.delenv("PRXREF_CI_WIRING", raising=False)
+        cli._run_review(None, post=False, diff_file=str(diff))
+        monkeypatch.setenv("PRXREF_CI_WIRING", "on")
+        cli._run_review(None, post=False, diff_file=str(diff))
+        cli._run_review(None, post=False, diff_file=str(diff), ci_wiring="off")
+
+        assert seen == [None, "on", "off"]
 
     def test_repo_dir_alone_is_enough(self, tmp_path):
         """The acceptance route: no forge file reader at all, just a local
