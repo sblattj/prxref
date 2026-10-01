@@ -113,7 +113,8 @@ class ReviewRules:
     :func:`load_review_rules` always leaves it ``None``, and neither
     :meth:`prompt_block` nor :meth:`record` reads it. ``sections`` is
     :func:`parse_rule_sections` over the capped body — the ATX sections
-    that declare a ``scope:`` line (#75) — ``()`` for a body with none;
+    with a scope, from a ``scope:`` line or inferred from a heading's
+    language or artifact noun (#75) — ``()`` for a body with none;
     :meth:`prompt_block` re-walks the body to annotate those sections, the
     orchestrator reads it for the applicability check, and :meth:`record`
     never does (it would leak rules text).
@@ -313,21 +314,27 @@ class RuleSection:
 
     ``name`` is the heading text with its whitespace collapsed, as written:
     the caller casefolds it when matching a finding's ``rule`` label against
-    the section. ``scopes`` holds the ``scope:`` line's tokens, casefolded
-    and split on commas and whitespace, in file order, duplicates dropped.
+    the section. ``scopes`` holds the section's scope tokens, casefolded, in
+    file order, duplicates dropped: the ``scope:`` line's tokens split on
+    commas and whitespace, or, with no such line, the language or artifact
+    nouns the heading names (:func:`parse_rule_sections`).
     :func:`parse_rule_index` returns every section, with ``scopes`` ``()``
-    for an unscoped one. A section without a ``scope:`` line — or one whose
-    ``scope:`` line names no token — is not returned by
-    :func:`parse_rule_sections` at all, so a
-    body with no such line parses to ``()`` and every rule-scope feature
-    stays off. ``items`` holds the section's bullet and numbered rule lines
-    (markup stripped, whitespace collapsed), so a label that names a rule
-    rather than the heading still maps to its section.
+    for an unscoped one; :func:`parse_rule_sections` returns only the
+    sections with at least one token. ``any_scope`` says how the tokens
+    combine (:func:`scope_covers`): ``False``, the default and always the
+    case for a ``scope:`` line, means a path must be covered by EVERY token;
+    ``True``, set only for a scope inferred from a heading, means ANY token
+    covering it is enough, so ``## Python and TypeScript conventions``
+    covers ``*.py`` and ``*.ts`` alike. ``items`` holds the section's bullet
+    and numbered rule lines (markup stripped, whitespace collapsed), so a
+    label that names a rule rather than the heading still maps to its
+    section.
     """
 
     name: str
     scopes: tuple[str, ...]
     items: tuple[str, ...] = ()
+    any_scope: bool = False
 
 
 _ITEM_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.+?)[ \t]*$")
@@ -373,15 +380,39 @@ def _heading_scope_tokens(name: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
+def _document_title_index(lines: Sequence[str]) -> int:
+    """The line index of ``lines``' document title, ``-1`` when it has none.
+
+    The title is the body's first heading (any depth) when no later heading
+    has its level or a higher one, so its section runs to the end of the
+    body, and it is either an H1 or holds at least one later sub-heading.
+    ``# Acme Java backend review rules`` over ``## General style`` is a
+    title; a lone ``## Java conventions`` section is not.
+    """
+    headings = [level for level in map(_heading_level, lines) if level]
+    if not headings:
+        return -1
+    level, later = headings[0], headings[1:]
+    if any(other <= level for other in later):
+        return -1
+    if level != 1 and not later:
+        return -1
+    return next(index for index, line in enumerate(lines) if _heading_level(line))
+
+
 def _scoped_sections(lines: Sequence[str]):
-    """Yield ``(heading line index, name, scope tokens)`` for each scoped section of ``lines``.
+    """Yield ``(heading line index, name, scope tokens, any_scope)`` for each scoped section of ``lines``.
 
     The walk that both the parser and the prompt annotation run: a section starts
     at an ATX heading (:data:`_SECTION_RE`) and its scope, when it has one,
     is the section's FIRST non-blank line after the heading read as a
-    ``scope:`` or ``applies to:`` line (:data:`_SCOPE_LINE_RE`); a heading
+    ``scope:`` or ``applies to:`` line (:data:`_SCOPE_LINE_RE`), whose
+    tokens must all cover a path (``any_scope`` ``False``); a heading
     with no such line infers its scope from the language or artifact nouns it
-    names (:func:`_heading_scope_tokens`). A ``scope:`` line anywhere
+    names (:func:`_heading_scope_tokens`), any one of which covering a path
+    is enough (``any_scope`` ``True``) — except the document title
+    (:func:`_document_title_index`), which infers nothing, because its
+    section is the whole file. A ``scope:`` line anywhere
     else in a section is ordinary rules text, and so is one the character
     cap already cut off — the walk reads the capped body the prompt shows.
     Only a heading with both a name and at least one token is yielded, in
@@ -389,6 +420,7 @@ def _scoped_sections(lines: Sequence[str]):
     line is consumed once and a following heading still opens the next
     section.
     """
+    title = _document_title_index(lines)
     index = 0
     while index < len(lines):
         heading = _SECTION_RE.match(lines[index])
@@ -401,12 +433,14 @@ def _scoped_sections(lines: Sequence[str]):
             rest += 1
         tokens = _scope_tokens(lines[rest]) if rest < len(lines) else ()
         if name and tokens:
-            yield index, name, tokens
+            yield index, name, tokens, False
             index = rest
             continue
-        inferred = _heading_scope_tokens(name) if _scope_line_absent(lines, rest) else ()
+        inferred = (
+            _heading_scope_tokens(name) if index != title and _scope_line_absent(lines, rest) else ()
+        )
         if inferred:
-            yield index, name, inferred
+            yield index, name, inferred, True
         index = rest
 
 
@@ -421,21 +455,30 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
     case-insensitive, the tokens casefolded and split on commas and
     whitespace). A heading with no such line infers its scope from a language
     or artifact noun it names (``java``, ``python``, ``typescript``,
-    ``javascript``, ``jvm``, ``ts``, ``js``, ``markdown``, ``openapi``). Callers pass the CAPPED
+    ``javascript``, ``jvm``, ``ts``, ``js``, ``markdown``, ``openapi``). A
+    ``scope:`` line's tokens must ALL cover a path; an inferred scope covers
+    a path ANY of its nouns covers (``any_scope``), so ``## Python and
+    TypeScript conventions`` applies to Python files and TypeScript files.
+    The document title infers nothing: the first heading, when no later
+    heading of its level or higher closes it and it is an H1 or holds
+    sub-headings, so ``# Acme Java backend review rules`` over ``## General
+    style`` leaves the file unscoped. Callers pass the CAPPED
     body the prompt shows, so a section the cap cut away is not parsed
     either: the model cannot see it, so it is not one a label can be
     checked against.
 
-    Only sections that declare at least one token are returned. A body with
-    none — every rules file written before #75 — parses to ``()``, which
-    leaves :meth:`ReviewRules.prompt_block` byte-identical and the
-    orchestrator's applicability check off. Front matter is not read: a
-    file-global ``scope`` would trip the ignored-keys path, and scopes are
-    per section by design.
+    Only sections with at least one token are returned. A body with none —
+    no ``scope:`` line and no heading naming a language or artifact noun —
+    parses to ``()``, which leaves :meth:`ReviewRules.prompt_block`
+    byte-identical and the scope half of the orchestrator's applicability
+    check off. A rules file written before #75 whose headings name such a
+    noun (``## Java conventions``) is scoped by inference. Front matter is
+    not read: a file-global ``scope`` would trip the ignored-keys path, and
+    scopes are per section by design.
     """
     lines = body.split("\n")
     sections: list[RuleSection] = []
-    for index, name, tokens in _scoped_sections(lines):
+    for index, name, tokens, any_scope in _scoped_sections(lines):
         items: list[str] = []
         for line in lines[index + 1:]:
             if _SECTION_RE.match(line):
@@ -443,7 +486,7 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
             text = _item_text(line)
             if text:
                 items.append(text)
-        sections.append(RuleSection(name=name, scopes=tokens, items=tuple(items)))
+        sections.append(RuleSection(name=name, scopes=tokens, items=tuple(items), any_scope=any_scope))
     return tuple(sections)
 
 
@@ -455,8 +498,8 @@ def parse_rule_index(body: str) -> tuple[RuleSection, ...]:
     rule a label can name, not only the scoped ones
     :func:`parse_rule_sections` returns. Each ATX heading (one to four
     ``#``) opens a section named by its whitespace-collapsed text; its
-    ``scopes`` are what :func:`parse_rule_sections` reads for it, ``()`` for
-    an unscoped section; its ``items`` are its bullet and numbered rule
+    ``scopes`` and ``any_scope`` are what :func:`parse_rule_sections` reads
+    for it, ``()`` and ``False`` for an unscoped section; its ``items`` are its bullet and numbered rule
     lines (markup stripped, whitespace collapsed). Rule lines above the
     first heading form one leading section named ``""``, so a rules file of
     plain bullets with no heading is indexed too; a heading-less body with
@@ -464,9 +507,9 @@ def parse_rule_index(body: str) -> tuple[RuleSection, ...]:
     capped body the prompt shows.
     """
     lines = body.split("\n")
-    scopes = {index: tokens for index, _name, tokens in _scoped_sections(lines)}
+    scopes = {index: (tokens, any_scope) for index, _name, tokens, any_scope in _scoped_sections(lines)}
     sections: list[RuleSection] = []
-    name, scope, items = "", (), []
+    name, scope, items = "", ((), False), []
     for index, line in enumerate(lines):
         heading = _SECTION_RE.match(line)
         if heading is None:
@@ -475,10 +518,10 @@ def parse_rule_index(body: str) -> tuple[RuleSection, ...]:
                 items.append(text)
             continue
         if name or items:
-            sections.append(RuleSection(name=name, scopes=scope, items=tuple(items)))
-        name, scope, items = " ".join(heading.group(1).split()), scopes.get(index, ()), []
+            sections.append(RuleSection(name=name, scopes=scope[0], items=tuple(items), any_scope=scope[1]))
+        name, scope, items = " ".join(heading.group(1).split()), scopes.get(index, ((), False)), []
     if name or items:
-        sections.append(RuleSection(name=name, scopes=scope, items=tuple(items)))
+        sections.append(RuleSection(name=name, scopes=scope[0], items=tuple(items), any_scope=scope[1]))
     return tuple(sections)
 
 
@@ -523,11 +566,14 @@ def _annotate_rule_scopes(text: str) -> str:
     Pure annotation, nothing removed: a heading whose section declares a
     scope gains `` (applies to: <token>, <token>)`` with the tokens in file
     order, so the model sees which sections cannot cover the file it is
-    reading. Text with no scoped section comes back byte-identical.
+    reading; an inferred any-of scope joins its tokens with `` or `` instead
+    (``(applies to: python or typescript)``). Text with no scoped section
+    comes back byte-identical.
     """
     lines = text.split("\n")
-    for index, _name, tokens in _scoped_sections(lines):
-        lines[index] = f"{lines[index].rstrip()} (applies to: {', '.join(tokens)})"
+    for index, _name, tokens, any_scope in _scoped_sections(lines):
+        joined = (" or " if any_scope else ", ").join(tokens)
+        lines[index] = f"{lines[index].rstrip()} (applies to: {joined})"
     return "\n".join(lines)
 
 
@@ -596,6 +642,20 @@ def scope_token_covers(token: str, path: str) -> bool:
     return True
 
 
+def scope_covers(tokens: Sequence[str], path: str, *, any_token: bool = False) -> bool:
+    """True when a section's scope ``tokens`` cover ``path`` (#75).
+
+    Every token must cover the path per :func:`scope_token_covers` — the
+    semantics of an explicit ``scope:`` line — unless ``any_token`` is set,
+    as it is for a scope inferred from a heading (``RuleSection.any_scope``),
+    when one covering token is enough. The prompt filter
+    (:func:`filter_rule_sections`) and the post-hoc label check
+    (:func:`prxref.quality.apply_rule_scope_check`) both decide through it.
+    """
+    combine = any if any_token else all
+    return combine(scope_token_covers(token, path) for token in tokens)
+
+
 def _heading_level(line: str) -> int:
     """The ``#`` count of a Markdown ATX heading line (any depth); ``0`` for any other line."""
     match = _ANY_HEADING_RE.match(line)
@@ -607,9 +667,10 @@ def filter_rule_sections(text: str, paths: Sequence[str]) -> tuple[str, tuple[st
 
     ``paths`` are the unit's diff paths. A scoped section (one
     :func:`parse_rule_sections` would return) is kept when at least one
-    path is covered by EVERY token of its scope per
-    :func:`scope_token_covers` — the same predicate the post-hoc label check
-    applies to one finding's path. Any other scoped section is left out:
+    path is covered by its scope per :func:`scope_covers` — EVERY token of
+    a ``scope:`` line, ANY noun of a scope inferred from the heading — the
+    same predicate the post-hoc label check applies to one finding's path.
+    Any other scoped section is left out:
     its heading line and every line up to the next heading of the same or a
     higher level, so its own sub-sections leave with it. Unscoped sections,
     text before the first heading, and every section an unknown scope token
@@ -630,10 +691,10 @@ def filter_rule_sections(text: str, paths: Sequence[str]) -> tuple[str, tuple[st
     lines = text.split("\n")
     removed = [False] * len(lines)
     left_out: list[str] = []
-    for index, name, tokens in _scoped_sections(lines):
+    for index, name, tokens, any_scope in _scoped_sections(lines):
         if removed[index]:
             continue
-        if any(all(scope_token_covers(token, path) for token in tokens) for path in wanted):
+        if any(scope_covers(tokens, path, any_token=any_scope) for path in wanted):
             continue
         level = _heading_level(lines[index])
         end = index + 1

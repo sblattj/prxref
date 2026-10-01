@@ -130,8 +130,9 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the spec digest the workers were shown.
 14. ``apply_rule_scope_check``: clear ``rule`` on a finding whose
      scoped section of the loaded team rules does not cover its path (#75) —
-     the label names an ATX section (by heading or rule line) that declares
-     a ``scope:`` line whose tokens miss the path; unknown labels and empty
+     the label names an ATX section (by heading or rule line) whose scope —
+     a ``scope:`` line, or the language nouns of its heading — misses the
+     path; unknown labels and empty
      paths keep their label — leaving the finding itself active,
      so it groups and caps by normalized title like any ruleless finding.
      A scope token outside the vocabulary is inert. It drops nothing, runs
@@ -2343,7 +2344,9 @@ def apply_rule_scope_check(
     leading words (a model that drops trailing words still maps; one that
     cites a single mid-heading word does not). The label is cleared to
     ``None`` only when it maps to at least one section and NO mapped
-    section's ``scope:`` tokens all cover the finding's path per
+    section's scope covers the finding's path per
+    :func:`prxref.rules.scope_covers` — every token of a ``scope:`` line,
+    any noun of a scope inferred from the heading — each token judged by
     :func:`prxref.rules.scope_token_covers`: ``java``/``jvm`` cover ``*.java``, ``*.kt``,
     ``pom.xml`` and ``build.gradle*``; ``python`` covers ``*.py``;
     ``typescript``, ``javascript``, ``ts`` and ``js`` cover the TypeScript
@@ -2368,12 +2371,12 @@ def apply_rule_scope_check(
     from the loaded rules files; the empty tuple clears nothing, and the
     orchestrator does not call this at all in that case.
     """
-    from .rules import scope_token_covers
+    from .rules import scope_covers
 
     scoped = tuple(
         (
             tuple(" ".join(key.split()).casefold() for key in (section.name, *section.items)),
-            tuple(section.scopes),
+            (tuple(section.scopes), section.any_scope),
         )
         for section in sections
     )
@@ -2391,7 +2394,7 @@ def apply_rule_scope_check(
             tokens for keys, tokens in scoped if any(_label_names(label, key) for key in keys)
         ]
         misses = bool(path) and bool(mapped) and not any(
-            all(scope_token_covers(token, path) for token in tokens) for tokens in mapped
+            scope_covers(tokens, path, any_token=any_scope) for tokens, any_scope in mapped
         )
         out.append(replace(finding, rule=None) if misses else finding)
         cleared += 1 if misses else 0

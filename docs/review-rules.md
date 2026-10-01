@@ -212,7 +212,7 @@ It appears in these places:
 
 | Where | What |
 |---|---|
-| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run); a body that declares a `scope:` line under an ATX heading also runs the rule-scope check (#75), whose `rule_scope_cleared` key follows (`null` when no section declares a scope) |
+| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run); a body with a scoped section (a `scope:` line under an ATX heading, or a heading naming a language or artifact noun) also runs the rule-scope check (#75), whose `rule_scope_cleared` key follows (`null` when no section declares a scope) |
 | `-v` text output | `rules: .prxref/rules.md sha256=<first 12 hex> chars=27344 (truncated at 24000)` |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `rules ok` event whose meta is the record, right after `run start`; a `rules remap` event with `findings=<n>` when the map rewrote any finding |
 | `--trace-dir` | the rules block itself, in every `<unit>.system.md` |
@@ -223,7 +223,8 @@ Nothing about the rules is added to the posted comments.
 
 A rules body can say which part of the repository one of its sections is
 about. The declaration is a `scope:` line directly under an ATX heading
-(one to four `#`), and it does three things: a review unit none of whose
+(one to four `#`), or a language or artifact noun in the heading itself
+(see the grammar), and it does three things: a review unit none of whose
 files the section covers is not shown the section at all, the heading the
 units that do see it gains an `(applies to: …)` annotation, and a
 deterministic pass clears a finding's `rule` label when that section cannot
@@ -260,10 +261,25 @@ scope: openapi, docs
   boundaries` is scoped to `java`). Ambiguous words such as `tests` or
   `docs` never infer, so `## Testing` and `## General style` stay
   unscoped. An explicit scope line always wins over the heading.
+- A heading that names several such nouns applies to a file ANY of them
+  covers: `## Python and TypeScript conventions` reaches `*.py` files and
+  `*.ts` files alike, and its annotation reads
+  `(applies to: python or typescript)`. An explicit scope line keeps its
+  own meaning, where every token must cover the file (below).
+- The document title infers nothing. That is the body's first heading when
+  no later heading of its level or a higher one closes it — its section is
+  the whole file — and it is an H1 or holds sub-headings, so
+  `# Acme Java backend review rules` over `## General style` leaves the
+  file unscoped and every unit still sees every rule. A sub-section under
+  the title still infers its own scope (`## Java naming` under it is
+  `java`), and an explicit scope line under the title still binds.
 - A heading with no scope line and no such noun, or one whose scope line
-  names no token, declares nothing. A body with no scoped section at all — every rules
-  file written before this — renders byte-identically and every
-  rule-scope feature stays off.
+  names no token, declares nothing. A body with no scoped section at all —
+  no scope line and no heading naming one of those nouns — renders
+  byte-identically and the scope features stay off (the claim-category
+  half below still runs on any body with a heading or a rule line). A
+  rules file written before section scopes whose headings name such a noun
+  (`## Java conventions`) is now scoped by inference.
 - Front matter is not read: scopes are per section by design, so a
   file-global `scope` key is ignored like any other unknown front-matter
   key.
@@ -273,8 +289,9 @@ chunk's `## Team review rules` block leaves out every scoped section that
 none of the chunk's files falls in: the heading and everything up to the
 next heading of the same or a higher level, so a `###` sub-section leaves
 with its `##` parent. A section is kept when at least one of the chunk's
-paths (a renamed file's old path included) is covered by every token of
-its scope — the same test the clearing pass applies to a finding's file —
+paths (a renamed file's old path included) is covered by its scope —
+every token of a scope line, any noun of a scope inferred from the
+heading — the same test the clearing pass applies to a finding's file —
 so a chunk of only `web/a.ts` is not offered a `java`-scoped section, and a
 chunk holding both a `.java` and a `.ts` file is offered both. Unscoped
 sections, text above the first heading, and a section scoped only by an
@@ -297,7 +314,8 @@ the whole body.
 **The annotation.** A kept scoped section's heading gains
 ` (applies to: <token>, <token>)` with the tokens in file order, in the
 unit's `## Team review rules` block, so the model sees which scope a
-section it is shown carries.
+section it is shown carries; a scope inferred from a heading naming
+several nouns joins them with ` or ` instead.
 
 **The clearing pass.** Once any loaded section declares a scope, a
 finding's `rule` label is cleared only when it names a scoped section and
@@ -305,7 +323,8 @@ no such section covers the path. A label names a section when it equals
 the heading text or one of the section's bullet or numbered rule lines, or
 is their leading words (both whitespace-collapsed and casefolded; a
 single mid-heading word does not match), and a section covers the path
-when every `scope:` token covers it. Every other label is kept: an unknown
+when every `scope:` token covers it, or, for a scope inferred from the
+heading, when any of its nouns does. Every other label is kept: an unknown
 name, a rule from an unscoped section, and any label on a finding with an
 empty path. A cleared label becomes `null`;
 the finding itself is never dropped, so it rejoins the ruleless findings
