@@ -241,7 +241,7 @@ from . import (
     verdicts,
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
-from .ci_wiring import ci_wiring_findings
+from .ci_wiring import ci_wiring_findings, mentions_ci_work
 from .forges.base import (
     ATTRIBUTION_MARKER,
     CommitData,
@@ -1600,6 +1600,11 @@ def orchestrate_review(
     # any `spec` the model emits anyway.
     grounded = specs.constraint_count(spec_digest) > 0
     injected = spec_digest if grounded else ""
+
+    if ci_findings and fetched:
+        if any(mentions_ci_work(s.text) for s in fetched if not s.error):
+            for ci_finding in ci_findings:
+                ci_finding.severity = "spec"
 
     # Recorded before the fan-out, so the total-failure exit carries it too.
     # The record mirrors the posted note (labels, redacted reasons); the
