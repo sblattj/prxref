@@ -60,6 +60,8 @@ class Thread:
     a forge that cannot report either reports ``False``, which keeps the
     thread suppressible exactly as before the fields existed. ``url`` is
     the thread's permalink when the forge has one, else ``None``.
+    ``root_id`` is the id of the thread's root comment (a reply carries its
+    parent's), the key GitHub's two thread views are joined on, else ``None``.
     """
 
     path: str | None
@@ -70,6 +72,7 @@ class Thread:
     start_line: int | None = None
     outdated: bool = False
     url: str | None = None
+    root_id: int | None = None
 
 
 @dataclass

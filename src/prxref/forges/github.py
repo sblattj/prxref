@@ -211,6 +211,18 @@ def _get_token(host: str) -> str | None:
     return os.environ.get("PRXREF_GITHUB_TOKEN")
 
 
+def _as_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _root_comment_id(item: dict[str, Any]) -> int | None:
+    """Return the id of the thread-root comment a REST review comment belongs to."""
+    parent = _as_int(item.get("in_reply_to_id"))
+    return parent if parent is not None else _as_int(item.get("id"))
+
+
 class ForgeImpl:
     """GitHub and GitHub Enterprise forge implementation."""
 
@@ -688,6 +700,7 @@ class ForgeImpl:
                     author = user.get("login", "") if isinstance(user, dict) else ""
                     body = item.get("body") or ""
                     snippet = body[:120]
+                    root_id = _root_comment_id(item)
                     threads.append(
                         Thread(
                             path=path,
@@ -697,6 +710,7 @@ class ForgeImpl:
                             body_snippet=snippet,
                             start_line=start_line,
                             outdated=outdated,
+                            root_id=root_id,
                         )
                     )
         except FeedReadError as e:
@@ -724,8 +738,7 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
           url
           comments(first: 1) {
             nodes {
-              path
-              line
+              databaseId
             }
           }
         }
@@ -742,10 +755,12 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
         no resolution field at all, only the GraphQL ``reviewThreads``
         connection knows ``isResolved`` and ``isOutdated``, and only it has
         the thread permalink. This second read pages through
-        ``reviewThreads`` and patches each REST thread whose ``(path, line)``
-        matches a thread's first comment — the same join GitHub itself makes
-        between the two views of one thread, ``line`` being null in both for
-        an outdated comment.
+        ``reviewThreads`` and patches each REST thread whose root comment id
+        equals the ``databaseId`` of a GraphQL thread's first comment (a REST
+        reply maps to its root through ``in_reply_to_id``). Two threads can
+        share a ``(path, line)``, and an outdated one has no line at all, so
+        the id is the only join that cannot cross-wire; a root id that more
+        than one GraphQL thread claims is skipped.
 
         Failure-tolerant by contract: no token, a transport failure, a
         non-OK status, a GraphQL ``errors`` array or an unreadable body logs
@@ -766,7 +781,8 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
             )
             return
 
-        by_anchor: dict[tuple[object, object], dict[str, Any]] = {}
+        by_root: dict[int, dict[str, Any]] = {}
+        ambiguous: set[int] = set()
         cursor: str | None = None
         for _ in range(_MAX_PAGES):
             try:
@@ -829,7 +845,12 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
                 )
                 if first is None:
                     continue
-                by_anchor[(first.get("path"), first.get("line"))] = node
+                root_id = _as_int(first.get("databaseId"))
+                if root_id is None:
+                    continue
+                if root_id in by_root:
+                    ambiguous.add(root_id)
+                by_root[root_id] = node
             page_info = connection.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):
                 break
@@ -850,7 +871,9 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
 
         patched = 0
         for t in threads:
-            node = by_anchor.get((t.path, t.line))
+            if t.root_id is None or t.root_id in ambiguous:
+                continue
+            node = by_root.get(t.root_id)
             if node is None:
                 continue
             t.resolved = bool(node.get("isResolved"))
