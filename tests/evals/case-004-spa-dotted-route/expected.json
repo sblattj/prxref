@@ -1,0 +1,10 @@
+[
+  {
+    "id": "S1",
+    "file": "conf/nginx.conf",
+    "line_hint": 4,
+    "severity": "spec",
+    "must_match": "re:v1\\.2|/items|dotted|version",
+    "source": "spec"
+  }
+]

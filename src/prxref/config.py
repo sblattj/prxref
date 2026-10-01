@@ -614,8 +614,8 @@ LLM / pipeline:
                                  PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                  repository's own standards documents - the
                                  security standard, the ADRs, CONTRIBUTING -
-                                 whose matching sections are excerpted under
-                                 PRXREF_REPO_CONTEXT="repo" only, ranked by
+                                 whose matching sections are excerpted at
+                                 every PRXREF_REPO_CONTEXT level, ranked by
                                  what the chunk's own changes name and capped
                                  by PRXREF_CONTEXT_STANDARDS_MAX_CHARS. A set
                                  value REPLACES the built-in set below rather
@@ -870,7 +870,7 @@ _DEFAULTS: dict[str, object] = {
     ],
     "context_exclude_globs": [],
     # In-repo standards documents (#68): sections of the repository's own
-    # rules offered to each chunk worker at the ``repo`` level, like the
+    # rules offered to each chunk worker at every ``repo_context`` level, like the
     # contract globs above. The default is non-empty and
     # replace-not-append, with the same house rule that a bare empty value
     # reads as unset; the exact value ``off``
