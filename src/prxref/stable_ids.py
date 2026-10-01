@@ -17,8 +17,10 @@ embedding-derived (the pipeline has no model on this path by design):
   as a SORTED set joined by single spaces, so a rewording that merely
   reorders or re-punctuates the claim keeps the id. A synonym swap does
   not; :func:`apply_stable_ids` bridges that with
-  :func:`quality.titles_similar` over findings of one run, recorded in
-  ``id_reused_from``, never inside the id itself.
+  :func:`quality.titles_similar` over findings of one run and over the
+  titles the verdict store recorded for the same file and rule in an
+  earlier run, recorded in ``id_reused_from``, never inside the id
+  itself.
 
 ``anchor_block`` is the smallest enclosing name at the finding's line —
 a function or type name, a YAML key path, a manifest dependency key —
@@ -30,9 +32,11 @@ signal), while the id stays anchor-free.
 :func:`apply_stable_ids` runs after both thread gates and before the
 quality gate, stamps ``id``, ``anchor_block`` and ``id_reused_from`` on
 every finding, and drops a finding whose id a loaded verdict store holds
-as refuted in an earlier run. Nothing runs unless the caller turns
-``stable_ids`` on; with it off every finding keeps ``id=None`` and the
-run is byte-identical to one that never heard of the feature.
+as refuted in an earlier run. The pass always runs; the
+``PRXREF_STABLE_IDS`` knob that once turned it off is deprecated and
+ignored. A store entry a 0.30.0 run recorded — keyed by the claim hash
+before it stemmed words, and carrying no ``title`` — still matches
+through :func:`legacy_claim_hash`.
 """
 from __future__ import annotations
 
@@ -49,6 +53,7 @@ from .quality import (
     _normalised_path,
     _title_tokens,
     previously_discussed_thread,
+    title_similarity,
     titles_similar,
 )
 from .repo_context import definition_regexes, language_of
@@ -84,6 +89,26 @@ REUSED_FROM_VERDICT = "verdict"
 REUSED_FROM_THREAD = "thread"
 
 
+_SUFFIXES: tuple[str, ...] = ("ing", "ed", "es", "s", "e")
+
+
+def _stem(word: str) -> str:
+    """Light suffix stemming so inflections of one word hash alike.
+
+    Strips one of ``ing``, ``ed``, ``es``, ``s``, ``e`` (first match,
+    longest first), keeping at least three characters and never stripping
+    the ``s`` of a ``ss`` ending. "derived", "derive", "deriving" and
+    "derives" all become "deriv"; "access" stays whole.
+    """
+    for suffix in _SUFFIXES:
+        if not word.endswith(suffix) or len(word) - len(suffix) < 3:
+            continue
+        if suffix == "s" and word.endswith("ss"):
+            continue
+        return word[: -len(suffix)]
+    return word
+
+
 def claim_hash(title: str) -> str:
     """The order-insensitive claim hash of a finding title.
 
@@ -91,9 +116,23 @@ def claim_hash(title: str) -> str:
     or more characters, minus stopwords and remedy verbs, hyphens
     split); sorting them makes the hash a function of the claim's word
     SET, so "Drain duration hardcoded" and "Hardcoded drain duration"
-    hash identically. An empty token set hashes the empty string — a
+    hash identically; :func:`_stem` folds inflections ("derived" and
+    "derive") into one token. An empty token set hashes the empty string — a
     title of stopwords only still gets an id, just one shared with every
     other stopword-only title of that file and rule.
+    """
+    words = " ".join(sorted({_stem(token) for token in _title_tokens(title)}))
+    return hashlib.sha256(words.encode("utf-8")).hexdigest()[:CLAIM_HASH_CHARS]
+
+
+def legacy_claim_hash(title: str) -> str:
+    """The claim hash prxref 0.30.0 computed: :func:`claim_hash` without stemming.
+
+    0.30.0 hashed the sorted content tokens as they stood, so any title
+    holding an inflected word ("Drain duration is hardcoded") carries a
+    different id there than here. :func:`_store_match` looks a finding up
+    under this hash too, so a verdict a 0.30.0 run recorded — an entry
+    with no ``title`` for the rewording bridge to read — keeps matching.
     """
     words = " ".join(sorted(_title_tokens(title)))
     return hashlib.sha256(words.encode("utf-8")).hexdigest()[:CLAIM_HASH_CHARS]
@@ -107,8 +146,13 @@ def finding_id(finding: Finding) -> str:
     still finds its own findings. The anchor block and the line are
     deliberately absent (see the module docstring).
     """
+    return f"{_id_prefix(finding)}{claim_hash(finding.title)}"
+
+
+def _id_prefix(finding: Finding) -> str:
+    """The ``<file>#<rule|norule>#`` head every id of this file and rule shares."""
     rule = " ".join((finding.rule or "").split()).casefold() or NO_RULE
-    return f"{_normalised_path(finding.file)}#{rule}#{claim_hash(finding.title)}"
+    return f"{_normalised_path(finding.file)}#{rule}#"
 
 
 def _post_lines(hunks: Sequence[Hunk]) -> list[tuple[int, str]]:
@@ -231,6 +275,49 @@ def _store_entry(
     return entry if isinstance(entry, Mapping) else None
 
 
+def _store_match(
+    store: Mapping[str, object] | None, finding: Finding, fid: str,
+) -> tuple[str, Mapping[str, object]] | None:
+    """The ``(id, entry)`` of the store that answers ``finding``, or ``None``.
+
+    An entry under ``fid`` itself wins. Next, the entry under the id
+    prxref 0.30.0 gave the finding (its ``<file>#<rule>#`` head plus
+    :func:`legacy_claim_hash` of its title), so a verdict recorded
+    before the claim hash stemmed its words still matches. On a miss,
+    the cross-run rewording bridge: every entry whose id shares the
+    finding's ``<file>#<rule>#`` head and whose recorded ``title`` is a
+    reworded restatement of the finding's (:func:`quality.titles_similar`
+    at :data:`REUSE_SIMILARITY`) is a candidate, and the one with the
+    highest title Jaccard wins, ties broken by the smaller id so the
+    match never depends on the store's key order. An entry recorded
+    without a title matches by exact id or by that 0.30.0 id only.
+    """
+    entry = _store_entry(store, fid)
+    if entry is not None:
+        return fid, entry
+    legacy = f"{_id_prefix(finding)}{legacy_claim_hash(finding.title)}"
+    entry = _store_entry(store, legacy)
+    if entry is not None:
+        return legacy, entry
+    if not isinstance(store, Mapping):
+        return None
+    verdicts = store.get("verdicts")
+    if not isinstance(verdicts, Mapping):
+        return None
+    prefix = _id_prefix(finding)
+    best: tuple[float, str, Mapping[str, object]] | None = None
+    for sid, candidate in verdicts.items():
+        if not (isinstance(sid, str) and sid.startswith(prefix) and isinstance(candidate, Mapping)):
+            continue
+        title = candidate.get("title")
+        if not isinstance(title, str) or not titles_similar(title, finding.title, REUSE_SIMILARITY):
+            continue
+        score = title_similarity(title, finding.title)[0]
+        if best is None or score > best[0] or (score == best[0] and sid < best[1]):
+            best = (score, sid, candidate)
+    return (best[1], best[2]) if best is not None else None
+
+
 def apply_stable_ids(
     findings: Sequence[Finding],
     files: Sequence[FileDiff],
@@ -248,17 +335,21 @@ def apply_stable_ids(
        :data:`REUSE_SIMILARITY`) proposes its own id — the synonym-swap
        case the sorted-token hash cannot see — recorded as
        ``id_reused_from="run"``;
-    3. when the verdict store holds that id, record
-       ``id_reused_from="verdict"``; a ``refuted`` entry drops the
-       finding with ``drop_reason="refuted in earlier run (<id>)"``;
+    3. when the verdict store holds that id — or, on a miss, the id a
+       0.30.0 run gave the finding, or an entry of the same file and
+       rule whose recorded title is a reworded restatement of this one
+       (:func:`_store_match`), whose id the
+       finding then takes over — record ``id_reused_from="verdict"``; a
+       ``refuted`` entry drops the finding with
+       ``drop_reason="refuted in earlier run (<id>)"``;
     4. else, when a resolved or outdated thread matches the finding
        under the previously-raised rule
        (:func:`quality.previously_discussed_thread`), record
        ``id_reused_from="thread"`` (the thread itself carries no id this
        release; that bridge is deferred).
 
-    Ids are never rewritten by a store or thread match, only reused from
-    an earlier finding of the same run. Two findings of one run that
+    Ids are never rewritten by a thread match, only reused from an
+    earlier finding of the same run or from a store entry. Two findings of one run that
     share an id but sit at different ``(anchor_block, line)`` are a
     collision: one WARNING names the id, and both keep it — the id stays
     honest to its rule, and the operator decides. Already-dropped
@@ -283,11 +374,19 @@ def apply_stable_ids(
                 if near is not None:
                     fid = near.id or fid
                     reused = REUSED_FROM_RUN
-            entry = _store_entry(store, fid)
-            if entry is not None:
+            match = _store_match(store, f, fid)
+            if match is not None:
+                fid, entry = match
                 reused = REUSED_FROM_VERDICT
-                if entry.get("verdict") == "refuted":
+                label = entry.get("verdict")
+                norm = label.strip().casefold() if isinstance(label, str) else None
+                if norm == "refuted":
                     f = replace(f, drop_reason=f"refuted in earlier run ({fid})")
+                elif norm != "accepted":
+                    logger.warning(
+                        "verdict store entry %s has unrecognised verdict %r; ignored",
+                        fid, label,
+                    )
             elif threads and previously_discussed_thread(f, threads):
                 reused = REUSED_FROM_THREAD
         stamped = replace(f, id=fid, anchor_block=anchor, id_reused_from=reused)

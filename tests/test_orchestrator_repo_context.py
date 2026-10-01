@@ -142,6 +142,7 @@ def _pinned_clock(monkeypatch):
 def _review(forge, llm: _RecordingLLM | None = None, *, ref=REF, **kwargs):
     llm = llm if llm is not None else _RecordingLLM()
     kwargs.setdefault("max_files_per_chunk", 1)
+    kwargs.setdefault("ci_wiring", "off")
     res = orchestrator.orchestrate_review(forge, ref, llm, post=False, **kwargs)
     return res, llm
 
@@ -248,7 +249,7 @@ class TestTheParameters:
         assert params["context_contract_globs"].default == ()
         assert params["context_exclude_globs"].default == ()
         assert params["context_standards_globs"].default == ()
-        assert params["context_standards_max_chars"].default == 4000 == STANDARDS_MAX_CHARS
+        assert params["context_standards_max_chars"].default == 6000 == STANDARDS_MAX_CHARS
         assert params["repo_dir"].default is None
 
     @pytest.mark.parametrize("mode", ["bogus", "", "OFF", None])

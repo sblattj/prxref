@@ -138,6 +138,7 @@ def _run(monkeypatch, path, tmp_path, **kw):
         kw.setdefault("scoped_rules_max_chars", 0)
     trace = tmp_path / "run.jsonl"
     kw.setdefault("post", False)
+    kw.setdefault("ci_wiring", "off")
     res = orchestrate_review(forge, REF, llm, trace_file=str(trace), **kw)
     events = [json.loads(x) for x in trace.read_text().splitlines() if x.strip()]
     return res, forge, events
@@ -221,7 +222,13 @@ class TestTheRecordKeys:
         assert res["verdict"] == VERDICT[path]
         assert set(res) == BASE_KEYS | RECORD_KEYS
         for key in NULL_WHEN_OFF:
+            if key == "stable_ids" and path == "success":
+                continue
             assert res[key] is None, key
+        if path == "success":
+            assert res["stable_ids"]["assigned"] == len(res["findings_active"]) + len(
+                res["findings_dropped"]
+            )
         assert res["cost_estimated"] is False
 
     @pytest.mark.parametrize("path", SCOPED_PATHS)

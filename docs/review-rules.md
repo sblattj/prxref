@@ -212,7 +212,7 @@ It appears in these places:
 
 | Where | What |
 |---|---|
-| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run); a body that declares a `scope:` line under an ATX heading also runs the rule-scope check (#75), whose `rule_scope_cleared` key follows (`null` when no section declares a scope) |
+| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run); a body with a scoped section (a `scope:` line under an ATX heading, or a heading naming a language or artifact noun) also runs the rule-scope check (#75), whose `rule_scope_cleared` key follows (`null` when no section declares a scope) |
 | `-v` text output | `rules: .prxref/rules.md sha256=<first 12 hex> chars=27344 (truncated at 24000)` |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `rules ok` event whose meta is the record, right after `run start`; a `rules remap` event with `findings=<n>` when the map rewrote any finding |
 | `--trace-dir` | the rules block itself, in every `<unit>.system.md` |
@@ -223,9 +223,13 @@ Nothing about the rules is added to the posted comments.
 
 A rules body can say which part of the repository one of its sections is
 about. The declaration is a `scope:` line directly under an ATX heading
-(one to four `#`), and it does two things: the heading the model sees
-gains an `(applies to: …)` annotation, and a deterministic pass clears a
-finding's `rule` label when that section cannot cover the finding's file.
+(one to four `#`), or a language or artifact noun in the heading itself
+(see the grammar), and it does three things: a review unit none of whose
+files the section covers is not shown the section at all, the heading the
+units that do see it gains an `(applies to: …)` annotation, and a
+deterministic pass clears a finding's `rule` label when that section cannot
+cover the finding's file. `PRXREF_RULE_SCOPING=off` turns off the first and
+the last, and the claim-category half described below.
 
 ```markdown
 # Team rules
@@ -250,31 +254,111 @@ scope: openapi, docs
   `scope:` line anywhere else in a section is ordinary rules text, and so
   is one the character cap already cut off: the walk reads the capped body
   the prompt shows, so a section the cap removed is not checked either.
-- A heading with no `scope:` line, or one whose line names no token,
-  declares nothing. A body with no scoped section at all — every rules
-  file written before this — renders byte-identically and every
-  rule-scope feature stays off.
+- `Applies to: <token>[, <token>]…` is accepted as a synonym of `scope:`.
+- A heading with no scope line infers one from the language or artifact
+  nouns in its own text: `java`, `jvm`, `python`, `typescript`,
+  `javascript`, `ts`, `js`, `markdown`, `openapi` (so `## Java module
+  boundaries` is scoped to `java`). Ambiguous words such as `tests` or
+  `docs` never infer, so `## Testing` and `## General style` stay
+  unscoped. An explicit scope line always wins over the heading.
+- A heading that names several such nouns applies to a file ANY of them
+  covers: `## Python and TypeScript conventions` reaches `*.py` files and
+  `*.ts` files alike, and its annotation reads
+  `(applies to: python or typescript)`. An explicit scope line keeps its
+  own meaning, where every token must cover the file (below).
+- The document title infers nothing. That is the body's first heading when
+  no later heading of its level or a higher one closes it — its section is
+  the whole file — and it is an H1 or holds sub-headings, so
+  `# Acme Java backend review rules` over `## General style` leaves the
+  file unscoped and every unit still sees every rule. A sub-section under
+  the title still infers its own scope (`## Java naming` under it is
+  `java`), and an explicit scope line under the title still binds.
+- A `#` line inside a fenced code block (opened by ```` ``` ```` or `~~~`)
+  is code, not a heading: it does not open a section, end one, or unseat
+  the document title, so a `# run the linter first` comment in a shell
+  sample leaves the title above it a title.
+- A heading with no scope line and no such noun, or one whose scope line
+  names no token, declares nothing. A body with no scoped section at all —
+  no scope line and no heading naming one of those nouns — renders
+  byte-identically and the scope features stay off (the claim-category
+  half below still runs on any body with a heading or a rule line). A
+  rules file written before section scopes whose headings name such a noun
+  (`## Java conventions`) is now scoped by inference.
 - Front matter is not read: scopes are per section by design, so a
   file-global `scope` key is ignored like any other unknown front-matter
   key.
 
-**The annotation.** Pure text, nothing removed: a scoped section's heading
-gains ` (applies to: <token>, <token>)` with the tokens in file order, in
-every unit's `## Team review rules` block, so the model sees which
-sections cannot cover the file it is reading.
+**Per-unit filtering.** With `PRXREF_RULE_SCOPING=on` (the default), each
+chunk's `## Team review rules` block leaves out every scoped section that
+none of the chunk's files falls in: the heading and everything up to the
+next heading of the same or a higher level, so a `###` sub-section leaves
+with its `##` parent. A section is kept when at least one of the chunk's
+paths (a renamed file's old path included) is covered by its scope —
+every token of a scope line, any noun of a scope inferred from the
+heading — the same test the clearing pass applies to a finding's file —
+so a chunk of only `web/a.ts` is not offered a `java`-scoped section, and a
+chunk holding both a `.java` and a `.ts` file is offered both. Unscoped
+sections, text above the first heading, and a section scoped only by an
+unknown token are always kept. The systemic sweep is filtered by the union
+of every chunk's paths, so it loses only sections no file of the pull
+request falls in. The filter applies to the `PRXREF_REVIEW_RULES` body and
+to each selected `PRXREF_SCOPED_RULES` body alike (before the scoped-rules
+character cap counts them). When anything was left out, one line closes the
+block:
+
+```text
+[rules for other languages/file types left out: Java conventions]
+```
+
+and the unit's `chunk start` / `sweep start` trace event carries the
+left-out headings as `rules_left_out` (headings only, never rules text). A
+body with no scoped section, or `PRXREF_RULE_SCOPING=off`, sends every unit
+the whole body.
+
+**The annotation.** A kept scoped section's heading gains
+` (applies to: <token>, <token>)` with the tokens in file order, in the
+unit's `## Team review rules` block, so the model sees which scope a
+section it is shown carries; a scope inferred from a heading naming
+several nouns joins them with ` or ` instead. Which headings carry one is
+decided on the whole body before anything is left out, so a section keeps
+its annotation even when the unit's paths left out the peer section that
+made it a section rather than the document title.
 
 **The clearing pass.** Once any loaded section declares a scope, a
-finding's `rule` label survives only when it names a section of the loaded
-rules — the label and the heading text, both whitespace-collapsed and
-casefolded, are equal, or the label is the heading's leading words (a
-model that drops a heading's trailing words still matches; one that cites
-a single mid-heading word does not) — **and** every `scope:` token of that
-section covers the finding's path. Every other label is cleared to `null`;
+finding's `rule` label is cleared only when it names a scoped section and
+no such section covers the path. A label names a section when it equals
+the heading text or one of the section's bullet or numbered rule lines, or
+is their leading words (both whitespace-collapsed and casefolded; a
+single mid-heading word does not match), and a section covers the path
+when every `scope:` token covers it, or, for a scope inferred from the
+heading, when any of its nouns does. Every other label is kept: an unknown
+name, a rule from an unscoped section, and any label on a finding with an
+empty path. A cleared label becomes `null`;
 the finding itself is never dropped, so it rejoins the ruleless findings
 downstream: grouping keys it on its normalized title and the per-rule cap
 caps it by title. The run record and `--format json` carry the count as
-`rule_scope_cleared` (`null` when no loaded section declares a scope,
-`0` when the check ran and cleared nothing).
+`rule_scope_cleared` (`null` when no loaded section declares a scope and
+the claim-category half below cleared nothing, `0` when the check ran and
+cleared nothing).
+
+**The claim-category half.** With `PRXREF_RULE_SCOPING=on` the check also
+clears a label whose rule names another kind of defect than the finding,
+in any rules file, scoped or not. The label is looked up the same way, in
+every section (and in the rule lines above the first heading). The rule's
+kinds come from the matched heading or rule line and its section heading,
+the finding's from its title alone, over a fixed whole-word vocabulary:
+`docs` (Javadoc, JSDoc, KDoc, docstring, doc comment, comment,
+documentation), `unused` (unused, unread, never read/used/called, dead
+code, unreachable), `style` (style, naming, formatting, whitespace,
+indentation, camelCase and the other case names, lint, line length) and
+`errors` (exception, retry, transient, error handling, catch, swallow). A
+label is cleared when both sides name a kind and share none — a `Stale
+duplicate Javadoc` finding citing `- Remove fields never read` — or when
+the rule and its section heading name only `style`, the finding is an
+`error`, and its title names no kind (a correctness bug filed under
+`## Naming style`). A rule or a title that names no kind keeps its label,
+so writing the kind into a rule's own words ("never read", "Javadoc") is
+what lets the check judge it.
 
 **The token vocabulary.** A token covers a path by its basename,
 case-sensitively:

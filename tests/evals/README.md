@@ -25,7 +25,7 @@ uv run prxref eval run --cases tests/evals --label base
 uv run prxref eval score --label base
 ```
 
-`eval run` reviews the three cases with the configured LLM
+`eval run` reviews the five cases with the configured LLM
 (`PRXREF_LLM_MODELS` and the backend's credentials, see `docs/llm.md`) and
 writes the run to `./prxref-eval/base/`, which is not tracked: keep it out
 of commits. Every label here has a `must_match` predicate, so `eval score`
@@ -96,7 +96,7 @@ row is the must-fix recall. Both labels of that case have a `must_match`
 predicate, so `eval score` needs no `--judge-model`; a dataset whose labels
 lack one needs it.
 
-The three cases in this directory measure little on their own. Each is a
+The five cases in this directory measure little on their own. Each is a
 `diff.patch` with no `repo/` directory, and a local diff has no forge to read
 files from, so `diff` and `repo` give them only entries built from the diff's
 hunk lines, and at `repo` each case logs a WARNING that there is no

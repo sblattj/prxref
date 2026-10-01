@@ -431,6 +431,28 @@ def test_list_threads_reads_every_review_comment():
     ]
 
 
+_LONG_HUMAN_WONT_FIX = "Looks odd at first. " * 12 + "Won't fix: intentional."
+_LONG_PRXREF_BY_DESIGN = (
+    "By design. Drain duration should come from config. " + "y " * 150
+    + f"\n\n*{ATTRIBUTION_MARKER} · model=m*"
+)
+
+
+@pytest.mark.parametrize(("body", "wont_fix"), [
+    (_LONG_HUMAN_WONT_FIX, True),
+    (_LONG_PRXREF_BY_DESIGN, False),
+    ("finding", False),
+], ids=["human-decline-past-the-cap", "prxref-body", "plain"])
+def test_list_threads_reads_wont_fix_from_the_full_body(body, wont_fix):
+    forge, _ = _forge(_review_routes({
+        1: ("", [_c(10, "app.py", 21, body, resolver={"login": "dev"})]),
+    }))
+
+    [thread] = forge.list_threads(_ref())
+
+    assert thread.wont_fix is wont_fix
+
+
 def test_list_threads_skips_the_comment_read_of_an_empty_review():
     forge, session = _forge(_review_routes({2: ("body only", [])}))
     assert forge.list_threads(_ref()) == []

@@ -12,7 +12,13 @@ import requests
 
 from prxref.config import make_forge
 from prxref.forges import bitbucket_server
-from prxref.forges.base import FeedReadError, InlineComment, PRRef, detect_forge
+from prxref.forges.base import (
+    ATTRIBUTION_MARKER,
+    FeedReadError,
+    InlineComment,
+    PRRef,
+    detect_forge,
+)
 from prxref.forges.bitbucket_server import ForgeImpl, _make_retry_session
 from prxref.triage import parse_unified_diff
 
@@ -573,6 +579,33 @@ def test_list_threads_reads_the_activity_feed():
     assert threads[0].author == "reviewer"
     assert threads[0].resolved is False
     assert threads[1].resolved is True
+
+
+_LONG_HUMAN_WONT_FIX = "Looks odd at first. " * 12 + "Won't fix: intentional."
+_LONG_PRXREF_BY_DESIGN = (
+    "By design. Drain duration should come from config. " + "y " * 150
+    + f"\n\n*{ATTRIBUTION_MARKER} · model=m*"
+)
+
+
+@pytest.mark.parametrize(("body", "wont_fix"), [
+    (_LONG_HUMAN_WONT_FIX, True),
+    (_LONG_PRXREF_BY_DESIGN, False),
+    ("please fix", False),
+], ids=["human-decline-past-the-cap", "prxref-body", "plain"])
+def test_list_threads_reads_wont_fix_from_the_full_body(body, wont_fix):
+    session = MagicMock()
+    session.get.return_value = _mock_response(json_data={
+        "values": [{"action": "COMMENTED", "comment": {
+            "text": body, "author": {"name": "dev"},
+            "anchor": {"path": "src/app.py", "line": 12}, "state": "RESOLVED",
+        }}],
+        "isLastPage": True,
+    })
+
+    [thread] = ForgeImpl(session=session).list_threads(_ref())
+
+    assert thread.wont_fix is wont_fix
 
 
 def test_list_threads_follows_start_limit_pagination():

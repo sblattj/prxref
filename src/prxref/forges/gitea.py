@@ -42,6 +42,7 @@ from .base import (
     PRData,
     PRRef,
     Thread,
+    says_wont_fix,
     with_summary_marker,
 )
 
@@ -483,6 +484,7 @@ class ForgeImpl:
                             resolved=bool(item.get("resolver")),
                             author=user.get("login", "") if isinstance(user, dict) else "",
                             body_snippet=(item.get("body") or "")[:120],
+                            wont_fix=says_wont_fix(item.get("body")),
                         ))
         except FeedReadError as e:
             logger.warning(

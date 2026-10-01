@@ -107,18 +107,18 @@ it (noted in the table).
 | 1 | `apply_example_echo_check` | Drops a finding whose title, normalized, equals the title of the example finding in the worker or sweep prompt template the run used. See [Example echoes](#example-echoes). The first pass that drops, deliberately, so an echo never reaches the thread, consistency or grouping comparisons, a cap, or sweep dedup, and its audit copy keeps the model's own anchor. |
 | 2 | `apply_location_validation` | Drops a finding whose `file` names no path of the parsed diff. |
 | 3 | `apply_manifest_claim_check` | Manifests and npm-family lockfiles (`package.json`, `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`). When the anchor's hunk holds no section header, the served full-file lines decide the enclosing section. Runs **before** line align, deliberately, so it reads the model's raw anchor. |
-| 4 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. |
-| 5 | `apply_anchor_snap` | #74. Reads the finding's own file at the head sha — the same reader the chunk context uses — and anchors it on the nearest occurrence of its quoted code: a backticked span first, then a double-quoted one, then the interior of `catch (…` / `if (…` / `for (…` / `while (…`, within 80 lines of the line the MODEL reported (captured before line align, so a demoted finding is searched from where the model said the defect sits, not where the hunk-bounded passes gave up). Moves only what needs moving: a file-level (line 0) anchor, or one further than 5 lines from the match. A finding whose snippet the head file does not hold, whose multi-match nothing breaks, or that sits file-level with no snippet parseable at all is marked `anchor_unverified` and loses 0.1 confidence, so a borderline one can die at the gate. An unreadable file, a dropped finding and a deterministic check's finding are untouched; without a reader the pass changes nothing. See [Anchor snapping and Also-at verification](#anchor-snapping-and-also-at-verification-74). |
+| 4 | `apply_line_align` | Re-anchors a cited line to a real added line of that file, or demotes it to file-level. A deterministic finding already on an added line (a pinned toggle, a failing linter's `path:line`) keeps its line. |
+| 5 | `apply_anchor_snap` | #74. Reads the finding's own file at the head sha — the same reader the chunk context uses — and anchors it on the nearest occurrence of its quoted code: a backticked span first, then a double-quoted one, then the interior of `catch (…` / `if (…` / `for (…` / `while (…`, within 100 lines of the line the MODEL reported (captured before line align, so a demoted finding is searched from where the model said the defect sits, not where the hunk-bounded passes gave up). Moves only what needs moving: a file-level (line 0) anchor, or one further than 5 lines from the match. A file-level finding whose snippet occurs only outside the 100-line window anchors on the snippet's single whole-file occurrence; when that occurrence is not unique it is marked `anchor_unverified` instead of staying silently at line 0. A finding whose snippet the head file does not hold, whose multi-match nothing breaks, or that sits file-level with no snippet parseable at all is marked `anchor_unverified`; its confidence is unchanged. An unreadable file, a dropped finding and a deterministic check's finding are untouched; without a reader the pass changes nothing. See [Anchor snapping and Also-at verification](#anchor-snapping-and-also-at-verification-74). |
 | 6 | `apply_thread_dedup` | Drops a finding an existing PR thread already makes (path + line window + shared distinctive tokens). |
 | 7 | `apply_settled_thread_suppression` | Drops a finding that re-litigates a subject a thread already argued out. Line-independent by design. A thread with no path — a general, unanchored PR comment — is ignored by this pass, since it cannot be "same path" as any finding. |
-| 8 | `apply_stable_ids` | Opt-in (#71): runs only with `PRXREF_STABLE_IDS` set to `1`, **after** both thread gates and the previously-raised note — the ids inherit the gates' verdict — and **before** severity consistency, so a refuted finding is neither counted, raised nor grouped downstream. Stamps every finding with `id` `<file>#<rule or norule>#<12-hex claim hash>` — the claim hash is over the title's sorted content words, so a rewording that merely reorders or re-punctuates the claim keeps the id — plus `anchor_block` (the enclosing function, YAML key path or manifest dependency key at the anchor, computed from the diff alone; `null` for a file-level or diff-absent line) and `id_reused_from`: `run` when a near-identical earlier finding of the same run proposed its id (the synonym-swap case the sorted-token hash cannot see — the id is reused, never rewritten, by a store or thread match), `verdict` when the `PRXREF_VERDICT_STORE` holds it, `thread` when a resolved-or-outdated thread matches under the previously-raised rule, `null` when the id was freshly computed and matched nothing. Neither the anchor block nor the line is part of the id, so an anchor that drifts one key or line keeps it. A finding whose id the store holds as `refuted` is dropped as `refuted in earlier run (<id>)`. Two findings of one run that share an id at different `(anchor_block, line)` sites keep it: each such id is listed once in the run record's `stable_ids.collisions`. With the flag off (the default) the pass never runs and every `id`, `anchor_block` and `id_reused_from` stays `null`. |
+| 8 | `apply_stable_ids` | Always on (#71; the deprecated `PRXREF_STABLE_IDS` is ignored): runs **after** both thread gates and the previously-raised note — the ids inherit the gates' verdict — and **before** severity consistency, so a refuted finding is neither counted, raised nor grouped downstream. Stamps every finding with `id` `<file>#<rule or norule>#<12-hex claim hash>` — the claim hash is over the title's sorted, lightly stemmed content words ("derived" and "derive" are one word), so a rewording that merely reorders, re-punctuates or re-inflects the claim keeps the id — plus `anchor_block` (the enclosing function, YAML key path or manifest dependency key at the anchor, computed from the diff alone; `null` for a file-level or diff-absent line) and `id_reused_from`: `run` when a near-identical earlier finding of the same run proposed its id (the synonym-swap case the sorted-token hash cannot see — the id is never rewritten by a thread match), `verdict` when the `PRXREF_VERDICT_STORE` holds it, or — on a miss — holds the id prxref 0.30.0 gave the finding (its claim hash before stemming, so an entry that release recorded without a `title` still matches), or holds an entry of the same file and rule whose recorded title the finding's restates (the finding then takes that entry's id, bridging a rewording across runs), `thread` when a resolved-or-outdated thread matches under the previously-raised rule, `null` when the id was freshly computed and matched nothing. Neither the anchor block nor the line is part of the id, so an anchor that drifts one key or line keeps it. A finding whose id the store holds as `refuted` is dropped as `refuted in earlier run (<id>)`. Two findings of one run that share an id at different `(anchor_block, line)` sites keep it: each such id is listed once in the run record's `stable_ids.collisions`. Only a summary-only or error run, which returns before this pass, leaves every `id`, `anchor_block` and `id_reused_from` `null`. |
 | 9 | `apply_severity_consistency` | Rewrites only: groups findings and raises every member to the group's maximum severity. Two rules group findings, and a group binds transitively: a shared normalized title, in any file; or a shared rare code token (one in the text of at most 2 findings) when the two sit in the same file or their titles name a common problem class. A deterministic finding (see [Deterministic checks](#deterministic-checks-findings-prxref-computes-itself)) is left out: it is never raised, never raises another finding, and its text does not count toward a token's rarity. |
 | 10 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
 | 11 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
-| 12 | `apply_rule_scope_check` | Clears — never drops — the `rule` label of a finding no scoped section of the loaded team rules covers (#75). A rules file declares a section's scope with a `scope: <token>[, <token>]…` line directly under an ATX heading (`##` to `####`); each such heading also gains an “`(applies to: …)`” note in the team-rules block the model reads, so the scope is visible before the fact and cleared after it. A label survives only when it names a scoped section — the label equals the section's heading text or is its leading words, both compared case-insensitively with whitespace collapsed — and every token of that section's scope covers the finding's path: `java`/`jvm` covers `*.java`, `*.kt`, `pom.xml` and `build.gradle*`; `python` covers `*.py`; `typescript`/`javascript`/`ts`/`js` cover `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs` and `*.cjs`; `docs`/`markdown` covers `*.md`, `*.mdx`, `*.rst` and `*.txt`; `openapi`/`specs` covers `*.yaml`, `*.yml` and `*.json` whose name mentions `openapi` or `swagger` or that sit under a `spec`/`specs`/`openapi`/`swagger` directory; `comments` covers every path. Every token of the line must cover the path, so a line names an intersection (`scope: java, comments` reaches Java comment rules). A token outside the vocabulary is inert — it covers every path, because an unknown word must not silently suppress rules. Everything else — an invented name, a rule from a section that declares no scope once any section does, or a matching section whose scope does not cover the file — has `rule` cleared to `null` and the finding kept, so it groups and caps by normalized title like any ruleless finding. Runs on its own guard — any loaded rules file (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`) that declares at least one section scope, whatever the grouping and cap switches say — **after** the hedge gate and **before** grouping and the per-rule cap, so a wrong label never keys either; the run record's `rule_scope_cleared` counts the cleared labels and is `null` when the check did not run. |
+| 12 | `apply_rule_scope_check` | Clears — never drops — the `rule` label of a finding no scoped section of the loaded team rules covers (#75). A rules file declares a section's scope with a `scope: <token>[, <token>]…` line directly under an ATX heading (`#` to `####`), or the heading infers one from a language or artifact noun it names (`java`, `jvm`, `python`, `typescript`, `javascript`, `ts`, `js`, `markdown`, `openapi`; never for the document title — the first heading when its section is the whole file and it is an H1 or holds sub-headings); each scoped heading also gains an “`(applies to: …)`” note in the team-rules block the model reads, and — with `PRXREF_RULE_SCOPING=on` — a chunk none of whose files the section covers is not shown it at all (see [review-rules.md](review-rules.md#section-scopes)), so the scope binds before the fact and is cleared after it. A label is cleared only when it names a scoped section — the label equals the section's heading text or one of its bullet or numbered rule lines, or is their leading words, both compared case-insensitively with whitespace collapsed — and no such section's scope covers the finding's path: `java`/`jvm` covers `*.java`, `*.kt`, `pom.xml` and `build.gradle*`; `python` covers `*.py`; `typescript`/`javascript`/`ts`/`js` cover `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs` and `*.cjs`; `docs`/`markdown` covers `*.md`, `*.mdx`, `*.rst` and `*.txt`; `openapi`/`specs` covers `*.yaml`, `*.yml` and `*.json` whose name mentions `openapi` or `swagger` or that sit under a `spec`/`specs`/`openapi`/`swagger` directory; `comments` covers every path. Every token of an explicit line must cover the path, so a line names an intersection (`scope: java, comments` reaches Java comment rules); a scope inferred from a heading naming several nouns is a union instead (`## Python and TypeScript conventions` covers `*.py` and `*.ts` alike). A token outside the vocabulary is inert — it covers every path, because an unknown word must not silently suppress rules. A label that names no scoped section (an unknown name, or a rule from an unscoped section) and any label on a finding with an empty path are kept; a label whose scoped section does not cover the file has `rule` cleared to `null` and the finding kept, so it groups and caps by normalized title like any ruleless finding. Runs on its own guard — any loaded rules file (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`) that declares at least one section scope, whatever the grouping and cap switches say — **after** the hedge gate and **before** grouping and the per-rule cap, so a wrong label never keys either. The claim-category half (`apply_rule_category_check`, right after it, with `PRXREF_RULE_SCOPING=on`) also clears a label whose rule names another kind of defect than the finding: the label is looked up the same way in every section of the loaded rules (scoped or not, plus the rule lines above the first heading), the rule's kinds are read from the matched heading or rule line and its section heading, the finding's from its title alone, over a fixed whole-word vocabulary — `docs` (Javadoc, JSDoc, KDoc, docstring, doc comment, comment, documentation), `unused` (unused, unread, never read/used/called, dead code, unreachable), `style` (style, naming, formatting, whitespace, indentation, camelCase and the other case names, lint, line length) and `errors` (exception, retry, transient, error handling, catch, swallow). It clears when both sides name a kind and share none (a `Stale duplicate Javadoc` finding citing `Remove fields never read`), or when the rule and its section heading name only `style`, the finding is an `error` and its title names no kind (a correctness bug under a style rule). A label naming no rule, and any rule or title naming no kind, keeps its label. That half runs whenever a loaded rules file holds a heading or a rule line. The run record's `rule_scope_cleared` counts the labels both halves cleared; it is `null` when the scope half did not run and the category half cleared nothing. |
 | 13 | `apply_rule_grouping` | Opt-in: runs only with `PRXREF_GROUP_FINDINGS` set to `1`. Folds chunk findings in one file that name the same rule (compared case-insensitively), or that name no rule and share a normalized title, into one finding. The finding with the smallest positive line anchors the group; a file-level (line 0) finding anchors only when no member has a line. The anchor takes the group's highest severity and highest confidence, and its body gains `Also at:` followed by each other line of the group as a backticked `<file>:<line>`. Every other member is dropped as `grouped into <file>:<line>`. Only active findings at or above the confidence floor are grouped, and whole-PR sweep findings are never grouped. The same rule in two files makes two groups. Runs **after** the thread, removal and hedge passes, so a dropped finding is never listed as a location, and **before** the gate, so the error cap counts groups, not lines. |
 | 14 | `apply_rule_cap` | Runs only when a review rules file is loaded (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`) and `PRXREF_MAX_FINDINGS_PER_RULE` is above 0, which it is by default (2); the model is then asked to name the rule it applied, as with grouping. Caps how many findings one rule produces across the whole review. It considers the findings grouping would (active chunk findings with a valid severity, at or above the confidence floor) and keys them on their rule (compared case-insensitively, with whitespace collapsed) or, when they name none, on their normalized title; the two kinds never mix, and unlike grouping the file is not part of the key. A representative from pass 13 counts once. Within one key the findings are ranked by severity, then confidence, then content, and the first `<n>` (the cap) are kept with their own severity and confidence. Every other one is dropped as `rule cap exceeded (max <n>): listed at <file>:<line>`, naming the best (first-ranked) kept finding. That finding's `locations` gains each folded finding's location and each folded finding's own `locations`, deduplicated, without its own location, and sorted by file and line; its body's last paragraph becomes `Also at:` followed by at most five of them as backticked `<file>:<line>` (a file-level one as its bare `<file>`), then `(+<k> more)` for the other `<k>`, replacing a paragraph pass 13 wrote rather than adding a second. Whole-PR sweep findings are never counted, capped or folded. Runs **after** grouping and **before** verification and the gate, so the error, warning and outofscope caps count what it kept. |
-| 15 | `apply_location_verification` | #74. Grouping (pass 13) and the cap (pass 14) list a folded member's location on their representative without ever checking the site against a source, so a member whose own anchor drifted posts a location its evidence does not hold. This pass re-runs pass 5's search for the representative's own quoted snippets within 80 lines of each `Also at:` site and drops the sites nothing corroborates, rewriting `locations` and the paragraph through the shared capped writer (at most five named, then `(+<k> more)`). A file-level (line 0) site is kept when any snippet occurs anywhere in its file. An unreadable file, a dropped finding and a representative with no snippet parseable keep every site; nothing is dropped from the review — a folded member's own drop reason stays true, only the representative's list shrinks. Runs once, after grouping and the cap (`locations` is final there) and before the gate and the suggestion pass. Without a reader the pass changes nothing. |
+| 15 | `apply_location_verification` | #74. Grouping (pass 13) and the cap (pass 14) list a folded member's location on their representative without ever checking the site against a source, so a member whose own anchor drifted posts a location its evidence does not hold. This pass re-runs pass 5's search for the representative's own quoted snippets within 100 lines of each `Also at:` site and moves the sites nothing corroborates out of `locations` and the `Also at:` paragraph into a separate last paragraph, `Also at (unverified):`, written by the same capped writer (at most five named, then `(+<k> more)`); a second run changes nothing. A file-level (line 0) site is kept when any snippet occurs anywhere in its file. An unreadable file, a dropped finding and a representative with no snippet parseable keep every site; nothing is dropped from the review — a folded member's own drop reason stays true, only the representative's verified list shrinks. Runs once, after grouping and the cap (`locations` is final there) and before the gate and the suggestion pass. Without a reader the pass changes nothing. |
 | 16 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap, and the optional per-review warning and outofscope caps (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`; unset caps nothing, and `spec` is never capped). Returns its findings in content order. |
 | 17 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. A chunk finding that grouping folded away (`grouped into <file>:<line>`) or the per-rule cap folded away (`rule cap exceeded (max <n>): listed at <file>:<line>`) still counts here, because the finding it was folded into lists its location. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line — or two file-level (line 0) findings of the same file, which compare since #74 — whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. |
 | 18 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
@@ -228,6 +228,135 @@ reports a defect nobody found. `apply_example_echo_check` (pass 1) drops it.
 - If the packaged `systemic.md` cannot be read, the run logs a WARNING and
   checks against the worker's example alone.
 
+## Execution evidence (#69)
+
+With execution evidence loaded (`--evidence-file` / `PRXREF_EVIDENCE_FILES`,
+see [docs/env-vars.md](env-vars.md)), `apply_evidence_drops` runs right after
+the example echo check and before every other pass, over chunk and sweep
+findings alike. It drops the one contradiction code can check without the
+model: a finding that claims a header is missing when an evidence item shows
+that header present. A finding is dropped only when one item meets all of:
+
+- **Exit code 0.** A failing run, or one with any other exit code, settles
+  nothing, so the finding stays. So does a run whose exit status is unknown:
+  a JSON item without `exit_code` (or with `null`), or a text block without
+  an `exit:` line. Such an item still rides the prompts, shown as
+  `exit: unknown`, but it never drops or raises a finding.
+- **A filled header field line.** The item's output holds a `Name: value`
+  line (curl's `< ` response marker allowed, CRLF captures too) with a
+  non-empty value. The name is matched case-insensitively; a name that only
+  appears in prose (`no Cache-Control set`) or an empty `Name:` field is not
+  presence.
+- **A missing claim about that header.** The finding's title or body names
+  the header as a whole token with a missing keyword (`missing`, `absent`,
+  `lacks`, `without`, `no`, `not set`, `does not send`, ...) within a few
+  words of it in the same clause (clauses split at `.`, `;`, `,`, a line
+  break and `but`/`while`/`although`), with no other hyphenated header name
+  between the two, and the name is hyphenated (`Cache-Control`) or the text
+  says "header". "Cache-Control is set but X-Frame-Options is missing" claims
+  nothing about `Cache-Control`. `no-cache` is not a missing keyword, and a claim about the
+  header's value (`max-age is too short`) is not a missing claim.
+- **The header itself, not a directive.** A claim that a directive or value
+  of the header is missing does not say the header is missing, so a probe
+  showing the header does not contradict it. Vocabulary, not word order,
+  tells the two apart. The finding is a directive claim, and is kept, when
+  its title or body holds any of these anywhere (case-insensitive, whole
+  tokens, the header name itself never counting, so `max-age` does not
+  match inside `Access-Control-Max-Age`):
+  - a known directive or value of that header: `no-store`, `no-cache`,
+    `max-age`, `s-maxage`, `private`, `public`, `immutable`,
+    `must-revalidate`, `stale-while-revalidate`, ... for `Cache-Control`;
+    `max-age`, `includeSubDomains`, `subdomains`, `preload` for
+    `Strict-Transport-Security`; any `*-src`, `frame-ancestors`,
+    `upgrade-insecure-requests`, `report-uri`, `report-to`, `sandbox`,
+    `base-uri`, `form-action`, ... for `Content-Security-Policy`; `deny`,
+    `sameorigin`, `allow-from` for `X-Frame-Options`; `nosniff` for
+    `X-Content-Type-Options`; the `Referrer-Policy` values; common
+    `Permissions-Policy` features; `Secure`, `HttpOnly`, `SameSite` for
+    `Set-Cookie`;
+  - a noun such as `directive`, `value`, `attribute`, `flag` or `option`;
+  - a value fragment after the name: `Name=value`, or `Name: value` when
+    the value holds `=`, a digit, a quote, `*`, `/` or a hyphen, or ends
+    the clause (`Cache-Control: missing` is not a value).
+
+  Otherwise a missing keyword tied to the name is a header claim, whatever
+  word follows the name. When the keyword comes first (`missing
+  Cache-Control`, `lacks a Cache-Control header`), the words up to the name
+  may not hold a preposition (`in`, `on`, `for`, ...); when the name comes
+  first (`Cache-Control is not set`, `Cache-Control header missing`), only
+  filler (`header`, `is`, ...) may sit between the two. So "Missing
+  Cache-Control (no-store)", "No Cache-Control header with no-store",
+  "Strict-Transport-Security lacks includeSubDomains" and "Missing
+  includeSubDomains in Strict-Transport-Security" are kept, while "No
+  Cache-Control set", "Missing Strict-Transport-Security (HSTS)" and
+  "Missing X-Frame-Options allows clickjacking" drop. Because the whole text
+  is scanned, a header claim whose body also names one of the header's
+  directives ("add `Cache-Control: no-store`") is kept, and so is one that
+  uses a common word from the table in prose ("on public assets"): the rule
+  errs towards keeping a finding.
+- **The same resource.** When the finding names a URL path (`/fonts/x.otf`), a
+  URL or a glob (`*.otf`), the item's command or output must name it, or for
+  a glob a path it covers. Repository file paths are not resources. When the
+  finding names none, the item's command must probe no specific resource
+  either (no URL path past `/`, no `/path`, no glob: `curl -sI
+  https://example.com/` or `nginx -T`, but not `curl -sI
+  https://example.com/index.html`, which says nothing about the font files a
+  finding may mean), and the item must reach the finding: its paths match the
+  finding's file, or they match no path of the PR (a global item every chunk
+  prompt carries).
+
+The finding gains `drop_reason` `contradicted by execution evidence: <cmd>`,
+naming the item's command, and keeps its severity and confidence. Nothing is
+relabelled or downgraded, and the model's own verdict on a contradiction
+never drops a finding. A deterministic finding and one that already has a
+`drop_reason` are left alone. The pass keeps the list's length and order, so
+the chunk/sweep boundary holds. When it drops anything, prxref logs `evidence:
+dropped N finding(s) the execution evidence contradicts` at INFO, the JSONL
+trace gets one `evidence drop` event with `findings: N`, and the summary's
+evidence note says how many were dropped, lists the supplied commands with
+their exit codes (at most 10, an unknown one shown as `exit unknown`), and
+names each dropped finding's title and the command that contradicted it.
+Findings dropped as `restates execution evidence: <cmd>` (below) are counted
+in the same note (`N finding(s) restating a failing check dropped`) and listed
+after them as `Dropped: <title> (<file>), restates <cmd>`, under the same cap
+of 10 lines. Without evidence the pass does not run.
+
+### Failing evidence raises findings
+
+The other direction is deterministic too. An evidence item with a non-zero
+exit code (never one whose exit status is unknown) is read line by line, and a line whose first position token names a
+changed file of the PR raises one finding there:
+
+- **Positions.** `path:line`, `path:line:col` and `path(line,col)`, a trailing
+  colon allowed — how ruff, flake8, mypy, ESLint's unix format, tsc, pytest and
+  most compilers print a location. The path must name exactly one changed file:
+  equal to it, a path-segment suffix of it (`app.py` for `src/app.py`), or an
+  absolute CI path ending in it. A path outside the PR, one matching two
+  changed files, line `0` and the command line itself raise nothing.
+- **The finding.** A `warning` at confidence `1.0` on that file and line,
+  titled `Failing check: <the rest of the output line>`, whose body cites the
+  command, its exit code and the fenced output line, and ends with
+  ` (deterministic check, no model)`. It joins the release-shape, toggle and
+  CI-wiring findings at the chunk/sweep boundary, so it runs the same passes
+  and severity consistency leaves it alone. On an added line it keeps its
+  line through `apply_line_align`; on any other line it snaps like a model
+  anchor, or goes file-level, so it never posts outside the diff.
+- **The cap.** At most 10 per run, across every item, in item and output order;
+  a position named twice raises once.
+- **No duplicate comment.** Just before they join, a model finding on the
+  same file and line that names the failure — a code from the output line
+  (`F401`, `TS2322`, `no-unused-vars`) or the command's tool (`ruff`, past
+  wrappers such as `uv run` or `npx`) — is dropped as
+  `restates execution evidence: <cmd>`. A different claim on the same line is
+  kept.
+
+When anything is raised or restated, prxref logs `evidence: raised N
+finding(s) from failing execution evidence (...)` at INFO and the JSONL trace
+gets one `evidence raise` event with `findings`, `capped` (positions left out
+past the cap) and `restated`. An empty or all-binary diff raises them too.
+Because they are ordinary active warnings, `PRXREF_FAIL_ON=any` exits `1` on
+one; `never` (the default) still exits `0`, and `error` ignores them.
+
 ## Ticket scope
 
 With a ticket context configured (`--context-file` / `PRXREF_TICKET_CONTEXT_FILE`,
@@ -302,8 +431,9 @@ other member.
   `rule_counts`, the per-rule cap's tally (its rows are described in
   [the README's `--format json` list](../README.md#cli-flags)): `[]` when
   nothing repeated, and `null` when the cap did not run. They carry
-  `rule_scope_cleared` too (#75): the count of rule labels pass 12 cleared,
-  `null` when no loaded rules file declares a section scope.
+  `rule_scope_cleared` too (#75): the count of rule labels pass 12 cleared
+  (scope and claim-category halves together), `null` when no loaded rules
+  file declares a section scope and the category half cleared nothing.
 - **Text output** (`--no-post` or `-v`). Every active finding that names a
   rule, a representative included, ends its line in ` [rule: <rule>]`, after
   any ` [scope: in]` or ` [scope: out]` tag. A representative's body carries
@@ -329,31 +459,39 @@ context uses (the forge's `get_file_content` at the head sha, else
   bare path citation (`` `src/app.py:31` `` — a location, not evidence),
   or a URL is not evidence. A body with none of these yields no snippet,
   and the finding keeps line align's verdict.
-- **`apply_anchor_snap` (pass 5)** searches ±80 lines around the line the
+- **`apply_anchor_snap` (pass 5)** searches ±100 lines around the line the
   MODEL reported — `model_lines`, captured before line align, so a demoted
   finding is searched from where the model said the defect sits. The
   nearest occurrence of the first matching snippet wins, ties to the
-  earliest. The anchor moves only when the move is real: the finding is
-  file-level, or the match is more than 5 lines from its aligned line. A
+  earliest. Import and comment/Javadoc lines are a tiebreak, not evidence:
+  a code line holding the snippet anywhere in the window beats them, and a
+  comment line is matched only when nothing else holds it. The anchor moves
+  only when the move is real: the finding is file-level, it sits on an
+  import or comment line while a code line holds the snippet (unless the
+  finding is about that comment: its title or body says comment or
+  docstring, or quotes the comment's text, and the comment holds a snippet,
+  which keeps the anchor), or the match
+  is more than 5 lines from its aligned line. A
   match inside a diff hunk that shares an evidence token with the claim
   settles an ambiguity; otherwise an unbreakable tie keeps the line and
-  marks the finding instead of guessing between siblings.
+  marks the finding instead of guessing between siblings. A file-level finding whose snippet lies only outside the window anchors
+  on its single whole-file occurrence, or is marked when that is not unique.
 - **`anchor_unverified`** marks a model finding whose evidence could not
   anchor it: no snippet parseable while it sits file-level, a snippet the
-  readable head file does not hold at all, or an ambiguous multi-match. The
-  same rewrite lowers its confidence by 0.1
-  (`ANCHOR_UNVERIFIED_CONFIDENCE_HIT`), so a borderline finding can drop at
-  the quality gate naturally. The flag is a plain finding field — visible
+  readable head file does not hold at all, or an ambiguous multi-match. Its
+  confidence is not lowered. The flag is a plain finding field — visible
   in `--format json` after `locations` — never a `drop_reason`. A
   deterministic check's finding is never marked or moved: its anchor is
   its own evidence. When nothing can be read (no reader, or the file does
   not resolve at the head sha) the pass is silent: no head file means no
   verdict, not a bad one.
 - **`apply_location_verification` (pass 15)** re-runs the same search for
-  the representative's own snippets within ±80 lines of each `Also at:`
-  site that grouping or the per-rule cap listed, and drops the sites
-  nothing corroborates — rewriting `locations` and the paragraph with the
-  shared capped writer (at most five named, then `(+<k> more)`). A
+  the representative's own snippets within ±100 lines of each `Also at:`
+  site that grouping or the per-rule cap listed, and moves the sites
+  nothing corroborates out of `locations` and the `Also at:` paragraph
+  into a last paragraph, `Also at (unverified):` — both written with the
+  shared capped writer (at most five named, then `(+<k> more)`), and a
+  second run changes nothing. A
   file-level site survives when any snippet occurs anywhere in its file.
   An unreadable file keeps every site, a representative with no snippet
   parseable keeps all of them, and a folded member's own drop reason stays
@@ -393,12 +531,14 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 | --- | --- | --- |
 | `not confirmed by context follow-up (confidence <x> below floor <y>)` | `merge_followup` (context follow-up) | Only with `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo` (#22). The chunk worker's finding was below `PRXREF_CONFIDENCE_FLOOR`, a definition it names was looked up and sent to the model once more, and no finding of that re-run confirmed it: none in the same file at or above the floor that sits within 5 lines of it, has the same normalized title, or names a looked-up symbol. The reason is set in the chunk worker, before every pass on this page, and `apply_quality_gate` keeps it instead of writing its own `confidence <x> below floor <y>`. A confirmed finding is replaced by the re-run's finding, which then runs every pass; the re-run's other findings are discarded, never posted, and counted in the run record's `context_followup`. |
 | `echoes the prompt's example: "<title>"` | `apply_example_echo_check` | The finding's title, normalized, is the title of the example finding in the worker or sweep template the run used. `<title>` is the example's title as the template writes it. |
+| `contradicted by execution evidence: <cmd>` | `apply_evidence_drops` | Only with execution evidence loaded (#69). The finding claims a header is missing (not one of its directives or values), and the exit-0 item `<cmd>` shows that header as a filled `Name: value` line for the resource the finding names, or, when it names none, probes no specific resource. See [Execution evidence](#execution-evidence-69). |
+| `restates execution evidence: <cmd>` | `drop_restated_failures` | Only with execution evidence loaded (#69). The failing item `<cmd>` raised a deterministic finding on the same file and line, and this model finding names the same failure (a code from the output line, or the command's tool). See [Failing evidence raises findings](#failing-evidence-raises-findings). |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
 | `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |
 | `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A manifest/lockfile finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |
-| `duplicate of existing thread` | `apply_thread_dedup` | An open thread on the PR already says this. |
-| `settled in thread: <author>` | `apply_settled_thread_suppression` | An **open, current** thread on the same path already argued this subject out. A resolved or outdated thread never suppresses (#73); a matching finding is kept and posted with a "Previously raised" note. |
-| `refuted in earlier run (<id>)` | `apply_stable_ids` | Only with `PRXREF_STABLE_IDS=1` and a `PRXREF_VERDICT_STORE` loaded (#71). The store holds this finding's stable id with verdict `refuted`: an earlier run's reviewer already answered this exact claim, and the verdict outlives the thread it was recorded from. `<id>` is the stable id both runs share; the finding also carries `id_reused_from: "verdict"`. |
+| `duplicate of existing thread` | `apply_thread_dedup` | An open, current thread on the PR already says this, or a resolved or outdated one that a human closed as "won't fix" (#73). The summary's `Thread dedup:` block and the run record's `thread_dedup.suppressed_detail` name the thread each suppressed finding matched (its URL when the forge reports one, else `thread by <author> at <path>:<line>`); `matched_resolved_detail` does the same for findings that matched a resolved thread. |
+| `settled in thread: <author>` | `apply_settled_thread_suppression` | An **open, current** thread on the same path already argued this subject out. A resolved or outdated thread never suppresses (#73); a matching finding is kept and posted with a "Previously raised" note. The exception is a won't-fix thread — Azure DevOps `wontFix`/`byDesign`, or an explicit human "won't fix" (`won't fix`, `wontfix`, `will not fix`, `by design`, `working as intended`, stated on its own rather than inside a sentence or as a question, in a comment without the prxref attribution, read from the full comment body; see [Won't-fix threads](forges.md#wont-fix-threads)) — which keeps suppressing. GitHub, GitLab and Azure DevOps find the decision in any reply of the thread; Bitbucket Cloud, Bitbucket Server and Gitea/Forgejo read it only from the comment the finding is matched against, so a "won't fix" reply there is not seen. |
+| `refuted in earlier run (<id>)` | `apply_stable_ids` | Only with a `PRXREF_VERDICT_STORE` loaded (#71). The store holds this finding's stable id with verdict `refuted`: an earlier run's reviewer already answered this claim, and the verdict outlives the thread it was recorded from. `<id>` is the stable id both runs share — the finding's own; the id prxref 0.30.0 gave it, when an entry recorded by that release (no `title`, keyed by the claim hash before it stemmed words) holds it; or, when a rewording moved its claim hash, the id of the store entry of the same file and rule whose recorded title it restates. The finding also carries `id_reused_from: "verdict"`. |
 | `claims removal of a path present in the post-image: <path>` | `apply_removal_claim_check` | A removal verb governs this path, and every path the claim names is still present after the PR lands. |
 | `hedged: "<matched phrase>"` | `apply_hedge_gate` | The finding's own text conditions the defect on something the model never established. |
 | `grouped into <file>:<line>` | `apply_rule_grouping` | Only with `PRXREF_GROUP_FINDINGS` set to `1`. Another chunk finding in the same file breaks the same rule (or, with no rule named, has the same normalized title), and this one was folded into it. `<file>:<line>` is where the group's anchor sits: the member on the smallest positive line, which carries the group's highest severity and confidence and lists this finding's line under `Also at:`, unless this finding is file-level or on the anchor's own line. Sweep findings never carry it. |
@@ -422,16 +562,17 @@ text.
 
 One clearing is not a drop reason either. `apply_rule_scope_check` (pass 12,
 #75) sets a finding's `rule` to `null` when no scoped section of the loaded
-team rules covers it — the finding itself stays active, so it posts and groups
+team rules covers it, or when the cited rule names another kind of defect
+than the finding's title (its claim-category half) — the finding itself stays active, so it posts and groups
 and caps by its normalized title like any ruleless finding. Nothing is dropped,
 so the only trace of the clearing is the label's own `null` and the run
 record's `rule_scope_cleared` count.
 
 One mark is not a drop reason either. `apply_anchor_snap` (pass 5, #74) sets
-the finding field `anchor_unverified` and lowers confidence by 0.1 when quoted
-evidence cannot anchor a model finding; the finding itself stays active (a
-sub-floor confidence still dies at the gate's floor, as any other would), and
-the only trace is the field, in `--format json` after `locations`.
+the finding field `anchor_unverified` when quoted evidence cannot anchor a
+model finding, and leaves its confidence untouched; the finding itself stays
+active and the gate judges it as it would any other, and the only trace is
+the field, in `--format json` after `locations`.
 
 ## What is and is not tunable
 
@@ -447,14 +588,15 @@ the only trace is the field, in `--format json` after `locations`.
   one rule may produce across the review in `apply_rule_cap`, and `0` turns
   it off. These seven are the only knobs that tune an existing pass. See
   [Tuning for Your Team](env-vars.md#tuning-for-your-team).
-- `PRXREF_STABLE_IDS` (default `0`, #71) adds a pass of its own rather than
-  tuning one: `1` turns on `apply_stable_ids` (pass 8), which stamps a
-  stable id on every finding and drops a finding the `PRXREF_VERDICT_STORE`
-  holds as `refuted`. Its reuse-similarity threshold is a fixed constant.
-  With it off the pass never runs and every `id` stays `null`.
+- `PRXREF_STABLE_IDS` (#71) is deprecated and ignored: `apply_stable_ids`
+  (pass 8) always runs, stamping a stable id on every finding and dropping
+  a finding the `PRXREF_VERDICT_STORE` holds as `refuted`. Any value is
+  still accepted; one that reads as off only logs a warning. Its
+  reuse-similarity threshold is a fixed constant.
 - The hedge gate, the manifest checks, the removal-claim check, the
   rule-scope check (#75 — the scope vocabulary lives in the rules file's
-  `scope:` lines, not in configuration), the anchor-snap and Also-at
+  `scope:` lines, not in configuration, and its claim-category vocabulary is
+  fixed; `PRXREF_RULE_SCOPING=off` turns both halves off), the anchor-snap and Also-at
   verification passes (#74 — they read the head file, and their window and
   confidence decrement are fixed constants), and the
   pinned-off toggle check have **no knob**. They are correctness checks against the diff itself, not noise

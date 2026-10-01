@@ -9,8 +9,9 @@ one chunk into the lines its prompt carries:
 2. :func:`prxref.repo_contracts.contract_entries`: contract excerpts
    (``contract``), at the ``repo`` level only;
 3. :func:`prxref.repo_standards.standards_entries`: sections of the
-   repository's own standards documents (``standard``, #68), at the ``repo``
-   level only;
+   repository's own standards documents (``standard``, #68), at every level
+   with a reader, and alone at the ``standards`` level, which is how a run
+   with repository context off still gets them;
 4. the resolver, :func:`prxref.repo_resolve.resolve_candidates` plus
    :func:`prxref.repo_context.find_definitions` over the candidate files
    (``import``, ``path-convention``, ``name-search``), at the ``repo`` level
@@ -54,6 +55,7 @@ from .repo_resolve import resolve_candidates
 from .repo_standards import standards_entries
 
 MODES = ("off", "diff", "repo")
+UNIT_MODES = (*MODES, "standards")
 
 
 @dataclass(frozen=True)
@@ -216,16 +218,20 @@ def build_unit_context(
     contract_priority: Sequence[str] = (),
     standards_paths: Sequence[str] = (),
     standards_priority: Sequence[str] = (),
-    standards_max_chars: int = 4000,
+    standards_max_chars: int = 6000,
     exclude: Callable[[str], bool] | None = None,
 ) -> UnitContext:
     """The repository context for one worker chunk at level ``mode``.
 
     ``chunk`` holds the chunk's ``triage.FileDiff`` records and ``all_files``
     the whole PR's, duck-typed as :func:`prxref.repo_crosschunk.diff_definitions`
-    reads them. ``mode`` is ``"off"``, ``"diff"`` or ``"repo"``; any other
-    value raises ``ValueError``, and ``"off"`` returns :data:`EMPTY_UNIT`
-    without calling anything. ``read`` is the chunk's capped reader, or None
+    reads them. ``mode`` is one of :data:`UNIT_MODES`: ``"off"``, ``"diff"``,
+    ``"repo"`` or ``"standards"``; any other value raises ``ValueError``,
+    and ``"off"`` returns :data:`EMPTY_UNIT` without calling anything.
+    ``"standards"`` is the level of a run whose repository context is off
+    but whose standards discovery is on (#68): it calls only
+    :func:`prxref.repo_standards.standards_entries` with the guarded reader
+    (nothing without a reader) and admits its entries as below. ``read`` is the chunk's capped reader, or None
     when there is none. ``listing_paths`` is the run's path listing as a set
     built once per run (or None), and ``listing_complete`` says it was not
     truncated. ``contract_paths`` and ``contract_priority`` are the run's
@@ -234,7 +240,7 @@ def build_unit_context(
     ``standards_paths``, ``standards_priority`` and ``standards_max_chars``
     are the same triple over the standards globs, ``max_chars`` the
     per-chunk budget of :func:`prxref.repo_standards.standards_entries`
-    (the config default 4000 restated).
+    (the config default 6000 restated).
     ``exclude(path)`` true marks a path repository context must never read or
     show, normally :func:`prxref.repo_context.exclude_predicate`; an
     ``exclude`` that raises counts as true.
@@ -245,8 +251,8 @@ def build_unit_context(
     1. :func:`prxref.repo_crosschunk.diff_definitions` with the guarded
        reader, at both levels;
     2. at ``"repo"`` with a reader, :func:`prxref.repo_contracts.contract_entries`;
-    3. at ``"repo"`` with a reader, :func:`prxref.repo_standards.standards_entries`
-       with the standards triple;
+    3. at ``"diff"`` or ``"repo"`` with a reader,
+       :func:`prxref.repo_standards.standards_entries` with the standards triple;
     4. at ``"repo"`` with a reader, the resolver. For each chunk file that is
        not removed and whose language has definition regexes, the names its
        added lines reference, less every symbol a definition entry at a
@@ -279,12 +285,25 @@ def build_unit_context(
     not fit, even when a later one would. The omitted line does not count
     toward ``max_chars``.
     """
-    if mode not in MODES:
-        raise ValueError(f"repository context mode must be one of {MODES}, got {mode!r}")
+    if mode not in UNIT_MODES:
+        raise ValueError(f"repository context mode must be one of {UNIT_MODES}, got {mode!r}")
     if mode == "off":
         return EMPTY_UNIT
     guarded = _guard(read, exclude)
+    if mode == "standards":
+        alone = standards_entries(
+            chunk, standards_paths=standards_paths, read=guarded,
+            priority=standards_priority, max_chars=standards_max_chars,
+        ) if guarded is not None else []
+        return _admit(_merge(list(alone), exclude), max_chars)
     entries = list(diff_definitions(chunk, all_files, guarded))
+    if mode == "diff" and guarded is not None:
+        entries.extend(
+            standards_entries(
+                chunk, standards_paths=standards_paths, read=guarded,
+                priority=standards_priority, max_chars=standards_max_chars,
+            )
+        )
     if mode == "repo" and guarded is not None:
         found = {
             entry.symbol

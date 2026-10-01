@@ -32,6 +32,7 @@ from prxref.rules import (
     ScopedRules,
     load_review_rules,
     load_scoped_rules,
+    parse_rule_sections,
 )
 from prxref.text_inputs import cap_text
 
@@ -112,6 +113,7 @@ class TestFileEntry:
                     severity_map={"blocker": "error"},
                     ignored_keys=("name",),
                     applies_to=JAVA_GLOBS,
+                    sections=parse_rule_sections(JAVA_BODY),
                 ),
             ),
             severity_map={"blocker": "error"},

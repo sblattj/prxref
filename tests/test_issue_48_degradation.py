@@ -468,9 +468,10 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("degraded") is None
         assert payload.pop("config_file") is None
         assert payload.pop("rule_scope_cleared") is None  # 0.29 (#75): null when no scope declared
-        assert payload.pop("ci_wiring") is None
+        # #66: on by default (OD2); this forge has no reader, so the check records why.
+        assert payload.pop("ci_wiring") == {"triggered": False, "reason": "no reader"}
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
-        assert payload.pop("stable_ids") is None  # #71: null when PRXREF_STABLE_IDS is off
+        assert payload.pop("stable_ids") is not None  # #71: ids are on by default
         assert payload.pop("metadata_rules") is None  # #70: null when PRXREF_METADATA_RULES is off
         assert payload.pop("failed_chunks") == []
         assert [payload.pop(key) for key in (
@@ -478,7 +479,7 @@ class TestASuccessfulPostIsUnchanged:
         )] == [0, 800, 0, 25000]
         for row in payload["findings"]:
             assert row.pop("anchor_unverified") is False  # 0.3x (#74): null-free, never stamped here
-            # #71: null on every row of a run with stable ids off.
-            assert (row.pop("id"), row.pop("anchor_block"), row.pop("id_reused_from")) == (None, None, None)
+            assert row.pop("id").startswith("src/app.py#")  # #71: ids are on by default
+            assert (row.pop("anchor_block"), row.pop("id_reused_from")) == (None, None)
         assert _sha(json.dumps(payload)) == BASE_JSON_SHA
         assert not (tmp_path / GITLAB_REPORT_FILE).exists()
