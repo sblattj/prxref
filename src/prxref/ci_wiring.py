@@ -25,20 +25,23 @@ run) and ``warning`` otherwise.
 A CI step that runs the check through a runner is followed exactly one hop:
 ``make verify`` reads the root Makefile (``GNUmakefile``, ``makefile``,
 ``Makefile``, GNU make's lookup order) and counts the check wired when the
-``verify`` rule's own recipe names it; ``npm run verify``, ``npm test``,
+``verify`` rule's recipe, or the recipe of a prerequisite it reaches in
+that same Makefile, names it; ``npm run verify``, ``npm test``,
 ``yarn verify`` and ``pnpm run verify`` do the same over the root
 ``package.json`` ``scripts`` entry. A runner file is read only when a CI
 invocation line names a runner and some check is not invoked directly,
 and only when the listing shows it (or the source cannot list).
 
-Known false negatives, accepted for v1 and documented here rather than
-hidden: an invocation embedded inside a folded YAML block scalar the
-indentation scanner mis-slices, a CI job that renames the script before
-running it (``cp scripts/verify.sh stage.sh``), and a runner chain deeper
-than one hop — a make prerequisite (``verify: smoke``), a recipe calling
-``$(MAKE) smoke``, ``make -C sub`` / ``make -f other.mk``, a workspace
-``npm --prefix web run verify``, or a ``justfile``/``Taskfile``/``tox.ini``
-runner. The conservative direction is under-flagging.
+Known false negatives (a check reported wired that CI never runs),
+accepted for v1: a CI job that only copies the script
+(``cp scripts/verify.sh stage.sh``) still names its path. Known false
+positives (a wired check flagged anyway), the price of a bounded,
+deterministic search: an invocation inside a folded YAML block scalar the
+indentation scanner mis-slices, and a runner chain the one-file hop does
+not follow — a recipe calling ``$(MAKE) smoke``, ``make -C sub`` /
+``make -f other.mk``, a workspace ``npm --prefix web run verify``, a
+script body calling another script, or a ``justfile``/``Taskfile``/
+``tox.ini`` runner.
 """
 from __future__ import annotations
 
@@ -449,18 +452,22 @@ def runner_targets(line: str) -> set[tuple[str, str]]:
     return out
 
 
-def _make_recipes(text: str) -> tuple[dict[str, list[str]], str | None]:
-    """The recipe lines per target of a Makefile, plus its default goal.
+def _make_recipes(
+    text: str,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], str | None]:
+    """The recipe lines and prerequisites per target of a Makefile, plus its default goal.
 
     A rule line (``a b: prereqs`` or ``a:: prereqs``, ``a: ; cmd`` with an
     inline recipe) opens the recipe its tab-indented lines fill; any other
     non-blank, non-comment line closes it. Recipe prefixes ``@``, ``-`` and
-    ``+`` are dropped and a ``#`` comment recipe line never counts. The
-    default goal is the first target that does not start with ``.`` and
-    has no ``%`` pattern. Prerequisites are not recorded: the follow is
-    one hop.
+    ``+`` are dropped and a ``#`` comment recipe line never counts. A
+    prerequisite is a plain name before any ``;`` (the order-only ``|``
+    and any ``$`` variable reference are skipped). The default goal is
+    the first target that does not start with ``.`` and has no ``%``
+    pattern.
     """
     recipes: dict[str, list[str]] = {}
+    prereqs: dict[str, list[str]] = {}
     default_goal: str | None = None
     current: list[str] | None = None
 
@@ -488,10 +495,13 @@ def _make_recipes(text: str) -> tuple[dict[str, list[str]], str | None]:
             recipes.setdefault(target, [])
             if default_goal is None and not target.startswith(".") and "%" not in target:
                 default_goal = target
-        _, semicolon, inline = match.group("rest").partition(";")
+        needs, semicolon, inline = match.group("rest").partition(";")
+        names = [name for name in needs.split() if name != "|" and "$" not in name]
+        for target in current:
+            prereqs.setdefault(target, []).extend(names)
         if semicolon:
             add(current, inline)
-    return recipes, default_goal
+    return recipes, prereqs, default_goal
 
 
 def _npm_scripts(text: str) -> dict[str, str]:
@@ -514,15 +524,33 @@ def _makefile(runners: Mapping[str, str]) -> str | None:
 def _runner_commands(
     runners: Mapping[str, str], hop: tuple[str, str],
 ) -> list[str]:
-    """The command lines the runner entry ``hop`` runs, one hop deep."""
+    """The command lines the runner entry ``hop`` runs, one runner file deep.
+
+    For make that is the goal's recipe plus the recipes of every
+    prerequisite it reaches inside the same Makefile (each target visited
+    once, so a cycle terminates); a nested ``$(MAKE)`` or ``make -C`` call
+    is never followed into.
+    """
     tool, target = hop
     if tool == "make":
         name = _makefile(runners)
         if name is None:
             return []
-        recipes, default_goal = _make_recipes(runners[name])
+        recipes, prereqs, default_goal = _make_recipes(runners[name])
         goal = target or default_goal
-        return recipes.get(goal, []) if goal else []
+        if not goal:
+            return []
+        commands: list[str] = []
+        seen: set[str] = set()
+        pending = [goal]
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            commands.extend(recipes.get(current, []))
+            pending.extend(prereqs.get(current, []))
+        return commands
     body = _npm_scripts(runners[PACKAGE_JSON]).get(target) if PACKAGE_JSON in runners else None
     return [body] if body else []
 
