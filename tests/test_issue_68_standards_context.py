@@ -466,7 +466,7 @@ class TestTheReviewerSeesTheStandards:
         assert "max-age=63072000" in prompt
         assert "max-age=15552000" in prompt  # the diff's own value, beside the standard
         assert res["repo_context"]["standards_globs"] == list(STANDARD_GLOBS)
-        assert res["repo_context"]["standards_max_chars"] == 4000
+        assert res["repo_context"]["standards_max_chars"] == 6000
         rows = res["repo_context"]["units"]["chunks"]
         cited = [
             (e["path"], e["line"])
@@ -475,6 +475,18 @@ class TestTheReviewerSeesTheStandards:
         assert cited  # something was admitted
         assert (STANDARDS_DOC, 12) in cited
         assert {path for path, _line in cited} == {STANDARDS_DOC}
+
+    def test_the_built_in_globs_reach_a_dot_github_security_doc(self, tmp_path):
+        _write(tmp_path, ".github/SECURITY.md", WEB_SECURITY)
+        res, llm = _review(
+            _RepoForge(TWO_CHUNK_DIFF, tmp_path), context_standards_globs=BUILTIN_GLOBS,
+        )
+
+        prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
+        prompt = prompts["app/middleware.py"][0]
+        assert STANDARDS_HEADER in prompt
+        assert ".github/SECURITY.md:12: ## HSTS" in prompt
+        assert res["repo_context"]["standards_max_chars"] == 6000
 
     def test_an_unrelated_chunk_in_the_same_run_sees_no_standards_block(self, tmp_path):
         _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)

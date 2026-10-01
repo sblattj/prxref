@@ -230,7 +230,7 @@ class TestTheRecordAndTheTraceCarryTheReasons:
         assert {key: value for key, value in record.items() if key != "units"} == {
             "mode": "repo", "max_chars": 12000, "max_reads": 200, "max_chunk_reads": 16,
             "contract_globs": list(GLOBS), "exclude_globs": [],
-            "standards_globs": [], "standards_max_chars": 4000,
+            "standards_globs": [], "standards_max_chars": 6000,
             "reader": "forge", "listing": {"paths": 6, "complete": True}, "reads": 5, "read_cap_hit": False,
             "chunk_read_cap_hit": False, "run_read_cap_hit": False,
         }

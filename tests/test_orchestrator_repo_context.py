@@ -248,7 +248,7 @@ class TestTheParameters:
         assert params["context_contract_globs"].default == ()
         assert params["context_exclude_globs"].default == ()
         assert params["context_standards_globs"].default == ()
-        assert params["context_standards_max_chars"].default == 4000 == STANDARDS_MAX_CHARS
+        assert params["context_standards_max_chars"].default == 6000 == STANDARDS_MAX_CHARS
         assert params["repo_dir"].default is None
 
     @pytest.mark.parametrize("mode", ["bogus", "", "OFF", None])

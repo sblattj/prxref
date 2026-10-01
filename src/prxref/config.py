@@ -565,12 +565,13 @@ LLM / pipeline:
                                  the PRXREF_LLM_SEED precedent) is the one way
                                  to turn standards excerpts off on their own.
                                  Built-in set: docs/standards/**, docs/adr/**,
-                                 STANDARDS*.md, SECURITY.md, CONTRIBUTING.md
+                                 STANDARDS*.md, SECURITY.md, CONTRIBUTING.md,
+                                 .github/SECURITY.md, .github/CONTRIBUTING.md
   PRXREF_CONTEXT_STANDARDS_MAX_CHARS
                                  In-repo standards (#68): per-chunk character
                                  budget for the standards sections admitted
                                  into one worker prompt. Must be greater
-                                 than 0 (default 4000)
+                                 than 0 (default 6000)
 
 Spec sources / Jira:
   PRXREF_JIRA_BASE_URL          Jira base URL (scheme://host plus any
@@ -816,8 +817,10 @@ _DEFAULTS: dict[str, object] = {
         "STANDARDS*.md",
         "SECURITY.md",
         "CONTRIBUTING.md",
+        ".github/SECURITY.md",
+        ".github/CONTRIBUTING.md",
     ],
-    "context_standards_max_chars": 4000,
+    "context_standards_max_chars": 6000,
     # CI wiring (#66): the opt-in switch plus the CI-file globs. The globs
     # default is non-empty and replace-not-append like
     # ``context_contract_globs`` above; the list restates
