@@ -910,12 +910,15 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     the cost line and the size advisory would have shipped unreachable. The
     loaded rules, ticket context, replay stamp and repository directory are
     not config keys, but they are the CLI's to build, so they are required by
-    name.
+    name. A deprecated, ignored parameter (``stable_ids``, #71) is the one
+    exception, and it must NOT be handed over.
     """
+    deprecated = {"stable_ids"}
     real = real_orchestrator.orchestrate_review
     assert sys.modules["prxref.orchestrator"].orchestrate_review is not real
     params = inspect.signature(real).parameters
-    expected = {name for name in params if name in config._DEFAULTS}
+    assert deprecated <= set(params) and deprecated <= set(config._DEFAULTS)
+    expected = {name for name in params if name in config._DEFAULTS} - deprecated
     assert expected, "no orchestrate parameter is a config key, so the check is vacuous"
     ref = PRRef(
         forge="github", host="github.com", owner="org", repo="repo",
@@ -928,6 +931,7 @@ def test_run_review_passes_every_configured_orchestrate_kwarg(fake_runtime, monk
     calls = fake_runtime["orchestrate_calls"]
     assert len(calls) == 1
     assert sorted(expected - set(calls[0])) == []
+    assert not deprecated & set(calls[0])
     assert {"rules", "ticket", "replay", "repo_dir"} <= set(calls[0])
 
 

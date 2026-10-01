@@ -22,8 +22,11 @@ holds as ``refuted`` (``refuted in earlier run (<id>)``, see
 :func:`prxref.stable_ids.apply_stable_ids`). An entry's ``title`` lets a
 later run bridge a rewording: a finding whose own id misses the store
 takes over the id of an entry of the same file and rule whose title it
-restates. An entry without a title (one written before the field
-existed) still matches by exact id. Recording is a caller's
+restates. An entry without a title (one prxref 0.30.0 wrote, before the
+field existed) still matches by exact id or by the id 0.30.0 gave the
+finding — keyed by its claim hash before stemming
+(:func:`prxref.stable_ids.legacy_claim_hash`), so a title with an
+inflected word in it keeps its 0.30.0 verdict. Recording is a caller's
 decision — a script, a future UI — through :func:`record`, which merges
 into whatever the path already holds and writes it back atomically, so
 two runs never clobber each other's entries. With no path configured

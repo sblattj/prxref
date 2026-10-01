@@ -32,8 +32,11 @@ signal), while the id stays anchor-free.
 :func:`apply_stable_ids` runs after both thread gates and before the
 quality gate, stamps ``id``, ``anchor_block`` and ``id_reused_from`` on
 every finding, and drops a finding whose id a loaded verdict store holds
-as refuted in an earlier run. The pass is on by default; with ``stable_ids`` off every finding keeps ``id=None`` and the
-run is byte-identical to one that never heard of the feature.
+as refuted in an earlier run. The pass always runs; the
+``PRXREF_STABLE_IDS`` knob that once turned it off is deprecated and
+ignored. A store entry a 0.30.0 run recorded — keyed by the claim hash
+before it stemmed words, and carrying no ``title`` — still matches
+through :func:`legacy_claim_hash`.
 """
 from __future__ import annotations
 
@@ -119,6 +122,19 @@ def claim_hash(title: str) -> str:
     other stopword-only title of that file and rule.
     """
     words = " ".join(sorted({_stem(token) for token in _title_tokens(title)}))
+    return hashlib.sha256(words.encode("utf-8")).hexdigest()[:CLAIM_HASH_CHARS]
+
+
+def legacy_claim_hash(title: str) -> str:
+    """The claim hash prxref 0.30.0 computed: :func:`claim_hash` without stemming.
+
+    0.30.0 hashed the sorted content tokens as they stood, so any title
+    holding an inflected word ("Drain duration is hardcoded") carries a
+    different id there than here. :func:`_store_match` looks a finding up
+    under this hash too, so a verdict a 0.30.0 run recorded — an entry
+    with no ``title`` for the rewording bridge to read — keeps matching.
+    """
+    words = " ".join(sorted(_title_tokens(title)))
     return hashlib.sha256(words.encode("utf-8")).hexdigest()[:CLAIM_HASH_CHARS]
 
 
@@ -264,18 +280,25 @@ def _store_match(
 ) -> tuple[str, Mapping[str, object]] | None:
     """The ``(id, entry)`` of the store that answers ``finding``, or ``None``.
 
-    An entry under ``fid`` itself wins. On a miss, the cross-run
-    rewording bridge: every entry whose id shares the finding's
-    ``<file>#<rule>#`` head and whose recorded ``title`` is a reworded
-    restatement of the finding's (:func:`quality.titles_similar` at
-    :data:`REUSE_SIMILARITY`) is a candidate, and the one with the
+    An entry under ``fid`` itself wins. Next, the entry under the id
+    prxref 0.30.0 gave the finding (its ``<file>#<rule>#`` head plus
+    :func:`legacy_claim_hash` of its title), so a verdict recorded
+    before the claim hash stemmed its words still matches. On a miss,
+    the cross-run rewording bridge: every entry whose id shares the
+    finding's ``<file>#<rule>#`` head and whose recorded ``title`` is a
+    reworded restatement of the finding's (:func:`quality.titles_similar`
+    at :data:`REUSE_SIMILARITY`) is a candidate, and the one with the
     highest title Jaccard wins, ties broken by the smaller id so the
     match never depends on the store's key order. An entry recorded
-    without a title matches by exact id only.
+    without a title matches by exact id or by that 0.30.0 id only.
     """
     entry = _store_entry(store, fid)
     if entry is not None:
         return fid, entry
+    legacy = f"{_id_prefix(finding)}{legacy_claim_hash(finding.title)}"
+    entry = _store_entry(store, legacy)
+    if entry is not None:
+        return legacy, entry
     if not isinstance(store, Mapping):
         return None
     verdicts = store.get("verdicts")
@@ -312,9 +335,10 @@ def apply_stable_ids(
        :data:`REUSE_SIMILARITY`) proposes its own id — the synonym-swap
        case the sorted-token hash cannot see — recorded as
        ``id_reused_from="run"``;
-    3. when the verdict store holds that id — or, on a miss, an entry of
-       the same file and rule whose recorded title is a reworded
-       restatement of this one (:func:`_store_match`), whose id the
+    3. when the verdict store holds that id — or, on a miss, the id a
+       0.30.0 run gave the finding, or an entry of the same file and
+       rule whose recorded title is a reworded restatement of this one
+       (:func:`_store_match`), whose id the
        finding then takes over — record ``id_reused_from="verdict"``; a
        ``refuted`` entry drops the finding with
        ``drop_reason="refuted in earlier run (<id>)"``;

@@ -932,8 +932,8 @@ def orchestrate_review(
     of that severity. ``outofscope`` is the minor severity, not the ticket
     scope ``out``.
 
-    ``stable_ids`` (default on; ``PRXREF_STABLE_IDS=0`` turns it off) controls stable finding ids (issue #71,
-    ``PRXREF_STABLE_IDS``). After both thread gates and before the
+    ``stable_ids`` is deprecated and ignored (as is ``PRXREF_STABLE_IDS``):
+    stable finding ids (issue #71) are always on. After both thread gates and before the
     severity-consistency pass, :func:`prxref.stable_ids.apply_stable_ids`
     stamps every finding with a content-derived ``id``
     (``<file>#<rule or norule>#<12-hex claim hash>``, stable across
@@ -948,12 +948,12 @@ def orchestrate_review(
     store that cannot be trusted is a configuration error, exit 2), read
     only — recording is a caller's decision
     (:func:`prxref.verdicts.record`) — and a finding whose id it holds
-    as ``refuted`` is dropped with ``refuted in earlier run (<id>)``.
+    as ``refuted`` is dropped with ``refuted in earlier run (<id>)``; an
+    entry a 0.30.0 run recorded still matches under that release's id.
     The run record's ``stable_ids`` is ``{"assigned", "reused_from_verdict",
-    "reused_from_thread", "collisions"}`` when on, ``null`` when off.
-    Off, the pass never runs, every finding keeps
-    ``id=None``, and the prompts, posts, trace and logs are exactly a
-    run without the feature.
+    "reused_from_thread", "collisions"}``; it stays ``null``, and the
+    findings' ids with it, only on a run that exits before the pass (a
+    summary-only or error run).
 
     ``repo_context`` is the repository-context level
     (``PRXREF_REPO_CONTEXT``): ``"off"`` (the default), ``"diff"`` or
@@ -1281,7 +1281,7 @@ def orchestrate_review(
     # recording a verdict is a caller's decision (prxref.verdicts.record),
     # so a review never writes the store itself.
     verdict_store_loaded: dict[str, Any] | None = None
-    if stable_ids and verdict_store:
+    if verdict_store:
         verdict_store_loaded = verdicts.load(verdict_store)
     summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
@@ -2091,19 +2091,17 @@ def orchestrate_review(
     # ids inherit the gates' verdict — a finding a thread already
     # suppressed never reaches the store's attention — and BEFORE
     # severity consistency, so the refuted drop is not counted, raised or
-    # grouped by anything downstream. Off entirely (run record
-    # ``stable_ids`` stays ``null``, every ``id`` stays ``null``) unless
-    # the caller turns the feature on.
-    if stable_ids:
-        findings = apply_stable_ids(findings, files, verdict_store_loaded, threads)
-        collisions = stable_id_collisions(findings)
-        run_inputs["stable_ids"] = {
-            "assigned": sum(1 for f in findings if f.id is not None),
-            "reused_from_verdict": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_VERDICT),
-            "reused_from_thread": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_THREAD),
-            "collisions": len(collisions),
-        }
-        tracer.event("stableids", "ok", **run_inputs["stable_ids"])
+    # grouped by anything downstream. Always on: the deprecated
+    # ``stable_ids`` argument no longer gates it.
+    findings = apply_stable_ids(findings, files, verdict_store_loaded, threads)
+    collisions = stable_id_collisions(findings)
+    run_inputs["stable_ids"] = {
+        "assigned": sum(1 for f in findings if f.id is not None),
+        "reused_from_verdict": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_VERDICT),
+        "reused_from_thread": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_THREAD),
+        "collisions": len(collisions),
+    }
+    tracer.event("stableids", "ok", **run_inputs["stable_ids"])
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1

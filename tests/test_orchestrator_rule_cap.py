@@ -571,10 +571,12 @@ def _json_payload(res: dict) -> dict:
     for row in payload["findings"]:
         assert (row.pop("suggestion"), row.pop("suggestion_end_line")) == (None, 0)
         assert row.pop("anchor_unverified") is False  # #74: no stamp without a readable head file
-        # #71: null on every row unless stable ids are on.
-        assert (row.pop("id"), row.pop("anchor_block"), row.pop("id_reused_from")) == (
-            None, None, None,
-        )
+        # #71: always-on stable ids, projected away like the other post-BASE keys;
+        # a summary-only exit returns before the pass, so its rows carry none.
+        fid = row.pop("id")
+        assert fid is None if res["stable_ids"] is None else fid.startswith(f"{row['file']}#")
+        row.pop("anchor_block")
+        row.pop("id_reused_from")
     return {key: payload[key] for key in A81_JSON_KEYS}
 
 
@@ -594,7 +596,7 @@ def rules_capture(name: str, **knobs) -> tuple[str, dict]:
             trace_dir = os.path.join(tmp, "units")
             res = orchestrator.orchestrate_review(
                 forge, REF, llm, post=True, max_workers=1,
-                trace_file=trace_file, trace_dir=trace_dir, stable_ids=False, **extra(), **knobs,
+                trace_file=trace_file, trace_dir=trace_dir, **extra(), **knobs,
             )
             payload = {
                 "prompts": [[_sha(s), _sha(u)] for s, u in sorted(llm.prompts)],
