@@ -1,19 +1,21 @@
 """Deterministic quality passes over worker findings.
 
-Nineteen passes run before posting, in the order ``orchestrate_review``
+Twenty passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, pass 13 only when the loaded rules file declares at least
-one section scope, pass 14 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on, and pass 15 only when a team rules file is loaded
-and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 16
+severity map, pass 10 only when ``PRXREF_STABLE_IDS`` turns stable finding
+ids on (#71, ``prxref.stable_ids.apply_stable_ids``), pass 14 only when
+the loaded rules file declares at least
+one section scope, pass 15 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 16 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 17
 (``apply_anchor_snap`` and ``apply_location_verification``) do only what
 the head-file reader can serve: without one they change nothing. A
-twentieth deterministic check, the release-shaped-PR heuristic, and a
-twenty-first, the pinned-toggle heuristic, are not passes at all:
+twenty-first deterministic check, the release-shaped-PR heuristic, and a
+twenty-second, the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
 before pass 1, and each then flows through every pass below like a model
-finding, except that pass 10 leaves it out. Every ``drop_reason`` prefix
+finding, except that pass 11 leaves it out. Every ``drop_reason`` prefix
 these passes emit is tabulated for operators in ``docs/quality.md``.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
@@ -94,26 +96,39 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
    has already demoted a file-level finding to line 0 by this point;
    resolved or outdated threads are skipped here too (issue #73)
    (``settled in thread: <author>``).
-10. ``apply_severity_consistency``: findings sharing one normalized title —
+10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): opt-in
+    via ``PRXREF_STABLE_IDS`` — off entirely by default, and then never
+    called. When on, it stamps every finding with a content-derived
+    ``id`` (``<file>#<rule or norule>#<12-hex claim hash>`` over the
+    title's sorted content words — no model, no embedding), an
+    ``anchor_block`` (enclosing function, YAML key path or manifest key,
+    from the diff alone) and an ``id_reused_from`` provenance, and drops
+    a finding whose id the loaded ``PRXREF_VERDICT_STORE`` holds as
+    refuted in an earlier run
+    (``refuted in earlier run (<id>)``). It runs after both thread gates
+    — so the ids inherit their verdict — and before severity consistency,
+    so a refuted finding is counted, raised and grouped by nothing
+    downstream.
+11. ``apply_severity_consistency``: findings sharing one normalized title —
     within a file or across sibling files — are all raised to the group's
     maximum severity, so per-chunk workers cannot disagree about how
     serious the same pattern is. Findings phrased differently but bound
     by a shared rare code token, with a shared problem class or file,
     join the same group (issue #30). A deterministic finding joins no
     group, so it keeps the severity its check gave it.
-11. ``apply_removal_claim_check``: drop findings whose removal verb governs
+12. ``apply_removal_claim_check``: drop findings whose removal verb governs
     a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
     path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
     header produces when a worker reads a copy as a move (issue #03).
     Only a claim that NAMES a diff path is judged, so a finding about a
     removed guard or constant is untouched.
-12. ``apply_hedge_gate``: drop findings whose title or body conditions the
+13. ``apply_hedge_gate``: drop findings whose title or body conditions the
     defect on a precondition the worker never established from the diff
     ("If X still leases a client", "unless the backfill already ran"),
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-13. ``apply_rule_scope_check``: clear ``rule`` on a finding no scoped
+14. ``apply_rule_scope_check``: clear ``rule`` on a finding no scoped
      section of the loaded team rules covers (#75) — the label matches no
      ATX section that declares a ``scope:`` line, or that section's tokens
      do not cover the finding's path — leaving the finding itself active,
@@ -123,7 +138,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
      label never keys them, and is skipped entirely (the run record's
      ``rule_scope_cleared`` stays ``null``) when no loaded section declares
      a scope.
-14. ``apply_rule_grouping``: fold chunk findings in one file that name the
+15. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -131,7 +146,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-15. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+16. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
     chunk findings per ``rule`` (casefolded), or per normalized title for
     findings that name none, across every file of the review. The kept
     findings are the most severe, then the most confident; the rest are
@@ -142,7 +157,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     it on: a team rules file is loaded and the cap is above 0. It runs
     after grouping, so a group counts once, and before the gate, so the
     severity caps count what it kept.
-16. ``apply_location_verification``: grouping and the cap list a folded
+17. ``apply_location_verification``: grouping and the cap list a folded
     member's location on their representative without ever checking the
     site against a source (issue #74). This pass re-runs pass 7's search
     for the representative's own quoted snippets within
@@ -153,7 +168,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     snippet parseable keep every site; nothing is dropped from the review.
     It runs once, after grouping and the cap (``locations`` is final
     there) and before the gate.
-17. ``apply_quality_gate``: drop findings below the confidence floor
+18. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -162,7 +177,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-18. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+19. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -177,7 +192,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-19. ``apply_containment_note``: a finding that asserts a throw, panic,
+20. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -185,7 +200,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     changes ``drop_reason`` or severity.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
-runs after pass 15 (after line alignment, anchor snapping and every fold, so
+runs after pass 16 (after line alignment, anchor snapping and every fold, so
 ``locations`` is final) and before the gate. It drops nothing: a code
 suggestion (#30) that fails one of its rules is cleared and the finding is
 kept, so it posts as a plain comment.
@@ -2774,7 +2789,7 @@ def apply_location_verification(
 ) -> list[Finding]:
     """Verify every ``Also at:`` site of a representative against the head file (#74).
 
-    Grouping (pass 14) and the per-rule cap (pass 15) list a folded
+    Grouping (pass 15) and the per-rule cap (pass 16) list a folded
     member's location on their representative without ever checking the
     site against any source, so a member whose own anchor drifted posts a
     location its evidence does not hold. This pass re-runs the

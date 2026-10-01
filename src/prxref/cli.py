@@ -956,6 +956,14 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     file-level, a snippet the head file does not hold, or an ambiguous
     multi-match — whose confidence the same pass lowered. ``false`` on
     every other row, and on a finding object without the attribute.
+
+    ``id``, ``anchor_block`` and ``id_reused_from`` follow
+    ``anchor_unverified`` and are always present (issue #71): the
+    finding's stable id, its enclosing anchor block, and where a reused
+    id came from. All three are ``null`` on every row of a run with
+    stable ids off, and on a finding object without the attribute; a
+    finding whose id a loaded verdict store holds refuted still carries
+    its id on the dropped row.
     """
     locations = getattr(f, "locations", None) or ()
     suggestion = getattr(f, "suggestion", None)
@@ -970,6 +978,9 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "suggestion_end_line": getattr(f, "suggestion_end_line", 0) if suggestion is not None else 0,
         "locations": [{"file": path, "line": line} for path, line in locations] or None,
         "anchor_unverified": bool(getattr(f, "anchor_unverified", False)),
+        "id": getattr(f, "id", None) or None,
+        "anchor_block": getattr(f, "anchor_block", None) or None,
+        "id_reused_from": getattr(f, "id_reused_from", None) or None,
         "title": f.title,
         "body": f.body,
         "drop_reason": drop_reason,
@@ -989,8 +1000,8 @@ def _build_json_result(result: Any) -> dict:
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
-    ``evidence``, ``degraded``, ``config_file``, then ``sampling`` and
-    ``replay`` when present.
+    ``evidence``, ``stable_ids``, ``degraded``, ``config_file``, then
+    ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -1022,6 +1033,9 @@ def _build_json_result(result: Any) -> dict:
     otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
     configured, the item count, how many chunk prompts matched items rode,
     and the per-unit character budget; never the evidence text), and so
+    is ``stable_ids`` (#71: ``null`` whenever ``PRXREF_STABLE_IDS`` is
+    off; otherwise ``{assigned, reused_from_verdict, reused_from_thread,
+    collisions}`` over every finding of the run), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
@@ -1082,6 +1096,7 @@ def _build_json_result(result: Any) -> dict:
         "incremental": result.get("incremental"),
         "ci_wiring": result.get("ci_wiring"),
         "evidence": result.get("evidence"),
+        "stable_ids": result.get("stable_ids"),
         "degraded": result.get("degraded"),
         "config_file": result.get("config_file"),
     }
@@ -1724,6 +1739,8 @@ def _run_review(
         ci_wiring_globs=cfg["ci_wiring_globs"],
         evidence=evidence,
         evidence_max_chunk_chars=cfg["evidence_max_chunk_chars"],
+        stable_ids=cfg["stable_ids"],
+        verdict_store=cfg["verdict_store"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp

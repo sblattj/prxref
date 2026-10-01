@@ -166,6 +166,20 @@ class Finding:
     serialized with the finding's JSON, not part of any identity or dedup
     key, and only :func:`prxref.quality.apply_evidence_verdicts` reads it
     (it downgrades a ``contradicts`` finding to ``warning``).
+
+    ``id``, ``anchor_block`` and ``id_reused_from`` are the stable-id
+    fields (issue #71), stamped by
+    :func:`prxref.stable_ids.apply_stable_ids` and ``None`` on every
+    finding of a run with stable ids off. ``id`` is the finding's
+    content-derived identity (``<file>#<rule or norule>#<12-hex claim
+    hash>``), stable across reworded titles and anchor drift;
+    ``anchor_block`` is the smallest enclosing name at the anchor (a
+    ``symbol:``/``yaml:``/``manifest:`` string), metadata the id
+    deliberately excludes; ``id_reused_from`` says where a reused id
+    came from (``run``, ``verdict`` or ``thread``), ``None`` when the id
+    was freshly computed and matched nothing. A finding whose id a
+    loaded verdict store holds refuted is dropped as ``refuted in
+    earlier run (<id>)``.
     """
 
     file: str
@@ -183,6 +197,9 @@ class Finding:
     previous_thread: str | None = None
     anchor_unverified: bool = False
     evidence: str | None = None
+    id: str | None = None
+    anchor_block: str | None = None
+    id_reused_from: str | None = None
 
 
 @dataclass
