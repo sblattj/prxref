@@ -418,7 +418,10 @@ context uses (the forge's `get_file_content` at the head sha, else
   a code line holding the snippet anywhere in the window beats them, and a
   comment line is matched only when nothing else holds it. The anchor moves
   only when the move is real: the finding is file-level, it sits on an
-  import or comment line while a code line holds the snippet, or the match
+  import or comment line while a code line holds the snippet (unless the
+  finding is about that comment: its title or body says comment or
+  docstring, or quotes the comment's text, and the comment holds a snippet,
+  which keeps the anchor), or the match
   is more than 5 lines from its aligned line. A
   match inside a diff hunk that shares an evidence token with the claim
   settles an ambiguity; otherwise an unbreakable tie keeps the line and
@@ -517,10 +520,10 @@ so the only trace of the clearing is the label's own `null` and the run
 record's `rule_scope_cleared` count.
 
 One mark is not a drop reason either. `apply_anchor_snap` (pass 5, #74) sets
-the finding field `anchor_unverified` and lowers confidence by 0.1 when quoted
-evidence cannot anchor a model finding; the finding itself stays active (a
-sub-floor confidence still dies at the gate's floor, as any other would), and
-the only trace is the field, in `--format json` after `locations`.
+the finding field `anchor_unverified` when quoted evidence cannot anchor a
+model finding, and leaves its confidence untouched; the finding itself stays
+active and the gate judges it as it would any other, and the only trace is
+the field, in `--format json` after `locations`.
 
 ## What is and is not tunable
 
