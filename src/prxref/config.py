@@ -520,7 +520,10 @@ LLM / pipeline:
                                 when PRXREF_STABLE_IDS is "1"; a finding
                                 whose id the store holds as "refuted" is
                                 dropped with drop_reason "refuted in
-                                earlier run (<id>)". Unset (the default)
+                                earlier run (<id>)"; so is a reworded
+                                duplicate of the same file and rule
+                                whose title restates the entry's
+                                recorded title. Unset (the default)
                                 = no persistence; ids are still stamped
                                 but nothing from an earlier run can
                                 match. The review never writes the
