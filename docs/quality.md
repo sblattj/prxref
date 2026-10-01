@@ -238,7 +238,10 @@ model: a finding that claims a header is missing when an evidence item shows
 that header present. A finding is dropped only when one item meets all of:
 
 - **Exit code 0.** A failing run, or one with any other exit code, settles
-  nothing, so the finding stays.
+  nothing, so the finding stays. So does a run whose exit status is unknown:
+  a JSON item without `exit_code` (or with `null`), or a text block without
+  an `exit:` line. Such an item still rides the prompts, shown as
+  `exit: unknown`, but it never drops or raises a finding.
 - **A filled header field line.** The item's output holds a `Name: value`
   line (curl's `< ` response marker allowed, CRLF captures too) with a
   non-empty value. The name is matched case-insensitively; a name that only
@@ -253,10 +256,28 @@ that header present. A finding is dropped only when one item meets all of:
   says "header". "Cache-Control is set but X-Frame-Options is missing" claims
   nothing about `Cache-Control`. `no-cache` is not a missing keyword, and a claim about the
   header's value (`max-age is too short`) is not a missing claim.
+- **The header itself, not a directive.** A claim that a directive or value
+  of the header is missing does not say the header is missing, so a probe
+  showing the header does not contradict it. When the keyword comes first
+  (`missing Cache-Control`, `lacks a Cache-Control header`), the words up to
+  the name may not hold a preposition (`in`, `on`, `of`, `for`, ...) or a
+  directive word (`directive`, `value`, `flag`, `option`, ...), and none of
+  the three words after the name may be a directive word or another
+  hyphenated token. When the name comes first (`Cache-Control is not set`,
+  `Cache-Control header missing`), only filler (`header`, `is`, ...) may sit
+  between the two, and the keyword must end the clause or be followed by a
+  preposition (`missing from responses`), never by an object. So
+  "Strict-Transport-Security lacks includeSubDomains", "Cache-Control header
+  without no-store", "Cache-Control is missing max-age" and "Missing
+  includeSubDomains in Strict-Transport-Security" are all kept.
 - **The same resource.** When the finding names a URL path (`/fonts/x.otf`), a
   URL or a glob (`*.otf`), the item's command or output must name it, or for
   a glob a path it covers. Repository file paths are not resources. When the
-  finding names none, the item must reach the finding: its paths match the
+  finding names none, the item's command must probe no specific resource
+  either (no URL path past `/`, no `/path`, no glob: `curl -sI
+  https://example.com/` or `nginx -T`, but not `curl -sI
+  https://example.com/index.html`, which says nothing about the font files a
+  finding may mean), and the item must reach the finding: its paths match the
   finding's file, or they match no path of the PR (a global item every chunk
   prompt carries).
 
@@ -269,13 +290,17 @@ the chunk/sweep boundary holds. When it drops anything, prxref logs `evidence:
 dropped N finding(s) the execution evidence contradicts` at INFO, the JSONL
 trace gets one `evidence drop` event with `findings: N`, and the summary's
 evidence note says how many were dropped, lists the supplied commands with
-their exit codes (at most 10), and names each dropped finding's title and the
-command that contradicted it. Without evidence the pass does not run.
+their exit codes (at most 10, an unknown one shown as `exit unknown`), and
+names each dropped finding's title and the command that contradicted it.
+Findings dropped as `restates execution evidence: <cmd>` (below) are counted
+in the same note (`N finding(s) restating a failing check dropped`) and listed
+after them as `Dropped: <title> (<file>), restates <cmd>`, under the same cap
+of 10 lines. Without evidence the pass does not run.
 
 ### Failing evidence raises findings
 
 The other direction is deterministic too. An evidence item with a non-zero
-exit code is read line by line, and a line whose first position token names a
+exit code (never one whose exit status is unknown) is read line by line, and a line whose first position token names a
 changed file of the PR raises one finding there:
 
 - **Positions.** `path:line`, `path:line:col` and `path(line,col)`, a trailing
@@ -479,7 +504,7 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 | --- | --- | --- |
 | `not confirmed by context follow-up (confidence <x> below floor <y>)` | `merge_followup` (context follow-up) | Only with `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo` (#22). The chunk worker's finding was below `PRXREF_CONFIDENCE_FLOOR`, a definition it names was looked up and sent to the model once more, and no finding of that re-run confirmed it: none in the same file at or above the floor that sits within 5 lines of it, has the same normalized title, or names a looked-up symbol. The reason is set in the chunk worker, before every pass on this page, and `apply_quality_gate` keeps it instead of writing its own `confidence <x> below floor <y>`. A confirmed finding is replaced by the re-run's finding, which then runs every pass; the re-run's other findings are discarded, never posted, and counted in the run record's `context_followup`. |
 | `echoes the prompt's example: "<title>"` | `apply_example_echo_check` | The finding's title, normalized, is the title of the example finding in the worker or sweep template the run used. `<title>` is the example's title as the template writes it. |
-| `contradicted by execution evidence: <cmd>` | `apply_evidence_drops` | Only with execution evidence loaded (#69). The finding claims a header is missing, and the exit-0 item `<cmd>` shows that header as a filled `Name: value` line for the resource the finding names. See [Execution evidence](#execution-evidence-69). |
+| `contradicted by execution evidence: <cmd>` | `apply_evidence_drops` | Only with execution evidence loaded (#69). The finding claims a header is missing (not one of its directives or values), and the exit-0 item `<cmd>` shows that header as a filled `Name: value` line for the resource the finding names, or, when it names none, probes no specific resource. See [Execution evidence](#execution-evidence-69). |
 | `restates execution evidence: <cmd>` | `drop_restated_failures` | Only with execution evidence loaded (#69). The failing item `<cmd>` raised a deterministic finding on the same file and line, and this model finding names the same failure (a code from the output line, or the command's tool). See [Failing evidence raises findings](#failing-evidence-raises-findings). |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
 | `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |

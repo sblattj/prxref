@@ -135,7 +135,7 @@ its `PRXREF_` name.
 | `ticket_context_file` | string | File holding the ticket this PR implements ([more](env-vars.md#llm--pipeline)). |
 | `ticket_context_max_chars` | integer | Characters of ticket text kept in the prompt ([more](env-vars.md#llm--pipeline)). |
 | `evidence_files` | array of strings | Execution evidence files to review against ([more](env-vars.md#llm--pipeline)). |
-| `evidence_max_chars` | integer | Characters of evidence text one review unit receives ([more](env-vars.md#llm--pipeline)). |
+| `evidence_max_chars` | integer | Characters of evidence text one review unit receives; the 0.30.0 name `evidence_max_chunk_chars` is still read as a deprecated alias, and setting both is an error ([more](env-vars.md#llm--pipeline)). |
 | `spec_sources` | array of strings | Local spec files and directories to review against; no URLs here ([more](env-vars.md#llm--pipeline)). |
 | `spec_max_chars` | integer | Raw characters kept per spec source ([more](env-vars.md#llm--pipeline)). |
 | `spec_digest_tokens` | integer | Token budget of the spec digest in worker prompts ([more](env-vars.md#llm--pipeline)). |

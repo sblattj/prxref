@@ -355,15 +355,18 @@ LLM / pipeline:
                                 "evidence" array of {command, exit_code,
                                 output, files}) or plain text (blank-line-
                                 separated blocks, the first line the
-                                command, an exit: N line the exit code).
+                                command, an exit: N line the exit code;
+                                no exit code = unknown, settles nothing).
                                 Items whose paths match a chunk ride that
                                 chunk's prompt; the rest ride every prompt,
                                 the whole-PR sweep's included, and a worker
                                 must not report a finding the evidence
                                 contradicts. A finding claiming a header
-                                is missing is dropped when an exit-0 item
-                                shows that header as a Name: value line
-                                for the resource it names. A missing,
+                                (not a directive of it) is missing is
+                                dropped when an exit-0 item shows that
+                                header as a Name: value line for the
+                                resource it names (naming none, an item
+                                probing no specific resource). A missing,
                                 unreadable or non-UTF-8 file, or JSON of
                                 the wrong shape,
                                 is a configuration error. Comma- or
@@ -1098,6 +1101,13 @@ _LEGACY_ENV_ALIASES: dict[str, str] = {
     "evidence_max_chars": _ENV_PREFIX + "EVIDENCE_MAX_CHUNK_CHARS",
 }
 
+#: Deprecated config-file key names still read, each mapped to its key. A
+#: renamed key keeps loading under its old name, so a release never turns a
+#: file a previous release accepted into a configuration error.
+_LEGACY_FILE_KEYS: dict[str, str] = {
+    "evidence_max_chunk_chars": "evidence_max_chars",
+}
+
 #: The repository config file auto-discovered in the working directory (#38).
 CONFIG_FILE_NAME = ".prxref.toml"
 
@@ -1199,11 +1209,14 @@ def _toml_type_name(value: object) -> str:
     return f"a {type(value).__name__}"
 
 
-def _file_value(key: str, value: object, display: str) -> object:
-    """Type-check one file value and return it in the env layer's type."""
+def _file_value(key: str, value: object, display: str, *, written: str = "") -> object:
+    """Type-check one file value and return it in the env layer's type.
+
+    ``written`` is the name the file used, when a deprecated alias of ``key``.
+    """
     def wrong(expected: str) -> ConfigError:
         return ConfigError(
-            f"{display}: {key!r} must be {expected}, got "
+            f"{display}: {(written or key)!r} must be {expected}, got "
             f"{_toml_type_name(value)}; see {CONFIG_DOCS_URL}"
         )
 
@@ -1332,7 +1345,22 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
     directory. A syntax error (with its line), a non-UTF-8 file, a table, an unknown key,
     an :data:`ENV_ONLY_KEYS` key, a wrong type, a ``spec_sources`` URL, or a
     path outside the file's directory raises
-    :class:`~prxref.llm.ConfigError`. The environment is never read.
+    :class:`~prxref.llm.ConfigError`. The environment is never read. A
+    deprecated key name (``evidence_max_chunk_chars``, renamed
+    ``evidence_max_chars`` in 0.30.1) loads under its current key, and a
+    file that sets both names is an error.
+    """
+    return _read_config_file(path, display=display)[0]
+
+
+def _read_config_file(
+    path: Path, *, display: str | None = None,
+) -> tuple[dict[str, object], dict[str, str]]:
+    """:func:`read_config_file`, plus ``{key: name the file wrote}``.
+
+    The second dict maps every returned key to the name the file used for
+    it, which differs from the key only for a deprecated alias, so a later
+    range error names what the operator typed.
     """
     name = str(path) if display is None else display
     try:
@@ -1350,7 +1378,15 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
         raise ConfigError(f"{name}: invalid TOML: {exc}; see {CONFIG_DOCS_URL}") from exc
     base = os.path.realpath(os.path.dirname(os.path.abspath(path)))
     result: dict[str, object] = {}
-    for key, raw in data.items():
+    typed: dict[str, str] = {}
+    for written, raw in data.items():
+        key = _LEGACY_FILE_KEYS.get(written, written)
+        if key != written and key in data:
+            raise ConfigError(
+                f"{name}: both {key!r} and its deprecated name {written!r} are "
+                f"set; keep {key!r} only; see {CONFIG_DOCS_URL}"
+            )
+        typed[key] = written
         if isinstance(raw, dict):
             raise ConfigError(
                 f"{name}: {key!r} is a table, but the config file is flat; "
@@ -1369,7 +1405,7 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
                 f"({_ENV_ONLY_REASONS[key]}); set {_ENV_PREFIX}{key.upper()} "
                 f"in the pipeline instead; see {CONFIG_DOCS_URL}"
             )
-        value = _file_value(key, raw, name)
+        value = _file_value(key, raw, name, written=written)
         if key == "context_standards_globs" and not value:
             result[key] = []
             continue
@@ -1392,7 +1428,7 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
             else:
                 value = _contained_path(key, value, base, name)
         result[key] = value
-    return result
+    return result, {key: typed[key] for key in result}
 
 
 def _truthy(raw: str) -> bool:
@@ -1713,9 +1749,10 @@ def load_config_with_sources(
     layers: dict[str, str] = dict.fromkeys(_DEFAULTS, "default")
     if config_file is not None:
         display = _display_path(config_file)
-        for key, value in read_config_file(config_file, display=display).items():
+        values, typed = _read_config_file(config_file, display=display)
+        for key, value in values.items():
             cfg[key] = value
-            sources[key] = f"{display}: {key}"
+            sources[key] = f"{display}: {typed[key]}"
             layers[key] = "file"
             supplied.add(key)
     for key in _DEFAULTS:

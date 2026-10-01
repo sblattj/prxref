@@ -84,8 +84,10 @@ FINDING = {
     "evidence": "contradicts",
 }
 
+# A probe of no specific resource (the host root), so it can settle a
+# header claim that names no resource either.
 PROBE = {
-    "command": "curl -sI /x",
+    "command": "curl -sI https://cdn.example.com/",
     "exit_code": 0,
     "output": "HTTP/1.1 200 OK\nCache-Control: public, max-age=31536000, immutable",
 }
@@ -186,9 +188,11 @@ class TestLoader:
         assert bundle.items == (EvidenceItem("pytest -q", 1, "3 failed", ()),)
         assert bundle.active is True
 
-    def test_a_none_exit_code_and_non_list_files_default(self, tmp_path):
+    def test_a_none_exit_code_is_unknown_and_non_list_files_default(self, tmp_path):
         path = _json_file(tmp_path, [{"command": "make", "exit_code": None, "files": None}])
-        assert _load([str(path)]).items[0].exit_code == 0
+        item = _load([str(path)]).items[0]
+        assert item.exit_code is None
+        assert item.files == ()
 
     def test_file_entries_are_normalised(self, tmp_path):
         path = _json_file(tmp_path, [
@@ -552,10 +556,10 @@ class TestThroughTheRealReviewer:
             "; 1 finding(s) the evidence contradicts dropped" in summary
         ) is dropped
         assert "downgraded" not in summary
-        assert "`curl -sI /x` (exit 0)" in summary
+        assert f"`{PROBE['command']}` (exit 0)" in summary
         assert ("Missing Cache-Control header" in summary) is dropped
         if dropped:
-            assert "contradicted by `curl -sI /x`" in summary
+            assert f"contradicted by `{PROBE['command']}`" in summary
 
     def test_no_note_without_evidence(self, tmp_path):
         forge, _llm, _res = _run(None, post=True)
