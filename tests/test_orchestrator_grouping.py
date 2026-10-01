@@ -708,12 +708,15 @@ class TestCliWiring:
 # when worker.md dropped its "roughly 30k tokens" promise (0.15): the only
 # fields that moved are the worker prompt and unit-file hashes and, for
 # "override", the override worker.md's sha256 and chars (42 fewer);
-# "summary_only" renders no prompt.
+# "summary_only" renders no prompt. Both were re-derived again for issue
+# #67's "Matching rules" section in worker.md: the worker prompt system
+# hashes (and the unit-file hashes that embed them) are the only movers;
+# "summary_only" still renders no prompt.
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {
-    "main": "bcb8afd09b5e1915537205225d1d8fa7a5f030c454b94861fc4861ed998200ad",
-    "override": "01ae1cc9153c3976c8c64e243d908e64605020ea3370e60ad98b16041ddf6ee9",
+    "main": "2b153b5cb7f81f8a1a32148fa49f28a24edd55ffe38b476fa55b1d1408df5848",
+    "override": "26d2e827b9e327e9ac61a81cf0eff28a5d29ce08c890dfa6cec6999d9cfc0df1",
     "summary_only": "1539f1e036492cf3437e08b9263413c6cf9f1cb4f5378753dcc602fff62715a5",
 }
 
