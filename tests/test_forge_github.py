@@ -304,10 +304,10 @@ def test_list_threads_patches_resolution_outdated_and_url_from_graphql(monkeypat
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                 "nodes": [
                     {"isResolved": True, "isOutdated": False, "url": url,
-                     "comments": {"nodes": [{"path": "src/app.py", "line": 12}]}},
+                     "comments": {"nodes": [{"databaseId": 1}]}},
                     {"isResolved": False, "isOutdated": True,
                      "url": "https://github.com/acme/api/pull/42/files#discussion_r2",
-                     "comments": {"nodes": [{"path": "src/old.py", "line": None}]}},
+                     "comments": {"nodes": [{"databaseId": 2}]}},
                 ],
             }}}},
         }
@@ -320,8 +320,6 @@ def test_list_threads_patches_resolution_outdated_and_url_from_graphql(monkeypat
     assert by_path["src/app.py"].resolved is True
     assert by_path["src/app.py"].outdated is False
     assert by_path["src/app.py"].url == url
-    # Joined by (path, line) with nulls equal: the outdated REST comment's
-    # GraphQL twin also reports line null.
     assert by_path["src/old.py"].outdated is True
     assert by_path["src/old.py"].resolved is False
     assert by_path["src/old.py"].url is not None
@@ -329,6 +327,79 @@ def test_list_threads_patches_resolution_outdated_and_url_from_graphql(monkeypat
     assert by_path["src/gone.py"].resolved is False
     assert by_path["src/gone.py"].outdated is False
     assert by_path["src/gone.py"].url is None
+
+
+def _graphql_nodes(*nodes):
+    return _mock_response(
+        json_data={"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": list(nodes),
+        }}}}}
+    )
+
+
+def _node(db_id, url, resolved, outdated):
+    return {"isResolved": resolved, "isOutdated": outdated, "url": url,
+            "comments": {"nodes": [{"databaseId": db_id}]}}
+
+
+def test_graphql_patch_joins_outdated_threads_on_the_same_path_by_root_id(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {"id": 10, "path": "a.py", "line": None, "user": {"login": "alice"}, "body": "x"},
+            {"id": 20, "path": "a.py", "line": None, "user": {"login": "bob"}, "body": "y"},
+            {"id": 21, "path": "a.py", "line": None, "in_reply_to_id": 20,
+             "user": {"login": "carol"}, "body": "reply"},
+        ]
+    )
+    session.post.return_value = _graphql_nodes(
+        _node(10, "U-A", False, True), _node(20, "U-B", True, True)
+    )
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    by_author = {t.author: t for t in threads}
+    assert (by_author["alice"].url, by_author["alice"].resolved) == ("U-A", False)
+    assert (by_author["bob"].url, by_author["bob"].resolved) == ("U-B", True)
+    assert (by_author["carol"].url, by_author["carol"].resolved) == ("U-B", True)
+
+
+def test_graphql_patch_joins_current_threads_on_one_line_by_root_id(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[
+            {"id": 10, "path": "a.py", "line": 5, "user": {"login": "alice"}, "body": "x"},
+            {"id": 20, "path": "a.py", "line": 5, "user": {"login": "bob"}, "body": "y"},
+        ]
+    )
+    session.post.return_value = _graphql_nodes(
+        _node(10, "U-A", True, False), _node(20, "U-B", False, False)
+    )
+
+    threads = ForgeImpl(session=session).list_threads(_ref())
+
+    by_author = {t.author: t for t in threads}
+    assert (by_author["alice"].url, by_author["alice"].resolved) == ("U-A", True)
+    assert (by_author["bob"].url, by_author["bob"].resolved) == ("U-B", False)
+
+
+def test_graphql_patch_skips_an_ambiguous_root_id(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _mock_response(
+        json_data=[{"id": 10, "path": "a.py", "line": 5, "user": {"login": "a"}, "body": "x"}]
+    )
+    session.post.return_value = _graphql_nodes(
+        _node(10, "U-1", True, False), _node(10, "U-2", False, False)
+    )
+
+    (thread,) = ForgeImpl(session=session).list_threads(_ref())
+
+    assert thread.url is None
+    assert thread.resolved is False
 
 
 def test_list_threads_degrades_to_rest_only_when_graphql_fails(monkeypatch):
