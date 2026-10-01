@@ -570,11 +570,14 @@ LLM / pipeline:
                                  what the chunk's own changes name and capped
                                  by PRXREF_CONTEXT_STANDARDS_MAX_CHARS. A set
                                  value REPLACES the built-in set below rather
-                                 than adding to it; a bare empty value reads
-                                 as unset (the house rule), so the built-in
-                                 set stays - the exact value "off" (lowercase,
-                                 the PRXREF_LLM_SEED precedent) is the one way
-                                 to turn standards excerpts off on their own.
+                                 than adding to it; a bare empty value in the
+                                 environment reads as unset (the house rule),
+                                 so the built-in set stays - the exact value
+                                 "off" (lowercase, the PRXREF_LLM_SEED
+                                 precedent) turns standards excerpts off on
+                                 their own, as do --context-standards-globs
+                                 "" (or off) for one run and, in
+                                 .prxref.toml, [] or "off".
                                  Built-in set: docs/standards/**, docs/adr/**,
                                  STANDARDS*.md, SECURITY.md, CONTRIBUTING.md,
                                  .github/SECURITY.md, .github/CONTRIBUTING.md
@@ -941,9 +944,10 @@ _SEED_OFF = "off"
 
 # ``context_standards_globs``'s one non-glob value (#68): read no standards
 # document at all. Matched exactly (lowercase) like ``llm_seed``'s sentinel,
-# because the normal list coercion would read ``off`` as a one-glob list. A
-# bare empty value keeps the house rule instead: it reads as unset, so the
-# built-in set stays.
+# because the normal list coercion would read ``off`` as a one-glob list. In
+# the environment a bare empty value keeps the house rule (it reads as unset,
+# so the built-in set stays); ``--context-standards-globs ""``, a TOML ``[]``
+# and a TOML ``"off"`` all turn it off.
 _STANDARDS_GLOBS_OFF = "off"
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
@@ -1165,9 +1169,18 @@ def _file_value(key: str, value: object, display: str) -> object:
             return value
         raise wrong("a boolean")
     if key in _LIST_KEYS:
+        if (
+            key == "context_standards_globs"
+            and isinstance(value, str)
+            and value.strip() == _STANDARDS_GLOBS_OFF
+        ):
+            return []
         if isinstance(value, list) and all(isinstance(v, str) for v in value):
             return [v.strip() for v in value if v.strip()]
-        raise wrong("an array of strings")
+        raise wrong(
+            'an array of strings, or "off" to read no standards'
+            if key == "context_standards_globs" else "an array of strings"
+        )
     if isinstance(value, str):
         return value
     if key == "llm_temperature":
@@ -1304,6 +1317,9 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
                 f"in the pipeline instead; see {CONFIG_DOCS_URL}"
             )
         value = _file_value(key, raw, name)
+        if key == "context_standards_globs" and not value:
+            result[key] = []
+            continue
         if value == "" or value == []:
             continue
         if key == "spec_sources":
