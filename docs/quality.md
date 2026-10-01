@@ -258,27 +258,42 @@ that header present. A finding is dropped only when one item meets all of:
   header's value (`max-age is too short`) is not a missing claim.
 - **The header itself, not a directive.** A claim that a directive or value
   of the header is missing does not say the header is missing, so a probe
-  showing the header does not contradict it. When the keyword comes first
-  (`missing Cache-Control`, `lacks a Cache-Control header`), the words up to
-  the name may not hold a preposition (`in`, `on`, `of`, `for`, ...) or a
-  directive word (`directive`, `value`, `flag`, `option`, ...), none of
-  the three words after the name may be a directive word, and the first
-  word after the name — past an alias in parentheses such as `(HSTS)` — must
-  end the clause or be filler (`header`, `is`, ...), a preposition (`for`,
-  `to`, ...) or a connective (`which`, `and`, ...). Any other word is the
-  keyword's object, so "Missing Strict-Transport-Security includeSubDomains"
-  and "No Cache-Control private" are directive claims, while "Missing
-  Strict-Transport-Security (HSTS) header" and "No Cache-Control for
-  authenticated responses" are about the header. A bare verb after the name
-  ("Missing X-Frame-Options allows clickjacking") also reads as an object,
-  so such a claim is kept rather than dropped. When the name comes first (`Cache-Control is not set`,
-  `Cache-Control header missing`), only filler (`header`, `is`, ...) may sit
-  between the two, and the keyword must end the clause or be followed by a
-  preposition (`missing from responses`), never by an object or by `to`/`of`
-  (`not set to no-store` is a value claim). So
-  "Strict-Transport-Security lacks includeSubDomains", "Cache-Control header
-  without no-store", "Cache-Control is missing max-age" and "Missing
-  includeSubDomains in Strict-Transport-Security" are all kept.
+  showing the header does not contradict it. Vocabulary, not word order,
+  tells the two apart. The finding is a directive claim, and is kept, when
+  its title or body holds any of these anywhere (case-insensitive, whole
+  tokens, the header name itself never counting, so `max-age` does not
+  match inside `Access-Control-Max-Age`):
+  - a known directive or value of that header: `no-store`, `no-cache`,
+    `max-age`, `s-maxage`, `private`, `public`, `immutable`,
+    `must-revalidate`, `stale-while-revalidate`, ... for `Cache-Control`;
+    `max-age`, `includeSubDomains`, `subdomains`, `preload` for
+    `Strict-Transport-Security`; any `*-src`, `frame-ancestors`,
+    `upgrade-insecure-requests`, `report-uri`, `report-to`, `sandbox`,
+    `base-uri`, `form-action`, ... for `Content-Security-Policy`; `deny`,
+    `sameorigin`, `allow-from` for `X-Frame-Options`; `nosniff` for
+    `X-Content-Type-Options`; the `Referrer-Policy` values; common
+    `Permissions-Policy` features; `Secure`, `HttpOnly`, `SameSite` for
+    `Set-Cookie`;
+  - a noun such as `directive`, `value`, `attribute`, `flag` or `option`;
+  - a value fragment after the name: `Name=value`, or `Name: value` when
+    the value holds `=`, a digit, a quote, `*`, `/` or a hyphen, or ends
+    the clause (`Cache-Control: missing` is not a value).
+
+  Otherwise a missing keyword tied to the name is a header claim, whatever
+  word follows the name. When the keyword comes first (`missing
+  Cache-Control`, `lacks a Cache-Control header`), the words up to the name
+  may not hold a preposition (`in`, `on`, `for`, ...); when the name comes
+  first (`Cache-Control is not set`, `Cache-Control header missing`), only
+  filler (`header`, `is`, ...) may sit between the two. So "Missing
+  Cache-Control (no-store)", "No Cache-Control header with no-store",
+  "Strict-Transport-Security lacks includeSubDomains" and "Missing
+  includeSubDomains in Strict-Transport-Security" are kept, while "No
+  Cache-Control set", "Missing Strict-Transport-Security (HSTS)" and
+  "Missing X-Frame-Options allows clickjacking" drop. Because the whole text
+  is scanned, a header claim whose body also names one of the header's
+  directives ("add `Cache-Control: no-store`") is kept, and so is one that
+  uses a common word from the table in prose ("on public assets"): the rule
+  errs towards keeping a finding.
 - **The same resource.** When the finding names a URL path (`/fonts/x.otf`), a
   URL or a glob (`*.otf`), the item's command or output must name it, or for
   a glob a path it covers. Repository file paths are not resources. When the

@@ -191,8 +191,12 @@ alias, and one is deprecated. The worker prompt template changed again
   default.
 - **Evidence (#69).** A finding that says a header lacks a directive or
   value (for example "Strict-Transport-Security lacks
-  includeSubDomains") is no longer dropped when evidence shows the header
-  is present. A finding that names no resource is settled only by a probe
+  includeSubDomains", "Missing Cache-Control (no-store)") is no longer
+  dropped when evidence shows the header is present. A per-header
+  vocabulary of directive tokens, directive nouns and `Name: value`
+  fragments decides this, not word order, so a plain missing-header
+  claim still drops whatever verb follows the name ("Missing
+  X-Frame-Options allows clickjacking"). A finding that names no resource is settled only by a probe
   that also targets no specific resource. An evidence item with no exit
   code has an unknown status: it shows as `exit: unknown` and never drops
   or raises a finding. The evidence note also counts and lists findings
