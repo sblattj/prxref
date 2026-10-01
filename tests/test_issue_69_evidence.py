@@ -472,8 +472,9 @@ class TestThroughTheRealReviewer:
 
     def test_the_model_label_alone_neither_drops_nor_downgrades(self, tmp_path):
         _forge, _llm, res = _run(self._active(tmp_path), findings=[dict(FINDING)])
-        assert len(res["findings_active"]) == 1
-        finding = res["findings_active"][0]
+        model = [f for f in res["findings_active"] if f.title == FINDING["title"]]
+        assert len(model) == 1
+        finding = model[0]
         assert finding.severity == "error"
         assert finding.drop_reason is None
 
@@ -599,8 +600,11 @@ class TestCli:
         assert out["evidence"] == {
             "files": [str(path)], "items": 1, "matched_chunks": 1, "max_chars": 4000,
         }
-        assert [f["severity"] for f in out["findings"]] == ["error"]
-        assert SENTINEL not in json.dumps(out)
+        assert [(f["severity"], f["line"]) for f in out["findings"]] == [
+            ("error", 0), ("warning", 3),
+        ]
+        assert out["findings"][1]["title"].startswith("Failing check: E999 SyntaxError")
+        assert SENTINEL in out["findings"][1]["body"]
         assert len(rig.llm.prompts) == 2
         # The item matched the one chunk, so the worker carries it and the
         # sweep — global items only — does not.

@@ -82,7 +82,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    → ``apply_evidence_drops`` (#69, only with execution evidence loaded:
    a finding claiming a header missing that an exit-0 item shows as a
    filled header field line is dropped as ``contradicted by execution
-   evidence: <cmd>``, counted by an ``evidence drop`` trace event)
+   evidence: <cmd>``, counted by an ``evidence drop`` trace event; at
+   the deterministic splice before it, a failing item's ``path:line`` in a
+   changed file raises a warning, at most 10, and a model finding restating
+   one is dropped as ``restates execution evidence: <cmd>``, counted by an
+   ``evidence raise`` trace event)
    → ``apply_location_validation`` (a ``file``
    naming no path of the parsed diff is dropped, not rendered) →
    ``apply_manifest_claim_check`` (a
@@ -242,6 +246,7 @@ from . import (
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
 from .ci_wiring import ci_wiring_findings
+from .evidence import drop_restated_failures, failure_findings, failures_left_out
 from .forges.base import (
     ATTRIBUTION_MARKER,
     CommitData,
@@ -1461,7 +1466,12 @@ def orchestrate_review(
         # needs an added, non-binary line, so it rarely fires on this path.
         release_shape = heuristics.release_shape_findings(files)
         toggle_findings = heuristics.toggle_pinned_off_findings(files)
-        deterministic_findings = release_shape + toggle_findings + ci_findings
+        evidence_findings = _raise_evidence_failures(
+            evidence if evidence_active else None, files, tracer=tracer,
+        )
+        deterministic_findings = (
+            release_shape + toggle_findings + ci_findings + evidence_findings
+        )
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
             **_cost_meta(run_inputs),
@@ -1473,6 +1483,7 @@ def orchestrate_review(
             sampling=sampling, release_shape_findings=release_shape,
             toggle_findings=toggle_findings,
             ci_findings=ci_findings,
+            evidence_findings=evidence_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
             max_outofscope_findings=max_outofscope_findings,
@@ -1865,8 +1876,25 @@ def orchestrate_review(
     # chunk-side standing — file-level on the check's own path, and inline
     # candidates, so a genuinely unwired check reaches the PR as a comment
     # on the file that adds it. PR-metadata violations (#70) are not
-    # findings and never join it (OD8).
-    deterministic_findings = release_shape + toggle_findings + ci_findings
+    # findings and never join it (OD8). Failing execution evidence (#69,
+    # OD11) joins it too, after a model finding that restates one of its
+    # positions is dropped, so the PR gets one comment per failure.
+    evidence_restated = 0
+    evidence_findings: list[Finding] = []
+    if evidence_active:
+        restated = drop_restated_failures(findings, evidence, _new_paths(files))
+        evidence_restated = sum(
+            1
+            for before, after in zip(findings, restated, strict=True)
+            if before.drop_reason is None and after.drop_reason is not None
+        )
+        findings = restated
+        evidence_findings = _raise_evidence_failures(
+            evidence, files, tracer=tracer, restated=evidence_restated,
+        )
+    deterministic_findings = (
+        release_shape + toggle_findings + ci_findings + evidence_findings
+    )
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
     )
@@ -4575,6 +4603,40 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _new_paths(files) -> list[str]:
+    """The PR's changed paths a failing evidence position may name."""
+    return [f.path for f in files if f.path]
+
+
+def _raise_evidence_failures(
+    evidence: Any, files, *, tracer: Tracer, restated: int = 0,
+) -> list[Finding]:
+    """The findings failing execution evidence raises (#69), logged and traced.
+
+    :func:`prxref.evidence.failure_findings` over the PR's changed paths;
+    ``[]`` when ``evidence`` is ``None``. When it raises anything, or a
+    restated model finding was dropped, one INFO line and one ``evidence
+    raise`` trace event count the raised findings (``findings``), the
+    positions left out past the cap (``capped``) and the model findings
+    dropped as restatements (``restated``).
+    """
+    if evidence is None:
+        return []
+    paths = _new_paths(files)
+    raised = failure_findings(evidence, paths)
+    capped = failures_left_out(evidence, paths)
+    if raised or restated:
+        logger.info(
+            "evidence: raised %d finding(s) from failing execution evidence "
+            "(%d more left out past the cap; %d model restatement(s) dropped)",
+            len(raised), capped, restated,
+        )
+        tracer.event(
+            "evidence", "raise", findings=len(raised), capped=capped, restated=restated,
+        )
+    return raised
+
+
 def _evidence_note(record: Mapping[str, Any] | None, dropped: int) -> str:
     """Render the summary's execution-evidence note (#69), ``""`` when none was supplied.
 
@@ -4798,6 +4860,7 @@ def _summary_only_run(
     release_shape_findings: list[Finding] | None = None,
     toggle_findings: list[Finding] | None = None,
     ci_findings: list[Finding] | None = None,
+    evidence_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
@@ -4816,7 +4879,9 @@ def _summary_only_run(
     and quality passes a chunk-sourced finding gets
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
     they reach ``findings_active`` / ``verdict`` / the summary. The
-    CI-wiring findings (#66, ``ci_findings``) join them the same way.
+    CI-wiring findings (#66, ``ci_findings``) and the findings failing
+    execution evidence raises (#69, ``evidence_findings``,
+    :func:`prxref.evidence.failure_findings`) join them the same way.
     Location validation runs only when the diff holds files; every
     deterministic producer yields ``[]`` with no files, so the guard only
     spares an empty path set. The PR-metadata notes (#70) are not findings:
@@ -4850,7 +4915,7 @@ def _summary_only_run(
 
     findings = (
         list(release_shape_findings or []) + list(toggle_findings or [])
-        + list(ci_findings or [])
+        + list(ci_findings or []) + list(evidence_findings or [])
     )
     if findings:
         if files:

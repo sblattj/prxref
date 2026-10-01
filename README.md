@@ -84,7 +84,9 @@ so it is never posted inline and never moves the verdict or
 `PRXREF_FAIL_ON`; and the
 execution-evidence drop (#69, `--evidence-file`), which drops a finding
 claiming a header is missing when an exit-0 evidence item shows that header
-as a `Name: value` line for the resource the finding names.
+as a `Name: value` line for the resource the finding names, and raises a
+warning (at most 10 per run) at each `path:line` a failing evidence item
+reports in a changed file, citing the command and its exit code.
 
 The passes, the checks, every `drop_reason` string, and which of them have a
 knob: [docs/quality.md](docs/quality.md).
