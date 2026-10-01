@@ -278,7 +278,23 @@ class TestLocationVerification:
         assert out[0].locations == ((APP, 12),)
         assert out[0].body == (
             "The loader calls `dataLoader` here.\n\nAlso at: `src/app.py:12`"
+            "\n\nAlso at (unverified): `src/app.py:300`"
         )
+
+    def test_a_second_run_over_the_result_changes_nothing(self):
+        once = apply_location_verification(
+            [self._rep([300, 12])], read=_reader({APP: self.HEAD}),
+        )
+        twice = apply_location_verification(once, read=_reader({APP: self.HEAD}))
+        assert twice[0] is once[0]
+        assert twice[0].body.count("Also at (unverified):") == 1
+
+    def test_strip_also_at_removes_both_paragraphs(self):
+        from prxref.quality import _strip_also_at
+
+        body = "Text.\n\nAlso at: `a.py:1`\n\nAlso at (unverified): `a.py:2`"
+        assert _strip_also_at(body) == "Text."
+        assert _strip_also_at("Text.\n\nAlso at (unverified): `a.py:2`") == "Text."
 
     def test_a_site_with_the_snippet_stays(self):
         assert self.HEAD.splitlines()[11] == "line 12  calls dataLoader here"
@@ -288,7 +304,10 @@ class TestLocationVerification:
             [self._rep([300])], read=_reader({APP: "unrelated content\n"}),
         )
         assert out[0].locations == ()
-        assert out[0].body == "The loader calls `dataLoader` here."
+        assert out[0].body == (
+            "The loader calls `dataLoader` here.\n\n"
+            "Also at (unverified): `src/app.py:300`"
+        )
 
     def test_a_shrunk_list_longer_than_five_gains_the_more_suffix(self):
         head = "\n".join(
@@ -304,6 +323,7 @@ class TestLocationVerification:
         assert out[0].body.endswith(
             "Also at: `src/app.py:12`, `src/app.py:22`, `src/app.py:32`, "
             "`src/app.py:42`, `src/app.py:52` (+2 more)"
+            "\n\nAlso at (unverified): `src/app.py:300`"
         )
 
     def test_an_unreadable_site_file_keeps_every_site(self):
