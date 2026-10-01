@@ -17,6 +17,11 @@ reached through ``version.ref``, and a ``reports`` subproject whose
 The regression golden, ``golden_0_16_0.json``, was captured from the RELEASED
 prxref 0.16.0 by ``make_golden.py`` (its docstring has the command); it is
 never regenerated from the tree. No test touches the network.
+
+Issue #67 re-recorded the seven worker SYSTEM texts in the golden (its
+version, forge reads, counts and user texts are still 0.16.0's): each is the
+earlier text with exactly the "Matching rules" section inserted above
+"## Style" in worker.md, and every sweep prompt is byte-identical.
 """
 from __future__ import annotations
 

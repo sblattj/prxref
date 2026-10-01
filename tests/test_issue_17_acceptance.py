@@ -27,6 +27,11 @@ included, because the "Other files changed in this PR" digest quotes
 TransportConfig's hunk. So the definitions evidence is keyed on the
 ``TransportConfig.java:11: `` row inside the definitions block, never on the
 bare string.
+
+Issue #67 re-recorded the seven worker SYSTEM texts in the golden (its
+version, forge reads, counts and user texts are still 0.15.0's): each is the
+earlier text with exactly the "Matching rules" section inserted above
+"## Style" in worker.md, and every sweep prompt is byte-identical.
 """
 from __future__ import annotations
 
