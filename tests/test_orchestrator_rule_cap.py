@@ -570,6 +570,7 @@ def _json_payload(res: dict) -> dict:
     payload = cli._build_json_result(res)
     for row in payload["findings"]:
         assert (row.pop("suggestion"), row.pop("suggestion_end_line")) == (None, 0)
+        assert row.pop("anchor_unverified") is False  # #74: no stamp without a readable head file
     return {key: payload[key] for key in A81_JSON_KEYS}
 
 
