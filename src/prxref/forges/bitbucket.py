@@ -15,6 +15,7 @@ from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
+    CommitData,
     DescriptionVersion,
     FeedReadError,
     InlineComment,
@@ -255,13 +256,23 @@ class ForgeImpl:
 
         A page at a time rather than one flat list, so a caller hunting for a
         single comment stops at the page it appears on instead of paying for
-        the whole feed. Any read that does not reach the end — transport
-        failure, non-OK status, unparseable body, or the page budget running
-        out — raises ``FeedReadError`` instead of returning short, so no
-        caller can mistake "I stopped early" for "that was all".
+        the whole feed. Failures raise as ``_iter_pages`` describes.
+        """
+        return self._iter_pages(ref, "/comments", what="comment feed", unit="comments")
+
+    def _iter_pages(
+        self, ref: PRRef, suffix: str, *, what: str, unit: str,
+    ) -> Iterator[list[dict]]:
+        """Yield a paginated collection under the PR's URL, following ``next``.
+
+        ``suffix`` is appended to the PR's API URL; ``what`` and ``unit`` name
+        the collection in errors. Any read that does not reach the end —
+        transport failure, non-OK status, unparseable body, or the page
+        budget running out — raises ``FeedReadError`` instead of returning
+        short, so no caller can mistake "I stopped early" for "that was all".
         """
         headers, auth = self._get_auth()
-        url: str | None = self._pr_url(ref, "/comments")
+        url: str | None = self._pr_url(ref, suffix)
         params: dict[str, int | str] | None = {"pagelen": _PAGE_SIZE}
         where = f"{ref.owner}/{ref.repo}#{ref.number}"
 
@@ -276,21 +287,21 @@ class ForgeImpl:
                 )
             except requests.RequestException as e:
                 raise FeedReadError(
-                    f"comment feed for {where} could not be read: {e}"
+                    f"{what} for {where} could not be read: {e}"
                 ) from e
             if not resp.ok:
                 raise FeedReadError(
-                    f"comment feed for {where} returned HTTP {resp.status_code}"
+                    f"{what} for {where} returned HTTP {resp.status_code}"
                 )
             try:
                 data = resp.json()
             except ValueError as e:
                 raise FeedReadError(
-                    f"comment feed for {where} returned an unreadable body: {e}"
+                    f"{what} for {where} returned an unreadable body: {e}"
                 ) from e
             if not isinstance(data, dict):
                 raise FeedReadError(
-                    f"comment feed for {where} returned "
+                    f"{what} for {where} returned "
                     f"{type(data).__name__}, not a page object"
                 )
 
@@ -302,9 +313,38 @@ class ForgeImpl:
                 return
 
         raise FeedReadError(
-            f"comment feed for {where} outran the {_MAX_PAGES}-page budget "
-            f"({_MAX_PAGES * _PAGE_SIZE} comments) without reaching the end"
+            f"{what} for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_SIZE} {unit}) without reaching the end"
         )
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        Reads ``/pullrequests/{id}/commits``, which needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. The listing is
+        walked with ``_iter_pages``, ``pagelen=100`` and following ``next``,
+        so a page that cannot be read, or a listing past the page budget,
+        raises ``FeedReadError`` rather than handing back part of the PR.
+        Bitbucket lists the commits newest first; they are reversed to the
+        oldest-first order the ``Forge`` contract names. Each entry keeps
+        the ``hash`` as the sha, the first line of ``message`` as the
+        subject, and ``len(parents)`` as the parent count, which is 1 when
+        Bitbucket sends no parent list.
+        """
+        commits: list[CommitData] = []
+        for page in self._iter_pages(ref, "/commits", what="commit list", unit="commits"):
+            for entry in page:
+                message = entry.get("message") or ""
+                parents = entry.get("parents")
+                commits.append(CommitData(
+                    sha=entry.get("hash") or "",
+                    subject=message.splitlines()[0] if message else "",
+                    parent_count=len(parents) if isinstance(parents, list) else 1,
+                ))
+        commits.reverse()
+        return commits
 
     def _find_summary(self, ref: PRRef) -> tuple[object, str | None]:
         """Return the id and ``content.raw`` of the summary ``post_summary`` overwrites.

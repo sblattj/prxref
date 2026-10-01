@@ -83,7 +83,8 @@ metadata_rules = "on"
 # fix); an unresolved type is skipped, not flagged.
 branch_patterns = ["fix=fix/.*", "feature=feature/.*"]
 # Every non-merge commit subject must contain this; needs the forge's
-# commit listing (GitHub, Gitea), else the check skips itself.
+# commit listing (GitHub, GitLab, Bitbucket Cloud, Gitea), else the check
+# skips itself.
 commit_reference = "ACME-[0-9]+"
 # name=glob areas; more than max_areas_per_pr distinct areas is flagged.
 area_globs = ["backend=src/**", "frontend=web/**"]
