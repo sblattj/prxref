@@ -854,3 +854,207 @@ class TestRunnerHopFindings:
         )
         [f] = _ci_findings(res)
         assert f.file == "scripts/verify.sh"
+
+
+# --- the target kind: a new make/npm check target (OD10, F38) ------------------
+
+
+VERIFY_TARGET_DIFF = _modified_diff(
+    "Makefile", [], ["", "verify:", "\t./scripts/check-health.sh"],
+)
+MAKEFILE_AFTER = "build:\n\tgo build ./...\n\nverify:\n\t./scripts/check-health.sh\n"
+PYTEST_WORKFLOW = "jobs:\n  t:\n    steps:\n      - run: pytest\n"
+
+PACKAGE_DIFF = _modified_diff(
+    "package.json",
+    ['    "build": "tsc"'],
+    ['    "build": "tsc",', '    "smoke": "node scripts/smoke-run.js"'],
+)
+PACKAGE_AFTER = (
+    '{"name": "app", "scripts": {"build": "tsc", "smoke": "node scripts/smoke-run.js"},'
+    ' "devDependencies": {"check-types": "^1.0.0"}}'
+)
+
+
+class TestTargetCandidates:
+    def test_an_added_make_rule_with_a_check_name_is_a_target_candidate(self):
+        [candidate] = ci_wiring.candidate_checks(parse_unified_diff(VERIFY_TARGET_DIFF))
+        assert candidate.path == "Makefile"
+        assert candidate.target == ("make", "verify")
+        assert candidate.label == "make verify"
+
+    def test_a_test_named_make_target_counts(self):
+        files = parse_unified_diff(_modified_diff(
+            "Makefile", [], ["test-integration: build", "\tgo test -tags it ./..."],
+        ))
+        [candidate] = ci_wiring.candidate_checks(files)
+        assert candidate.target == ("make", "test-integration")
+
+    @pytest.mark.parametrize(
+        "added",
+        [
+            ["release:", "\tgoreleaser"],
+            ["latest:", "\tdocker pull app:latest"],
+            ["\t./scripts/check-health.sh"],
+            ["verify: GOFLAGS=-count=1"],
+            [".PHONY: verify"],
+            ["CHECK := ./scripts/x.sh"],
+            ["%.check: %.in"],
+        ],
+    )
+    def test_no_target_candidate(self, added):
+        files = parse_unified_diff(_modified_diff("Makefile", [], added))
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_a_rule_already_on_a_removed_line_is_not_new(self):
+        files = parse_unified_diff(_modified_diff(
+            "Makefile", ["verify: lint"], ["verify: lint vet"],
+        ))
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_a_rule_already_on_a_context_line_is_not_new(self):
+        files = parse_unified_diff(
+            "diff --git a/Makefile b/Makefile\n--- a/Makefile\n+++ b/Makefile\n"
+            "@@ -1,2 +1,4 @@\n verify:\n+\t./scripts/check-health.sh\n+verify: vet\n \tpytest\n"
+        )
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_a_nested_makefile_target_is_no_candidate(self):
+        files = parse_unified_diff(_modified_diff("web/Makefile", [], ["verify:", "\ttrue"]))
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_a_new_package_json_script_is_a_target_candidate_when_head_confirms_it(self):
+        files = parse_unified_diff(PACKAGE_DIFF)
+        [candidate] = ci_wiring.candidate_checks(
+            files, read={"package.json": PACKAGE_AFTER}.get,
+        )
+        assert candidate.path == "package.json"
+        assert candidate.target == ("npm", "smoke")
+        assert candidate.label == "npm run smoke"
+
+    def test_a_package_json_key_outside_scripts_is_no_candidate(self):
+        files = parse_unified_diff(_modified_diff(
+            "package.json", [], ['    "check-types": "^1.0.0",'],
+        ))
+        assert ci_wiring.candidate_checks(files, read={"package.json": PACKAGE_AFTER}.get) == []
+
+    def test_without_a_head_read_a_package_json_key_is_no_candidate(self):
+        files = parse_unified_diff(PACKAGE_DIFF)
+        assert ci_wiring.candidate_checks(files) == []
+        assert ci_wiring.candidate_checks(files, read=lambda p: None) == []
+        assert ci_wiring.candidate_checks(files, read=lambda p: "{not json") == []
+
+    def test_a_raising_head_read_is_no_candidate_and_never_escapes(self):
+        def read(path):
+            raise OSError("boom")
+
+        assert ci_wiring.candidate_checks(parse_unified_diff(PACKAGE_DIFF), read=read) == []
+
+
+class TestTargetWiring:
+    def _run(self, diff: str, repo: dict[str, str]):
+        return ci_wiring.ci_wiring_findings(
+            parse_unified_diff(diff), read=repo.get, listing=sorted(repo),
+        )
+
+    def test_a_verify_target_with_no_ci_caller_gives_one_finding(self):
+        findings, record = self._run(
+            VERIFY_TARGET_DIFF, {WORKFLOW_PATH: PYTEST_WORKFLOW, "Makefile": MAKEFILE_AFTER},
+        )
+        [finding] = findings
+        assert finding.file == "Makefile"
+        assert finding.line == 0
+        assert finding.confidence == 1.0
+        assert finding.title == "`make verify` is added but no CI job runs it"
+        assert "adds the `verify` target to `Makefile`" in finding.body
+        assert f"`{WORKFLOW_PATH}`" in finding.body
+        assert heuristics.is_deterministic(finding)
+        assert record["candidates"] == ["Makefile (make verify)"]
+        assert record["triggered"] is True
+
+    def test_ci_make_verify_wires_the_target(self):
+        findings, record = self._run(
+            VERIFY_TARGET_DIFF, {WORKFLOW_PATH: MAKE_WORKFLOW, "Makefile": MAKEFILE_AFTER},
+        )
+        assert findings == []
+        assert record["triggered"] is False
+
+    def test_a_ci_make_goal_reaching_the_target_as_a_prerequisite_wires_it(self):
+        workflow = "jobs:\n  t:\n    steps:\n      - run: make ci\n"
+        makefile = MAKEFILE_AFTER + "\nci: build verify\n"
+        findings, _ = self._run(
+            VERIFY_TARGET_DIFF, {WORKFLOW_PATH: workflow, "Makefile": makefile},
+        )
+        assert findings == []
+
+    def test_a_ci_make_goal_not_reaching_the_target_stays_unwired(self):
+        workflow = "jobs:\n  t:\n    steps:\n      - run: make build\n"
+        findings, _ = self._run(
+            VERIFY_TARGET_DIFF, {WORKFLOW_PATH: workflow, "Makefile": MAKEFILE_AFTER},
+        )
+        [finding] = findings
+        assert "`Makefile` (followed from `make build`)" in finding.body
+
+    def test_an_npm_target_with_no_ci_caller_gives_one_finding(self):
+        findings, _ = self._run(
+            PACKAGE_DIFF, {WORKFLOW_PATH: PYTEST_WORKFLOW, "package.json": PACKAGE_AFTER},
+        )
+        [finding] = findings
+        assert finding.file == "package.json"
+        assert finding.title == "`npm run smoke` is added but no CI job runs it"
+
+    @pytest.mark.parametrize("call", ["npm run smoke", "yarn smoke", "pnpm run smoke"])
+    def test_ci_running_the_npm_script_wires_it(self, call):
+        workflow = f"jobs:\n  t:\n    steps:\n      - run: {call}\n"
+        findings, _ = self._run(
+            PACKAGE_DIFF, {WORKFLOW_PATH: workflow, "package.json": PACKAGE_AFTER},
+        )
+        assert findings == []
+
+    def test_an_npm_script_calling_the_new_script_wires_it_one_hop(self):
+        workflow = "jobs:\n  t:\n    steps:\n      - run: npm run ci\n"
+        package = (
+            '{"scripts": {"build": "tsc", "smoke": "node scripts/smoke-run.js",'
+            ' "ci": "npm run build && npm run smoke"}}'
+        )
+        findings, _ = self._run(PACKAGE_DIFF, {WORKFLOW_PATH: workflow, "package.json": package})
+        assert findings == []
+
+    def test_the_head_package_json_is_read_once_for_candidate_and_hop(self):
+        reads: list[str] = []
+        repo = {
+            WORKFLOW_PATH: "jobs:\n  t:\n    steps:\n      - run: npm run build\n",
+            "package.json": PACKAGE_AFTER,
+        }
+
+        def read(path):
+            reads.append(path)
+            return repo.get(path)
+
+        findings, _ = ci_wiring.ci_wiring_findings(
+            parse_unified_diff(PACKAGE_DIFF), read=read, listing=sorted(repo),
+        )
+        assert len(findings) == 1
+        assert reads.count("package.json") == 1
+        assert "`package.json` (followed from `npm run build`)" in findings[0].body
+
+    def test_the_spec_acceptance_end_to_end(self):
+        unwired = CiForge(VERIFY_TARGET_DIFF, repo_files={
+            WORKFLOW_PATH: PYTEST_WORKFLOW, "Makefile": MAKEFILE_AFTER,
+        })
+        res = orchestrate_review(
+            unwired, REF, EMPTY_LLM, post=False, ci_wiring="on",
+            ticket=_ticket("Add regression checks."),
+        )
+        [f] = _ci_findings(res)
+        assert f.file == "Makefile"
+        assert "`make verify`" in f.title
+
+        wired = CiForge(VERIFY_TARGET_DIFF, repo_files={
+            WORKFLOW_PATH: MAKE_WORKFLOW, "Makefile": MAKEFILE_AFTER,
+        })
+        res = orchestrate_review(
+            wired, REF, EMPTY_LLM, post=False, ci_wiring="on",
+            ticket=_ticket("Add regression checks."),
+        )
+        assert _ci_findings(res) == []
