@@ -106,7 +106,8 @@ file's hunks. The advisory is not a finding: it never changes the verdict or the
 exit code, and with `--no-post` or `PRXREF_POST_MODE=inline` it appears only in
 the run record, under `--format json` as `size_advisory`, and as a
 `size advisory:` line in the CLI output. See
-[docs/env-vars.md](docs/env-vars.md) for the glob syntax.
+[docs/env-vars.md](docs/env-vars.md) for the glob syntax. A PR-metadata
+violation (#70) prints the same way, as one `pr metadata:` line each.
 
 ## Quickstart
 
