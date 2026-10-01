@@ -54,7 +54,12 @@ class Thread:
     ``line`` is the thread's anchor line: the last line of a multi-line
     thread. ``start_line`` is the first line of a multi-line thread, and
     ``None`` for a single-line or file-level thread or on a forge that does
-    not report one.
+    not report one. ``resolved`` and ``outdated`` gate the dedup passes
+    (issue #73): a thread the reviewers closed, or one whose anchor no
+    longer matches the current diff, no longer suppresses a finding —
+    a forge that cannot report either reports ``False``, which keeps the
+    thread suppressible exactly as before the fields existed. ``url`` is
+    the thread's permalink when the forge has one, else ``None``.
     """
 
     path: str | None
@@ -63,6 +68,8 @@ class Thread:
     author: str
     body_snippet: str
     start_line: int | None = None
+    outdated: bool = False
+    url: str | None = None
 
 
 @dataclass

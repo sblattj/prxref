@@ -84,9 +84,13 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    precede line align, which is what makes it read the model's RAW
    anchor) → ``apply_line_align`` → ``apply_thread_dedup`` (existing
    threads fetched best-effort BEFORE the workers run, and after the
-   stale-inline prune; failure means no threads) →
+   stale-inline prune; failure means no threads; a resolved or outdated
+   thread never suppresses, issue #73) →
    ``apply_settled_thread_suppression`` (a finding re-litigating a
-   subject an existing thread already argued out, line-independently) →
+   subject an existing open, current thread already argued out,
+   line-independently; resolved or outdated threads skipped here too,
+   and a surviving finding that matches one is stamped with a
+   previously-raised note instead) →
    ``apply_severity_consistency`` (findings sharing a normalized title
    are raised to the group's max severity — the sweep's corroborating
    title counts toward its group) → ``apply_removal_claim_check`` (a
@@ -251,6 +255,7 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    previously_discussed_thread,
     prompt_example_titles,
     rule_cap_counts,
 )
@@ -1554,8 +1559,28 @@ def orchestrate_review(
     findings = apply_manifest_claim_check(findings, files, read=reader)
     model_lines = [f.line for f in findings]
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
+    before_threads = findings
     findings = apply_thread_dedup(findings, threads)
     findings = apply_settled_thread_suppression(findings, threads)
+    # Both thread gates now skip resolved or outdated threads (issue #73), so
+    # what they drop here was dropped against OPEN, CURRENT threads only, and
+    # what they let through can still restate a subject a closed thread
+    # raised — which earns the finding a previously-raised note, not a drop.
+    thread_suppressed = sum(
+        1
+        for before, after in zip(before_threads, findings, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    findings, thread_matched_resolved = _note_previously_raised(findings, threads)
+    if threads:
+        run_inputs["thread_dedup"] = {
+            "suppressed": thread_suppressed,
+            "matched_resolved": thread_matched_resolved,
+            "threads_read": len(threads),
+            # Threads that can no longer suppress anything: resolved OR
+            # outdated, the same predicate both gates skip on.
+            "threads_resolved": sum(1 for t in threads if t.resolved or t.outdated),
+        }
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1
@@ -1662,6 +1687,9 @@ def orchestrate_review(
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
+            thread_accounting=_thread_dedup_accounting(
+                thread_suppressed, thread_matched_resolved,
+            ),
             incremental_note=incremental_note,
         )
         fallback_summary = summary
@@ -1725,6 +1753,9 @@ def orchestrate_review(
                 len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
             ),
+            thread_accounting=_thread_dedup_accounting(
+                thread_suppressed, thread_matched_resolved,
+            ),
             incremental_note=incremental_note,
         )
         fallback_summary = refreshed
@@ -1748,6 +1779,9 @@ def orchestrate_review(
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
+            thread_accounting=_thread_dedup_accounting(
+                thread_suppressed, thread_matched_resolved,
+            ),
             incremental_note=incremental_note,
         )
 
@@ -2441,6 +2475,77 @@ def _inline_accounting(
         reasons.append(f"{rejected} anchor{plural} rejected by the forge")
     detail = " · ".join(reasons) if reasons else "unposted"
     return f"Inline comments: {posted} of {active} findings ({detail})."
+
+
+def _thread_dedup_accounting(suppressed: int, matched_resolved: int) -> str:
+    """Render the thread-dedup reconciliation line (issue #73).
+
+    The summary used to be silent about both halves of the thread gates: a
+    finding suppressed as a duplicate vanished without a trace, and a finding
+    that matched a resolved thread was re-posted with nothing saying it had
+    history. This line names both counts; ``""`` when neither happened, so a
+    run without thread history keeps a byte-identical summary. "Resolved"
+    here covers outdated threads too — anything the gates skip.
+    """
+    if not suppressed and not matched_resolved:
+        return ""
+    return (
+        f"Thread dedup: {suppressed} suppressed as duplicates of open "
+        f"threads; {matched_resolved} matched resolved threads and are "
+        f"posted below."
+    )
+
+
+def _thread_reference(t: Thread) -> str:
+    """How a previously-raised note names one thread: its URL when the forge
+    reported one (GitHub's GraphQL read does), else ``thread by <author> at
+    <path>:<line>`` with the pieces a forge without permalinks can still
+    give."""
+    if t.url:
+        return t.url
+    who = t.author or "unknown"
+    if t.path:
+        if isinstance(t.line, int) and t.line > 0:
+            return f"thread by {who} at {t.path}:{t.line}"
+        return f"thread by {who} at {t.path}"
+    return f"thread by {who} on the PR"
+
+
+def _note_previously_raised(
+    findings: Sequence[Finding], threads: Sequence[Thread]
+) -> tuple[list[Finding], int]:
+    """Stamp surviving findings that restate a closed thread (issue #73).
+
+    For every finding that survived both thread gates, the first resolved or
+    outdated thread that matches it under either gate's rule earns the
+    finding a ``previous_thread`` sentence — ``Previously raised in <ref>;
+    still present at <file>:<line>.`` — which renders as a suffix on the
+    posted inline body and the summary bullet. Pure, 1:1 and
+    order-preserving; already-dropped findings pass through untouched.
+    Returns the new list and the count of findings stamped.
+    """
+    if not any(t.resolved or t.outdated for t in threads):
+        return list(findings), 0
+    result: list[Finding] = []
+    noted = 0
+    for f in findings:
+        if f.drop_reason is not None:
+            result.append(f)
+            continue
+        t = previously_discussed_thread(f, threads)
+        if t is None:
+            result.append(f)
+            continue
+        where = f"{f.file}:{f.line if f.line > 0 else '—'}"
+        result.append(replace(
+            f,
+            previous_thread=(
+                f"Previously raised in {_thread_reference(t)}; "
+                f"still present at {where}."
+            ),
+        ))
+        noted += 1
+    return result, noted
 
 
 HEARTBEAT_SECONDS = 30.0
@@ -3404,6 +3509,7 @@ def _render_summary(
     failed_chunks: Sequence[tuple[str, Sequence[str]]] = (),
     include_verdict: bool = True,
     inline_accounting: str | None = None,
+    thread_accounting: str = "",
     spec_note: str = "",
     ticket_note: str = "",
     cost_label: str = "",
@@ -3461,7 +3567,10 @@ def _render_summary(
     ``inline_accounting`` goes to the ``{inline_accounting}`` slot when the
     template has one; otherwise it rides the end of ``{findings}``, as it
     always has, and a template with neither slot gets it appended to the
-    body. A template without ``{findings}`` whose finding group (see
+    body. ``thread_accounting`` (:func:`_thread_dedup_accounting`, issue
+    #73, ``""`` when neither thread count is non-zero) rides that exact same
+    plumbing, joined after the inline line with a blank line between them.
+    A template without ``{findings}`` whose finding group (see
     :func:`prxref.prompt_templates.uncovered_summary_groups`) has neither
     of its slots gets that group's findings appended as ``**Other findings
     (N)**`` with a WARNING, so no finding is silently dropped. Other
@@ -3502,7 +3611,14 @@ def _render_summary(
 
     found = placeholders(template)
     has_findings = "findings" in found
-    accounting = inline_accounting or ""
+    # The inline and thread-dedup reconciliation lines ride the SAME slot
+    # plumbing: joined with a blank line so either can be empty without
+    # leaving a seam, and both reach {inline_accounting}, the end of
+    # {findings}, or the appended extras exactly as the inline line alone
+    # always has.
+    accounting = "\n\n".join(
+        line for line in (inline_accounting or "", thread_accounting) if line
+    )
     if accounting and has_findings and "inline_accounting" not in found:
         bullets = f"{bullets}\n\n{accounting}"
 
@@ -3792,13 +3908,21 @@ def _summary_bullets(
 
     ``separator`` defaults to :data:`SUMMARY_BULLET_SEPARATOR` (``" — "``);
     a file-level finding's line is always rendered ``—``, whatever the
-    separator. ``""`` for no findings.
+    separator. ``""`` for no findings. A finding carrying a
+    ``previous_thread`` note (issue #73) has it appended after its title,
+    joined by the same separator, so the bullet says the finding was raised
+    before in a since-resolved thread.
     """
-    return "\n".join(
-        f"- {marker_for(f.severity, f.scope)} "
-        f"`{f.file}:{f.line if f.line > 0 else '—'}`{separator}{f.title}"
-        for f in findings
-    )
+    lines = []
+    for f in findings:
+        line = (
+            f"- {marker_for(f.severity, f.scope)} "
+            f"`{f.file}:{f.line if f.line > 0 else '—'}`{separator}{f.title}"
+        )
+        if f.previous_thread:
+            line = f"{line}{separator}{f.previous_thread}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _summary_group_of(f: Finding) -> str:
@@ -3815,11 +3939,16 @@ def _summary_group_of(f: Finding) -> str:
 def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
     block = format_suggestion_block(f, suggestion_style)
     suggestion = f"{block}\n\n" if block else ""
+    # The previously-raised note (issue #73) is a SUFFIX, after the footer:
+    # the header, body, suggestion and attribution lines are pinned by frozen
+    # tests that prefix-match or compare the leading body, and the note is
+    # context for a re-review, not part of the finding itself.
+    note = f"\n\n{f.previous_thread}" if f.previous_thread else ""
     return (
         f"{inline_header(f)}\n\n"
         f"{f.body}\n\n"
         f"{suggestion}"
-        f"---\n*Reviewed by prxref · model={model}*"
+        f"---\n*Reviewed by prxref · model={model}*{note}"
     )
 
 

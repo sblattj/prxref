@@ -66,12 +66,14 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
 7. ``apply_thread_dedup``: drop findings that duplicate an already-open
-   or existing thread on the PR (path + line-window + shared distinctive
-   tokens), with ``drop_reason`` ``duplicate of existing thread``.
+   and current thread on the PR (path + line-window + shared distinctive
+   tokens), with ``drop_reason`` ``duplicate of existing thread``; a
+   resolved or outdated thread never matches (issue #73).
 8. ``apply_settled_thread_suppression``: drop findings that re-litigate a
-   subject an existing thread already argued out — same path plus shared
-   distinctive tokens, with NO line test, because line alignment has already
-   demoted a file-level finding to line 0 by this point
+   subject an existing open, current thread already argued out — same path
+   plus shared distinctive tokens, with NO line test, because line alignment
+   has already demoted a file-level finding to line 0 by this point;
+   resolved or outdated threads are skipped here too (issue #73)
    (``settled in thread: <author>``).
 9. ``apply_severity_consistency``: findings sharing one normalized title —
    within a file or across sibling files — are all raised to the group's
@@ -929,46 +931,70 @@ def is_duplicate_of_existing(
     measured as a range: a finding anywhere from ``start_line`` through
     ``line`` is at distance 0, and one outside it is measured from the nearer
     end. A single-line thread is measured exactly as before.
+
+    A ``resolved`` or ``outdated`` thread never matches (issue #73): only an
+    open, current thread suppresses a finding. A forge that cannot report
+    either state reports ``False``, which keeps the thread eligible exactly
+    as before the fields existed.
     """
     finding_tokens = _tokens(f"{finding.title} {finding.body}")
     if not finding_tokens:
         return False
 
-    distant_required = max(min_shared_for_distant, len(finding_tokens) // 2)
-
     for t in threads:
-        if t.path != finding.file:
+        if t.resolved or t.outdated:
             continue
-
-        body_tokens = _tokens(t.body_snippet or "")
-        if not body_tokens:
-            continue
-
-        f_line = finding.line if finding.line > 0 else None
-        t_line = t.line if t.line is not None and t.line > 0 else None
-
-        if f_line is not None and t_line is not None:
-            distance = abs(t_line - f_line)
-            t_start = getattr(t, "start_line", None)
-            if isinstance(t_start, int) and 0 < t_start < t_line:
-                if t_start <= f_line <= t_line:
-                    distance = 0
-                else:
-                    distance = min(distance, abs(t_start - f_line))
-            if distance == 0:
-                required = 1
-            elif distance <= line_window:
-                required = min_shared_tokens
-            else:
-                required = distant_required
-        else:
-            required = distant_required
-
-        shared = finding_tokens & body_tokens
-        if len(shared) >= required:
+        if _duplicate_matches_thread(
+            finding, t, finding_tokens,
+            line_window=line_window,
+            min_shared_tokens=min_shared_tokens,
+            min_shared_for_distant=min_shared_for_distant,
+        ):
             return True
 
     return False
+
+
+def _duplicate_matches_thread(
+    finding: Finding,
+    t: Thread,
+    finding_tokens: set[str],
+    *,
+    line_window: int,
+    min_shared_tokens: int,
+    min_shared_for_distant: int,
+) -> bool:
+    """Whether ONE open, current thread overlaps the finding in topic."""
+    if t.path != finding.file:
+        return False
+
+    body_tokens = _tokens(t.body_snippet or "")
+    if not body_tokens:
+        return False
+
+    distant_required = max(min_shared_for_distant, len(finding_tokens) // 2)
+
+    f_line = finding.line if finding.line > 0 else None
+    t_line = t.line if t.line is not None and t.line > 0 else None
+
+    if f_line is not None and t_line is not None:
+        distance = abs(t_line - f_line)
+        t_start = getattr(t, "start_line", None)
+        if isinstance(t_start, int) and 0 < t_start < t_line:
+            if t_start <= f_line <= t_line:
+                distance = 0
+            else:
+                distance = min(distance, abs(t_start - f_line))
+        if distance == 0:
+            required = 1
+        elif distance <= line_window:
+            required = min_shared_tokens
+        else:
+            required = distant_required
+    else:
+        required = distant_required
+
+    return len(finding_tokens & body_tokens) >= required
 
 
 def apply_thread_dedup(
@@ -1022,12 +1048,14 @@ def apply_settled_thread_suppression(
     plus at least ``min_shared_tokens`` distinct shared content tokens between
     the finding's title+body and the thread's snippet.
 
-    ``resolved`` does not gate it: a resolved thread is still a decision the
-    reviewers made with more context than the review has. A thread with no
-    path — a general, unanchored PR comment, near-universal on Bitbucket
-    Server — cannot be "same path" as any finding and is skipped rather than
-    compared. Order-preserving, pure, and already-dropped findings pass
-    through untouched so the reason an earlier pass gave survives.
+    Only an OPEN, CURRENT thread settles (issue #73): a resolved or outdated
+    one is skipped, because "resolved" says the reviewers closed the thread —
+    often for an unrelated sub-issue while the code it flagged is unchanged —
+    and re-posting the finding is then the honest output, not a re-litigation.
+    A thread with no path — a general, unanchored PR comment, near-universal
+    on Bitbucket Server — cannot be "same path" as any finding and is skipped
+    rather than compared. Order-preserving, pure, and already-dropped findings
+    pass through untouched so the reason an earlier pass gave survives.
     """
     if not threads:
         return list(findings)
@@ -1041,6 +1069,8 @@ def apply_settled_thread_suppression(
         author = ""
         if finding_tokens:
             for t in threads:
+                if t.resolved or t.outdated:
+                    continue
                 if t.path is None:
                     continue
                 if _normalised_path(t.path) != _normalised_path(f.file):
@@ -1054,6 +1084,45 @@ def apply_settled_thread_suppression(
         else:
             result.append(f)
     return result
+
+
+def previously_discussed_thread(
+    finding: Finding,
+    threads: Sequence[Thread],
+    line_window: int = 30,
+    min_shared_tokens: int = 2,
+    min_shared_for_distant: int = 4,
+    min_shared_settled: int = SETTLED_MIN_SHARED_TOKENS,
+) -> Thread | None:
+    """The resolved-or-outdated thread that already raised this finding's subject.
+
+    The mirror of both suppression gates run against CLOSED threads only
+    (issue #73): a finding that survives :func:`apply_thread_dedup` and
+    :func:`apply_settled_thread_suppression` matched no open, current thread,
+    but it can still restate a subject a resolved or outdated thread raised —
+    that fact is worth a previously-raised note on the posted finding, not a
+    drop. A thread matches under either gate's rule: the line-window tiered
+    token test, or the line-independent settled test. Returns the first
+    matching thread, else ``None``.
+    """
+    finding_tokens = _tokens(f"{finding.title} {finding.body}")
+    if not finding_tokens:
+        return None
+    for t in threads:
+        if not (t.resolved or t.outdated):
+            continue
+        if _duplicate_matches_thread(
+            finding, t, finding_tokens,
+            line_window=line_window,
+            min_shared_tokens=min_shared_tokens,
+            min_shared_for_distant=min_shared_for_distant,
+        ):
+            return t
+        if t.path is not None and _normalised_path(t.path) == _normalised_path(finding.file):
+            body_tokens = _tokens(t.body_snippet or "")
+            if len(finding_tokens & body_tokens) >= min_shared_settled:
+                return t
+    return None
 
 
 _SEVERITY_RANK: dict[str, int] = {
