@@ -116,11 +116,36 @@ class TestAnchorSnap:
             [_f(line=0)], read=_reader({APP: head}), model_lines=[90],
         )
         assert out[0].line == 190
-        # Model line 89: |190 - 89| = 101 > 100, so the window misses it.
+        # Model line 89: |190 - 89| = 101 > 100, so the window misses it and
+        # the unique whole-file fallback anchors the file-level claim.
         out = apply_anchor_snap(
             [_f(line=0)], read=_reader({APP: head}), model_lines=[89],
         )
+        assert out[0].line == 190
+        assert out[0].anchor_unverified is False
+
+    def test_a_line0_claim_with_far_unique_snippet_is_anchored(self):
+        out = apply_anchor_snap(
+            [_f(line=0)], read=_reader({APP: _head_file(190)}), model_lines=[1],
+        )
+        assert out[0].line == 190
+        assert out[0].anchor_unverified is False
+        assert out[0].confidence == 0.8
+
+    def test_a_line0_claim_with_far_repeated_snippet_is_marked_unverified(self):
+        head = _head_file(190) + "itemIndex again\n"
+        out = apply_anchor_snap(
+            [_f(line=0)], read=_reader({APP: head}), model_lines=[1],
+        )
         assert out[0].line == 0
+        assert out[0].anchor_unverified is True
+        assert out[0].confidence == 0.8
+
+    def test_a_positive_line_with_far_only_snippet_keeps_its_anchor(self):
+        out = apply_anchor_snap(
+            [_f(line=5)], read=_reader({APP: _head_file(190)}), model_lines=[5],
+        )
+        assert out[0].line == 5
         assert out[0].anchor_unverified is False
 
     def test_a_snippet_absent_from_the_head_file_marks_without_lowering(self):
