@@ -961,6 +961,16 @@ def _quoted_snippets(title: str, body: str) -> list[str]:
     return snippets
 
 
+_NON_USAGE_LINE_RE = re.compile(
+    r"\s*(?:import\s|from\s+\S+\s+import\s|using\s|#include\b|\*|/\*|//|#)"
+)
+
+
+def _is_non_usage_line(line: str) -> bool:
+    """Whether ``line`` is an import or a comment/Javadoc line, not a usage."""
+    return _NON_USAGE_LINE_RE.match(line) is not None
+
+
 def _nearest_snippet_match(
     lines: Sequence[str], snippet: str, center: int, window: int
 ) -> tuple[int | None, bool]:
@@ -968,13 +978,17 @@ def _nearest_snippet_match(
 
     Returns ``(line, ambiguous)``: the nearest match, ties going to the
     earliest line, and whether two or more matches share that nearest
-    distance — a tie the finding's own text cannot break.
+    distance — a tie the finding's own text cannot break. Import and
+    comment lines lose to a code line: they are matched only when no code
+    line in the window holds the snippet.
     """
     matches = [
         number
         for number in range(1, len(lines) + 1)
         if snippet in lines[number - 1] and abs(number - center) <= window
     ]
+    code = [n for n in matches if not _is_non_usage_line(lines[n - 1])]
+    matches = code or matches
     if not matches:
         return None, False
     nearest = min(matches, key=lambda number: (abs(number - center), number))
@@ -1076,7 +1090,13 @@ def apply_anchor_snap(
             if hunk is None or not (_hunk_tokens(hunk) & evidence):
                 result.append(_mark_anchor_unverified(f))
                 continue
-        if f.line <= 0 or abs(target - f.line) > DEFAULT_LINE_TOLERANCE:
+        on_non_usage = (
+            target != f.line
+            and 0 < f.line <= len(lines)
+            and _is_non_usage_line(lines[f.line - 1])
+            and not _is_non_usage_line(lines[target - 1])
+        )
+        if f.line <= 0 or on_non_usage or abs(target - f.line) > DEFAULT_LINE_TOLERANCE:
             result.append(replace(f, line=target))
         else:
             result.append(f)
