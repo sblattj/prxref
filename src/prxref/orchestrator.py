@@ -4659,9 +4659,14 @@ def _metadata_skips(record: Mapping[str, Any] | None) -> list[tuple[str, str]]:
     Reads the ``metadata_rules`` run-record entry. A check that was never
     configured (its own "no ... pattern/globs" status) is not worth naming;
     a configured check that could not run (no PR type, no source branch,
-    no commit source) is, so a reader can tell it from a pass.
+    no commit source) is, so a reader can tell it from a pass. A record
+    whose ``checks`` key says the whole stage failed yields one ``metadata``
+    skip.
     """
     skips: list[tuple[str, str]] = []
+    stage = (record or {}).get("checks")
+    if isinstance(stage, str) and stage.startswith("skipped: "):
+        skips.append(("metadata", stage[len("skipped: "):]))
     for check in ("branch_pattern", "commit_reference", "area_globs"):
         status = (record or {}).get(check)
         if not isinstance(status, str) or not status.startswith("skipped: "):
