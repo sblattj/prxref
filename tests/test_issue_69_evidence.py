@@ -762,6 +762,27 @@ class TestEvidenceDrops:
         (out,) = self._apply([_claim(title=title, body=body)], PROBE)
         assert out.drop_reason is None
 
+    @pytest.mark.parametrize("title,body", [
+        ("Missing HSTS header; Cache-Control is already set", "Add HSTS."),
+        ("Weak framing policy", "Cache-Control is set correctly but X-Frame-Options is missing"),
+        ("Validator absent", "Cache-Control header set; no ETag"),
+        ("Validator absent", "Cache-Control header set, no ETag"),
+        ("Missing X-Frame-Options alongside Cache-Control", "Add X-Frame-Options."),
+    ])
+    def test_a_missing_claim_about_another_header_is_kept(self, title, body):
+        (out,) = self._apply([_claim(title=title, body=body)], PROBE)
+        assert out.drop_reason is None
+
+    @pytest.mark.parametrize("title,body", [
+        ("Caching", "Responses set no Cache-Control header"),
+        ("Caching", "Cache-Control is not set"),
+        ("Caching", "Cache-Control header missing"),
+        ("Caching", "The static location block lacks a Cache-Control header."),
+    ])
+    def test_every_missing_phrasing_drops(self, title, body):
+        (out,) = self._apply([_claim(title=title, body=body)], PROBE)
+        assert out.drop_reason == DROP
+
     @pytest.mark.parametrize("output", [
         "warning: no Cache-Control set",
         "HTTP/1.1 200 OK\nX-Note: Cache-Control is absent",

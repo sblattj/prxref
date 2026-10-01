@@ -3052,6 +3052,10 @@ _EVIDENCE_MISSING_RE = re.compile(
 )
 _EVIDENCE_HEADER_WORD_RE = re.compile(r"\bheaders?\b", re.IGNORECASE)
 _EVIDENCE_MISSING_WINDOW = 40
+_EVIDENCE_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;,\n]|\b(?:but|while|whereas|although|though)\b", re.IGNORECASE,
+)
+_EVIDENCE_HEADER_TOKEN_RE = re.compile(r"(?<![\w-])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+(?![\w-])")
 _EVIDENCE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\"<>()\[\]]+")
 _EVIDENCE_RESOURCE_RE = re.compile(
     r"(?<![\w.:/*-])(/[\w.~%@+*-]+(?:/[\w.~%@+*-]*)*)"
@@ -3079,21 +3083,34 @@ def _present_header_names(output: str) -> set[str]:
 def _claims_header_missing(text: str, name: str) -> bool:
     """True when ``text`` says header ``name`` is missing.
 
-    ``name`` must occur as a whole token (case-insensitive), a missing
-    keyword must sit within a few words of one occurrence, and the claim
-    must be about a header: the name is hyphenated (``Cache-Control``) or
-    the text says "header".
+    ``name`` must occur as a whole token (case-insensitive), and a missing
+    keyword must sit within a few words of it in the SAME clause (clauses
+    split at ``. ; ,``, a line break, and ``but``/``while``/``although``),
+    with no other hyphenated header-shaped token between the two — so
+    "Cache-Control is set but X-Frame-Options is missing" claims nothing
+    about ``Cache-Control``. The claim must also be about a header: the
+    name is hyphenated (``Cache-Control``) or the text says "header".
     """
     if "-" not in name and not _EVIDENCE_HEADER_WORD_RE.search(text):
         return False
     pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])", re.IGNORECASE)
-    for match in pattern.finditer(text):
-        window = text[
-            max(0, match.start() - _EVIDENCE_MISSING_WINDOW):
-            match.end() + _EVIDENCE_MISSING_WINDOW
-        ]
-        if _EVIDENCE_MISSING_RE.search(window):
-            return True
+    for clause in _EVIDENCE_CLAUSE_SPLIT_RE.split(text):
+        for match in pattern.finditer(clause):
+            for keyword in _EVIDENCE_MISSING_RE.finditer(clause):
+                if keyword.end() <= match.start():
+                    gap = clause[keyword.end():match.start()]
+                elif keyword.start() >= match.end():
+                    gap = clause[match.end():keyword.start()]
+                else:
+                    continue
+                if len(gap) > _EVIDENCE_MISSING_WINDOW:
+                    continue
+                if any(
+                    tok.lower() != name.lower()
+                    for tok in _EVIDENCE_HEADER_TOKEN_RE.findall(gap)
+                ):
+                    continue
+                return True
     return False
 
 
