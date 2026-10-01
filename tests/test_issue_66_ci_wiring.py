@@ -319,7 +319,31 @@ class TestCiWiringFindings:
             self._files(), read=lambda p: None, listing=None,
         )
         assert len(findings) == 1
-        assert record["ci_files"] == LITERAL_CI_PATHS
+        assert record["ci_files"] == []
+        assert "no CI configuration file was found" in findings[0].body
+
+    def test_a_literal_absent_from_the_listing_is_not_read(self):
+        reads: list[str] = []
+
+        def read(path):
+            reads.append(path)
+            return None
+
+        ci_wiring.ci_wiring_findings(
+            self._files(), read=read, listing=["src/app.py"],
+        )
+        assert reads == []
+
+    def test_a_missing_literal_never_crowds_out_a_real_workflow(self):
+        workflows = {
+            f".github/workflows/w{n:02d}.yml": "name: x\njobs: {}\n" for n in range(11)
+        }
+        workflows[".github/workflows/w10.yml"] = "run: bash scripts/verify.sh\n"
+        findings, record = ci_wiring.ci_wiring_findings(
+            self._files(), read=workflows.get, listing=sorted(workflows),
+        )
+        assert findings == []
+        assert ".github/workflows/w10.yml" in record["ci_files"]
 
 
 # --- the config surface -------------------------------------------------------
@@ -386,14 +410,11 @@ class TestTheAcceptance:
         assert f.drop_reason is None
         assert "scripts/verify.sh" in f.title
         assert heuristics.is_deterministic(f)
-        # The body names the CI files searched (the literal fallback set:
-        # the repo holds no CI file, and no listing can show one).
-        for path in (".gitlab-ci.yml", "Jenkinsfile", "azure-pipelines.yml"):
-            assert path in f.body, f"{path} missing from body:\n{f.body}"
+        assert "no CI configuration file was found" in f.body
 
         assert res["ci_wiring"] == {
             "candidates": ["scripts/verify.sh"],
-            "ci_files": LITERAL_CI_PATHS,
+            "ci_files": [],
             "picked_up_default": [],
             "triggered": True,
         }
@@ -405,9 +426,7 @@ class TestTheAcceptance:
         assert res["findings_active"] == []
         assert res["ci_wiring"]["triggered"] is False
         assert res["ci_wiring"]["candidates"] == ["scripts/verify.sh"]
-        # The listing matched the workflow, and the literal entries of the
-        # built-in set are read directly alongside it.
-        assert res["ci_wiring"]["ci_files"] == sorted([WORKFLOW_PATH, *LITERAL_CI_PATHS])
+        assert res["ci_wiring"]["ci_files"] == [WORKFLOW_PATH]
         assert WORKFLOW_PATH in forge.reads
 
     def test_a_jest_default_include_file_stays_silent(self):
@@ -490,7 +509,7 @@ class TestTheReaderGate:
             forge, REF, EMPTY_LLM, post=False, ci_wiring="on", repo_dir=RepoDir(tmp_path),
         )
         assert wired["findings_active"] == []
-        assert wired["ci_wiring"]["ci_files"] == sorted([WORKFLOW_PATH, *LITERAL_CI_PATHS])
+        assert wired["ci_wiring"]["ci_files"] == [WORKFLOW_PATH]
 
 
 def _modified_diff(path: str, removed: list[str], added: list[str], ctx: bool = True) -> str:
