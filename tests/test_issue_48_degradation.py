@@ -318,7 +318,8 @@ class TestTheCliEmits:
             "cause": "permission", "failed": ["summary"],
             "fallback": ["github-step-summary"], "annotations": 0,
         }
-        assert list(payload)[list(payload).index("incremental") + 1] == "degraded"
+        assert list(payload)[list(payload).index("incremental") + 1] == "ci_wiring"
+        assert list(payload)[list(payload).index("incremental") + 2] == "degraded"
         assert DEGRADED_SUMMARY_KEY not in payload
         assert (tmp_path / "s.md").is_file()
 
@@ -464,6 +465,7 @@ class TestASuccessfulPostIsUnchanged:
         payload = json.loads(out)
         assert payload.pop("degraded") is None
         assert payload.pop("config_file") is None
+        assert payload.pop("ci_wiring") is None
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]

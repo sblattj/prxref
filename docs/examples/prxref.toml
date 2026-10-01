@@ -80,3 +80,14 @@ commit_reference = "ACME-[0-9]+"
 # name=glob areas; more than max_areas_per_pr distinct areas is flagged.
 area_globs = ["backend=src/**", "frontend=web/**"]
 max_areas_per_pr = 2
+
+# --- CI wiring (#66) ---------------------------------------------------------
+# "on" flags a check-shaped file the PR adds (a verify/smoke/check script
+# or flag, a gained shebang, a test file outside the runner's default
+# include) that no CI configuration file invokes. Needs the forge's
+# head-sha file reads or --repo-dir. Off by default.
+
+ci_wiring = "on"
+# Globs REPLACING the built-in CI-file set (empty/unset keeps it); at most
+# 12 CI files are read per run.
+ci_wiring_globs = [".github/workflows/*.y*ml", ".gitlab-ci.yml", "Jenkinsfile"]

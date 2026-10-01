@@ -506,8 +506,8 @@ class TestTheCli:
         keys = list(cli._build_json_result({"verdict": "Approved", "context_followup": record,
                                             "sampling": {"seed": 1}, "replay": {}}))
         assert keys[keys.index("parse_retries") + 1:] == [
-            "context_followup", "suggestions", "incremental", "degraded", "config_file", "sampling",
-            "replay",
+            "context_followup", "suggestions", "incremental", "ci_wiring", "degraded",
+            "config_file", "sampling", "replay",
         ]
         assert cli._build_json_result({"context_followup": record})["context_followup"] == record
 
