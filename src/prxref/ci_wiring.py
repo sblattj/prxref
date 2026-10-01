@@ -293,15 +293,44 @@ def _rule_line(text: str) -> tuple[list[str], bool]:
     return targets, "=" in match.group("rest").partition(";")[0]
 
 
-def _make_target_candidates(file: FileDiff) -> list[CiCandidate]:
+def _head_rule_counts(
+    path: str, read: Callable[[str], str | None] | None,
+) -> dict[str, int]:
+    """How many rule lines of the head Makefile ``path`` define each target; empty on no read."""
+    if read is None:
+        return {}
+    try:
+        text = read(path)
+    except Exception:  # noqa: BLE001
+        return {}
+    counts: dict[str, int] = {}
+    if not isinstance(text, str):
+        return counts
+    for line in text.splitlines():
+        targets, assignment = _rule_line(line)
+        if assignment:
+            continue
+        for target in targets:
+            counts[target] = counts.get(target, 0) + 1
+    return counts
+
+
+def _make_target_candidates(
+    file: FileDiff, read: Callable[[str], str | None] | None = None,
+) -> list[CiCandidate]:
     """The check-shaped make targets an added rule line of a root Makefile defines.
 
     A target already on a removed or context line of the diff existed
     before the PR and never counts, and neither does a target-specific
     variable line (``verify: GOFLAGS=-count=1``), which defines no rule.
+    Through ``read``, a target the head Makefile defines on more rule
+    lines than the diff adds is old too: an added prerequisite-only line
+    (``check: extra-dep``) extends a rule defined elsewhere in the file.
+    A missing, raising or non-text read changes nothing.
     """
     existing: set[str] = set()
     added: dict[str, None] = {}
+    added_count: dict[str, int] = {}
     for hunk in file.hunks:
         for ln in hunk.lines:
             targets, assignment = _rule_line(ln.text)
@@ -309,10 +338,15 @@ def _make_target_candidates(file: FileDiff) -> list[CiCandidate]:
                 existing.update(targets)
             elif not assignment:
                 added.update(dict.fromkeys(targets))
+                for target in targets:
+                    added_count[target] = added_count.get(target, 0) + 1
+    head_count = _head_rule_counts(file.path, read) if added else {}
     out: list[CiCandidate] = []
     for name in added:
         hint = _target_hint(name)
         if name in existing or hint is None:
+            continue
+        if head_count.get(name, 0) > added_count[name]:
             continue
         out.append(CiCandidate(
             file.path, f"it is a new make target whose name mentions {hint!r}",
@@ -377,7 +411,9 @@ def target_candidates(
     ``package.json``, matched by ``npm run``/``yarn``/``pnpm`` (see
     :func:`runner_targets`). A target is check-shaped when its name
     carries a :data:`CI_SUFFIX_HINT` word or a whole ``test``/``tests``/
-    ``e2e`` token. The Makefile scan reads only the diff; a package.json
+    ``e2e`` token. The Makefile scan reads the diff and, when ``read`` is given and
+    the diff adds a check-shaped rule, the head Makefile (to drop a rule
+    line that only extends a target defined elsewhere); a package.json
     entry is confirmed against the head manifest through ``read`` (one
     read, and only when the diff adds a check-shaped key). Never raises.
     """
@@ -386,7 +422,7 @@ def target_candidates(
         if file.status == "removed" or file.is_binary:
             continue
         if file.path in MAKEFILE_NAMES:
-            out.extend(_make_target_candidates(file))
+            out.extend(_make_target_candidates(file, read))
         elif file.path == PACKAGE_JSON:
             out.extend(_npm_target_candidates(file, read))
     return out
@@ -775,8 +811,9 @@ def invokes(
     text. When given, an invocation line running a make target or an
     npm-family script (see :func:`runner_targets`) also counts when that
     target's own recipe or script body names the candidate the same way —
-    one hop, never a prerequisite or a nested runner call. Pure: reads
-    only the texts it is handed.
+    one hop through the runner file: the target's own recipe plus the
+    recipes of the prerequisites it reaches in the same Makefile, never a
+    nested runner call. Pure: reads only the texts it is handed.
 
     A target candidate (``candidate.target`` set) is invoked by an
     invocation line whose :func:`runner_targets` include it, or, with

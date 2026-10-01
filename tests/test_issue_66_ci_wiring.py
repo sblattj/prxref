@@ -919,6 +919,26 @@ class TestTargetCandidates:
         )
         assert ci_wiring.candidate_checks(files) == []
 
+    def test_a_prerequisite_only_line_for_a_target_defined_at_head_is_not_new(self):
+        files = parse_unified_diff(_modified_diff("Makefile", [], ["check: extra-dep"]))
+        head = "all:\n\techo all\n\ncheck:\n\tpytest\ncheck: extra-dep\n"
+        assert ci_wiring.candidate_checks(files, read=lambda path: head) == []
+
+    def test_a_new_target_absent_from_the_head_makefile_still_counts(self):
+        files = parse_unified_diff(_modified_diff("Makefile", [], ["check: extra-dep"]))
+        head = "all:\n\techo all\n\ncheck: extra-dep\n"
+        [candidate] = ci_wiring.candidate_checks(files, read=lambda path: head)
+        assert candidate.target == ("make", "check")
+
+    def test_a_raising_read_keeps_the_diff_only_verdict(self):
+        files = parse_unified_diff(_modified_diff("Makefile", [], ["check: extra-dep"]))
+
+        def boom(path):
+            raise OSError(path)
+
+        [candidate] = ci_wiring.candidate_checks(files, read=boom)
+        assert candidate.target == ("make", "check")
+
     def test_a_nested_makefile_target_is_no_candidate(self):
         files = parse_unified_diff(_modified_diff("web/Makefile", [], ["verify:", "\ttrue"]))
         assert ci_wiring.candidate_checks(files) == []
