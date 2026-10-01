@@ -50,9 +50,12 @@ class InlineComment:
 
 _WONT_FIX_RE = re.compile(
     r"(?:^|(?<=[.!?;:]))[\W_]*"
-    r"(?:won['\u2019]?t[\s-]*fix|will\s+not\s+fix|not\s+(?:going\s+to|gonna)\s+fix"
-    r"|by\s+design|works?\s+as\s+(?:intended|designed)|working\s+as\s+(?:intended|designed))"
-    r"[*_`]*(?=\s*(?:[.!?:;,)\]\u2014\u2013-]|$))",
+    r"(?:"
+    r"(?:won['\u2019]?t[\s-]*fix|will\s+not\s+fix|not\s+(?:going\s+to|gonna)\s+fix)"
+    r"[*_`]*(?=\s*(?:[.!:;,)\]\u2014\u2013-]|$))"
+    r"|(?:by\s+design|works?\s+as\s+(?:intended|designed)|working\s+as\s+(?:intended|designed))"
+    r"[*_`]*(?=\s*(?:[.!:;)\]\u2014\u2013-]|$))"
+    r")",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -63,11 +66,16 @@ def says_wont_fix(text: object) -> bool:
     True when ``text`` states "won't fix" (also ``wontfix``, "will not fix",
     "not going to fix", "by design", "working as intended") as a statement
     of its own: at the start of the comment, of a line or of a sentence, and
-    followed by punctuation or the end of the line. Prose that merely uses
-    the words ("retrying won't fix the timeout", "Won't fix the leak when
-    …") does not count, and neither does any body carrying
-    :data:`ATTRIBUTION_MARKER`, because a prxref comment is never a human's
-    decision. A non-string is ``False``.
+    followed by punctuation other than ``?`` or by the end of the line. A
+    comma ends the "won't fix" forms ("Wont fix, this is deliberate") but not
+    the "by design" / "works as intended" forms, which open a request or a
+    bug report as often as a decline ("By design, this timeout should be
+    configurable."). Prose that merely uses the words ("retrying won't fix
+    the timeout", "Won't fix the leak when …") does not count, nor does a
+    question ("won't fix?"), nor any body carrying :data:`ATTRIBUTION_MARKER`,
+    because a prxref comment is never a human's decision. ``text`` must be
+    the whole comment body: a truncated prxref body has lost its trailing
+    attribution. A non-string is ``False``.
     """
     if not isinstance(text, str) or not text:
         return False
@@ -93,9 +101,11 @@ class Thread:
     parent's), the key GitHub's two thread views are joined on, else ``None``.
     ``wont_fix`` marks a thread closed as a deliberate decision not to
     change the code: Azure DevOps ``wontFix`` / ``byDesign``, or an explicit
-    human "won't fix" anywhere in the thread (:func:`says_wont_fix`; an
-    adapter that reads replies sets it from the whole thread, and every
-    thread whose own snippet says so gets it at construction). It keeps
+    human "won't fix" (:func:`says_wont_fix`). The adapter sets it from the
+    full comment bodies it read (every reply of the thread where it reads
+    replies), never from ``body_snippet``: a snippet is truncated, so a
+    prxref comment's trailing attribution is cut off and its own prose could
+    pass for a human decision. Construction never infers it. It keeps
     suppressing a duplicate even though it is resolved or outdated.
     :attr:`lapsed` is the one predicate the gates share.
     """
@@ -110,11 +120,6 @@ class Thread:
     url: str | None = None
     root_id: int | None = None
     wont_fix: bool = False
-
-    def __post_init__(self) -> None:
-        """Mark the thread won't-fix when its own snippet says so."""
-        if not self.wont_fix and says_wont_fix(self.body_snippet):
-            self.wont_fix = True
 
     @property
     def lapsed(self) -> bool:

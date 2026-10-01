@@ -3162,12 +3162,14 @@ def _thread_dedup_accounting(
     that matched a resolved thread. ``""`` when neither count is non-zero,
     so a run without thread history keeps a byte-identical summary.
     "Resolved" here covers outdated threads too — anything the gates skip.
+    A suppression can come from a resolved or outdated thread only when it
+    is a won't-fix decision (``Thread.wont_fix``), hence "open or won't-fix".
     """
     if not suppressed and not matched_resolved:
         return ""
     lines = [
-        f"Thread dedup: {suppressed} suppressed as duplicates of open "
-        f"threads; {matched_resolved} matched resolved threads and are "
+        f"Thread dedup: {suppressed} suppressed as duplicates of open or "
+        f"won't-fix threads; {matched_resolved} matched resolved threads and are "
         f"posted below."
     ]
     if suppressed_detail:

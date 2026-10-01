@@ -395,6 +395,29 @@ def test_a_wont_fix_reply_marks_its_whole_thread(monkeypatch, reply, wont_fix):
     assert by_author["bob"].wont_fix is False
 
 
+def test_a_truncated_prxref_root_is_never_a_wont_fix(monkeypatch):
+    monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
+    session = MagicMock(spec=requests.Session)
+    body = (
+        "**Drain duration hardcoded**\n\nThe value is fixed. By design: drain duration "
+        "should come from config so operators can tune it. " + "y " * 60
+        + f"\n\n*{ATTRIBUTION_MARKER} · model=m*"
+    )
+    session.get.return_value = _mock_response(
+        json_data=[{"id": 50, "path": "a.py", "line": None,
+                    "user": {"login": "prxref-bot"}, "body": body}]
+    )
+    session.post.return_value = _graphql_nodes(_node(50, "U-50", True, True))
+
+    [thread] = ForgeImpl(session=session).list_threads(_ref())
+
+    assert ATTRIBUTION_MARKER not in thread.body_snippet
+    assert "By design:" in thread.body_snippet
+    assert (thread.resolved, thread.outdated, thread.wont_fix, thread.lapsed) == (
+        True, True, False, True,
+    )
+
+
 def test_graphql_patch_joins_current_threads_on_one_line_by_root_id(monkeypatch):
     monkeypatch.setenv("PRXREF_GITHUB_TOKEN", "t")
     session = MagicMock(spec=requests.Session)

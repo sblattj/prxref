@@ -37,6 +37,7 @@ from prxref.formatter import format_inline_comment  # noqa: E402
 from prxref.orchestrator import orchestrate_review  # noqa: E402
 from prxref.quality import (  # noqa: E402
     apply_settled_thread_suppression,
+    apply_thread_dedup,
     is_duplicate_of_existing,
     previously_discussed_thread,
 )
@@ -238,7 +239,7 @@ class TestSummaryAccounting:
         res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
         assert (
-            "Thread dedup: 0 suppressed as duplicates of open threads; "
+            "Thread dedup: 0 suppressed as duplicates of open or won't-fix threads; "
             "1 matched resolved threads and are posted below."
         ) in forge.summaries[0]
         assert res["posted"] is True
@@ -248,7 +249,7 @@ class TestSummaryAccounting:
         orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
         assert (
-            "Thread dedup: 1 suppressed as duplicates of open threads; "
+            "Thread dedup: 1 suppressed as duplicates of open or won't-fix threads; "
             "0 matched resolved threads and are posted below."
         ) in forge.summaries[0]
 
@@ -260,7 +261,7 @@ class TestSummaryAccounting:
 
     def test_the_accounting_helpers_exact_shape(self):
         assert orchestrator._thread_dedup_accounting(2, 1) == (
-            "Thread dedup: 2 suppressed as duplicates of open threads; "
+            "Thread dedup: 2 suppressed as duplicates of open or won't-fix threads; "
             "1 matched resolved threads and are posted below."
         )
         assert orchestrator._thread_dedup_accounting(0, 0) == ""
@@ -342,7 +343,7 @@ class TestPreviouslyRaisedRendering:
         )
         bullets = "Null deref — Previously raised in thread by alice"
         accounting = (
-            "Thread dedup: 0 suppressed as duplicates of open threads; "
+            "Thread dedup: 0 suppressed as duplicates of open or won't-fix threads; "
             "1 matched resolved threads and are posted below."
         )
         assert bullets in summary
@@ -375,7 +376,7 @@ WONT_FIX_SNIPPET = "Won't fix: intentional. " + THREAD_SNIPPET
 def _human_thread(snippet, *, resolved=True):
     return Thread(
         path="src/app.py", line=3, resolved=resolved, author="alice",
-        body_snippet=snippet, url=THREAD_URL,
+        body_snippet=snippet, url=THREAD_URL, wont_fix=says_wont_fix(snippet),
     )
 
 
@@ -387,6 +388,10 @@ class TestExplicitHumanWontFix:
         "Retrying won't fix the timeout.",
         "Won't fix the leak when the pool is empty, so add a guard.",
         "Designed by design-review committee",
+        "By design, this timeout should be configurable.",
+        "Works as intended, except when the pool is empty.",
+        "won't fix?",
+        "By design?",
         "",
         format_inline_comment(
             _finding(), f"{ATTRIBUTION_MARKER} · model=m",
@@ -413,9 +418,36 @@ class TestExplicitHumanWontFix:
     def test_a_non_string_body_is_not_a_wont_fix(self):
         assert says_wont_fix(None) is False
 
-    def test_the_thread_snippet_sets_wont_fix(self):
+    def test_construction_never_reads_wont_fix_from_the_snippet(self):
+        bare = Thread(
+            path="src/app.py", line=3, resolved=True, author="alice",
+            body_snippet=WONT_FIX_SNIPPET,
+        )
+        assert bare.wont_fix is False
+        assert bare.lapsed is True
         assert _human_thread(WONT_FIX_SNIPPET).wont_fix is True
         assert _human_thread(THREAD_SNIPPET).wont_fix is False
+
+    @pytest.mark.parametrize("sentence", [
+        "By design, drain duration should come from config so operators can tune it.",
+        "By design: drain duration should come from config so operators can tune it.",
+        "Works as intended. Drain duration should come from config so operators can tune it.",
+    ])
+    def test_a_truncated_prxref_body_never_becomes_a_wont_fix(self, sentence):
+        f = Finding(
+            file="svc/drain.py", line=40, severity="warning", confidence=0.9,
+            title="Drain duration hardcoded", body=f"The value is fixed. {sentence}",
+        )
+        body = format_inline_comment(f, f"{ATTRIBUTION_MARKER} · model=x")
+        snippet = body[:120]
+        assert ATTRIBUTION_MARKER not in snippet
+        assert sentence[:20] in snippet
+        t = Thread(
+            path="svc/drain.py", line=12, resolved=True, outdated=True,
+            author="prxref", body_snippet=snippet,
+        )
+        assert (t.wont_fix, t.lapsed) == (False, True)
+        assert apply_thread_dedup([f], [t])[0].drop_reason is None
 
     def test_a_resolved_wont_fix_thread_still_dedupes(self):
         assert is_duplicate_of_existing(_finding(), [_human_thread(THREAD_SNIPPET)]) is False
