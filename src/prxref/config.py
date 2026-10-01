@@ -254,7 +254,8 @@ LLM / pipeline:
                                 message) of the PR must CONTAIN (re.search),
                                 e.g. "PROJ-[0-9]+". One summary note per
                                 offending commit. Needs the forge's
-                                commit listing (GitHub, Gitea); without one,
+                                commit listing (GitHub, GitLab, Bitbucket
+                                Cloud, Gitea); without one,
                                 or on a --diff-file run, the check skips
                                 with "skipped: no commit source". Empty
                                 (default) skips the check.
