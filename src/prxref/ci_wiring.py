@@ -38,7 +38,8 @@ adds to the root Makefile, or a ``scripts`` entry it adds to the root
 ``test``/``tests``/``e2e`` token. It is wired when a CI invocation line
 runs it (``make verify``, ``npm run smoke``, ``yarn smoke``) or runs a
 runner entry that reaches it one runner file deep — a make goal whose
-prerequisites reach it, or a recipe or script body that runs it. A
+prerequisites reach it, or a recipe or script body that runs it
+(``$(MAKE) verify`` included, for a target candidate only). A
 target in a nested Makefile or workspace ``package.json`` is never a
 candidate, since the one-hop follow reads only the root runner files.
 
@@ -158,7 +159,9 @@ _MAKE_RULE_RE = re.compile(r"^(?P<targets>[^\s:=#][^:=#]*?)\s*::?(?!=)(?P<rest>.
 
 _TEST_TARGET_TOKENS = frozenset({"test", "tests", "e2e"})
 
-_JSON_STRING_KEY_RE = re.compile(r'^\s*"(?P<key>[^"\\]+)"\s*:\s*"')
+_MAKE_VAR_RE = re.compile(r"\$[({]MAKE[)}]")
+
+_JSON_STRING_KEY_RE =re.compile(r'^\s*"(?P<key>[^"\\]+)"\s*:\s*"')
 
 
 @dataclass(frozen=True)
@@ -739,7 +742,7 @@ def _runs_target(
     file deep: a make goal whose prerequisites in the same Makefile reach
     the target, or a recipe line or package.json script body ``hop`` runs
     that itself names the target (``"ci": "npm run lint && npm run
-    smoke"``).
+    smoke"``, or a recipe ``$(MAKE) verify``, read as ``make verify``).
     """
     if hop == target:
         return True
@@ -747,7 +750,10 @@ def _runs_target(
         return False
     if hop[0] == "make" and target[0] == "make" and target[1] in _make_walk(runners, hop[1])[0]:
         return True
-    return any(target in runner_targets(command) for command in _runner_commands(runners, hop))
+    return any(
+        target in runner_targets(_MAKE_VAR_RE.sub("make", command))
+        for command in _runner_commands(runners, hop)
+    )
 
 
 def invokes(
