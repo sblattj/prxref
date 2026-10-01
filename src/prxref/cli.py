@@ -1045,9 +1045,10 @@ def _build_json_result(result: Any) -> dict:
     otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
     configured, the item count, how many chunk prompts matched items rode,
     and the per-unit character budget; never the evidence text), and so
-    is ``stable_ids`` (#71: ``null`` only when ``PRXREF_STABLE_IDS`` is
-    ``0``; otherwise ``{assigned, reused_from_verdict, reused_from_thread,
-    collisions}`` over every finding of the run), and so
+    is ``stable_ids`` (#71: ``null`` only on a summary-only or error
+    run, which exits before the id pass; otherwise ``{assigned,
+    reused_from_verdict, reused_from_thread, collisions}`` over every
+    finding of the run), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
@@ -1703,6 +1704,11 @@ def _run_review(
         forge = make_forge(ref)
         if replay is not None:
             forge = _replay_forge(forge, ref, replay)
+    if not cfg["stable_ids"]:
+        logger.warning(
+            "PRXREF_STABLE_IDS (stable_ids) is deprecated and ignored: "
+            "stable finding ids are always on"
+        )
     incremental = cfg["incremental"]
     full_review_reason: str | None = None
     if incremental == "on" and full_review:
@@ -1796,7 +1802,6 @@ def _run_review(
         ci_wiring_globs=cfg["ci_wiring_globs"],
         evidence=evidence,
         evidence_max_chars=cfg["evidence_max_chars"],
-        stable_ids=cfg["stable_ids"],
         verdict_store=cfg["verdict_store"],
     )
     if isinstance(result, dict):
