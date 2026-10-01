@@ -43,9 +43,11 @@ alias, and one is deprecated. The worker prompt template changed again
   `routing_probe` on and a file reader, a chunk that adds a web-server or
   static-host rule also gets the conventional route-table files' route
   lines as a context block, so the probe can check inputs against routes
-  the PR does not touch. A live eval pair exercises the matching-rule
-  failure mode: `case-004-spa-dotted-route` (must flag) and
-  `case-005-spa-uuid-route` (must not).
+  the PR does not touch. A live eval pair covers the matching-rule failure
+  mode: `case-004-spa-dotted-route` (must flag) and
+  `case-005-spa-uuid-route` (must not). The eval harness pins the probe
+  off, so the pair measures the model without the `## Matching rules`
+  section rather than exercising it.
 - **Failing evidence raises findings (#69).** A failing evidence item
   (non-zero exit) whose output names `path:line` in a file the PR changes
   raises a deterministic warning there citing the command and exit code,
@@ -68,9 +70,12 @@ alias, and one is deprecated. The worker prompt template changed again
   takes its `refuted` drop. An unknown verdict label in the store logs a
   WARNING naming the id and is ignored; labels are case-normalised.
 - **Won't-fix threads keep suppressing (#73).** An Azure DevOps thread
-  closed as `wontFix` or `byDesign`, or any thread on any forge whose text
+  closed as `wontFix` or `byDesign`, or a thread on any forge whose text
   is an explicit human "won't fix" decision, keeps suppressing duplicates
-  even when resolved or outdated. The summary's thread-dedup line now
+  even when resolved or outdated. GitHub, GitLab and Azure DevOps find
+  the decision in any reply of the thread; Bitbucket Cloud, Bitbucket
+  Server and Gitea/Forgejo read it only from the comment the finding is
+  matched against. The summary's thread-dedup line now
   reads "suppressed as duplicates of open or won't-fix threads", and the
   summary and the `thread_dedup` run record name the thread each
   suppressed finding matched.
@@ -135,8 +140,10 @@ alias, and one is deprecated. The worker prompt template changed again
   `id`, and `--format json` rows always carry `id`, `anchor_block` and
   `id_reused_from`. `PRXREF_VERDICT_STORE` is read whenever it is set.
   `PRXREF_STABLE_IDS` (and the `stable_ids` file key) is **deprecated and
-  ignored**: any value is still accepted, and a non-empty value other
-  than `1` logs one WARNING saying the knob is ignored.
+  ignored**: the environment variable accepts any value, the file key
+  must still be a boolean (any other type exits 2, as in 0.30.0), and a
+  non-empty value other than `1` logs one WARNING saying the knob is
+  ignored.
 - **The stable-id claim hash stems words (#71).** "derived" and "derive"
   now hash alike, so a finding whose title contains inflected words gets
   a different id than 0.30.0 gave it. Refuted verdicts recorded by 0.30.0
@@ -182,8 +189,10 @@ alias, and one is deprecated. The worker prompt template changed again
   repository listing does not hold no longer eat the read budget, and the
   searched list names only files actually read. A rule line that only
   adds a prerequisite to a make target already defined elsewhere in the
-  root Makefile is no longer reported as a new unwired target. The docs
-  now state that only file candidates ignore `$(MAKE)` chains.
+  root Makefile is no longer reported as a new unwired target; the head
+  Makefile that check needs is read only when the PR adds a check-shaped
+  make target. The docs now state that only file candidates ignore
+  `$(MAKE)` chains.
 - **Standards surfaces (#68).** The `PRXREF_CONTEXT_STANDARDS_GLOBS`
   docstring and `docs/examples/prxref.toml` now say standards apply at
   every `repo_context` level, that `[]` or `"off"` disables them, and use
@@ -191,15 +200,19 @@ alias, and one is deprecated. The worker prompt template changed again
   default.
 - **Evidence (#69).** A finding that says a header lacks a directive or
   value (for example "Strict-Transport-Security lacks
-  includeSubDomains") is no longer dropped when evidence shows the header
-  is present. A finding that names no resource is settled only by a probe
+  includeSubDomains", "Missing Strict-Transport-Security
+  includeSubDomains", "No Cache-Control private") is no longer dropped
+  when evidence shows the header is present; a finding that says the
+  header itself is missing ("Missing Strict-Transport-Security (HSTS)
+  header") still is. A finding that names no resource is settled only by a probe
   that also targets no specific resource. An evidence item with no exit
   code has an unknown status: it shows as `exit: unknown` and never drops
   or raises a finding. The evidence note also counts and lists findings
   dropped for restating a failing check.
 - **Metadata docs (#70).** The docs describe when the `PR metadata`
-  section appears and list the commit endpoints for Bitbucket Server and
-  Azure DevOps.
+  section appears, including the `Skipped metadata check` line of a
+  metadata stage that fails, and list the commit endpoints for GitHub,
+  Gitea/Forgejo, Bitbucket Server and Azure DevOps.
 - **Thread handling (#73).** GitHub joins GraphQL thread state on the root
   comment id instead of `(path, line)`, so two threads on one line no
   longer swap their resolved flag and permalink. prxref no longer reads
@@ -214,16 +227,23 @@ alias, and one is deprecated. The worker prompt template changed again
   `anchor_unverified`, instead of posting at line 0. A fully qualified
   snippet prefers the usage over an import line or Javadoc. Anchor snap
   no longer moves a finding off a comment or docstring line when the
-  finding is about that comment (its title or body says
-  comment/docstring, or quotes the comment text).
+  finding is about that comment (its title says comment/docstring, or its
+  title or body quotes the comment text); a body that only mentions a
+  comment in passing no longer pins the finding there.
 - **Rule applicability (#75).** The scope check keeps labels it cannot
   map to a scoped section (unknown labels, rules in unscoped sections,
   findings with no file), and maps labels to sections by rule-item lines
-  as well as headings, so valid attributions are no longer cleared. A rules file's top-level title ("# Acme Java backend review
-  rules") no longer scopes the whole file to one language, and a heading
-  naming several languages ("## Python and TypeScript conventions")
-  applies to files in any of them instead of none; explicit `scope:`
-  lines still require every token to match.
+  as well as headings, so valid attributions are no longer cleared. A
+  rules file's top-level title ("# Acme Java backend review rules") no
+  longer scopes the whole file to one language, and a heading naming
+  several languages ("## Python and TypeScript conventions") applies to
+  files in any of them instead of none; explicit `scope:` lines still
+  require every token to match. A `#` comment inside a fenced code block
+  (a shell sample, say) is no longer read as a heading, so it no longer
+  unseats the document title and hides the whole file from other
+  languages' files. A section that survives per-unit filtering always
+  keeps its `(applies to: ...)` annotation, whatever other sections that
+  unit left out.
 
 ## [0.30.0] — 2026-09-30
 
