@@ -33,6 +33,7 @@ from requests.adapters import HTTPAdapter
 from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
+    CommitData,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -59,6 +60,7 @@ _MAX_FILE_CONTENT_BYTES = 512 * 1024
 # allChangesIncluded. Running out of pages RAISES: an incomplete file list is a
 # wrong review, not a smaller one.
 _DIFF_PAGE_SIZE = 1000
+_COMMIT_PAGE_SIZE = 100
 _MAX_PAGES = 50
 # Content budget for the rebuilt diff. Blob sizes are unknown until download,
 # so the file and byte budgets are checked between fetch batches; a file past
@@ -697,6 +699,81 @@ class ForgeImpl:
                 "the listing is incomplete", where,
             )
         return PathListing(paths=tuple(sorted(paths)), complete=complete)
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        The per-PR listing ``/pullrequests/{id}/commits`` needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. It pages with
+        ``$top`` and a ``continuationToken`` taken from the previous
+        response's ``x-ms-continuationtoken`` header, at most ``_MAX_PAGES``
+        pages (more raises ``ValueError`` rather than returning short), and
+        lists newest first, so the entries are reversed. Each keeps its
+        ``commitId`` as the sha, the first line of ``comment`` as the
+        subject, and ``len(parents)`` as the parent count.
+
+        ``GitCommitRef`` documents ``parents`` and a ``commentTruncated``
+        flag, but whether this listing fills ``parents`` was not probed
+        live. An entry without a ``parents`` list, or whose truncated
+        comment has no line break (so its first line may be cut), is read
+        once more through ``/commits/{id}``, up to ``_FETCH_WORKERS`` at a
+        time, and that answer supplies the parents and the subject. Any
+        transport, HTTP or non-JSON failure raises like ``get_diff``.
+        """
+        url = self._pr_api(ref, "/commits")
+        entries: list[dict] = []
+        token = ""
+        for _ in range(_MAX_PAGES):
+            params: dict[str, Any] = {"$top": _COMMIT_PAGE_SIZE}
+            if token:
+                params["continuationToken"] = token
+            resp = self._get(url, params)
+            body = self._json(resp, "commit listing")
+            value = body.get("value")
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"Azure DevOps commit listing for PR {ref.number} has no 'value' array"
+                )
+            entries.extend(entry for entry in value if isinstance(entry, dict))
+            token = resp.headers.get("x-ms-continuationtoken") or ""
+            if not token:
+                break
+        else:
+            raise ValueError(
+                f"Azure DevOps commit listing exceeded {_MAX_PAGES} pages; "
+                "refusing an incomplete commit list"
+            )
+        entries.reverse()
+        incomplete = [
+            index for index, entry in enumerate(entries)
+            if not isinstance(entry.get("parents"), list)
+            or (entry.get("commentTruncated") and "\n" not in (entry.get("comment") or ""))
+        ]
+        if incomplete:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+                full = list(pool.map(
+                    lambda index: self._commit_json(ref, entries[index].get("commitId") or ""),
+                    incomplete,
+                ))
+            for index, entry in zip(incomplete, full, strict=True):
+                entries[index] = {**entries[index], **entry}
+        commits: list[CommitData] = []
+        for entry in entries:
+            comment = entry.get("comment") or ""
+            commits.append(CommitData(
+                sha=entry.get("commitId") or "",
+                subject=comment.splitlines()[0] if comment else "",
+                parent_count=len(entry.get("parents") or []),
+            ))
+        return commits
+
+    def _commit_json(self, ref: PRRef, commit_id: str) -> dict:
+        """Fetch one commit's JSON, which carries its parents and full comment."""
+        return self._json(
+            self._get(f"{self._api_base(ref)}/commits/{commit_id}"), "commit",
+        )
 
     def _read_threads(self, ref: PRRef) -> list[dict]:
         """Read every thread on the PR (one response; the API does not page them).
