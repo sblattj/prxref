@@ -2652,6 +2652,35 @@ def apply_spec_grounding(
     ]
 
 
+def apply_evidence_verdicts(
+    findings: Sequence[Finding], *, evidence_active: bool,
+) -> list[Finding]:
+    """Downgrade a finding the execution evidence contradicts to ``warning`` (#69).
+
+    ``evidence_active`` says whether any review unit's prompt carried
+    execution evidence, so a finding's ``evidence`` label — the word
+    ``"contradicts"``, the only value :func:`prxref.triage.normalize_evidence`
+    keeps — can exist at all. On such a run, a labelled finding is
+    RELABELLED ``warning``, never dropped: the model judged the
+    contradiction, and this pass only enforces the ceiling on its
+    severity, so a mislabelled label costs a finding its severity, not its
+    existence. Unlabelled findings and already-dropped findings pass
+    through untouched; identity when no evidence was shown.
+
+    Pure and order-preserving, like :func:`apply_spec_grounding`, whose
+    slot in ``orchestrate_review`` it shares: it runs right after that
+    pass and before every other one.
+    """
+    if not evidence_active:
+        return list(findings)
+    return [
+        replace(f, severity="warning")
+        if f.drop_reason is None and f.evidence == "contradicts"
+        else f
+        for f in findings
+    ]
+
+
 EXAMPLE_ECHO_PREFIX: str = "echoes the prompt's example: "
 
 _EXAMPLE_FENCE_INFO: frozenset[str] = frozenset({"json", ""})

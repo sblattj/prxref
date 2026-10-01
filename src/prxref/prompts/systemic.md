@@ -49,7 +49,7 @@ PR description:
 
 Repo: {repo_hint}
 
-{ticket_context}### Spec constraints
+{ticket_context}{evidence_block}### Spec constraints
 
 {spec_digest}
 

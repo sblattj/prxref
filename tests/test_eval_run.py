@@ -197,18 +197,21 @@ class TestLayout:
             {
                 "url": None, **common, "diff_file": str(data / "change.patch"),
                 "base_sha": None, "head_sha": None, "context_file": "", "spec_sources": [],
+                "evidence_files": [],
                 "trace_dir": str(cases_dir / "plain" / "trace"),
             },
             {
                 "url": None, **common, "diff_file": str(data / "change.patch"),
                 "base_sha": None, "head_sha": None, "context_file": str(data / "ticket.md"),
                 "spec_sources": [str(data / "docs"), "https://example.com/spec.md"],
+                "evidence_files": [],
                 "trace_dir": str(cases_dir / "rich" / "trace"),
             },
             {
                 "url": PR_URL, **common, "diff_file": None,
                 "base_sha": BASE_SHA, "head_sha": HEAD_SHA, "context_file": "",
-                "spec_sources": [], "trace_dir": str(cases_dir / "pinned" / "trace"),
+                "spec_sources": [], "evidence_files": [],
+                "trace_dir": str(cases_dir / "pinned" / "trace"),
             },
         ]
 

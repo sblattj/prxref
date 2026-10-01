@@ -201,7 +201,7 @@ def eval_run(
             "prompts_dir": "--prompts-dir",
         },
     )
-    load_path_inputs(cfg, layers, config_file=config_file, ticket=False)
+    load_path_inputs(cfg, layers, config_file=config_file, ticket=False, evidence=False)
     created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     run_dir = Path(args.out) / args.label
     if run_dir.exists() and not args.resume:
@@ -265,6 +265,7 @@ def _run_case(
             trace_dir=str(trace_dir),
             repo_dir=case.repo_dir,
             config_file=config_file,
+            evidence_files=[],
         )
         if result is None:
             raise RuntimeError(f"unrecognized PR URL {case.pr_url!r}")
