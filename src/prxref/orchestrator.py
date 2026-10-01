@@ -92,11 +92,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    outside every hunk, so the anchor is settled by the finding's own
    quoted code — backticked, double-quoted, or a ``catch (``/``if (``
    interior — against the head file the chunk-context reader serves,
-   within 80 lines of the model's RAW line, which the same capture the
+   within 100 lines of the model's RAW line, which the same capture the
    suggestion pass reads supplies; a finding whose snippet the file does
    not hold, whose multi-match nothing breaks, or that sits file-level
-   with no snippet at all is marked ``anchor_unverified`` and loses 0.1
-   confidence, and without a reader the pass changes nothing) →
+   with no snippet at all is marked ``anchor_unverified`` with its confidence
+   unchanged, and without a reader the pass changes nothing) →
    ``apply_thread_dedup`` (existing
    threads fetched best-effort BEFORE the workers run, and after the
    stale-inline prune; failure means no threads; a resolved or outdated
@@ -140,7 +140,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``apply_location_verification`` (#74, once ``locations`` is final:
    each ``Also at:`` site of a grouped or capped representative is
    re-checked against the head file for the representative's own quoted
-   snippets within 80 lines of the site, and a site nothing corroborates
+   snippets within 100 lines of the site, and a site nothing corroborates
    is dropped from the list and the paragraph — an unreadable file keeps
    every site, folded members keep their drop reasons, and without a
    reader the pass changes nothing) →
