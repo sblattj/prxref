@@ -254,6 +254,62 @@ class TestVerdictStore:
         assert out[0].id == fid
         assert out[0].id_reused_from == REUSED_FROM_VERDICT
 
+    def test_record_stores_the_title_beside_the_verdict(self, tmp_path):
+        f = _finding(title="Drain duration is hardcoded instead of derived from values")
+        path = self._store_with_refuted(tmp_path, f)
+        entry = verdicts.load(path)["verdicts"][finding_id(f)]
+        assert entry["title"] == "Drain duration is hardcoded instead of derived from values"
+
+    def test_a_refuted_verdict_drops_a_reworded_duplicate_in_the_next_run(self, tmp_path):
+        original = _finding(title="Drain duration is hardcoded instead of derived from values")
+        path = self._store_with_refuted(tmp_path, original)
+        orig_id = finding_id(original)
+        reworded = _finding(line=7, title="drain duration hardcoded; should derive from values")
+        assert finding_id(reworded) != orig_id
+        out = apply_stable_ids([reworded], [], verdicts.load(path))
+        assert out[0].drop_reason == f"refuted in earlier run ({orig_id})"
+        assert out[0].id == orig_id
+        assert out[0].id_reused_from == REUSED_FROM_VERDICT
+
+    def test_an_unrelated_title_in_the_same_file_does_not_match_the_store(self, tmp_path):
+        original = _finding(title="Drain duration is hardcoded instead of derived from values")
+        path = self._store_with_refuted(tmp_path, original)
+        unrelated = _finding(line=7, title="Retry loop swallows connection errors silently")
+        out = apply_stable_ids([unrelated], [], verdicts.load(path))
+        assert out[0].drop_reason is None
+        assert out[0].id == finding_id(unrelated)
+        assert out[0].id_reused_from is None
+
+    def test_store_similarity_is_scoped_to_the_same_file_and_rule(self, tmp_path):
+        original = _finding(title="Drain duration is hardcoded instead of derived from values")
+        path = self._store_with_refuted(tmp_path, original)
+        store = verdicts.load(path)
+        title = "drain duration hardcoded; should derive from values"
+        other_file = _finding(file="src/other.py", title=title)
+        other_rule = _finding(title=title, rule="config hygiene")
+        out = apply_stable_ids([other_file, other_rule], [], store)
+        assert [f.drop_reason for f in out] == [None, None]
+        assert [f.id_reused_from for f in out] == [None, None]
+
+    def test_a_store_entry_without_a_title_matches_by_exact_id_only(self):
+        original = _finding(title="Drain duration is hardcoded instead of derived from values")
+        store = {"version": 1, "verdicts": {finding_id(original): {"verdict": "refuted"}}}
+        reworded = _finding(title="drain duration hardcoded; should derive from values")
+        assert apply_stable_ids([reworded], [], store)[0].drop_reason is None
+        assert apply_stable_ids([original], [], store)[0].drop_reason is not None
+
+    def test_the_closest_stored_title_wins(self):
+        target = "drain duration hardcoded; should derive from values"
+        close = _finding(title="Drain duration hardcoded; derive from config values today, sadly")
+        closer = _finding(title="Drain duration hardcoded, should derive from values")
+        store = {"version": 1, "verdicts": {
+            finding_id(close): {"verdict": "accepted", "title": close.title},
+            finding_id(closer): {"verdict": "refuted", "title": closer.title},
+        }}
+        out = apply_stable_ids([_finding(title=target + " today")], [], store)
+        assert out[0].id == finding_id(closer)
+        assert out[0].drop_reason == f"refuted in earlier run ({finding_id(closer)})"
+
     def test_an_accepted_verdict_marks_the_reuse_but_drops_nothing(self, tmp_path):
         f = _finding()
         path = tmp_path / "verdicts.json"

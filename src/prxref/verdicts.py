@@ -12,13 +12,18 @@ Shape::
 
     {"version": 1,
      "verdicts": {"<stable id>": {"verdict": "refuted" | "accepted",
+                                  "title": "<finding title>",
                                   "commit": "<sha>", "run": "<label>",
                                   "created_at": "<ISO 8601 UTC>"}}}
 
 The pipeline only READS the store: ``prxref review`` loads it when
 ``PRXREF_VERDICT_STORE`` names a path and drops a finding whose id it
 holds as ``refuted`` (``refuted in earlier run (<id>)``, see
-:func:`prxref.stable_ids.apply_stable_ids`). Recording is a caller's
+:func:`prxref.stable_ids.apply_stable_ids`). An entry's ``title`` lets a
+later run bridge a rewording: a finding whose own id misses the store
+takes over the id of an entry of the same file and rule whose title it
+restates. An entry without a title (one written before the field
+existed) still matches by exact id. Recording is a caller's
 decision — a script, a future UI — through :func:`record`, which merges
 into whatever the path already holds and writes it back atomically, so
 two runs never clobber each other's entries. With no path configured
@@ -104,16 +109,18 @@ def record(
     typo'd id can never plant a verdict nothing will ever match, and
     every value must be a known label. The store the path already holds
     is loaded and merged — an id both runs recorded keeps the newer
-    verdict — and the result written back through a temp file and
+    verdict — each entry carrying the finding's ``title`` for the
+    cross-run rewording match — and the result written back through a temp file and
     ``os.replace``, then returned. A parent directory that does not
     exist is created, so the natural first call on a fresh checkout
     works.
     """
-    known: set[str] = set()
+    titles: dict[str, str] = {}
     for f in findings:
         fid = getattr(f, "id", None)
-        known.add(fid if isinstance(fid, str) else finding_id(f))
-    unknown = sorted(set(verdicts) - known)
+        title = getattr(f, "title", "")
+        titles.setdefault(fid if isinstance(fid, str) else finding_id(f), title if isinstance(title, str) else "")
+    unknown = sorted(set(verdicts) - set(titles))
     if unknown:
         raise ConfigError(
             f"verdict store: no finding of this run carries the stable id(s) {', '.join(unknown)}"
@@ -128,7 +135,10 @@ def record(
     entries = store["verdicts"]
     stamp = created_at or datetime.now(UTC).isoformat(timespec="seconds")
     for fid, verdict in sorted(verdicts.items()):
-        entries[fid] = {"verdict": verdict, "commit": commit, "run": run, "created_at": stamp}
+        entries[fid] = {
+            "verdict": verdict, "title": titles[fid],
+            "commit": commit, "run": run, "created_at": stamp,
+        }
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
     tmp = file.with_name(file.name + ".tmp")
