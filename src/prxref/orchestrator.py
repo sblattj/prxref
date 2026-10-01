@@ -551,7 +551,7 @@ def orchestrate_review(
     context_contract_globs: Sequence[str] = (),
     context_exclude_globs: Sequence[str] = (),
     context_standards_globs: Sequence[str] = (),
-    context_standards_max_chars: int = 4000,
+    context_standards_max_chars: int = 6000,
     repo_dir: RepoDir | None = None,
     repo_context_max_reads: int = repo_reader.MAX_RUN_READS,
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
@@ -935,7 +935,7 @@ def orchestrate_review(
     (``PRXREF_CONTEXT_STANDARDS_GLOBS``, #68) selects the repository's own
     standards documents the same way — ``()`` means none, the built-in set
     is config's default — and ``context_standards_max_chars``
-    (``PRXREF_CONTEXT_STANDARDS_MAX_CHARS``, default 4000, the config
+    (``PRXREF_CONTEXT_STANDARDS_MAX_CHARS``, default 6000, the config
     default restated) is the per-chunk budget of
     :func:`prxref.repo_standards.standards_entries`. Standards sections are
     read ONLY at ``"repo"`` with a reader, exactly like contract files, so
@@ -3177,7 +3177,7 @@ class _RepoPlan:
     contract_priority: tuple[str, ...] = ()
     standards_paths: tuple[str, ...] = ()
     standards_priority: tuple[str, ...] = ()
-    standards_max_chars: int = 4000
+    standards_max_chars: int = 6000
 
 
 def _plan_repo_context(
