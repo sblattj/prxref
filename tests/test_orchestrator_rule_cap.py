@@ -634,7 +634,7 @@ class TestOffPathMatchesBase:
                            "rule_scope_cleared",
                            "repo_context", "parse_retries", "context_followup", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-                           "config_file",
+                           "metadata_rules", "config_file",
                            "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
