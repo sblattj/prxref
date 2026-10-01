@@ -307,7 +307,9 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
     are skipped. A thread counts as resolved when its status is `fixed`, `wontFix`,
     `closed` or `byDesign`. `wontFix` and `byDesign` also mark the thread won't-fix: a
     deliberate decision to leave the code alone, so it keeps suppressing a duplicate
-    finding instead of being re-posted with a "Previously raised" note.
+    finding instead of being re-posted with a "Previously raised" note. So does a
+    thread with any live, non-system comment that states an explicit human "won't fix"
+    (see [Won't-fix threads](#wont-fix-threads)).
   - **Prune:** a stale prxref inline thread is removed by deleting its root comment,
     `DELETE {base}/pullrequests/{number}/threads/{thread}/comments/{comment}`, matched
     by the attribution marker. The summary thread and human replies are never touched.
@@ -588,3 +590,18 @@ is accepted or refused whole):
 the Bitbucket Cloud, Bitbucket Server, GitLab and Azure DevOps adapters skip each
 comment a 4xx rejects, as they do for a line outside the diff, so an inline-only run on
 those forges does not detect a read-only token and records no degradation.
+
+## Won't-fix threads
+
+A resolved or outdated thread stops suppressing a re-raised finding (#73), with one
+exception on every forge: a thread a human closed as a deliberate decision to leave the
+code alone keeps suppressing it. Besides Azure DevOps `wontFix` / `byDesign` statuses,
+prxref reads that decision from the comment text: `won't fix`, `wontfix`, `will not fix`,
+`not going to fix`, `by design`, `working as intended` or `works as designed`, stated on
+its own — at the start of a comment, line or sentence and followed by punctuation or the
+end of the line ("Won't fix: intentional", "Thanks. Wontfix."). The words inside a
+sentence ("retrying won't fix the timeout") do not count, and neither does any comment
+carrying the prxref attribution. GitHub, GitLab and Azure DevOps read every reply of the
+thread, so a "won't fix" reply covers the root comment the finding is matched against;
+Bitbucket Cloud, Bitbucket Server and Gitea/Forgejo read it from the comment the finding
+is matched against.

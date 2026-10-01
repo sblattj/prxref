@@ -29,6 +29,7 @@ from .base import (
     PRRef,
     Thread,
     TitleRename,
+    says_wont_fix,
     with_summary_marker,
 )
 
@@ -673,11 +674,18 @@ class ForgeImpl:
         permalink are then patched from a best-effort GraphQL second read,
         :meth:`_patch_thread_states`, because the REST feed cannot express
         any of the three.
+
+        A reply is its own :class:`Thread`, but the subject a finding is
+        matched on lives in the root's snippet, so an explicit human "won't
+        fix" in any comment (:func:`~prxref.forges.base.says_wont_fix`, read
+        from the full body) marks every comment sharing that root
+        ``wont_fix`` (issue #73).
         """
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
         headers = self._headers(ref.host)
 
         threads: list[Thread] = []
+        wont_fix_roots: set[int] = set()
         try:
             for data in self._iter_pages(ref, url, headers, what="comment feed"):
                 for item in data:
@@ -701,6 +709,8 @@ class ForgeImpl:
                     body = item.get("body") or ""
                     snippet = body[:120]
                     root_id = _root_comment_id(item)
+                    if root_id is not None and says_wont_fix(body):
+                        wont_fix_roots.add(root_id)
                     threads.append(
                         Thread(
                             path=path,
@@ -720,6 +730,9 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, len(threads), e,
             )
 
+        for t in threads:
+            if t.root_id in wont_fix_roots:
+                t.wont_fix = True
         self._patch_thread_states(ref, threads)
         return threads
 
