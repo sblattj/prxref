@@ -80,6 +80,9 @@ class TestDirectiveClaimsAreKept:
         ("Missing Cache-Control max-age directive", "", "Cache-Control: no-store"),
         ("Strict-Transport-Security includeSubDomains is missing", "",
          "Strict-Transport-Security: max-age=300"),
+        ("Cache-Control not set to no-store", "", "Cache-Control: max-age=60"),
+        ("Strict-Transport-Security is not set to include subdomains", "",
+         "Strict-Transport-Security: max-age=300"),
     ])
     def test_a_directive_claim_is_kept(self, title, body, output):
         assert _drop(title, output, body=body) is None
