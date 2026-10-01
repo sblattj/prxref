@@ -173,6 +173,98 @@ class TestBareDirectiveAfterTheName:
         )
 
 
+VOCAB_HEADERS = BOTH_HEADERS + "\nX-Frame-Options: DENY\nX-Robots-Tag: noindex"
+
+VOCAB_KEPT = [
+    "Missing Strict-Transport-Security includeSubDomains",
+    "Missing Strict-Transport-Security preload",
+    "Missing Cache-Control immutable",
+    "No Cache-Control private for authenticated responses",
+    "Strict-Transport-Security does not include includeSubDomains",
+    "Strict-Transport-Security header does not include preload",
+    "Content-Security-Policy lacks frame-ancestors",
+    "Content-Security-Policy has no frame-ancestors",
+    "Content-Security-Policy without script-src",
+    "Cache-Control missing no-store",
+    "Cache-Control header is set without no-store",
+    "Strict-Transport-Security max-age too short and no includeSubDomains",
+    "Cache-Control is missing private",
+    "Cache-Control header lacks no-store and private",
+    "Login responses: Cache-Control not set to no-store",
+    "Strict-Transport-Security header has no preload",
+    "Missing Cache-Control (no-store)",
+    "Missing Strict-Transport-Security (includeSubDomains)",
+    "No Cache-Control header with no-store",
+    "Cache-Control lacks max-age directive",
+    "Strict-Transport-Security lacks includeSubDomains",
+    "Missing Cache-Control header with private",
+    "Missing Cache-Control header no-store",
+    "Missing Strict-Transport-Security header preload",
+    "Missing Cache-Control for no-store",
+    "Missing Cache-Control: no-store",
+    "Missing `Cache-Control: no-store`",
+    "Content-Security-Policy lacks script-src-elem",
+    "Missing X-Frame-Options value",
+    "Missing X-Robots-Tag=noindex",
+    "Missing X-Robots-Tag: noindex",
+    "Missing `X-Robots-Tag: noindex, nofollow` on staging",
+]
+
+VOCAB_DROPPED = [
+    "Missing Cache-Control header",
+    "No Cache-Control header",
+    "Cache-Control header is not set",
+    "Response lacks a Cache-Control header",
+    "Strict-Transport-Security missing",
+    "Strict-Transport-Security header missing which allows downgrade",
+    "Cache-Control is never set by the server",
+    "The server does not send Strict-Transport-Security",
+    "No Cache-Control set",
+    "Missing Strict-Transport-Security allows downgrade attacks",
+    "Missing Cache-Control means stale content",
+    "No Strict-Transport-Security enables SSL stripping",
+    "Missing X-Frame-Options allows clickjacking",
+    "Missing Cache-Control",
+    "Missing Strict-Transport-Security; downgrade attacks possible",
+    "Missing Strict-Transport-Security: downgrade attacks possible",
+    "Missing Strict-Transport-Security header leaves users exposed",
+    "Missing Cache-Control on static assets",
+    "Missing Strict-Transport-Security (HSTS)",
+    "Missing Strict-Transport-Security (HSTS) header",
+    "Missing Cache-Control could leak data",
+    "Cache-Control: missing",
+    "Missing X-Robots-Tag header",
+    "Missing X-Robots-Tag: staging pages get indexed",
+    "Missing Cache-Control header, though Access-Control-Max-Age is sent",
+]
+
+
+class TestVocabularyDecidesDirectiveClaims:
+    """A directive token, noun or value fragment keeps a claim; else it drops."""
+
+    @pytest.mark.parametrize("title", VOCAB_KEPT)
+    def test_a_directive_claim_is_kept(self, title):
+        assert _drop(title, VOCAB_HEADERS) is None
+
+    @pytest.mark.parametrize("title", VOCAB_DROPPED)
+    def test_a_header_claim_drops_whatever_follows(self, title):
+        assert _drop(title, VOCAB_HEADERS) == (
+            f"contradicted by execution evidence: {ROOT_PROBE}"
+        )
+
+    def test_a_directive_in_the_body_keeps_the_claim(self):
+        assert _drop(
+            "Missing Cache-Control header", VOCAB_HEADERS,
+            body="Login pages need no-store.",
+        ) is None
+
+    def test_a_directive_of_another_header_does_not_keep_the_claim(self):
+        assert _drop(
+            "Missing Strict-Transport-Security", VOCAB_HEADERS,
+            body="Unlike Cache-Control, which already sends no-store.",
+        ) == f"contradicted by execution evidence: {ROOT_PROBE}"
+
+
 class TestUnknownExitSettlesNothing:
     """An item with no exit status carries no drop power and raises nothing."""
 
