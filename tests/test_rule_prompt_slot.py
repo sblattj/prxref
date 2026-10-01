@@ -100,9 +100,14 @@ CONTEXTS = {
 # (0.15): each is the earlier render with that one sentence
 # replaced by "The diff below is the complete chunk.", and every system hash
 # and every sweep hash is unchanged.
+# The four worker SYSTEM hashes (and orchestrator/1's, which is the chunk
+# system) were re-derived again for issue #67's "Matching rules" section in
+# worker.md: each is the earlier render with that one section inserted above
+# "## Style". Every sweep hash, every USER hash and orchestrator/0 are still
+# the 0.15 recording.
 BASE_GOLDEN = {
     "worker/off": (
-        "7484254cf7461fb7dab2aeee4599d9e4992af293f23e00d967801f8a48e99a7c",
+        "399e97891c67054196c5cfc7b1e8d10ebf2ff2256b88bdbbd0a6a6cb0c7d4ff5",
         "4efbc87d908fc50b2ea9adb6dbc43b58e144a8c99734cef5790e425851b2f0f4",
     ),
     "sweep/off": (
@@ -110,7 +115,7 @@ BASE_GOLDEN = {
         "577820a0c654d7ac50edab15990cf9d527c83317ad90aa16a6ded0f4dc8aa80f",
     ),
     "worker/scope": (
-        "9dadd864c8c99ecd8937c7e111b8ae6cd26eb3e0cd7cebd09efd5e03cc5d4539",
+        "d0ed5d711d11b7ec0799dabe16bc7094b7daf08156c487ac5f44eedf4e48ce26",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/scope": (
@@ -118,7 +123,7 @@ BASE_GOLDEN = {
         "971380d4218e5aaebd8afd76787b1e57ba08697d910d30547dd7ac219fb70103",
     ),
     "worker/full": (
-        "19aea16e223c4c80c809728fde826c6bc7185f4173fece80f83b28e491f662a4",
+        "670b3a0287f1da9cffc2829fba10a557df1ebf50e0c21e78c765cfaab7921ff9",
         "118d48be8eeac397b8246b5c6bfc3afb1478100f678c2a540648e41a37f4b715",
     ),
     "sweep/full": (
@@ -126,7 +131,7 @@ BASE_GOLDEN = {
         "3dcf3ce2490de05559933421db5beb8ab046a884f1d38d7470cf06921874732a",
     ),
     "worker/override": (
-        "7518a47a993e55aceaf61f8141c3a6748ce73b63c87f460948fdaefd64aef69d",
+        "d2caeb97ba66d564d41edc28172b16fc43ec21460709f1fc3ed97a98312a5dc3",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/override": (
@@ -138,7 +143,7 @@ BASE_GOLDEN = {
         "69f464cf7517584bb8630547fde874febcff84f0498e95d7292a175952383c43",
     ),
     "orchestrator/1": (
-        "7484254cf7461fb7dab2aeee4599d9e4992af293f23e00d967801f8a48e99a7c",
+        "399e97891c67054196c5cfc7b1e8d10ebf2ff2256b88bdbbd0a6a6cb0c7d4ff5",
         "0113e78e0815af17dbbc6f2e642bfacc237f9464ead72197801a6c23799b2239",
     ),
 }
@@ -344,7 +349,7 @@ class TestRuleActiveDrivesAcceptance:
     def test_rule_active_is_a_property_not_a_field(self):
         assert isinstance(PromptContext.__dict__["rule_active"], property)
         assert "rule_active" not in {f.name for f in dataclasses.fields(PromptContext)}
-        assert dataclasses.fields(PromptContext)[7].name == "rule_request"
+        assert dataclasses.fields(PromptContext)[8].name == "rule_request"
 
     @pytest.mark.parametrize("unit", ["chunk", "sweep"])
     def test_the_reviewer_keeps_rule_only_when_asked(self, unit):

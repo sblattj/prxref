@@ -219,14 +219,25 @@ class TestRewordedPairs:
 
 
 class TestLineRule:
-    def test_line_zero_pair_is_never_compared(self):
+    def test_a_line_zero_pair_in_one_file_now_compares(self):
+        # Issue #74: file-level restatements of a file-level finding in the
+        # SAME file join the reworded tier under one per-file line-0 bucket.
         chunk, sweep = _dedup([_f(P3_A, line=0)], [_f(P3_B, line=0)])
-        assert [f.drop_reason for f in chunk + sweep] == [None, None]
+        assert chunk[0].drop_reason is None
+        assert sweep[0].drop_reason == _reason("chunk", "1.00")
         chunk, _ = _dedup([_f(P1_A, line=0), _f(P1_B, line=0)], [])
-        assert [f.drop_reason for f in chunk] == [None, None]
+        assert [f.drop_reason for f in chunk] == [None, _reason("chunk", "0.57")]
+
+    def test_line_zero_in_another_file_is_never_compared(self):
+        chunk, sweep = _dedup(
+            [_f(P3_A, line=0, file="src/a.py")], [_f(P3_B, line=0, file="src/b.py")]
+        )
+        assert [f.drop_reason for f in chunk + sweep] == [None, None]
 
     def test_line_zero_against_an_anchored_copy_is_not_compared(self):
         chunk, sweep = _dedup([_f(P1_A, line=10)], [_f(P1_B, line=0)])
+        assert [f.drop_reason for f in chunk + sweep] == [None, None]
+        chunk, sweep = _dedup([_f(P1_A, line=0)], [_f(P1_B, line=10)])
         assert [f.drop_reason for f in chunk + sweep] == [None, None]
 
     def test_same_line_control_is_dropped(self):
@@ -295,7 +306,9 @@ class TestKeepRuleAcrossTheBoundary:
                     worst_after[key] = min(worst_after.get(key, rank), rank)
                     continue
                 tier_drops += 1
-                assert before.line > 0
+                # Since #74 a file-level (line 0) copy compares with the
+                # file-level copies of its own file, so 0 is in range.
+                assert before.line >= 0
                 assert after.drop_reason.startswith("duplicate of ")
                 if i < start:
                     assert after.drop_reason.startswith("duplicate of chunk finding (reworded")
@@ -391,7 +404,9 @@ class TestOrderIndependence:
             _reason("chunk", "0.57"), None, None, _reason("chunk", "0.67"), None, None,
         ]
         assert [f.drop_reason for f in out_s] == [
-            _reason("chunk", "0.50"), None, None, _reason("sweep", "0.67"), None,
+            _reason("chunk", "0.50"), None, None, _reason("sweep", "0.67"),
+            # The two file-level copies (line 0, same file) compare since #74.
+            _reason("chunk", "1.00"),
         ]
 
     def test_every_shuffle_of_each_side_gives_one_result(self):

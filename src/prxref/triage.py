@@ -71,6 +71,27 @@ def _rule_char_dropped(ch: str) -> bool:
     return ch in _RULE_BIDI_CONTROLS or unicodedata.category(ch) in _RULE_DROPPED_CATEGORIES
 
 
+#: The one ``evidence`` label a finding may carry (#69): the model marked
+#: the finding as contradicted by the execution evidence shown in its
+#: prompt, so the deterministic pass downgrades it to ``warning``.
+EVIDENCE_CONTRADICTS: str = "contradicts"
+
+
+def normalize_evidence(raw: object) -> str | None:
+    """Map a model-supplied ``evidence`` value onto its label, or ``None``.
+
+    Only the exact word ``contradicts`` (any case, surrounding whitespace
+    stripped) survives; every other value — a non-string, ``None``, a
+    misspelling, a free-text explanation — maps to ``None``, because the
+    deterministic pass acts on the label alone and must never guess a
+    contradiction from prose. Never raises.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    return value if value == EVIDENCE_CONTRADICTS else None
+
+
 def normalize_rule(raw: object) -> str | None:
     """Map a model-supplied ``rule`` value onto a short label, or ``None``.
 
@@ -118,6 +139,47 @@ class Finding:
     validation, so a non-``None`` value is safe to render. Neither is part of
     any identity or dedup key. The new fields trail the old ones, so every
     positional construction keeps working.
+
+    ``previous_thread`` is set by the orchestrator's previously-raised note
+    (issue #73): on a finding that survived both thread gates but matches a
+    resolved or outdated thread, it carries the sentence ``"Previously
+    raised in <url or 'thread by <author> at <path>:<line>'>; still present
+    at <file>:<line>."`` and renders as a suffix on the posted inline body
+    and the summary bullet. ``None`` on every other finding; not part of any
+    identity or dedup key.
+
+    ``anchor_unverified`` is set by :func:`prxref.quality.apply_anchor_snap`
+    (issue #74) on a MODEL finding whose quoted evidence could not anchor it:
+    no snippet parseable while it sits file-level, a snippet the head file
+    does not hold, or an ambiguous multi-match. The same ``replace`` lowers
+    its confidence by :data:`prxref.quality.ANCHOR_UNVERIFIED_CONFIDENCE_HIT`,
+    so the quality gate may still drop it. ``False`` on every other finding
+    (a deterministic check's anchor is its own evidence, so its findings are
+    never stamped); it changes no posting behaviour and is not part of any
+    identity or dedup key.
+
+    ``evidence`` is one finding-level verdict execution evidence produced
+    (issue #69): ``"contradicts"``, as normalized by
+    :func:`normalize_evidence`, when the model concedes the evidence shown
+    in its prompt contradicts the finding, and ``None`` otherwise —
+    including on every unit whose prompt carried no evidence. It is not
+    serialized with the finding's JSON, not part of any identity or dedup
+    key, and only :func:`prxref.quality.apply_evidence_verdicts` reads it
+    (it downgrades a ``contradicts`` finding to ``warning``).
+
+    ``id``, ``anchor_block`` and ``id_reused_from`` are the stable-id
+    fields (issue #71), stamped by
+    :func:`prxref.stable_ids.apply_stable_ids` and ``None`` on every
+    finding of a run with stable ids off. ``id`` is the finding's
+    content-derived identity (``<file>#<rule or norule>#<12-hex claim
+    hash>``), stable across reworded titles and anchor drift;
+    ``anchor_block`` is the smallest enclosing name at the anchor (a
+    ``symbol:``/``yaml:``/``manifest:`` string), metadata the id
+    deliberately excludes; ``id_reused_from`` says where a reused id
+    came from (``run``, ``verdict`` or ``thread``), ``None`` when the id
+    was freshly computed and matched nothing. A finding whose id a
+    loaded verdict store holds refuted is dropped as ``refuted in
+    earlier run (<id>)``.
     """
 
     file: str
@@ -132,6 +194,12 @@ class Finding:
     locations: tuple[tuple[str, int], ...] = ()
     suggestion: str | None = None
     suggestion_end_line: int = 0
+    previous_thread: str | None = None
+    anchor_unverified: bool = False
+    evidence: str | None = None
+    id: str | None = None
+    anchor_block: str | None = None
+    id_reused_from: str | None = None
 
 
 @dataclass

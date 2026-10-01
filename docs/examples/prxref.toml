@@ -44,6 +44,14 @@ repo_context_max_chars = 12000
 chunk_context_lines = 5
 context_exclude_globs = ["**/fixtures/**", "**/*.snap"]
 
+# In-repo standards (#68): the repository's own standards documents whose
+# sections ride chunk prompts at repo_context = "repo". This REPLACES the
+# built-in set (empty/unset keeps it); the exact value off, set only through
+# the environment, turns them off.
+context_standards_globs = ["docs/standards/**", "docs/adr/**", "SECURITY.md"]
+# Standards characters one chunk worker receives.
+context_standards_max_chars = 4000
+
 # --- Comment policy ----------------------------------------------------------
 
 # summary+inline | summary | inline
@@ -63,3 +71,51 @@ max_error_findings = 5
 max_warning_findings = 10
 size_warn_lines = 800
 size_ignore_globs = ["docs/generated/**"]
+
+# --- PR metadata rules (#70) -------------------------------------------------
+# Flat keys — the config file is flat, so a [metadata] table is an error.
+# "on" runs only the checks their own keys configure.
+
+metadata_rules = "on"
+# type=regex: the WHOLE source branch must match the PR type's pattern
+# (fullmatch, so fix=fix/.* fits fix/42). The type comes from the PR's
+# labels first, else the title's conventional-commit prefix ("fix: ..." ->
+# fix); an unresolved type is skipped, not flagged.
+branch_patterns = ["fix=fix/.*", "feature=feature/.*"]
+# Every non-merge commit subject must contain this; needs the forge's
+# commit listing (GitHub, Gitea), else the check skips itself.
+commit_reference = "ACME-[0-9]+"
+# name=glob areas; more than max_areas_per_pr distinct areas is flagged.
+area_globs = ["backend=src/**", "frontend=web/**"]
+max_areas_per_pr = 2
+
+# --- CI wiring (#66) ---------------------------------------------------------
+# "on" flags a check-shaped file the PR adds (a verify/smoke/check script
+# or flag, a gained shebang, a test file outside the runner's default
+# include) that no CI configuration file invokes. Needs the forge's
+# head-sha file reads or --repo-dir. Off by default.
+
+ci_wiring = "on"
+# Globs REPLACING the built-in CI-file set (empty/unset keeps it); at most
+# 12 CI files are read per run.
+ci_wiring_globs = [".github/workflows/*.y*ml", ".gitlab-ci.yml", "Jenkinsfile"]
+
+# --- Execution evidence (#69) ------------------------------------------------
+# Command outputs from running this PR locally, shown to review units as
+# trusted context. JSON or plain text; see docs/env-vars.md.
+
+evidence_files = [".prxref/evidence/run.json"]
+# Evidence characters one review unit receives; 0 turns the block off.
+evidence_max_chunk_chars = 4000
+
+# --- Stable finding ids (#71) ---------------------------------------------------
+# true stamps every finding with a content-derived id (file#rule#12-hex claim
+# hash) that survives reworded titles and anchor drift; false (the default)
+# never runs the pass and every id stays null. See docs/env-vars.md.
+
+# stable_ids = true
+# JSON verdict store earlier runs' refuted verdicts are read from, keyed by
+# stable id; the review reads it and never writes it. Read only with
+# stable_ids = true. Missing reads as empty; malformed is a configuration
+# error. Path relative to THIS file's directory.
+# verdict_store = ".prxref/verdicts.json"

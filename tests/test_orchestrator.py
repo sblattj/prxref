@@ -279,8 +279,8 @@ class TestHappyPath:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries", "context_followup",
-            "suggestions", "incremental", "degraded",
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -656,7 +656,7 @@ class TestCoverageAwareVerdict:
         assert result["chunks_reviewed"] == 1
         assert result["chunks_failed"] == result["chunk_count"] - 1
 
-    def test_partial_failure_keeps_verdict_and_reports_coverage(self, monkeypatch):
+    def test_partial_failure_downgrades_the_verdict_and_reports_coverage(self, monkeypatch):
         counter = itertools.count(1)
 
         def _flaky_review_chunk(llm, files, **kwargs):
@@ -673,7 +673,9 @@ class TestCoverageAwareVerdict:
         monkeypatch.setattr(orchestrator.reviewer, "review_chunk", _flaky_review_chunk)
         forge = FakeForge(diff=TWO_FILE_DIFF)
         result = orchestrate_review(forge, REF, FakeLLM("{}"), post=False, max_chunks=2)
-        assert result["verdict"] == "Approved"
+        # Issue #72: a partial review no longer reads as "Approved" — the
+        # failed chunk contributed no findings, which proved nothing.
+        assert result["verdict"] == "Incomplete"
         # The failed chunk counts as failed; the sweep unit reviewed.
         assert result["chunks_failed"] == 1
         assert result["chunks_reviewed"] == 2
@@ -751,8 +753,8 @@ class TestMaxTokensThreading:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries", "context_followup",
-            "suggestions", "incremental", "degraded",
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
         }
 
 
@@ -1068,8 +1070,8 @@ class TestQualityGateKnobsAreThreaded:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries", "context_followup",
-            "suggestions", "incremental", "degraded",
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
         }
 
 
@@ -1080,8 +1082,8 @@ RESULT_KEYS = {
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context", "parse_retries", "context_followup",
-    "suggestions", "incremental", "degraded",
+    "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+    "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
 }
 
 
@@ -1702,13 +1704,16 @@ class TestPartialBannerNamesTheFailedChunksFiles:
         return forge.summaries[0].split("> ⚠️ Partial review:")[1]
 
     def test_the_banner_line_carries_the_failed_chunks_files(self, monkeypatch):
+        # A non-timeout reason: the timeout vocabulary is rewritten for the
+        # operator (#72), which would pin this test to that text instead of
+        # the file-list naming it exists for.
         forge, _res = self._run(
             monkeypatch,
-            {"a/one.py": "LLMError: timeout"},
+            {"a/one.py": "LLMError: malformed response"},
             diff=FOUR_FILE_DIFF, max_chunks=4, token_budget=1000,
         )
         assert (
-            "> - chunk of 1 file (a/one.py): LLMError: timeout"
+            "> - chunk of 1 file (a/one.py): LLMError: malformed response"
             in self._banner(forge)
         )
 
@@ -1719,7 +1724,7 @@ class TestPartialBannerNamesTheFailedChunksFiles:
         )
         forge, res = self._run(
             monkeypatch,
-            {"a/1.py": "LLMError: timeout"},
+            {"a/1.py": "LLMError: malformed response"},
             diff=five, max_chunks=5, token_budget=100_000, max_files_per_chunk=4,
         )
         assert res["chunks_failed"] == 1
@@ -1728,7 +1733,7 @@ class TestPartialBannerNamesTheFailedChunksFiles:
         assert res["chunks_reviewed"] == 2
         assert (
             "> - chunk of 4 files (a/1.py, b/2.py, c/3.py, +1 more): "
-            "LLMError: timeout" in self._banner(forge)
+            "LLMError: malformed response" in self._banner(forge)
         )
 
     def test_the_unreviewed_files_are_not_redacted(self, monkeypatch):
@@ -2709,7 +2714,9 @@ class TestSystemicSweep:
         assert res["chunk_count"] == 2
         assert res["chunks_reviewed"] == 1
         assert res["chunks_failed"] == 1
-        assert res["verdict"] == "Approved"
+        # The sweep failing degrades the verdict too (#72): the chunk
+        # covered the only file, but the cross-file classes went unreviewed.
+        assert res["verdict"] == "Incomplete"
         summary = forge.summaries[0]
         assert "Partial review: 1 of 2 chunks were reviewed; 1 failed." in summary
         assert "systemic sweep" in summary

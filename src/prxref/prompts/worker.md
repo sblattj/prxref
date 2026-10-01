@@ -29,6 +29,21 @@ There is no downstream investigation pass that will confirm your suspicions. If 
 
 Before asserting that something is absent, unsupported, undocumented, or contradicted, check the `### Other files changed in this PR` summary below the diff — the refuting evidence may sit in a sibling file the chunk split moved out of view. If a sibling file plausibly refutes the claim, drop the finding or lower it to a question with `confidence` at or below 0.5.
 
+## Matching rules
+
+A changed rule that decides which inputs match — a web-server `location` or
+`rewrite`, a router path pattern, a `.gitignore`-style glob, a firewall or
+allow-list entry, a regex validator — can silently capture inputs another rule
+used to handle (the SPA fallback, a broader route, a default). For each added
+or widened rule of that kind in the diff: enumerate one to three concrete
+inputs it newly matches that were previously handled elsewhere; check each
+against what this PR and the context blocks define (route tables, path
+parameter formats, existing tests); report only inputs that plausibly occur
+here, and name one example input in the finding body. When the diff or a
+context block shows every capturable input is constrained (route parameters
+are UUIDs, a more specific rule already handles them), emit `outofscope` at
+confidence 0.6 stating the constraint instead of `warning` — or nothing.
+
 ## Style
 
 Terse. Title under 80 characters, imperative. Body: what breaks or risks, plus the diff evidence, in 1-4 sentences. No praise, no restating what the diff does, no style-guide nits that change neither behavior nor risk. A finding that asserts a throw, panic, crash, or unhandled rejection must name its containment boundary: the enclosing catch, or state that it is uncaught and name the caller it propagates to.
@@ -42,7 +57,7 @@ PR description:
 
 Repo: {repo_hint}
 
-{ticket_context}### Spec constraints
+{ticket_context}{evidence_block}### Spec constraints
 
 {spec_digest}
 

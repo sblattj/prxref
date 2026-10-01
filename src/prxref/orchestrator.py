@@ -64,7 +64,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    IS compared by that tier against any other chunk-side finding sharing
    its file and line — a chunk worker's own restatement of the same toggle
    included — and only the higher-ranked one of the two (severity, then
-   confidence, then content) survives, same as any other same-side pair:
+   confidence, then content) survives, same as any other same-side pair.
+   The opt-in PR-metadata findings (#70, ``metadata_rules``) join that
+   same splice with the same chunk-side standing and the same
+   deterministic exemption, computed before any worker runs; they are
+   summary-only, so the inline batch is selected from the findings that
+   are not them (by object identity, never by a reserved rule name):
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
@@ -82,11 +87,25 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``package.json`` claim whose dependency is not the key on the anchored
    line, or whose asserted section disagrees with the actual one; it must
    precede line align, which is what makes it read the model's RAW
-   anchor) → ``apply_line_align`` → ``apply_thread_dedup`` (existing
+   anchor) → ``apply_line_align`` → ``apply_anchor_snap`` (#74: the
+   hunk-bounded align passes cannot reach a defect the model quoted
+   outside every hunk, so the anchor is settled by the finding's own
+   quoted code — backticked, double-quoted, or a ``catch (``/``if (``
+   interior — against the head file the chunk-context reader serves,
+   within 80 lines of the model's RAW line, which the same capture the
+   suggestion pass reads supplies; a finding whose snippet the file does
+   not hold, whose multi-match nothing breaks, or that sits file-level
+   with no snippet at all is marked ``anchor_unverified`` and loses 0.1
+   confidence, and without a reader the pass changes nothing) →
+   ``apply_thread_dedup`` (existing
    threads fetched best-effort BEFORE the workers run, and after the
-   stale-inline prune; failure means no threads) →
+   stale-inline prune; failure means no threads; a resolved or outdated
+   thread never suppresses, issue #73) →
    ``apply_settled_thread_suppression`` (a finding re-litigating a
-   subject an existing thread already argued out, line-independently) →
+   subject an existing open, current thread already argued out,
+   line-independently; resolved or outdated threads skipped here too,
+   and a surviving finding that matches one is stamped with a
+   previously-raised note instead) →
    ``apply_severity_consistency`` (findings sharing a normalized title
    are raised to the group's max severity — the sweep's corroborating
    title counts toward its group) → ``apply_removal_claim_check`` (a
@@ -94,6 +113,15 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
+   ``apply_rule_scope_check`` (#75, on its own guard: any loaded rules
+   file whose body declares at least one ATX section scope, whatever the
+   grouping and cap switches say; a ``rule`` label that names no scoped
+   section, or whose section's ``scope:`` tokens do not cover the
+   finding's path, is cleared to ``None`` and the finding kept, so it
+   groups and caps by title like any ruleless one; one INFO line and one
+   ``rulescope ok`` trace event count the cleared labels, and the run
+   record's ``rule_scope_cleared`` carries the count, ``None`` when the
+   check did not run) →
    ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
    in one file that break one rule, or that name no rule and share a
    normalized title, fold into one representative that lists
@@ -109,6 +137,13 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    dropped as ``rule cap exceeded (max <n>): listed at <file>:<line>``;
    sweep findings are never capped; one INFO line and one ``rulecap ok``
    trace event count the folded findings and the rules over the cap) →
+   ``apply_location_verification`` (#74, once ``locations`` is final:
+   each ``Also at:`` site of a grouped or capped representative is
+   re-checked against the head file for the representative's own quoted
+   snippets within 80 lines of the site, and a site nothing corroborates
+   is dropped from the list and the paragraph — an unreadable file keeps
+   every site, folded members keep their drop reasons, and without a
+   reader the pass changes nothing) →
    ``apply_quality_gate(confidence_floor=, max_errors=,
    max_warning_findings=, max_outofscope_findings=)``, which returns
    its findings in content order, so the chunk/sweep boundary is
@@ -120,10 +155,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    finding from suppressing its higher-confidence sweep duplicate and
    then dying at the gate itself. With ``dedup_similarity`` set, a
    reworded tier also compares findings in the same file on the same
-   line: a sweep copy no more severe than a chunk copy is dropped, and of
+   line, or two file-level (line 0) findings of the same file (#74): a
+   sweep copy no more severe than a chunk copy is dropped, and of
    two copies on one side the less severe, then less confident, one is;
-   a chunk copy is never dropped for a sweep copy, and line 0 is never
-   compared) → ``apply_containment_note`` (a throw
+   a chunk copy is never dropped for a sweep copy) → ``apply_containment_note`` (a throw
    / panic / crash / unhandled-rejection finding that never names its
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
@@ -136,21 +171,26 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
    ``spec_grounding``, ``size_advisory``, ``prompt_templates``,
-   ``scoped_rules``, ``rule_counts``, ``repo_context``; ``replay`` on replays only, and
+   ``scoped_rules``, ``rule_counts``, ``rule_scope_cleared``,
+   ``repo_context``, ``evidence``; ``replay`` on replays only, and
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
-   iff any active error-severity finding survives;
-   else ``"Approved"``. A partial failure keeps the verdict but the summary
-   declares reduced coverage AND itemizes each failed chunk with the files
-   it took unreviewed plus its reason (capped, redacted, inside the same
-   blockquote) — a partial review reads as a successful one, so a failure
-   left only in the logs reaches nobody, and a file list left out of it
-   leaves the operator guessing which files went unreviewed.
+   iff any active error-severity finding survives; else ``"Incomplete"``
+   when any review unit failed (issue #72: a partial review used to read
+   as ``"Approved"`` because the failed chunk simply contributed no
+   findings); else ``"Approved"``. A partial failure also degrades the
+   run record (``degraded.cause == "partial"``, one ``chunks`` row per
+   failed unit) and the summary declares reduced coverage AND itemizes
+   each failed chunk with the files it took unreviewed plus its reason
+   (capped, redacted, inside the same blockquote) — a partial review
+   reads as a successful one, so a failure left only in the logs reaches
+   nobody, and a file list left out of it leaves the operator guessing
+   which files went unreviewed.
 8. Post: summary rendered from ``reviewer.load_prompt("summary")``, or from
    the operator's ``summary.md`` override when ``prompts`` carries one, with
    placeholders ``{verdict} {title} {file_count} {error_count}
-   {warning_count} {spec_count} {spec_note} {ticket_note}
+   {warning_count} {spec_count} {spec_note} {ticket_note} {evidence_note}
    {outofscope_count} {findings} {attribution}`` filled, along with the
    marker slots and the optional slots of :func:`_render_summary`
    (per-severity finding groups, head SHA, chunk and token counts), plus
@@ -196,10 +236,13 @@ from . import (
     reviewer,
     specs,
     systemic,
+    verdicts,
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
+from .ci_wiring import ci_wiring_findings
 from .forges.base import (
     ATTRIBUTION_MARKER,
+    CommitData,
     Forge,
     InlineComment,
     PRData,
@@ -217,6 +260,7 @@ from .markers import (
     out_of_ticket_marker,
     severity_marker,
 )
+from .metadata_rules import run_metadata_checks
 from .prompt_templates import (
     CONTEXT_MARKER,
     REVIEW_TEMPLATES,
@@ -232,16 +276,20 @@ from .quality import (
     SUGGESTION_CLEAR_REASONS,
     _resolve_confidence_floor,
     active,
+    apply_anchor_snap,
     apply_containment_note,
+    apply_evidence_verdicts,
     apply_example_echo_check,
     apply_hedge_gate,
     apply_line_align,
     apply_location_validation,
+    apply_location_verification,
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
     apply_rule_cap,
     apply_rule_grouping,
+    apply_rule_scope_check,
     apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_severity_map,
@@ -251,11 +299,13 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    previously_discussed_thread,
     prompt_example_titles,
     rule_cap_counts,
 )
 from .repo_context import exclude_predicate
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
+from .stable_ids import REUSED_FROM_THREAD, REUSED_FROM_VERDICT, apply_stable_ids, stable_id_collisions
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
@@ -267,6 +317,7 @@ from .triage import (
     Finding,
     added_lines_by_file,
     count_size_relevant_changes,
+    normalize_evidence,
     normalize_rule,
     normalize_scope,
     parse_unified_diff,
@@ -427,7 +478,7 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "Files reviewed: {file_count} · {error_marker} {error_count} error · "
     "{warning_marker} {warning_count} warning · {spec_marker} {spec_count} spec · "
     "{outofscope_marker} {outofscope_count} outofscope\n"
-    "{spec_note}{ticket_note}\n"
+    "{spec_note}{ticket_note}{evidence_note}\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -499,6 +550,8 @@ def orchestrate_review(
     repo_context_max_chars: int = 12000,
     context_contract_globs: Sequence[str] = (),
     context_exclude_globs: Sequence[str] = (),
+    context_standards_globs: Sequence[str] = (),
+    context_standards_max_chars: int = 4000,
     repo_dir: RepoDir | None = None,
     repo_context_max_reads: int = repo_reader.MAX_RUN_READS,
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
@@ -508,6 +561,17 @@ def orchestrate_review(
     incremental: str = "off",
     full_review: bool = False,
     full_review_reason: str | None = None,
+    metadata_rules: str = "off",
+    branch_patterns: Sequence[str] = (),
+    commit_reference: str = "",
+    area_globs: Sequence[str] = (),
+    max_areas_per_pr: int = 2,
+    ci_wiring: str = "off",
+    ci_wiring_globs: Sequence[str] = (),
+    evidence: Any = None,
+    evidence_max_chunk_chars: int = 4000,
+    stable_ids: bool = False,
+    verdict_store: str | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -517,10 +581,10 @@ def orchestrate_review(
     output_tokens, posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions, incremental, degraded}``, plus
+    suggestions, incremental, ci_wiring, evidence, stable_ids, degraded}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
-    :func:`_run_record`, so the last fifteen keys are always present and are
+    :func:`_run_record`, so the last sixteen keys are always present and are
     ``None`` (``cost_usd``: ``0.0`` before any LLM request; ``cost_estimated``:
     ``False``; ``parse_retries``: ``0`` before any review unit when the
     parse retry is on) when their feature is off or the run never reached it.
@@ -653,6 +717,78 @@ def orchestrate_review(
     ``size_advisory``, and a triggered advisory is prepended to every posted
     summary. It never touches the verdict.
 
+    ``metadata_rules`` (issue #70) turns on the deterministic PR-metadata
+    checks: ``branch_patterns`` (``type=regex``; the PR's type from its
+    labels, else its title's conventional-commit prefix, must own a pattern
+    the source branch fully matches), ``commit_reference`` (a regex every
+    non-merge commit subject must contain; needs the forge's optional
+    ``get_commits``, without which the check reports itself skipped) and
+    ``area_globs`` with ``max_areas_per_pr`` (the diff's paths may not
+    spread over more named areas than that). All three are pure, computed
+    before any worker runs and making no LLM call of their own; each
+    violation is a ``warning`` / ``outofscope`` finding with confidence 1.0,
+    folded in beside the heuristics findings at the chunk/sweep boundary
+    and SUMMARY-ONLY — the inline batch is selected from the findings that
+    are not them, by object identity threaded from the check, never by a
+    reserved rule name a model finding could match. With
+    ``metadata_rules`` off (the default) nothing runs, no
+    ``metadata_rules`` key is stamped on the run record, and the run is
+    byte-identical to one without the feature; on, the record carries
+    ``{branch_pattern, commit_reference, area_globs}`` each
+    ``"pass"``/``"fail"``/``"skipped: <reason>"``, echoed by one
+    ``metadata_rules ok`` trace event. None of it touches the verdict or
+    the exit code.
+
+    ``ci_wiring`` (issue #66) turns on the CI-wiring check:
+    ``ci_wiring_globs`` (``PRXREF_CI_WIRING_GLOBS``; the default restates
+    :data:`prxref.ci_wiring.DEFAULT_CI_GLOBS`) selects the CI
+    configuration files, where a set value replaces the built-in set. The
+    check flags a check-shaped file the PR adds — a script whose name or a
+    ``--flag`` it gains says verify, smoke or check, a file that gains a
+    shebang, or a new test file outside the runner's default include
+    (:func:`prxref.ci_wiring.default_include`) — that no CI file invokes
+    by full path or bare basename: one finding per unwired check,
+    file-level on its own path, ``spec`` when the ticket text mentions
+    regression checks, CI, pipelines or automated tests (relabelled
+    ``warning`` by spec grounding on an ungrounded run) and ``warning``
+    otherwise, an INLINE candidate like the heuristic findings rather
+    than summary-only. It reads the repository through its own reader —
+    the forge's head-sha reads or ``--repo-dir``, gated on the reader and
+    NOT on ``repo_context`` — at most
+    :data:`prxref.ci_wiring.MAX_CI_FILES` file reads, never the
+    ``repo_context`` reader whose caps a CI file could starve on; with no
+    reader the run logs one WARNING naming ``PRXREF_CI_WIRING`` and the
+    record says why. Off (the default) nothing runs, nothing is read, and
+    the record's ``ci_wiring`` key is ``None``; on, it carries
+    ``{candidates, ci_files, picked_up_default, triggered}``, echoed by
+    one ``ci_wiring ok`` trace event. Never changes the verdict or the
+    exit code.
+
+    ``evidence`` (issue #69) is the loaded execution evidence
+    (:class:`prxref.evidence.EvidenceBundle`, as
+    :func:`prxref.evidence.load_evidence` returns it, duck-typed like
+    ``rules`` and ``ticket``: ``active``, ``record()``, ``block_for()``,
+    ``global_block()`` and ``matched_for()``), and ``evidence_max_chunk_chars``
+    (``PRXREF_EVIDENCE_MAX_CHUNK_CHARS``; the default restates
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does) is the per-unit
+    character budget of its prompt blocks. ``None`` (an empty list
+    configured) turns it off, and an unset run's prompts, posts, record
+    and trace are exactly a run without it. When active, each chunk's
+    prompt carries the evidence items its paths matched plus the global
+    ones, and the sweep's prompt the global ones alone, each item fenced
+    and labelled data-not-instructions under a must-not-contradict rule;
+    the worker may answer with a per-finding ``"evidence": "contradicts"``
+    label, read only on units whose prompt carried evidence, and
+    :func:`quality.apply_evidence_verdicts` — right after spec grounding —
+    RELABELS such a finding ``warning`` rather than dropping it, counted by
+    one INFO line, one ``evidence downgrade`` trace event and the summary's
+    evidence note (``{evidence_note}``, after the ticket note). The
+    ``evidence`` key of every exit is ``{files, items, matched_chunks,
+    max_chars}`` (paths as configured, never the evidence text), echoed by
+    one ``evidence ok`` trace event, and an EMPTY bundle (files that held
+    no item) is recorded like an empty ticket: noted, never an error.
+    Never changes the verdict or the exit code.
+
     ``replay`` is the evaluation-replay stamp built by the CLI
     (``{base_sha, head_sha, threads, diff_file, description, as_of,
     as_of_source}``). When given it is copied
@@ -761,6 +897,29 @@ def orchestrate_review(
     of that severity. ``outofscope`` is the minor severity, not the ticket
     scope ``out``.
 
+    ``stable_ids`` turns on stable finding ids (issue #71,
+    ``PRXREF_STABLE_IDS``). After both thread gates and before the
+    severity-consistency pass, :func:`prxref.stable_ids.apply_stable_ids`
+    stamps every finding with a content-derived ``id``
+    (``<file>#<rule or norule>#<12-hex claim hash>``, stable across
+    reworded titles and anchor drift), an ``anchor_block`` (the smallest
+    enclosing function, YAML key or manifest key at the anchor —
+    metadata the id deliberately excludes) and an ``id_reused_from``
+    label (``run`` for an id a near-identical earlier finding of the
+    same run proposed, ``verdict`` for a stored-verdict match,
+    ``thread`` for a closed-thread match). ``verdict_store``
+    (``PRXREF_VERDICT_STORE``, default ``None``) names a JSON store of
+    earlier runs' verdicts keyed by id; loaded before any stage runs (a
+    store that cannot be trusted is a configuration error, exit 2), read
+    only — recording is a caller's decision
+    (:func:`prxref.verdicts.record`) — and a finding whose id it holds
+    as ``refuted`` is dropped with ``refuted in earlier run (<id>)``.
+    The run record's ``stable_ids`` is ``{"assigned", "reused_from_verdict",
+    "reused_from_thread", "collisions"}`` when on, ``null`` when off.
+    Off (the default), the pass never runs, every finding keeps
+    ``id=None``, and the prompts, posts, trace and logs are exactly a
+    run without the feature.
+
     ``repo_context`` is the repository-context level
     (``PRXREF_REPO_CONTEXT``): ``"off"`` (the default), ``"diff"`` or
     ``"repo"`` (:data:`prxref.repo_unit.MODES`). Any other value raises
@@ -772,7 +931,15 @@ def orchestrate_review(
     config's default, which the CLI passes), and ``context_exclude_globs``
     (``PRXREF_CONTEXT_EXCLUDE_GLOBS``) adds to the exclude floor of
     :func:`prxref.repo_context.exclude_predicate`: an excluded path is
-    never read, listed or shown. ``repo_dir`` is a
+    never read, listed or shown. ``context_standards_globs``
+    (``PRXREF_CONTEXT_STANDARDS_GLOBS``, #68) selects the repository's own
+    standards documents the same way — ``()`` means none, the built-in set
+    is config's default — and ``context_standards_max_chars``
+    (``PRXREF_CONTEXT_STANDARDS_MAX_CHARS``, default 4000, the config
+    default restated) is the per-chunk budget of
+    :func:`prxref.repo_standards.standards_entries`. Standards sections are
+    read ONLY at ``"repo"`` with a reader, exactly like contract files, so
+    ``"off"`` and ``"diff"`` never read them. ``repo_dir`` is a
     :class:`prxref.forges.repo_dir.RepoDir` to read the repository from in
     place of the forge; this function does not validate it (``RepoDir``
     does, when it is built). ``repo_context_max_reads``
@@ -802,18 +969,22 @@ def orchestrate_review(
     on the paths outside the diff alone, and the entries do not depend on
     which chunk reads a shared diff file first. The context's definition
     lines extend the definitions block, its contract lines form a
-    ``### Contract excerpts`` block and its reader lines a last
-    ``### Code elsewhere that reads state this chunk writes`` block, on the
+    ``### Contract excerpts`` block, its reader lines a
+    ``### Code elsewhere that reads state this chunk writes`` block and its
+    standards lines (sections of the repository's own standards documents,
+    #68) a last ``### In-repo standards for this chunk`` block that carries
+    its own how-to-cite guidance, on the
     first attempt only: the timeout retry passes no unit, so it carries none
-    of the three. A build that raises gives that chunk no context
+    of the four. A build that raises gives that chunk no context
     and one WARNING naming the chunk; the review goes on. The dependency and
     same-file definition blocks keep their own reader in every mode, so a
     diff file can be fetched once by each reader.
 
     The ``repo_context`` key of every exit, when on, is ``{"mode",
     "max_chars", "max_reads", "max_chunk_reads", "contract_globs",
-    "exclude_globs", "reader", "listing", "reads", "read_cap_hit",
-    "chunk_read_cap_hit", "run_read_cap_hit", "units"}``, where
+    "exclude_globs", "standards_globs", "standards_max_chars", "reader",
+    "listing", "reads", "read_cap_hit", "chunk_read_cap_hit",
+    "run_read_cap_hit", "units"}``, where
     ``max_reads`` and ``max_chunk_reads`` are the two read caps. Until the
     chunk workers finish, ``reader`` and ``listing`` are ``None``, ``reads``
     is 0, the three cap flags are false and ``units`` is ``None``. After
@@ -959,6 +1130,10 @@ def orchestrate_review(
         raise ValueError(
             f"incremental must be one of {INCREMENTAL_MODES}, got {incremental!r}"
         )
+    if ci_wiring not in CI_WIRING_MODES:
+        raise ValueError(
+            f"ci_wiring must be one of {CI_WIRING_MODES}, got {ci_wiring!r}"
+        )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
     sampling = _sampling(llm)
@@ -978,6 +1153,7 @@ def orchestrate_review(
         "prompt_templates": None,
         "scoped_rules": None,
         "rule_counts": None,
+        "rule_scope_cleared": None,
         "repo_context": None,
         "parse_retries": (
             0 if isinstance(llm_parse_retries, int) and llm_parse_retries >= 1 else None
@@ -985,6 +1161,9 @@ def orchestrate_review(
         "context_followup": _followup_record() if context_followup == "on" else None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
+        "ci_wiring": None,
+        "evidence": None,
+        "stable_ids": None,
         "degraded": None,
         "chunks_over_budget": 0,
         "largest_chunk_tokens": 0,
@@ -1012,6 +1191,8 @@ def orchestrate_review(
             "max_chunk_reads": repo_context_max_chunk_reads,
             "contract_globs": list(context_contract_globs),
             "exclude_globs": list(context_exclude_globs),
+            "standards_globs": list(context_standards_globs),
+            "standards_max_chars": context_standards_max_chars,
             "reader": None,
             "listing": None,
             "reads": 0,
@@ -1020,6 +1201,23 @@ def orchestrate_review(
             "run_read_cap_hit": False,
             "units": None,
         }
+    # Like the ticket: an EMPTY bundle (files that held no item) is still
+    # recorded — the paths and the 0 items — it just reaches no prompt.
+    evidence_active = evidence is not None and bool(evidence.active)
+    if evidence is not None:
+        run_inputs["evidence"] = {
+            **evidence.record(),
+            "matched_chunks": 0,
+            "max_chars": evidence_max_chunk_chars,
+        }
+    # Issue #71: load the verdict store BEFORE any stage runs, so a store
+    # the pass cannot trust is a configuration error (exit 2), never a
+    # degraded review that silently ignored it. Read-only from here on:
+    # recording a verdict is a caller's decision (prxref.verdicts.record),
+    # so a review never writes the store itself.
+    verdict_store_loaded: dict[str, Any] | None = None
+    if stable_ids and verdict_store:
+        verdict_store_loaded = verdicts.load(verdict_store)
     summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
     ticket_note = ticket.note() if ticket is not None else ""
@@ -1107,6 +1305,78 @@ def orchestrate_review(
         run_inputs["size_advisory"] = None
     size_advisory_line = _size_advisory_line(run_inputs["size_advisory"])
 
+    # Deterministic PR-metadata checks (#70), computed here — before any
+    # worker dispatch — so the no-LLM guarantee is structural: nothing below
+    # can schedule a model call on their behalf. Opt-in: with
+    # metadata_rules off (the default) this block runs nothing, stamps no
+    # run-record key and changes no byte of the review.
+    metadata_findings: list[Finding] = []
+    if metadata_rules == "on":
+        commits, commit_skip = (
+            _fetch_pr_commits(forge, ref, pr) if commit_reference else (None, "")
+        )
+        try:
+            metadata_findings, stamp = run_metadata_checks(
+                pr, files, commits,
+                branch_patterns=branch_patterns, commit_reference=commit_reference,
+                area_globs=area_globs, max_areas_per_pr=max_areas_per_pr,
+                commit_skip_reason=commit_skip or "no commit source",
+            )
+            run_inputs["metadata_rules"] = stamp
+            tracer.event("metadata_rules", "ok", **stamp)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("metadata rules failed (continuing without them): %s", e)
+            metadata_findings = []
+            run_inputs["metadata_rules"] = {
+                "checks": f"skipped: metadata stage failed: {e.__class__.__name__}"
+            }
+            tracer.event(
+                "metadata_rules", "fail", reason=f"{e.__class__.__name__}: {e}"
+            )
+
+    # CI wiring (#66), computed on the same pre-dispatch doctrine: the
+    # check makes no LLM call, so nothing below can schedule one on its
+    # behalf. Opt-in like metadata_rules, but it READS the repository —
+    # through its own reader, the forge's head-sha reads or --repo-dir,
+    # never the repo_context reader (a CI file starved by that reader's
+    # chunk caps would false-positive "no CI runs it") — with the module's
+    # MAX_CI_FILES bound. Gated on the reader, not on repo_context: the
+    # acceptance runs --repo-dir alone. A readerless run warns once and
+    # records why; a crash in the stage disables it, never the review.
+    ci_findings: list[Finding] = []
+    if ci_wiring == "on":
+        ci_reader = repo_reader.forge_reader(
+            forge, ref, getattr(pr, "source_sha", "") or "",
+        )
+        if ci_reader is None and repo_dir is not None:
+            ci_reader = repo_reader.repo_dir_reader(repo_dir)
+        if ci_reader is None:
+            logger.warning(CI_WIRING_INACTIVE_WARNING)
+            run_inputs["ci_wiring"] = {"triggered": False, "reason": "no reader"}
+            tracer.event("ci_wiring", "ok", triggered=False, reason="no reader")
+        else:
+            ci_listing = ci_reader.listing()
+            try:
+                ci_findings, ci_stamp = ci_wiring_findings(
+                    files,
+                    read=ci_reader.read,
+                    listing=ci_listing.paths if ci_listing is not None else None,
+                    globs=ci_wiring_globs,
+                    ticket_text=ticket.text if ticket is not None else None,
+                )
+                run_inputs["ci_wiring"] = ci_stamp
+                tracer.event("ci_wiring", "ok", **ci_stamp)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ci wiring failed (continuing without it): %s", e)
+                ci_findings = []
+                run_inputs["ci_wiring"] = {
+                    "triggered": False,
+                    "reason": f"skipped: ci wiring stage failed: {e.__class__.__name__}",
+                }
+                tracer.event(
+                    "ci_wiring", "fail", reason=f"{e.__class__.__name__}: {e}"
+                )
+
     try:
         with tracer.span("build_chunks") as sp:
             plan = plan_chunks(
@@ -1141,7 +1411,7 @@ def orchestrate_review(
         # needs an added, non-binary line, so it rarely fires on this path.
         release_shape = heuristics.release_shape_findings(files)
         toggle_findings = heuristics.toggle_pinned_off_findings(files)
-        deterministic_findings = release_shape + toggle_findings
+        deterministic_findings = release_shape + toggle_findings + metadata_findings + ci_findings
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
             **_cost_meta(run_inputs),
@@ -1152,6 +1422,8 @@ def orchestrate_review(
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             toggle_findings=toggle_findings,
+            metadata_findings=metadata_findings,
+            ci_findings=ci_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
             max_outofscope_findings=max_outofscope_findings,
@@ -1193,6 +1465,37 @@ def orchestrate_review(
             },
         }
         _warn_scoped_cap(scoped_rules, [*scoped_blocks, sweep_block], scoped_rules_max_chars)
+
+    # Evidence blocks (#69), built before the fan-out like the scoped
+    # blocks: each chunk's unit gets its matched items plus the global
+    # ones inside its PromptContext copy, and the sweep's gets the global
+    # ones alone (a chunk's matched items are that chunk's business, not
+    # the sweep's), so its block is built against every chunk path at
+    # once: an item matching ANY chunk is spent on that chunk. The ok
+    # event fires here too, once matched_chunks is known — the record is
+    # one claim, echoed whole. matched_chunks counts the chunks whose
+    # paths matched at least one item.
+    evidence_blocks: list[str] | None = None
+    sweep_evidence_block = ""
+    if evidence_active:
+        chunk_paths = [
+            [p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks
+        ]
+        evidence_blocks = [
+            evidence.block_for(paths, evidence_max_chunk_chars) for paths in chunk_paths
+        ]
+        sweep_evidence_block = evidence.global_block(
+            [p for paths in chunk_paths for p in paths], evidence_max_chunk_chars,
+        )
+        run_inputs["evidence"]["matched_chunks"] = sum(
+            1 for paths in chunk_paths if evidence.matched_for(paths)
+        )
+        tracer.event("evidence", "ok", **run_inputs["evidence"])
+        logger.info(
+            "evidence: %d item(s) from %d file(s); matched items reach %d of %d chunk(s)",
+            len(evidence.items), len(evidence.files),
+            run_inputs["evidence"]["matched_chunks"], len(chunks),
+        )
 
     # Pruned BEFORE the threads are listed, and both before the review units
     # run. The prune-then-list order is load-bearing: reading threads first
@@ -1352,6 +1655,7 @@ def orchestrate_review(
         repo_plan=repo_plan, unit_records=unit_records,
         parse_retries=llm_parse_retries,
         followup_floor=followup_floor, followup_records=followup_records,
+        evidence_blocks=evidence_blocks,
     )
     if repo_plan is not None and unit_records is not None:
         run_inputs["repo_context"] = _repo_context_record(
@@ -1382,6 +1686,7 @@ def orchestrate_review(
             trace_dir=trace_dir,
             prompt_context=prompt_context, scoped_block=sweep_block,
             parse_retries=llm_parse_retries,
+            evidence_block=sweep_evidence_block,
         )
     )
     if run_inputs["parse_retries"] is not None:
@@ -1446,14 +1751,24 @@ def orchestrate_review(
     # outcome for i < len(chunks): the zip pairs each failed review with the
     # files it took down, which the partial banner names (issue #31). The
     # systemic sweep is results[-1] and names itself in its reason, so it is
-    # not zipped against a chunk here.
-    failed_chunks = [
-        (r["error"], [f.path for f in chunk])
-        for chunk, r in zip(chunks, results, strict=False)
-        if r["error"]
-    ]
+    # not zipped against a chunk here. The rows mirror the pairs for the
+    # #72 degraded record, with each unit's 1-based worker index and, for
+    # the sweep, its results-list slot and an empty file list.
+    failed_chunks: list[tuple[str, list[str]]] = []
+    failed_chunk_rows: list[dict[str, object]] = []
+    for i, (chunk, r) in enumerate(zip(chunks, results, strict=False), start=1):
+        if not r["error"]:
+            continue
+        chunk_files = [f.path for f in chunk]
+        failed_chunks.append((r["error"], chunk_files))
+        failed_chunk_rows.append(
+            {"index": i, "files": chunk_files, "error": r["error"]}
+        )
     if results[-1]["error"]:
         failed_chunks.append((results[-1]["error"], []))
+        failed_chunk_rows.append({
+            "index": len(chunks) + 1, "files": [], "error": results[-1]["error"],
+        })
 
     # Two deterministic, non-LLM findings folded in before the quality passes
     # so each flows through them like a model finding, except that
@@ -1479,7 +1794,18 @@ def orchestrate_review(
     # finding" and keep the model's restatement instead.
     release_shape = heuristics.release_shape_findings(files)
     toggle_findings = heuristics.toggle_pinned_off_findings(files)
-    deterministic_findings = release_shape + toggle_findings
+    # Metadata findings (#70) join the same splice with the same
+    # chunk-side standing; they are file-level (line 0) like
+    # release_shape, so the reworded-dedup tier never compares them, and
+    # severity consistency exempts them through the shared deterministic
+    # body suffix. CI-wiring findings (#66) join them the same way —
+    # file-level on the check's own path, and INLINE candidates rather
+    # than summary-only: unlike the metadata findings they never thread
+    # through the exclusion set below, so a genuinely unwired check
+    # reaches the PR as a comment on the file that adds it.
+    deterministic_findings = (
+        release_shape + toggle_findings + metadata_findings + ci_findings
+    )
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
     )
@@ -1528,6 +1854,28 @@ def orchestrate_review(
         tracer.event("specs", "relabel", findings=relabelled)
     findings = graded
 
+    # Evidence verdicts (#69), in spec grounding's slot: the only pass that
+    # reads a finding's ``evidence`` label, and it RELABELS rather than
+    # drops — the model judged the contradiction, this only enforces the
+    # severity ceiling on it, so a wrong label costs severity, never the
+    # finding. 1:1 and order-preserving, so sweep_start still marks the
+    # boundary.
+    evidence_downgraded = 0
+    if evidence_active:
+        downgraded = apply_evidence_verdicts(findings, evidence_active=True)
+        evidence_downgraded = sum(
+            1
+            for before, after in zip(findings, downgraded, strict=True)
+            if before.severity != after.severity
+        )
+        if evidence_downgraded:
+            logger.info(
+                "evidence: downgraded %d finding(s) the evidence contradicts to warning",
+                evidence_downgraded,
+            )
+            tracer.event("evidence", "downgrade", findings=evidence_downgraded)
+        findings = downgraded
+
     # The first pass that drops: an echo of the prompt's own example never
     # reaches the thread, consistency or grouping comparisons, a cap, or
     # sweep dedup, and its audit copy keeps the model's raw anchor. 1:1 and
@@ -1555,8 +1903,68 @@ def orchestrate_review(
     findings = apply_manifest_claim_check(findings, files, read=reader)
     model_lines = [f.line for f in findings]
     findings = apply_line_align(findings, added_lines_by_file(files), files=files)
+    # AFTER line align, deliberately, on the RAW model anchor: the window is
+    # centred where the model said the defect sits, not where the hunk-bounded
+    # passes gave up on it (#74). A demoted (line 0) finding is exactly the
+    # shape this pass exists to rescue, and re-running align after it would
+    # re-demote any move beyond its 5-line tolerance.
+    snapped = apply_anchor_snap(
+        findings, files, read=reader, model_lines=model_lines,
+    )
+    anchor_moves = sum(
+        1 for before, after in zip(findings, snapped, strict=True)
+        if after.line != before.line
+    )
+    anchor_unverified = sum(
+        1 for before, after in zip(findings, snapped, strict=True)
+        if after.anchor_unverified and not before.anchor_unverified
+    )
+    if anchor_moves or anchor_unverified:
+        logger.info(
+            "anchor snap: moved %d anchor(s) to quoted evidence, "
+            "marked %d unverified",
+            anchor_moves, anchor_unverified,
+        )
+    findings = snapped
+    before_threads = findings
     findings = apply_thread_dedup(findings, threads)
     findings = apply_settled_thread_suppression(findings, threads)
+    # Both thread gates now skip resolved or outdated threads (issue #73), so
+    # what they drop here was dropped against OPEN, CURRENT threads only, and
+    # what they let through can still restate a subject a closed thread
+    # raised — which earns the finding a previously-raised note, not a drop.
+    thread_suppressed = sum(
+        1
+        for before, after in zip(before_threads, findings, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    findings, thread_matched_resolved = _note_previously_raised(findings, threads)
+    if threads:
+        run_inputs["thread_dedup"] = {
+            "suppressed": thread_suppressed,
+            "matched_resolved": thread_matched_resolved,
+            "threads_read": len(threads),
+            # Threads that can no longer suppress anything: resolved OR
+            # outdated, the same predicate both gates skip on.
+            "threads_resolved": sum(1 for t in threads if t.resolved or t.outdated),
+        }
+    # AFTER both thread gates and the previously-raised note (#71): the
+    # ids inherit the gates' verdict — a finding a thread already
+    # suppressed never reaches the store's attention — and BEFORE
+    # severity consistency, so the refuted drop is not counted, raised or
+    # grouped by anything downstream. Off entirely (run record
+    # ``stable_ids`` stays ``null``, every ``id`` stays ``null``) unless
+    # the caller turns the feature on.
+    if stable_ids:
+        findings = apply_stable_ids(findings, files, verdict_store_loaded, threads)
+        collisions = stable_id_collisions(findings)
+        run_inputs["stable_ids"] = {
+            "assigned": sum(1 for f in findings if f.id is not None),
+            "reused_from_verdict": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_VERDICT),
+            "reused_from_thread": sum(1 for f in findings if f.id_reused_from == REUSED_FROM_THREAD),
+            "collisions": len(collisions),
+        }
+        tracer.event("stableids", "ok", **run_inputs["stable_ids"])
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1
@@ -1571,6 +1979,18 @@ def orchestrate_review(
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
     findings = apply_hedge_gate(findings, spec_digest=injected)
+    # Its own guard (#75), independent of grouping and the cap: any loaded
+    # rules file that declares a section scope turns the check on, so a
+    # wrong label is cleared BEFORE either pass can key on it — including
+    # when both are off and the label came from an override prompt.
+    rule_sections = _rule_sections(rules, scoped_rules)
+    if rule_sections:
+        findings, cleared_labels = apply_rule_scope_check(findings, sections=rule_sections)
+        logger.info(
+            "rule scope: cleared %d rule label(s) that no section covers", cleared_labels,
+        )
+        tracer.event("rulescope", "ok", cleared=cleared_labels)
+        run_inputs["rule_scope_cleared"] = cleared_labels
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
@@ -1581,6 +2001,22 @@ def orchestrate_review(
             findings, cap=max_findings_per_rule, confidence_floor=confidence_floor,
             sweep_start=sweep_start, tracer=tracer,
         )
+    # AFTER grouping and the cap (#74): ``locations`` is final here, and the
+    # verification shrinks only the representative's list — a folded member's
+    # own drop reason names where it was folded, which stays true. BEFORE the
+    # gate and the suggestion pass, so both read the verified locations.
+    verified = apply_location_verification(findings, read=reader)
+    unverified_sites = sum(
+        1 for before, after in zip(findings, verified, strict=True)
+        if after is not before
+    )
+    if unverified_sites:
+        logger.info(
+            "location verification: rewrote %d grouped finding(s) "
+            "with an unverifiable Also-at site",
+            unverified_sites,
+        )
+    findings = verified
     cleared_suggestions: list[tuple[Finding, str]] = []
     if suggestions == "on":
         findings, suggestion_reasons = apply_suggestion_validation(
@@ -1622,9 +2058,17 @@ def orchestrate_review(
     if suggestions == "on":
         run_inputs["suggestions"] = _suggestion_record(findings_active, cleared_suggestions)
 
+    # Issue #72: a partial review is no longer "Approved". The failed units
+    # contributed no findings, so the old expression read a review that did
+    # not happen as one that found nothing. Precedence: an active
+    # error-severity finding still wins over incompleteness (a real defect
+    # beats a coverage gap), and the total-failure "Error" verdict left at
+    # the all-failed exit above can never be shadowed from here.
     verdict = (
         "Request-Changes"
         if any(f.severity == "error" for f in findings_active)
+        else "Incomplete"
+        if chunks_failed
         else "Approved"
     )
 
@@ -1633,6 +2077,7 @@ def orchestrate_review(
         run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
     )
     incremental_note = _incremental_note(scope, len(files))
+    evidence_note = _evidence_note(run_inputs["evidence"], evidence_downgraded)
     posted = False
     inline_posted = 0
     post_failures: list[tuple[str, str]] = []
@@ -1659,10 +2104,14 @@ def orchestrate_review(
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
+            evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
+            thread_accounting=_thread_dedup_accounting(
+                thread_suppressed, thread_matched_resolved,
+            ),
             incremental_note=incremental_note,
         )
         fallback_summary = summary
@@ -1676,9 +2125,21 @@ def orchestrate_review(
     # inline batch rides on it; an inline-mode run has no summary to gate on.
     inline_attempted = 0
     inline_failed = False
-    if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
+    # Metadata findings are summary-only by design (#70): they report on the
+    # PR as a whole, not on a line, so the inline batch is selected from the
+    # findings that are not them. The exclusion is an explicit identity set
+    # threaded from the check that produced the findings — never a reserved
+    # rule or title a model finding could accidentally match. The quality
+    # passes above replace() a finding only when they change it, and none of
+    # them changes one of these (file-level, deterministic-suffixed,
+    # confidence 1.0); the worst case of a future pass that did is one
+    # summary finding also posted inline — fail-open, never a silent loss.
+    # With the feature off the set is empty and this is exactly findings_active.
+    metadata_only = {id(f) for f in metadata_findings}
+    inline_pool = [f for f in findings_active if id(f) not in metadata_only]
+    if post_inline_wanted and inline_pool and (posted or not post_summary_wanted):
         ordered = sorted(
-            findings_active,
+            inline_pool,
             key=lambda f: (
                 _SEVERITY_RANK.get(f.severity, 3),
                 _SCOPE_RANK.get(f.scope, 0),
@@ -1705,10 +2166,12 @@ def orchestrate_review(
     # some of them without an anchor the summary has to say so — otherwise it
     # promises a per-finding comment the PR never received. The counts only
     # exist after posting, so the disclosure rides a second post_summary call,
-    # which the forges already implement as an update-in-place.
+    # which the forges already implement as an update-in-place. Both sides
+    # count the inline-eligible pool (#70: metadata findings are summary-only
+    # by design, so they are neither promised nor accounted as missing).
     if (
         post_summary_wanted and posted and post_inline_wanted
-        and len(findings_active) > inline_posted
+        and len(inline_pool) > inline_posted
     ):
         refreshed = _render_summary(
             pr, files, verdict, findings_active, model,
@@ -1718,13 +2181,17 @@ def orchestrate_review(
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
+            evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
-                len(findings_active), inline_attempted, inline_posted,
+                len(inline_pool), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
+            ),
+            thread_accounting=_thread_dedup_accounting(
+                thread_suppressed, thread_matched_resolved,
             ),
             incremental_note=incremental_note,
         )
@@ -1735,7 +2202,7 @@ def orchestrate_review(
             logger.error("summary re-post with inline accounting failed: %s", e)
             post_failures.append(("summary", post_failure_cause(e)))
 
-    degraded = _degraded_record(post_failures)
+    degraded = _degraded_record(post_failures, failed_chunk_rows)
     if degraded is not None and fallback_summary is None:
         fallback_summary = _render_summary(
             pr, files, verdict, findings_active, model,
@@ -1745,10 +2212,14 @@ def orchestrate_review(
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
+            evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
+            thread_accounting=_thread_dedup_accounting(
+                thread_suppressed, thread_matched_resolved,
+            ),
             incremental_note=incremental_note,
         )
 
@@ -1913,6 +2384,27 @@ def _example_titles(prompt_context: PromptContext) -> tuple[str, ...]:
         except (OSError, ValueError) as e:
             logger.warning("example echo check: cannot read packaged %s.md (continuing without it): %s", name, e)
     return prompt_example_titles(*texts)
+
+
+def _rule_sections(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
+    """Every scoped section of the loaded rules files, always-on first (#75).
+
+    ``rules`` is the always-on ``PRXREF_REVIEW_RULES`` file and
+    ``scoped_rules`` the path-scoped files, either possibly ``None``; the
+    sections are read duck-typed off ``sections``, and an object without
+    the attribute — a hand-constructed double or a pre-#75 stand-in —
+    reads as none, so the applicability check never fires on it. The
+    result is what guards the :func:`quality.apply_rule_scope_check` call:
+    empty (check skipped, ``rule_scope_cleared`` stays ``None``) unless at
+    least one loaded file declares a ``scope:`` line under an ATX heading.
+    """
+    sections: tuple[Any, ...] = ()
+    if rules is not None:
+        sections += getattr(rules, "sections", ()) or ()
+    if scoped_rules is not None:
+        for rules_file in getattr(scoped_rules, "files", ()) or ():
+            sections += getattr(rules_file, "sections", ()) or ()
+    return sections
 
 
 def _group_findings(
@@ -2100,21 +2592,43 @@ def post_failure_cause(exc: BaseException) -> str:
     return "permission" if status in PERMISSION_STATUSES else "error"
 
 
-def _degraded_record(failures: Sequence[tuple[str, str]]) -> dict | None:
-    """The run record's ``degraded`` value from ``(post, cause)`` failures.
+def _degraded_record(
+    failures: Sequence[tuple[str, str]],
+    failed_chunk_rows: Sequence[Mapping[str, object]] = (),
+) -> dict | None:
+    """The run record's ``degraded`` value from failed posts and failed chunks.
 
     ``None`` when nothing failed. ``failed`` keeps each post kind once, in
-    the order it first failed; ``cause`` is ``"permission"`` when any failure
-    was. ``fallback`` and ``annotations`` start empty for the CLI to fill.
+    the order it first failed, after ``"chunk"`` when any review unit
+    failed (the chunk fails before any post is attempted). ``cause`` is
+    ``"permission"`` when any post failure was (a blocked write outranks
+    everything: it is the one the operator must act on), else ``"partial"``
+    when a chunk failed (issue #72: the review only partially happened),
+    else ``"error"``. ``fallback`` and ``annotations`` start empty for the
+    CLI to fill. ``chunks`` carries one ``{"index", "files", "error"}`` row
+    per failed review unit, and appears only when at least one did, so the
+    #48 post-failure shape is unchanged.
     """
-    if not failures:
+    if not failures and not failed_chunk_rows:
         return None
     failed: list[str] = []
+    if failed_chunk_rows:
+        failed.append("chunk")
     for kind, _ in failures:
         if kind not in failed:
             failed.append(kind)
-    cause = "permission" if any(c == "permission" for _, c in failures) else "error"
-    return {"cause": cause, "failed": failed, "fallback": [], "annotations": 0}
+    if any(c == "permission" for _, c in failures):
+        cause = "permission"
+    elif failed_chunk_rows:
+        cause = "partial"
+    else:
+        cause = "error"
+    record: dict[str, object] = {
+        "cause": cause, "failed": failed, "fallback": [], "annotations": 0,
+    }
+    if failed_chunk_rows:
+        record["chunks"] = [dict(row) for row in failed_chunk_rows]
+    return record
 
 
 def _with_degraded(result: dict, degraded: dict | None, summary: str | None) -> dict:
@@ -2447,7 +2961,105 @@ def _inline_accounting(
     return f"Inline comments: {posted} of {active} findings ({detail})."
 
 
+def _thread_dedup_accounting(suppressed: int, matched_resolved: int) -> str:
+    """Render the thread-dedup reconciliation line (issue #73).
+
+    The summary used to be silent about both halves of the thread gates: a
+    finding suppressed as a duplicate vanished without a trace, and a finding
+    that matched a resolved thread was re-posted with nothing saying it had
+    history. This line names both counts; ``""`` when neither happened, so a
+    run without thread history keeps a byte-identical summary. "Resolved"
+    here covers outdated threads too — anything the gates skip.
+    """
+    if not suppressed and not matched_resolved:
+        return ""
+    return (
+        f"Thread dedup: {suppressed} suppressed as duplicates of open "
+        f"threads; {matched_resolved} matched resolved threads and are "
+        f"posted below."
+    )
+
+
+def _thread_reference(t: Thread) -> str:
+    """How a previously-raised note names one thread: its URL when the forge
+    reported one (GitHub's GraphQL read does), else ``thread by <author> at
+    <path>:<line>`` with the pieces a forge without permalinks can still
+    give."""
+    if t.url:
+        return t.url
+    who = t.author or "unknown"
+    if t.path:
+        if isinstance(t.line, int) and t.line > 0:
+            return f"thread by {who} at {t.path}:{t.line}"
+        return f"thread by {who} at {t.path}"
+    return f"thread by {who} on the PR"
+
+
+def _note_previously_raised(
+    findings: Sequence[Finding], threads: Sequence[Thread]
+) -> tuple[list[Finding], int]:
+    """Stamp surviving findings that restate a closed thread (issue #73).
+
+    For every finding that survived both thread gates, the first resolved or
+    outdated thread that matches it under either gate's rule earns the
+    finding a ``previous_thread`` sentence — ``Previously raised in <ref>;
+    still present at <file>:<line>.`` — which renders as a suffix on the
+    posted inline body and the summary bullet. Pure, 1:1 and
+    order-preserving; already-dropped findings pass through untouched.
+    Returns the new list and the count of findings stamped.
+    """
+    if not any(t.resolved or t.outdated for t in threads):
+        return list(findings), 0
+    result: list[Finding] = []
+    noted = 0
+    for f in findings:
+        if f.drop_reason is not None:
+            result.append(f)
+            continue
+        t = previously_discussed_thread(f, threads)
+        if t is None:
+            result.append(f)
+            continue
+        where = f"{f.file}:{f.line if f.line > 0 else '—'}"
+        result.append(replace(
+            f,
+            previous_thread=(
+                f"Previously raised in {_thread_reference(t)}; "
+                f"still present at {where}."
+            ),
+        ))
+        noted += 1
+    return result, noted
+
+
 HEARTBEAT_SECONDS = 30.0
+
+
+def _fetch_pr_commits(
+    forge: Forge, ref: PRRef, pr: PRData,
+) -> tuple[Sequence[CommitData] | None, str]:
+    """The PR's commit list for the metadata rules, or why none came back.
+
+    ``get_commits`` is an optional Forge method resolved with
+    ``getattr``, like ``get_summary``: a forge without it — and every
+    ``--diff-file`` run, whose local forge has no commits to list — gets
+    ``(None, "no commit source")`` and the commit-reference check reports
+    itself skipped rather than failed. Both PR shas are handed over as
+    ``get_pr`` read them; a forge that needs no range ignores them. The
+    call is best-effort like the thread listing: a transport failure is
+    logged and also degrades to a skip with the reason, because the
+    metadata checks are advisory and must never fail a review.
+    """
+    getter = getattr(forge, "get_commits", None)
+    head = getattr(pr, "source_sha", "") or ""
+    base = getattr(pr, "target_sha", "") or ""
+    if getter is None or not head or not base:
+        return None, "no commit source"
+    try:
+        return list(getter(ref, base_sha=base, head_sha=head)), ""
+    except Exception as e:  # noqa: BLE001
+        logger.warning("get_commits failed (best-effort): %s", e)
+        return None, f"commit source failed: {e.__class__.__name__}"
 
 
 def _make_file_reader(
@@ -2503,18 +3115,20 @@ def _make_file_reader(
 def _context_blocks(
     chunk, reader, *, include_definitions: bool, unit: repo_unit.UnitContext | None = None,
 ) -> str:
-    """Render the chunk's dependency, definition, contract and reader blocks; never raises.
+    """Render the chunk's dependency, definition, contract, reader and standards blocks; never raises.
 
     ``unit`` is the chunk's repository context. Its definition lines follow
     the same-file definitions under one header, its contract lines form the
-    contracts block and its reader lines the last block; they render with no
+    contracts block, its reader lines the readers block and its standards
+    lines the last block; they render with no
     ``reader`` too, over empty dependency and same-file lists. ``None``, or a
     unit with no lines, is exactly the rendering without repository context.
     """
     extra = unit.definition_lines if unit is not None else ()
     contracts = unit.contract_lines if unit is not None else ()
     readers = unit.reader_lines if unit is not None else ()
-    if reader is None and not (extra or contracts or readers):
+    standards = unit.standards_lines if unit is not None else ()
+    if reader is None and not (extra or contracts or readers or standards):
         return ""
     deps: list[str] = []
     defs: list[str] = []
@@ -2528,12 +3142,13 @@ def _context_blocks(
             )
         except Exception as e:  # noqa: BLE001
             logger.debug("chunk context unavailable: %s", e)
-            if not (extra or contracts or readers):
+            if not (extra or contracts or readers or standards):
                 return ""
             deps, defs = [], []
     try:
         return chunk_context.render_context_blocks(
-            deps, defs, extra_def_lines=extra, contract_lines=contracts, reader_lines=readers,
+            deps, defs, extra_def_lines=extra, contract_lines=contracts,
+            reader_lines=readers, standards_lines=standards,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("chunk context unavailable: %s", e)
@@ -2546,9 +3161,9 @@ class _RepoPlan:
 
     ``reader`` is the run's one :class:`prxref.repo_reader.RepoReader`, or
     ``None``. ``diff_paths`` holds every PR diff file's path: a read of one
-    goes to the shared, uncapped ``reader.read``. The listing and contract
-    fields are the ``"repo"`` level's once-per-run inputs, and stay empty at
-    ``"diff"`` or without a reader.
+    goes to the shared, uncapped ``reader.read``. The listing, contract and
+    standards fields are the ``"repo"`` level's once-per-run inputs, and stay
+    empty at ``"diff"`` or without a reader.
     """
 
     mode: str
@@ -2560,6 +3175,9 @@ class _RepoPlan:
     listing_complete: bool = False
     contract_paths: tuple[str, ...] = ()
     contract_priority: tuple[str, ...] = ()
+    standards_paths: tuple[str, ...] = ()
+    standards_priority: tuple[str, ...] = ()
+    standards_max_chars: int = 4000
 
 
 def _plan_repo_context(
@@ -2574,7 +3192,8 @@ def _plan_repo_context(
     inputs. The reader reads
     ``repo_dir`` when it is given, else the forge at the PR's head sha. At
     ``"repo"`` with a reader, the listing is taken here, once, and the
-    contract files are selected here, once. At ``"repo"``, a missing reader
+    contract files and the standards files are selected here, once. At
+    ``"repo"``, a missing reader
     or a missing listing logs the run's one WARNING naming
     ``PRXREF_REPO_CONTEXT``.
     """
@@ -2604,6 +3223,7 @@ def _plan_repo_context(
             "outside the PR's own files",
         )
     globs = list(initial["contract_globs"])
+    standards_globs = list(initial["standards_globs"])
     return _RepoPlan(
         mode, reader, initial["max_chars"], exclude, diff_paths,
         listing_paths=frozenset(listing.paths) if listing is not None else None,
@@ -2613,6 +3233,12 @@ def _plan_repo_context(
             diff_paths=[f.path for f in files if f.status != "removed"],
         )),
         contract_priority=tuple(repo_contracts.literal_contract_paths(globs)),
+        standards_paths=tuple(repo_contracts.select_contract_files(
+            standards_globs, listing=listing.paths if listing is not None else None,
+            diff_paths=[f.path for f in files if f.status != "removed"],
+        )),
+        standards_priority=tuple(repo_contracts.literal_contract_paths(standards_globs)),
+        standards_max_chars=initial["standards_max_chars"],
     )
 
 
@@ -2647,6 +3273,8 @@ def _chunk_unit(
             mode=plan.mode, read=read, max_chars=plan.max_chars,
             listing_paths=plan.listing_paths, listing_complete=plan.listing_complete,
             contract_paths=plan.contract_paths, contract_priority=plan.contract_priority,
+            standards_paths=plan.standards_paths, standards_priority=plan.standards_priority,
+            standards_max_chars=plan.standards_max_chars,
             exclude=plan.exclude,
         )
     except Exception as e:  # noqa: BLE001 - context is never worth a failed review
@@ -2785,6 +3413,14 @@ FOLLOWUP_INACTIVE_WARNING = (
     "the context follow-up is off for this run"
 )
 
+CI_WIRING_MODES = ("off", "on")
+
+CI_WIRING_INACTIVE_WARNING = (
+    "PRXREF_CI_WIRING=on, but there is no repository reader (the forge cannot "
+    "read files at the PR head and no repository directory was given); the CI "
+    "wiring check is off for this run"
+)
+
 _FOLLOWUP_TOTALS = ("confirmed", "unconfirmed", "discarded", "input_tokens", "output_tokens")
 
 
@@ -2877,6 +3513,7 @@ def _run_workers(
     parse_retries: int = 0,
     followup_floor: float | None = None,
     followup_records: list[dict[str, Any] | None] | None = None,
+    evidence_blocks: Sequence[str] | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -2917,6 +3554,9 @@ def _run_workers(
                 repo_plan=repo_plan, unit_records=unit_records,
                 parse_retries=parse_retries,
                 followup_floor=followup_floor, followup_records=followup_records,
+                evidence_block=(
+                    evidence_blocks[i] if evidence_blocks is not None else ""
+                ),
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -3083,6 +3723,7 @@ def _invoke_chunk(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
             accept_suggestion=prompt_context.suggestion_active,
+            accept_evidence=prompt_context.evidence_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -3160,15 +3801,18 @@ def _run_worker(
     parse_retries: int = 0,
     followup_floor: float | None = None,
     followup_records: list[dict[str, Any] | None] | None = None,
+    evidence_block: str = "",
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
-    # The chunk's own scoped rules replace the run-wide worker block; both
-    # attempts below take this context, so the retry keeps the chunk's rules.
-    unit_context = (
-        prompt_context if scoped_block is None
-        else replace(prompt_context, rules_worker=scoped_block.text)
-    )
+    # The chunk's own scoped rules replace the run-wide worker block, and
+    # its evidence block rides beside them (#69); both attempts below take
+    # this context, so the retry keeps the chunk's rules and evidence.
+    unit_context = prompt_context
+    if scoped_block is not None:
+        unit_context = replace(unit_context, rules_worker=scoped_block.text)
+    if evidence_block:
+        unit_context = replace(unit_context, evidence_block=evidence_block)
     # Logged on ENTRY, not only on completion. A chunk that never finishes
     # otherwise leaves no evidence it ever started, so a hang cannot be
     # attributed to a chunk, a file, or a model.
@@ -3241,6 +3885,16 @@ def _run_worker(
             followup_records[index - 1] = row
 
     error = res["error"]
+    if error and _is_timeout_error(error):
+        # Issue #72: the backend's timeout vocabulary names the model and
+        # the exception class, neither of which tells an operator what to
+        # do. The rewrite names the chunk and the wait, and points at the
+        # lever that exists (--timeout, or leaving it alone so the prompt-
+        # scaled deadline applies).
+        error = (
+            f"[chunk {index}/{total}] timed out after "
+            f"{res.get('elapsed_ms', 0) / 1000:.0f}s; increase --timeout"
+        )
     if error:
         logger.error("[chunk %d/%d] worker reported error: %s", index, total, error)
         tracer.event(
@@ -3283,6 +3937,7 @@ def _run_sweep(
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     scoped_block: Any = None,
     parse_retries: int = 0,
+    evidence_block: str = "",
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -3301,7 +3956,11 @@ def _run_sweep(
     failed chunk in the caller's coverage accounting. ``scoped_block``, the
     sweep's path-scoped rules block, replaces ``rules_sweep`` in the context
     and its files ride the ``sweep start`` event as ``rules``; ``None`` (no
-    scoped rules) leaves both exactly as they were. ``parse_retries`` is
+    scoped rules) leaves both exactly as they were. ``evidence_block``
+    (issue #69) is the sweep's GLOBAL evidence block — a chunk's matched
+    items are that chunk's business — and fills ``evidence_block`` in the
+    context the same way; ``""`` (the default) leaves the prompt as it was.
+    ``parse_retries`` is
     passed to the reviewer unchanged (issue #21), and the result carries
     the meta's ``parse_retries`` and ``first_error`` exactly as a chunk's
     does (:func:`_retry_meta`); a sweep that raised carries neither.
@@ -3310,6 +3969,8 @@ def _run_sweep(
     t0 = time.perf_counter()
     if scoped_block is not None:
         prompt_context = replace(prompt_context, rules_sweep=scoped_block.text)
+    if evidence_block:
+        prompt_context = replace(prompt_context, evidence_block=evidence_block)
     digest = systemic.build_digest(files, token_budget)
     digested = {f.path for f in files}
     discussion = [t for t in threads if t.path in digested]
@@ -3347,6 +4008,7 @@ def _run_sweep(
         finding = _coerce_finding(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
+            accept_evidence=prompt_context.evidence_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -3384,7 +4046,7 @@ def _run_sweep(
 
 def _coerce_finding(
     item, *, accept_scope: bool = False, accept_rule: bool = False,
-    accept_suggestion: bool = False,
+    accept_suggestion: bool = False, accept_evidence: bool = False,
 ) -> Finding | None:
     if isinstance(item, Finding):
         return item
@@ -3407,6 +4069,7 @@ def _coerce_finding(
                 rule=normalize_rule(item.get("rule")) if accept_rule else None,
                 suggestion=suggestion,
                 suggestion_end_line=suggestion_end_line,
+                evidence=normalize_evidence(item.get("evidence")) if accept_evidence else None,
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)
@@ -3430,8 +4093,10 @@ def _render_summary(
     failed_chunks: Sequence[tuple[str, Sequence[str]]] = (),
     include_verdict: bool = True,
     inline_accounting: str | None = None,
+    thread_accounting: str = "",
     spec_note: str = "",
     ticket_note: str = "",
+    evidence_note: str = "",
     cost_label: str = "",
     size_advisory_line: str = "",
     summary_template: str = "",
@@ -3446,10 +4111,11 @@ def _render_summary(
     receiving that placeholder's value. The five marker slots
     (``{error_marker}`` ... ``{out_of_ticket_marker}``,
     :func:`markers.marker_slots`) are filled from the effective glyph table,
-    as are the bullets and the outside-ticket heading. ``spec_note`` and
-    ``ticket_note`` ride ``{spec_note}{ticket_note}`` on the line after the counts; each
-    carries its own trailing newline when non-empty, so empty notes leave the
-    summary byte-identical. ``{findings}`` lists the in-ticket and unjudged
+    as are the bullets and the outside-ticket heading. ``spec_note``,
+    ``ticket_note`` and ``evidence_note`` ride
+    ``{spec_note}{ticket_note}{evidence_note}`` on the line after the counts;
+    each carries its own trailing newline when non-empty, so empty notes
+    leave the summary byte-identical. ``{findings}`` lists the in-ticket and unjudged
     findings first; findings outside the ticket (scope ``"out"``) follow
     under a bold ``Outside the ticket (N)`` heading led by
     :func:`markers.out_of_ticket_marker`; when no other finding exists,
@@ -3487,7 +4153,10 @@ def _render_summary(
     ``inline_accounting`` goes to the ``{inline_accounting}`` slot when the
     template has one; otherwise it rides the end of ``{findings}``, as it
     always has, and a template with neither slot gets it appended to the
-    body. A template without ``{findings}`` whose finding group (see
+    body. ``thread_accounting`` (:func:`_thread_dedup_accounting`, issue
+    #73, ``""`` when neither thread count is non-zero) rides that exact same
+    plumbing, joined after the inline line with a blank line between them.
+    A template without ``{findings}`` whose finding group (see
     :func:`prxref.prompt_templates.uncovered_summary_groups`) has neither
     of its slots gets that group's findings appended as ``**Other findings
     (N)**`` with a WARNING, so no finding is silently dropped. Other
@@ -3528,7 +4197,14 @@ def _render_summary(
 
     found = placeholders(template)
     has_findings = "findings" in found
-    accounting = inline_accounting or ""
+    # The inline and thread-dedup reconciliation lines ride the SAME slot
+    # plumbing: joined with a blank line so either can be empty without
+    # leaving a seam, and both reach {inline_accounting}, the end of
+    # {findings}, or the appended extras exactly as the inline line alone
+    # always has.
+    accounting = "\n\n".join(
+        line for line in (inline_accounting or "", thread_accounting) if line
+    )
     if accounting and has_findings and "inline_accounting" not in found:
         bullets = f"{bullets}\n\n{accounting}"
 
@@ -3562,6 +4238,7 @@ def _render_summary(
         "outofscope_count": str(counts["outofscope"]),
         "spec_note": spec_note,
         "ticket_note": ticket_note,
+        "evidence_note": evidence_note,
         "findings": bullets,
         "attribution": attribution,
         "inline_accounting": accounting,
@@ -3710,6 +4387,29 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _evidence_note(record: Mapping[str, Any] | None, downgraded: int) -> str:
+    """Render the summary's execution-evidence note (#69), ``""`` when none was supplied.
+
+    One blockquote line says what was supplied (items, and the files they
+    came from) and how far the matched items reached (how many chunk
+    prompts), so a PR reader can tell an evidence-backed review from an
+    unevidenced one; a second clause, only when any finding conceded a
+    contradiction, says how many were downgraded to ``warning``. The note
+    rides ``{evidence_note}`` after ``{ticket_note}``, and carries its own
+    trailing newline, so an empty return leaves the summary byte-identical.
+    """
+    if record is None:
+        return ""
+    line = (
+        f"> ℹ️ Execution evidence: {record.get('items', 0)} item(s) from "
+        f"{len(record.get('files') or [])} file(s); matched items reached "
+        f"{record.get('matched_chunks', 0)} chunk prompt(s)"
+    )
+    if downgraded:
+        line += f"; {downgraded} contradicted finding(s) downgraded to warning"
+    return line + "\n"
+
+
 def _log_safe_origin(origin: str) -> str:
     """Name a spec source for the operator's log, never its credentials.
 
@@ -3818,13 +4518,21 @@ def _summary_bullets(
 
     ``separator`` defaults to :data:`SUMMARY_BULLET_SEPARATOR` (``" — "``);
     a file-level finding's line is always rendered ``—``, whatever the
-    separator. ``""`` for no findings.
+    separator. ``""`` for no findings. A finding carrying a
+    ``previous_thread`` note (issue #73) has it appended after its title,
+    joined by the same separator, so the bullet says the finding was raised
+    before in a since-resolved thread.
     """
-    return "\n".join(
-        f"- {marker_for(f.severity, f.scope)} "
-        f"`{f.file}:{f.line if f.line > 0 else '—'}`{separator}{f.title}"
-        for f in findings
-    )
+    lines = []
+    for f in findings:
+        line = (
+            f"- {marker_for(f.severity, f.scope)} "
+            f"`{f.file}:{f.line if f.line > 0 else '—'}`{separator}{f.title}"
+        )
+        if f.previous_thread:
+            line = f"{line}{separator}{f.previous_thread}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _summary_group_of(f: Finding) -> str:
@@ -3841,11 +4549,16 @@ def _summary_group_of(f: Finding) -> str:
 def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
     block = format_suggestion_block(f, suggestion_style)
     suggestion = f"{block}\n\n" if block else ""
+    # The previously-raised note (issue #73) is a SUFFIX, after the footer:
+    # the header, body, suggestion and attribution lines are pinned by frozen
+    # tests that prefix-match or compare the leading body, and the note is
+    # context for a re-review, not part of the finding itself.
+    note = f"\n\n{f.previous_thread}" if f.previous_thread else ""
     return (
         f"{inline_header(f)}\n\n"
         f"{f.body}\n\n"
         f"{suggestion}"
-        f"---\n*Reviewed by prxref · model={model}*"
+        f"---\n*Reviewed by prxref · model={model}*{note}"
     )
 
 
@@ -3895,6 +4608,8 @@ def _summary_only_run(
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
     toggle_findings: list[Finding] | None = None,
+    metadata_findings: list[Finding] | None = None,
+    ci_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
@@ -3911,7 +4626,18 @@ def _summary_only_run(
     computed over the full file list — are put through the same location
     and quality passes a chunk-sourced finding gets
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
-    they reach ``findings_active`` / ``verdict`` / the summary. No
+    they reach ``findings_active`` / ``verdict`` / the summary. The
+    PR-metadata findings (#70, ``metadata_findings``) and the CI-wiring
+    findings (#66, ``ci_findings``) join them the same
+    way; no inline batch is ever posted from this exit, so the
+    summary-only contract needs no enforcement here. Location validation
+    runs only when the diff holds files: a metadata finding about a branch
+    name exists even on an empty diff, where it anchors on ``""`` and
+    there is no diff path set to validate against — the deterministic
+    producers are trusted with their own anchors, exactly as they are on
+    the empty-diff path that predates them (both heuristics yield ``[]``
+    with no files, so the guard changes nothing when the feature is off).
+    No
     :func:`apply_line_align` call here: both heuristics already anchor on a
     real diff line and there is no worker-supplied anchor to re-corroborate.
     An empty diff still yields ``release_shape_findings=[]`` and
@@ -3938,9 +4664,13 @@ def _summary_only_run(
     degraded: dict | None = None
     summary: str | None = None
 
-    findings = list(release_shape_findings or []) + list(toggle_findings or [])
+    findings = (
+        list(release_shape_findings or []) + list(toggle_findings or [])
+        + list(metadata_findings or []) + list(ci_findings or [])
+    )
     if findings:
-        findings = apply_location_validation(findings, [f.path for f in files])
+        if files:
+            findings = apply_location_validation(findings, [f.path for f in files])
         findings = apply_quality_gate(
             findings, confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,

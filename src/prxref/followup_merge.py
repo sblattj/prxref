@@ -7,8 +7,10 @@ what that re-run changes in the chunk's findings:
 
 * A re-run finding **confirms** a question when it clears the confidence
   floor, sits in the same file, and either lands within
-  :data:`prxref.quality.DEFAULT_LINE_TOLERANCE` lines of it, restates its
-  title, or names one of the symbols the follow-up resolved for it.
+  :data:`prxref.quality.DEFAULT_LINE_TOLERANCE` lines of it (both lines
+  positive), restates its title, names one of the symbols the follow-up
+  resolved for it, or — when either side is file-level (line 0, issue
+  #74) — names one whole code identifier the question's own claim names.
 * A confirmed question is replaced in place by its confirming finding,
   which then runs every quality pass like any other worker finding.
 * A question with resolved names and no confirmation is marked with a
@@ -25,7 +27,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from .quality import DEFAULT_LINE_TOLERANCE, normalize_title
+from .quality import DEFAULT_LINE_TOLERANCE, _code_tokens, normalize_title
 from .triage import Finding
 
 UNCONFIRMED_PREFIX = "not confirmed by context follow-up"
@@ -75,9 +77,12 @@ def confirms(
     in the quality gate) and name the same file as ``question``. It must
     then match on at least one of: a line within ``line_window`` of the
     question's line (both lines positive), an equal
-    :func:`prxref.quality.normalize_title`, or a word-boundary mention of
+    :func:`prxref.quality.normalize_title`, a word-boundary mention of
     one of ``names`` (the symbols the follow-up resolved for the question)
-    in its title or body.
+    in its title or body, or — when either finding is file-level (line 0,
+    issue #74) — one whole shared code identifier between the two claims
+    (:func:`prxref.quality._code_tokens`; a compound part alone never
+    matches), which a mere line window can never decide.
     """
     if _confidence(rerun) < floor:
         return False
@@ -85,6 +90,11 @@ def confirms(
         return False
     if question.line > 0 and rerun.line > 0 and abs(rerun.line - question.line) <= line_window:
         return True
+    if question.line <= 0 or rerun.line <= 0:
+        if _code_tokens(f"{question.title or ''} {question.body or ''}") & _code_tokens(
+            f"{rerun.title or ''} {rerun.body or ''}"
+        ):
+            return True
     q_title = normalize_title(question.title or "")
     if q_title and normalize_title(rerun.title or "") == q_title:
         return True

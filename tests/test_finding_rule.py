@@ -133,10 +133,25 @@ class TestNormalizeRule:
 
 
 class TestFindingRuleField:
-    def test_rule_is_the_trailing_field_and_defaults_to_none(self):
+    def test_rule_is_a_trailing_field_and_defaults_to_none(self):
         names = [f.name for f in dataclasses.fields(Finding)]
-        assert names == [*BASE_FIELDS, "rule", "locations", "suggestion", "suggestion_end_line"]
+        assert names == [
+            *BASE_FIELDS,
+            "rule", "locations", "suggestion", "suggestion_end_line",
+            "previous_thread", "anchor_unverified", "evidence",
+            "id", "anchor_block", "id_reused_from",
+        ]
         assert Finding("a.py", 1, "error", 0.9, "t", "b").rule is None
+        # Issue #73's previously-raised note trails everything but #69's
+        # evidence verdict, which is last.
+        assert Finding("a.py", 1, "error", 0.9, "t", "b").previous_thread is None
+        # Issue #74's anchor-snap mark trails even that.
+        assert Finding("a.py", 1, "error", 0.9, "t", "b").anchor_unverified is False
+        assert Finding("a.py", 1, "error", 0.9, "t", "b").evidence is None
+        # Issue #71's stable-id fields trail everything: null until the
+        # id pass stamps them.
+        f = Finding("a.py", 1, "error", 0.9, "t", "b")
+        assert (f.id, f.anchor_block, f.id_reused_from) == (None, None, None)
 
     def test_positional_construction_through_scope_still_works(self):
         f = Finding("a.py", 1, "error", 0.9, "t", "b", None, SCOPE_OUT)

@@ -1,16 +1,21 @@
 """Deterministic quality passes over worker findings.
 
-Sixteen passes run before posting, in the order ``orchestrate_review``
+Twenty passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, pass 12 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on, and pass 13 only when a team rules file is loaded
-and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. A seventeenth
-deterministic check, the release-shaped-PR heuristic, and an eighteenth,
-the pinned-toggle heuristic, are not passes at all:
+severity map, pass 10 only when ``PRXREF_STABLE_IDS`` turns stable finding
+ids on (#71, ``prxref.stable_ids.apply_stable_ids``), pass 14 only when
+the loaded rules file declares at least
+one section scope, pass 15 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 16 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 17
+(``apply_anchor_snap`` and ``apply_location_verification``) do only what
+the head-file reader can serve: without one they change nothing. A
+twenty-first deterministic check, the release-shaped-PR heuristic, and a
+twenty-second, the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
 before pass 1, and each then flows through every pass below like a model
-finding, except that pass 9 leaves it out. Every ``drop_reason`` prefix
+finding, except that pass 11 leaves it out. Every ``drop_reason`` prefix
 these passes emit is tabulated for operators in ``docs/quality.md``.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
@@ -65,34 +70,75 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
    an anchor survives only when it ties the file's best evidence match
    or sits within tolerance of it, and a blank or pure-punctuation
    anchor never survives while any token-bearing added line exists.
-7. ``apply_thread_dedup``: drop findings that duplicate an already-open
-   or existing thread on the PR (path + line-window + shared distinctive
-   tokens), with ``drop_reason`` ``duplicate of existing thread``.
-8. ``apply_settled_thread_suppression``: drop findings that re-litigate a
-   subject an existing thread already argued out — same path plus shared
-   distinctive tokens, with NO line test, because line alignment has already
-   demoted a file-level finding to line 0 by this point
+7. ``apply_anchor_snap``: every align pass above reads only the diff
+   hunks, so a defect the model quoted correctly but anchored outside
+   every hunk is unreachable (issue #74). This pass reads the finding's
+   own file at the head sha (the same reader the chunk context uses) and
+   anchors it on the nearest occurrence of its quoted code — backticked
+   spans first, then double-quoted ones, then ``catch (…`` / ``if (…``
+   interiors — within :data:`ANCHOR_SNAP_WINDOW` lines of the line the
+   MODEL reported (``model_lines``, captured before pass 6). It moves
+   only what needs moving: a file-level (0) anchor or one further than
+   :data:`DEFAULT_LINE_TOLERANCE` from the match. A finding whose
+   snippet the head file does not hold, whose multi-match it cannot
+   break, or that sits file-level with no snippet at all is marked
+   ``anchor_unverified`` and loses
+   :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT` of confidence, so the gate
+   may drop it; an unreadable file, a dropped finding and a
+   deterministic check's finding are untouched.
+8. ``apply_thread_dedup``: drop findings that duplicate an already-open
+   and current thread on the PR (path + line-window + shared distinctive
+   tokens), with ``drop_reason`` ``duplicate of existing thread``; a
+   resolved or outdated thread never matches (issue #73).
+9. ``apply_settled_thread_suppression``: drop findings that re-litigate a
+   subject an existing open, current thread already argued out — same path
+   plus shared distinctive tokens, with NO line test, because line alignment
+   has already demoted a file-level finding to line 0 by this point;
+   resolved or outdated threads are skipped here too (issue #73)
    (``settled in thread: <author>``).
-9. ``apply_severity_consistency``: findings sharing one normalized title —
-   within a file or across sibling files — are all raised to the group's
-   maximum severity, so per-chunk workers cannot disagree about how
-   serious the same pattern is. Findings phrased differently but bound
-   by a shared rare code token, with a shared problem class or file,
-   join the same group (issue #30). A deterministic finding joins no
-   group, so it keeps the severity its check gave it.
-10. ``apply_removal_claim_check``: drop findings whose removal verb governs
+10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): opt-in
+    via ``PRXREF_STABLE_IDS`` — off entirely by default, and then never
+    called. When on, it stamps every finding with a content-derived
+    ``id`` (``<file>#<rule or norule>#<12-hex claim hash>`` over the
+    title's sorted content words — no model, no embedding), an
+    ``anchor_block`` (enclosing function, YAML key path or manifest key,
+    from the diff alone) and an ``id_reused_from`` provenance, and drops
+    a finding whose id the loaded ``PRXREF_VERDICT_STORE`` holds as
+    refuted in an earlier run
+    (``refuted in earlier run (<id>)``). It runs after both thread gates
+    — so the ids inherit their verdict — and before severity consistency,
+    so a refuted finding is counted, raised and grouped by nothing
+    downstream.
+11. ``apply_severity_consistency``: findings sharing one normalized title —
+    within a file or across sibling files — are all raised to the group's
+    maximum severity, so per-chunk workers cannot disagree about how
+    serious the same pattern is. Findings phrased differently but bound
+    by a shared rare code token, with a shared problem class or file,
+    join the same group (issue #30). A deterministic finding joins no
+    group, so it keeps the severity its check gave it.
+12. ``apply_removal_claim_check``: drop findings whose removal verb governs
     a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
     path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
     header produces when a worker reads a copy as a move (issue #03).
     Only a claim that NAMES a diff path is judged, so a finding about a
     removed guard or constant is untouched.
-11. ``apply_hedge_gate``: drop findings whose title or body conditions the
+13. ``apply_hedge_gate``: drop findings whose title or body conditions the
     defect on a precondition the worker never established from the diff
     ("If X still leases a client", "unless the backfill already ran"),
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-12. ``apply_rule_grouping``: fold chunk findings in one file that name the
+14. ``apply_rule_scope_check``: clear ``rule`` on a finding no scoped
+     section of the loaded team rules covers (#75) — the label matches no
+     ATX section that declares a ``scope:`` line, or that section's tokens
+     do not cover the finding's path — leaving the finding itself active,
+     so it groups and caps by normalized title like any ruleless finding.
+     A scope token outside the vocabulary is inert. It drops nothing, runs
+     between ``apply_hedge_gate`` and the grouping/cap passes so a wrong
+     label never keys them, and is skipped entirely (the run record's
+     ``rule_scope_cleared`` stays ``null``) when no loaded section declares
+     a scope.
+15. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -100,7 +146,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-13. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+16. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
     chunk findings per ``rule`` (casefolded), or per normalized title for
     findings that name none, across every file of the review. The kept
     findings are the most severe, then the most confident; the rest are
@@ -111,7 +157,18 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     it on: a team rules file is loaded and the cap is above 0. It runs
     after grouping, so a group counts once, and before the gate, so the
     severity caps count what it kept.
-14. ``apply_quality_gate``: drop findings below the confidence floor
+17. ``apply_location_verification``: grouping and the cap list a folded
+    member's location on their representative without ever checking the
+    site against a source (issue #74). This pass re-runs pass 7's search
+    for the representative's own quoted snippets within
+    :data:`ANCHOR_SNAP_WINDOW` lines of each ``Also at:`` site and drops
+    the sites nothing corroborates, rewriting ``locations`` and the
+    paragraph through the shared :func:`_also_at_paragraph` writer. An
+    unreadable file, a dropped finding and a representative with no
+    snippet parseable keep every site; nothing is dropped from the review.
+    It runs once, after grouping and the cap (``locations`` is final
+    there) and before the gate.
+18. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -120,21 +177,22 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-15. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+19. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
     duplicate and then die at the gate itself. With a similarity
     threshold set, a second tier then drops reworded restatements: two
-    active findings in the same file on the same line (line 0 is never
-    compared) whose titles pass ``titles_similar``
+    active findings in the same file on the same line — or two file-level
+    (line 0) findings of the same file (issue #74) — whose titles pass
+    ``titles_similar``
     (``duplicate of chunk finding (reworded, similarity 0.57)``, or
     ``duplicate of sweep finding ...`` between two sweep findings).
     Across the boundary the chunk copy always survives and a sweep copy
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-16. ``apply_containment_note``: a finding that asserts a throw, panic,
+20. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -142,10 +200,10 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     changes ``drop_reason`` or severity.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
-runs after pass 13 (after line alignment and every fold, so ``locations``
-is final) and before the gate. It drops nothing: a code suggestion (#30)
-that fails one of its rules is cleared and the finding is kept, so it posts
-as a plain comment.
+runs after pass 16 (after line alignment, anchor snapping and every fold, so
+``locations`` is final) and before the gate. It drops nothing: a code
+suggestion (#30) that fails one of its rules is cleared and the finding is
+kept, so it posts as a plain comment.
 
 Every dropped finding retains its identity with ``drop_reason`` populated,
 so review runstores and logs can explain every filter decision. Use
@@ -153,6 +211,7 @@ so review runstores and logs can explain every filter decision. Use
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -161,10 +220,14 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from . import heuristics
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
+
+if TYPE_CHECKING:
+    from .rules import RuleSection
 
 SEVERITIES: frozenset[str] = frozenset({"error", "warning", "spec", "outofscope"})
 
@@ -177,6 +240,19 @@ DEFAULT_MAX_ERRORS: int = 10
 # evidence. 5 also sits below the smallest drift the issue #19 audit measured
 # on real reviews (10 lines), so no observed-failure distance survives.
 DEFAULT_LINE_TOLERANCE: int = 5
+
+# How far around a finding's reported line apply_anchor_snap searches the
+# head file for the finding's quoted evidence (issue #74). The defect shapes
+# the issue documents sit 14 to 70 lines past the nearest hunk — outside
+# every hunk, which is exactly why the diff-bounded passes cannot reach them
+# — so the window is a file-range scan, not a hunk-bounded one.
+ANCHOR_SNAP_WINDOW: int = 80
+
+# Confidence taken off a finding apply_anchor_snap marks ``anchor_unverified``
+# (issue #74). 0.1 is one gate step below the common 0.7/0.8 model
+# confidences: a finding whose evidence cannot be located is demoted, and one
+# that was already borderline dies at the quality gate naturally.
+ANCHOR_UNVERIFIED_CONFIDENCE_HIT: float = 0.1
 
 # A period that is not followed by whitespace is member access, a filename, or
 # a version — not a sentence break — so the hedge rules may span it.
@@ -847,6 +923,180 @@ def apply_line_align(
     return result
 
 
+# --- Anchor snapping and "Also at" verification (issue #74) -------------------
+#
+# Every align pass above reads only the diff hunks, so a defect the model
+# quoted correctly but anchored dozens of lines outside every hunk is
+# unreachable: the content pass demotes it to file-level and the review
+# posts it nowhere near its evidence. The passes below read the HEAD FILE
+# through the same reader the chunk context uses and settle the anchor by
+# the model's own quoted code instead.
+
+_SNIPPET_BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+_SNIPPET_DQUOTE_RE = re.compile(r'"([^"\n]{4,})"')
+_SNIPPET_CONTROL_RE = re.compile(r"\b(?:catch|if|for|while)\s*\(([^)\n]{4,})")
+_SNIPPET_TRAILING_PUNCT = ".,;:!?"
+
+
+def _quoted_snippets(title: str, body: str) -> list[str]:
+    """Quoted code spans of a claim, in the order they appear, best first.
+
+    Three shapes qualify, in decreasing reliability: a backticked span
+    (the prompt's own way of marking code), a double-quoted span of at
+    least 4 characters, and the code inside ``catch (…`` / ``if (…`` /
+    ``for (…`` / ``while (…`` up to the closing parenthesis or the line's
+    end. A span is dropped when it holds no token of 4+ characters
+    (:data:`_TOKEN_RE`), is nothing but a path citation
+    (:data:`_CITATION_RE` — a location, not evidence), or carries a URL.
+    Trailing sentence punctuation is stripped; duplicates collapse to
+    their first occurrence.
+    """
+    snippets: list[str] = []
+    seen: set[str] = set()
+    text = f"{title}\n{body}"
+    for pattern in (_SNIPPET_BACKTICK_RE, _SNIPPET_DQUOTE_RE, _SNIPPET_CONTROL_RE):
+        for match in pattern.finditer(text):
+            span = match.group(1).strip()
+            span = span.rstrip(_SNIPPET_TRAILING_PUNCT).strip()
+            if not span or "://" in span or _CITATION_RE.fullmatch(span):
+                continue
+            if not _TOKEN_RE.search(span) or span in seen:
+                continue
+            seen.add(span)
+            snippets.append(span)
+    return snippets
+
+
+def _nearest_snippet_match(
+    lines: Sequence[str], snippet: str, center: int, window: int
+) -> tuple[int | None, bool]:
+    """Nearest line holding ``snippet`` within ``window`` of ``center``.
+
+    Returns ``(line, ambiguous)``: the nearest match, ties going to the
+    earliest line, and whether two or more matches share that nearest
+    distance — a tie the finding's own text cannot break.
+    """
+    matches = [
+        number
+        for number in range(1, len(lines) + 1)
+        if snippet in lines[number - 1] and abs(number - center) <= window
+    ]
+    if not matches:
+        return None, False
+    nearest = min(matches, key=lambda number: (abs(number - center), number))
+    tie = sum(1 for number in matches if abs(number - center) == abs(nearest - center))
+    return nearest, tie > 1
+
+
+def _mark_anchor_unverified(finding: Finding) -> Finding:
+    """Stamp ``anchor_unverified`` and lower confidence in one ``replace``."""
+    return replace(
+        finding,
+        anchor_unverified=True,
+        confidence=max(
+            0.0, float(finding.confidence or 0.0) - ANCHOR_UNVERIFIED_CONFIDENCE_HIT
+        ),
+    )
+
+
+def apply_anchor_snap(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff] | None = None,
+    read: Callable[[str], str | None] | None = None,
+    *,
+    model_lines: Sequence[int] | None = None,
+    window: int = ANCHOR_SNAP_WINDOW,
+) -> list[Finding]:
+    """Snap a finding's anchor to its quoted evidence in the head file (#74).
+
+    The diff-bounded passes cannot judge a line outside every hunk, so this
+    pass reads the finding's OWN file at the head sha through ``read`` (the
+    same reader the chunk context uses) and searches a ``window``-line range
+    around the line the MODEL reported — ``model_lines``, captured before
+    :func:`apply_line_align`, position by position; a length that differs
+    from ``findings`` raises ``ValueError``. Running on the raw anchor is
+    what lets the pass rescue a demoted (line 0) finding: alignment already
+    gave up on it, so the quoted code is the only witness left.
+
+    A finding is skipped untouched — no stamp, current line — when it
+    already carries a ``drop_reason``, when it came from a deterministic
+    check (:func:`heuristics.is_deterministic`; its anchor is its own
+    evidence), when ``read`` is ``None``, or when the file cannot be read:
+    no head file means no verdict, not a bad one.
+
+    Evidence is the first of :func:`_quoted_snippets` that occurs within
+    the window; the nearest occurrence wins, ties to the earliest. When
+    that nearest distance is shared by two or more occurrences AND the
+    matched line's hunk (when the diff supplies one) shares no evidence
+    token with the claim, the anchor is NOT moved — the pass refuses to
+    guess between siblings — and the finding is marked
+    ``anchor_unverified`` with its confidence lowered by
+    :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT` (a sub-floor result then dies
+    at :func:`apply_quality_gate` naturally). The same mark-and-lower
+    applies when the file reads but no snippet occurs anywhere in it, and
+    when a finding sits file-level (line 0) with no snippet parseable at
+    all: in each case the claim quotes code the head file cannot show.
+
+    Otherwise the anchor moves to the matched line only when the move is
+    real — the finding is file-level, or the match lies beyond
+    :data:`DEFAULT_LINE_TOLERANCE` of its aligned line — so an anchor
+    alignment already vetted is never churned, and a snippet that occurs
+    only far outside the window leaves the aligned verdict alone. Length
+    and order are preserved, so the positional sweep boundary holds.
+    """
+    if model_lines is not None and len(model_lines) != len(findings):
+        raise ValueError(
+            f"model_lines has {len(model_lines)} entries for {len(findings)} findings"
+        )
+    hunks_by_file = {f.path: f.hunks for f in files} if files else {}
+    result: list[Finding] = []
+    for index, f in enumerate(findings):
+        if (
+            f.drop_reason is not None
+            or read is None
+            or heuristics.is_deterministic(f)
+        ):
+            result.append(f)
+            continue
+        content = read(f.file)
+        if not isinstance(content, str):
+            result.append(f)
+            continue
+        lines = content.splitlines()
+        snippets = _quoted_snippets(f.title or "", f.body or "")
+        center = f.line if model_lines is None else (model_lines[index] or f.line)
+        target: int | None = None
+        ambiguous = False
+        present = False
+        for snippet in snippets:
+            match, tie = _nearest_snippet_match(lines, snippet, center, window)
+            if match is not None:
+                target, ambiguous = match, tie
+                break
+            if any(snippet in line for line in lines):
+                present = True
+        if target is None:
+            # No snippet matched near the reported line. Far-only matches
+            # keep alignment's verdict; a snippet the head file does not
+            # hold at all — or a file-level claim with no snippet to look
+            # for at all — is unverified quoted evidence.
+            unverified = (f.line <= 0) if not snippets else not present
+            result.append(_mark_anchor_unverified(f) if unverified else f)
+            continue
+        if ambiguous:
+            hunks = hunks_by_file.get(f.file)
+            hunk = _hunk_containing(hunks, target) if hunks else None
+            evidence = _evidence_tokens(f"{f.title} {f.body}")
+            if hunk is None or not (_hunk_tokens(hunk) & evidence):
+                result.append(_mark_anchor_unverified(f))
+                continue
+        if f.line <= 0 or abs(target - f.line) > DEFAULT_LINE_TOLERANCE:
+            result.append(replace(f, line=target))
+        else:
+            result.append(f)
+    return result
+
+
 _STOPWORDS: frozenset[str] = frozenset({
     "this", "that", "there", "here", "with", "which", "should", "would",
     "could", "when", "then", "have", "will", "into", "from", "what", "your",
@@ -929,46 +1179,70 @@ def is_duplicate_of_existing(
     measured as a range: a finding anywhere from ``start_line`` through
     ``line`` is at distance 0, and one outside it is measured from the nearer
     end. A single-line thread is measured exactly as before.
+
+    A ``resolved`` or ``outdated`` thread never matches (issue #73): only an
+    open, current thread suppresses a finding. A forge that cannot report
+    either state reports ``False``, which keeps the thread eligible exactly
+    as before the fields existed.
     """
     finding_tokens = _tokens(f"{finding.title} {finding.body}")
     if not finding_tokens:
         return False
 
-    distant_required = max(min_shared_for_distant, len(finding_tokens) // 2)
-
     for t in threads:
-        if t.path != finding.file:
+        if t.resolved or t.outdated:
             continue
-
-        body_tokens = _tokens(t.body_snippet or "")
-        if not body_tokens:
-            continue
-
-        f_line = finding.line if finding.line > 0 else None
-        t_line = t.line if t.line is not None and t.line > 0 else None
-
-        if f_line is not None and t_line is not None:
-            distance = abs(t_line - f_line)
-            t_start = getattr(t, "start_line", None)
-            if isinstance(t_start, int) and 0 < t_start < t_line:
-                if t_start <= f_line <= t_line:
-                    distance = 0
-                else:
-                    distance = min(distance, abs(t_start - f_line))
-            if distance == 0:
-                required = 1
-            elif distance <= line_window:
-                required = min_shared_tokens
-            else:
-                required = distant_required
-        else:
-            required = distant_required
-
-        shared = finding_tokens & body_tokens
-        if len(shared) >= required:
+        if _duplicate_matches_thread(
+            finding, t, finding_tokens,
+            line_window=line_window,
+            min_shared_tokens=min_shared_tokens,
+            min_shared_for_distant=min_shared_for_distant,
+        ):
             return True
 
     return False
+
+
+def _duplicate_matches_thread(
+    finding: Finding,
+    t: Thread,
+    finding_tokens: set[str],
+    *,
+    line_window: int,
+    min_shared_tokens: int,
+    min_shared_for_distant: int,
+) -> bool:
+    """Whether ONE open, current thread overlaps the finding in topic."""
+    if t.path != finding.file:
+        return False
+
+    body_tokens = _tokens(t.body_snippet or "")
+    if not body_tokens:
+        return False
+
+    distant_required = max(min_shared_for_distant, len(finding_tokens) // 2)
+
+    f_line = finding.line if finding.line > 0 else None
+    t_line = t.line if t.line is not None and t.line > 0 else None
+
+    if f_line is not None and t_line is not None:
+        distance = abs(t_line - f_line)
+        t_start = getattr(t, "start_line", None)
+        if isinstance(t_start, int) and 0 < t_start < t_line:
+            if t_start <= f_line <= t_line:
+                distance = 0
+            else:
+                distance = min(distance, abs(t_start - f_line))
+        if distance == 0:
+            required = 1
+        elif distance <= line_window:
+            required = min_shared_tokens
+        else:
+            required = distant_required
+    else:
+        required = distant_required
+
+    return len(finding_tokens & body_tokens) >= required
 
 
 def apply_thread_dedup(
@@ -1022,12 +1296,14 @@ def apply_settled_thread_suppression(
     plus at least ``min_shared_tokens`` distinct shared content tokens between
     the finding's title+body and the thread's snippet.
 
-    ``resolved`` does not gate it: a resolved thread is still a decision the
-    reviewers made with more context than the review has. A thread with no
-    path — a general, unanchored PR comment, near-universal on Bitbucket
-    Server — cannot be "same path" as any finding and is skipped rather than
-    compared. Order-preserving, pure, and already-dropped findings pass
-    through untouched so the reason an earlier pass gave survives.
+    Only an OPEN, CURRENT thread settles (issue #73): a resolved or outdated
+    one is skipped, because "resolved" says the reviewers closed the thread —
+    often for an unrelated sub-issue while the code it flagged is unchanged —
+    and re-posting the finding is then the honest output, not a re-litigation.
+    A thread with no path — a general, unanchored PR comment, near-universal
+    on Bitbucket Server — cannot be "same path" as any finding and is skipped
+    rather than compared. Order-preserving, pure, and already-dropped findings
+    pass through untouched so the reason an earlier pass gave survives.
     """
     if not threads:
         return list(findings)
@@ -1041,6 +1317,8 @@ def apply_settled_thread_suppression(
         author = ""
         if finding_tokens:
             for t in threads:
+                if t.resolved or t.outdated:
+                    continue
                 if t.path is None:
                     continue
                 if _normalised_path(t.path) != _normalised_path(f.file):
@@ -1054,6 +1332,45 @@ def apply_settled_thread_suppression(
         else:
             result.append(f)
     return result
+
+
+def previously_discussed_thread(
+    finding: Finding,
+    threads: Sequence[Thread],
+    line_window: int = 30,
+    min_shared_tokens: int = 2,
+    min_shared_for_distant: int = 4,
+    min_shared_settled: int = SETTLED_MIN_SHARED_TOKENS,
+) -> Thread | None:
+    """The resolved-or-outdated thread that already raised this finding's subject.
+
+    The mirror of both suppression gates run against CLOSED threads only
+    (issue #73): a finding that survives :func:`apply_thread_dedup` and
+    :func:`apply_settled_thread_suppression` matched no open, current thread,
+    but it can still restate a subject a resolved or outdated thread raised —
+    that fact is worth a previously-raised note on the posted finding, not a
+    drop. A thread matches under either gate's rule: the line-window tiered
+    token test, or the line-independent settled test. Returns the first
+    matching thread, else ``None``.
+    """
+    finding_tokens = _tokens(f"{finding.title} {finding.body}")
+    if not finding_tokens:
+        return None
+    for t in threads:
+        if not (t.resolved or t.outdated):
+            continue
+        if _duplicate_matches_thread(
+            finding, t, finding_tokens,
+            line_window=line_window,
+            min_shared_tokens=min_shared_tokens,
+            min_shared_for_distant=min_shared_for_distant,
+        ):
+            return t
+        if t.path is not None and _normalised_path(t.path) == _normalised_path(finding.file):
+            body_tokens = _tokens(t.body_snippet or "")
+            if len(finding_tokens & body_tokens) >= min_shared_settled:
+                return t
+    return None
 
 
 _SEVERITY_RANK: dict[str, int] = {
@@ -1214,10 +1531,12 @@ def apply_sweep_dedup(
 
     ``similarity`` switches on a second, reworded tier that runs after the
     exact tier; ``None`` (the default) skips it entirely, so the pass is
-    the exact tier alone. The tier compares findings that are still active,
-    in the same file and on the same line; a line-0 (file-level) finding is
-    never compared. Two such findings are duplicates when
-    :func:`titles_similar` holds at ``similarity``.
+    the exact tier alone. The tier compares findings that are still active
+    and in the same file on the same line; a file-level (line 0) finding
+    compares only with the file-level findings of its own file (issue #74),
+    so a demoted-to-file-level copy of an anchored one still escapes but a
+    line-0 restatement of a line-0 finding does not. Two such findings are
+    duplicates when :func:`titles_similar` holds at ``similarity``.
 
     - Across the chunk/sweep boundary the chunk copy always survives. The
       sweep copy is dropped only when its severity is no higher than the
@@ -1310,8 +1629,11 @@ def _dedup_reworded(
 ) -> list[Finding]:
     lines: dict[tuple[str, int], list[int]] = {}
     for i, f in enumerate(findings):
-        if f.drop_reason is None and (f.line or 0) > 0:
-            lines.setdefault((f.file, f.line), []).append(i)
+        if f.drop_reason is None:
+            # Line 0 keys its own per-file bucket (issue #74): a file-level
+            # finding compares with the file-level copies of its file, never
+            # with an anchored one, and never across files.
+            lines.setdefault((f.file, f.line or 0), []).append(i)
     result = list(findings)
     for indices in lines.values():
         if len(indices) < 2:
@@ -1914,6 +2236,112 @@ def apply_hedge_gate(
     return out
 
 
+# Rule-scope vocabulary (#75): which paths one ``scope:`` token of a rules
+# section covers. Matched against the path's BASENAME, case-sensitively, with
+# fnmatch. A token absent from every table here covers every path — it is
+# inert, because an unknown word must not silently suppress rules — and so
+# does the explicit ``comments`` token.
+_JAVA_SCOPE_GLOBS: tuple[str, ...] = ("*.java", "*.kt", "pom.xml", "build.gradle*")
+_TS_SCOPE_GLOBS: tuple[str, ...] = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs")
+_DOCS_SCOPE_GLOBS: tuple[str, ...] = ("*.md", "*.mdx", "*.rst", "*.txt")
+_SCOPE_BASENAME_GLOBS: Mapping[str, tuple[str, ...]] = {
+    "java": _JAVA_SCOPE_GLOBS,
+    "jvm": _JAVA_SCOPE_GLOBS,
+    "python": ("*.py",),
+    "typescript": _TS_SCOPE_GLOBS,
+    "javascript": _TS_SCOPE_GLOBS,
+    "ts": _TS_SCOPE_GLOBS,
+    "js": _TS_SCOPE_GLOBS,
+    "docs": _DOCS_SCOPE_GLOBS,
+    "markdown": _DOCS_SCOPE_GLOBS,
+}
+_SPEC_SCOPE_TOKENS: frozenset[str] = frozenset({"openapi", "specs"})
+_SPEC_SCOPE_SUFFIXES: tuple[str, ...] = (".yaml", ".yml", ".json")
+_SPEC_NAME_MARKS: tuple[str, ...] = ("openapi", "swagger")
+_SPEC_SCOPE_DIRS: frozenset[str] = frozenset({"spec", "specs", "openapi", "swagger"})
+
+
+def _scope_token_covers(token: str, path: str) -> bool:
+    """True when one ``scope:`` token covers a finding's ``path`` (#75).
+
+    ``token`` is casefolded as :func:`prxref.rules.parse_rule_sections`
+    returns it; ``path`` is a diff path, POSIX and relative to the repository
+    root. Every token outside the vocabulary returns ``True`` — inert, never
+    filtering — and so does ``comments``.
+    """
+    base = path.rsplit("/", 1)[-1].casefold()
+    globs = _SCOPE_BASENAME_GLOBS.get(token)
+    if globs is not None:
+        return any(fnmatch.fnmatchcase(base, pattern) for pattern in globs)
+    if token in _SPEC_SCOPE_TOKENS:
+        if not any(base.endswith(suffix) for suffix in _SPEC_SCOPE_SUFFIXES):
+            return False
+        directories = (part.casefold() for part in path.split("/")[:-1])
+        return any(mark in base for mark in _SPEC_NAME_MARKS) or any(
+            part in _SPEC_SCOPE_DIRS for part in directories
+        )
+    return True
+
+
+def apply_rule_scope_check(
+    findings: Sequence[Finding], *, sections: Sequence[RuleSection]
+) -> tuple[list[Finding], int]:
+    """Clear ``rule`` on a finding no scoped section of the team rules covers (#75).
+
+    A finding's ``rule`` survives only when it names a section of the loaded
+    rules — the label and the section's heading text, both whitespace-collapsed
+    and casefolded, are equal, or the label is the heading's leading words (a
+    model that drops a heading's trailing words still matches; one that cites
+    a single mid-heading word does not) — AND every ``scope:`` token of that
+    section covers the finding's path per :func:`_scope_token_covers`:
+    ``java``/``jvm`` cover ``*.java``, ``*.kt``, ``pom.xml`` and
+    ``build.gradle*``; ``python`` covers ``*.py``; ``typescript``,
+    ``javascript``, ``ts`` and ``js`` cover the TypeScript and JavaScript
+    extensions; ``docs``/``markdown`` cover ``*.md``, ``*.mdx``, ``*.rst``
+    and ``*.txt``; ``openapi``/``specs`` cover ``*.yaml``, ``*.yml`` and
+    ``*.json`` whose basename mentions ``openapi`` or ``swagger`` or that sit
+    under a ``spec``/``specs``/``openapi``/``swagger`` directory; ``comments``
+    covers every path; and a token outside the vocabulary is inert and covers
+    every path too, because an unknown word must not silently suppress rules.
+
+    Every other label — one no section carries (an invented name, or a rule
+    from a section that declares no scope once any section does), or a
+    matching section whose tokens do not cover the file — is cleared to
+    ``None``. The finding itself is never dropped, so it rejoins the ruleless
+    paths downstream: ``apply_rule_grouping`` keys it on its normalized title
+    and ``apply_rule_cap`` caps it by title. Pure and order-preserving:
+    already-dropped findings and ruleless ones pass through untouched, and
+    only ``rule`` moves. Returns the findings and how many labels were
+    cleared.
+
+    ``sections`` is what :func:`prxref.rules.parse_rule_sections` returned
+    from the loaded rules files; the empty tuple clears nothing, and the
+    orchestrator does not call this at all in that case.
+    """
+    scoped = tuple(
+        (" ".join(section.name.split()).casefold(), tuple(section.scopes))
+        for section in sections
+    )
+    if not scoped:
+        return list(findings), 0
+    out: list[Finding] = []
+    cleared = 0
+    for finding in findings:
+        if finding.drop_reason is not None or not isinstance(finding.rule, str) or not finding.rule:
+            out.append(finding)
+            continue
+        label = " ".join(finding.rule.split()).casefold()
+        path = finding.file if isinstance(finding.file, str) else ""
+        covered = any(
+            (label == name or name.startswith(f"{label} "))
+            and all(_scope_token_covers(token, path) for token in tokens)
+            for name, tokens in scoped
+        )
+        out.append(finding if covered else replace(finding, rule=None))
+        cleared += 0 if covered else 1
+    return out, cleared
+
+
 GROUPED_INTO_PREFIX: str = "grouped into "
 """``drop_reason`` prefix of a finding :func:`apply_rule_grouping` folded away.
 
@@ -2148,6 +2576,24 @@ def _own_locations(finding: Finding) -> list[tuple[str, int]]:
     ]
 
 
+def _also_at_paragraph(locations: Sequence[tuple[str, int]]) -> str:
+    """The ``Also at:`` paragraph for ``locations``, capped at five names.
+
+    The shared writer of :func:`_rule_cap_body` and of the rebuild
+    :func:`apply_location_verification` does after dropping an
+    unverifiable site: the first :data:`RULE_CAP_LISTED_LOCATIONS`
+    locations as backticked ``<file>:<line>`` (``<file>`` alone for a
+    file-level one), comma-separated, then `` (+<k> more)`` when ``k``
+    are not named.
+    """
+    listed = ", ".join(
+        f"`{file}`" if line == 0 else f"`{file}:{line}`"
+        for file, line in locations[:RULE_CAP_LISTED_LOCATIONS]
+    )
+    unlisted = len(locations) - RULE_CAP_LISTED_LOCATIONS
+    return f"Also at: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
+
+
 def _rule_cap_body(
     best: Finding, merged: Sequence[tuple[str, int]]
 ) -> str:
@@ -2159,12 +2605,7 @@ def _rule_cap_body(
             body = ""
         elif body.endswith("\n\n" + grouped):
             body = body[: -len("\n\n" + grouped)]
-    listed = ", ".join(
-        f"`{file}`" if line == 0 else f"`{file}:{line}`"
-        for file, line in merged[:RULE_CAP_LISTED_LOCATIONS]
-    )
-    unlisted = len(merged) - RULE_CAP_LISTED_LOCATIONS
-    also_at = f"Also at: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
+    also_at = _also_at_paragraph(merged)
     return f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
 
 
@@ -2309,6 +2750,101 @@ def rule_cap_counts(
         })
     rows.sort(key=lambda row: (-row["total"], row["kind"], row["rule"].casefold(), row["rule"]))
     return rows
+
+
+_ALSO_AT_PARAGRAPH_RE = re.compile(r"(?:^|\n\n)Also at: .*\Z", re.DOTALL)
+
+
+def _strip_also_at(body: str) -> str:
+    """The body without its trailing ``Also at:`` paragraph, if it has one.
+
+    Only the last paragraph is read, because both writers
+    (:func:`_fold_group`, :func:`_rule_cap_body`) append it there and the
+    cap replaces rather than repeats. A body with no such paragraph comes
+    back unchanged.
+    """
+    match = _ALSO_AT_PARAGRAPH_RE.search(body)
+    return body[: match.start()] if match else body
+
+
+def _location_verified(
+    lines: Sequence[str], snippets: Sequence[str], line: int, window: int
+) -> bool:
+    """Whether any quoted snippet occurs near ``line`` (or anywhere, for 0)."""
+    if line <= 0:
+        return any(
+            any(snippet in text for text in lines) for snippet in snippets
+        )
+    return any(
+        _nearest_snippet_match(lines, snippet, line, window)[0] is not None
+        for snippet in snippets
+    )
+
+
+def apply_location_verification(
+    findings: Sequence[Finding],
+    read: Callable[[str], str | None] | None = None,
+    *,
+    window: int = ANCHOR_SNAP_WINDOW,
+) -> list[Finding]:
+    """Verify every ``Also at:`` site of a representative against the head file (#74).
+
+    Grouping (pass 15) and the per-rule cap (pass 16) list a folded
+    member's location on their representative without ever checking the
+    site against any source, so a member whose own anchor drifted posts a
+    location its evidence does not hold. This pass re-runs the
+    :func:`apply_anchor_snap` search for the representative's own quoted
+    snippets (:func:`_quoted_snippets` — the ``Also at:`` paragraph's own
+    backticked ``<file>:<line>`` spans are path citations, never
+    evidence) within ``window`` of EACH listed site: a site no snippet
+    corroborates is dropped from ``locations`` and from the paragraph.
+
+    A site whose file cannot be read is left untouched — no head file
+    means no verdict — and a representative with no snippet parseable
+    keeps all of its sites, since nothing can be verified either way. A
+    file-level site (line 0) is kept when any snippet occurs anywhere in
+    its file: file-level claims its file, not a line.
+
+    When at least one site drops, the trailing ``Also at:`` paragraph is
+    rebuilt from the sites that stayed, through the shared
+    :func:`_also_at_paragraph` writer (at most five named, then
+    ``(+<k> more)``; a group paragraph the cap shape now shares with the
+    cap). A representative that keeps every site is returned as the SAME
+    object, so a caller can count rewrites by identity; the result has
+    the input's length and order. ``read=None`` returns
+    ``list(findings)`` unchanged. Nothing is dropped and no
+    ``drop_reason`` is written: the folded members' own reasons stay, and
+    only the representative's list shrinks.
+    """
+    if read is None:
+        return list(findings)
+    result: list[Finding] = []
+    for f in findings:
+        locations = _own_locations(f)
+        if f.drop_reason is not None or not locations:
+            result.append(f)
+            continue
+        snippets = _quoted_snippets(f.title or "", f.body or "")
+        kept: list[tuple[str, int]] = []
+        dropped = False
+        for path, line in locations:
+            content = read(path)
+            lines = content.splitlines() if isinstance(content, str) else None
+            if lines is None or not snippets or _location_verified(
+                lines, snippets, line, window
+            ):
+                kept.append((path, line))
+            else:
+                dropped = True
+        if not dropped:
+            result.append(f)
+            continue
+        body = _strip_also_at(f.body or "")
+        if kept:
+            paragraph = _also_at_paragraph(kept)
+            body = f"{body.rstrip()}\n\n{paragraph}" if body.strip() else paragraph
+        result.append(replace(f, locations=tuple(kept), body=body.rstrip()))
+    return result
 
 
 def apply_quality_gate(
@@ -2456,6 +2992,35 @@ def apply_spec_grounding(
     return [
         replace(f, severity="warning")
         if f.drop_reason is None and (f.severity or "").strip().lower() == "spec"
+        else f
+        for f in findings
+    ]
+
+
+def apply_evidence_verdicts(
+    findings: Sequence[Finding], *, evidence_active: bool,
+) -> list[Finding]:
+    """Downgrade a finding the execution evidence contradicts to ``warning`` (#69).
+
+    ``evidence_active`` says whether any review unit's prompt carried
+    execution evidence, so a finding's ``evidence`` label — the word
+    ``"contradicts"``, the only value :func:`prxref.triage.normalize_evidence`
+    keeps — can exist at all. On such a run, a labelled finding is
+    RELABELLED ``warning``, never dropped: the model judged the
+    contradiction, and this pass only enforces the ceiling on its
+    severity, so a mislabelled label costs a finding its severity, not its
+    existence. Unlabelled findings and already-dropped findings pass
+    through untouched; identity when no evidence was shown.
+
+    Pure and order-preserving, like :func:`apply_spec_grounding`, whose
+    slot in ``orchestrate_review`` it shares: it runs right after that
+    pass and before every other one.
+    """
+    if not evidence_active:
+        return list(findings)
+    return [
+        replace(f, severity="warning")
+        if f.drop_reason is None and f.evidence == "contradicts"
         else f
         for f in findings
     ]

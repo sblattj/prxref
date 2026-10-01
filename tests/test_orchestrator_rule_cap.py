@@ -442,8 +442,12 @@ class TestJsonOutput:
         payload = cli._build_json_result(res)
         keys = list(payload)
         assert keys.index("rule_counts") == keys.index("scoped_rules") + 1
-        assert keys[keys.index("rule_counts") + 1] == "repo_context"
+        # rule_scope_cleared (#75) rides between the cap's tally and the
+        # repo-context record, null whenever no rules file declares a scope.
+        assert keys[keys.index("rule_counts") + 1] == "rule_scope_cleared"
+        assert keys[keys.index("rule_scope_cleared") + 1] == "repo_context"
         assert payload["rule_counts"] == [{"rule": "no-bare-except", "kind": "rule", "total": 5, "kept": 2}]
+        assert payload["rule_scope_cleared"] is None
 
     def test_the_best_row_carries_locations_across_files(self):
         res, _forge, _llm = _scripted_run(rules=_rules(), post=False)
@@ -515,12 +519,16 @@ class TestCliWiring:
 # posted as second comments and now drop as "duplicate of chunk finding". Only
 # those three findings moved: the record and JSON rows, the three inline
 # comments, the summary's counts and list, and the post and run trace counts.
+# "rules", "scoped" and "rules_grouping" were re-derived again for issue
+# #67's "Matching rules" section in worker.md: the worker prompt system
+# hashes (and the unit-file hashes that embed them) are the only movers;
+# "rules_summary_only" renders no prompt.
 # ---------------------------------------------------------------------------
 
 RULES_GOLDEN = {
-    "rules": "029d065d6734661346e48bad7acd3c1b9b282350406c957cc27d434ed1324a27",
-    "scoped": "65406082cb53caa153bce81ffeecd1e4437935ff12e908bc67dd17293a501c23",
-    "rules_grouping": "72733b90eb69c7edc14a8a3393245f44eade9c5f392b506b286461ace6d7dd30",
+    "rules": "148a3b6651f40d6c59f8dc48e7539176a0acb131b5da125f4cb7ede5877694cd",
+    "scoped": "a1cb60afc41f127a81d76c7d3c455b991ffe71a4ed0008caa4dcb69b7c97de81",
+    "rules_grouping": "ccb55431f1bdde01643640ac222c470dd05059c389feb4d881b20694a8e2f1d5",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 
@@ -562,6 +570,11 @@ def _json_payload(res: dict) -> dict:
     payload = cli._build_json_result(res)
     for row in payload["findings"]:
         assert (row.pop("suggestion"), row.pop("suggestion_end_line")) == (None, 0)
+        assert row.pop("anchor_unverified") is False  # #74: no stamp without a readable head file
+        # #71: null on every row unless stable ids are on.
+        assert (row.pop("id"), row.pop("anchor_block"), row.pop("id_reused_from")) == (
+            None, None, None,
+        )
     return {key: payload[key] for key in A81_JSON_KEYS}
 
 
@@ -609,16 +622,21 @@ class TestOffPathMatchesBase:
         text, res = rules_capture(name, max_findings_per_rule=0)
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
-            "rule_counts", "repo_context", "parse_retries", "context_followup", "suggestions",
-            "incremental", "degraded", "failed_chunks", *CHUNK_KEYS,
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "failed_chunks", *CHUNK_KEYS,
         }
         assert res["rule_counts"] is None
+        assert res["rule_scope_cleared"] is None  # no section scope: #75's check never ran
         assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
         at = A81_JSON_KEYS.index("chunks_failed") + 1
-        assert payload == [*A81_JSON_KEYS[:at], *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
+        assert payload == [*A81_JSON_KEYS[:at], "failed_chunks", *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
+                           "rule_scope_cleared",
                            "repo_context", "parse_retries", "context_followup", "suggestions",
-                           "incremental", "degraded", "config_file", "failed_chunks", "sampling"]
+                           "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+                           "metadata_rules", "config_file",
+                           "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

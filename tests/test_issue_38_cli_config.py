@@ -40,6 +40,7 @@ BASE_JSON = (
     '"cost_usd": null, "cost_estimated": null, "posted": false, "review_rules": null, '
     '"ticket_context": null, "spec_grounding": null, "size_advisory": null, '
     '"prompt_templates": null, "scoped_rules": null, "rule_counts": null, '
+    '"rule_scope_cleared": null, '
     '"repo_context": null, "parse_retries": null, "context_followup": null, '
     '"suggestions": null, "incremental": null, "degraded": null}\n'
 )
@@ -160,7 +161,8 @@ class TestRecordKey:
             "keys": ["max_chunks", "post_mode"],
         }
         keys = list(payload)
-        assert keys[keys.index("degraded") + 1] == "config_file"
+        assert keys[keys.index("degraded") + 1] == "metadata_rules"
+        assert keys[keys.index("metadata_rules") + 1] == "config_file"
 
     def test_a_file_outside_the_working_directory_is_named_by_its_path(
         self, tmp_path, recorder, capsys, monkeypatch,
@@ -214,7 +216,13 @@ class TestNoFileInvariant:
     def test_json(self, capsys):
         assert _review("--format", "json") == 0
         expected = BASE_JSON.replace(
-            '"degraded": null}', '"degraded": null, "config_file": null, "failed_chunks": null}',
+            '"chunks_failed": 0,',
+            '"chunks_failed": 0, "failed_chunks": null,',
+        ).replace(
+            '"incremental": null, "degraded": null}',
+            '"incremental": null, "ci_wiring": null, "evidence": null, '
+            '"stable_ids": null, "degraded": null, "metadata_rules": null, '
+            '"config_file": null}',
         )
         assert capsys.readouterr().out == expected
 
