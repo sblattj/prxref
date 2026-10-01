@@ -166,8 +166,9 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     site against a source (issue #74). This pass re-runs pass 7's search
     for the representative's own quoted snippets within
     :data:`ANCHOR_SNAP_WINDOW` lines of each ``Also at:`` site and drops
-    the sites nothing corroborates, rewriting ``locations`` and the
-    paragraph through the shared :func:`_also_at_paragraph` writer. An
+    the sites nothing corroborates, moving them out of ``locations`` and
+    the ``Also at:`` paragraph into a last ``Also at (unverified):``
+    paragraph written by the shared :func:`_also_at_paragraph` writer. An
     unreadable file, a dropped finding and a representative with no
     snippet parseable keep every site; nothing is dropped from the review.
     It runs once, after grouping and the cap (``locations`` is final
@@ -984,6 +985,29 @@ def _is_non_usage_line(line: str) -> bool:
     return _NON_USAGE_LINE_RE.match(line) is not None
 
 
+_COMMENT_SUBJECT_RE = re.compile(r"\b(?:comments?|docstrings?|javadoc|jsdoc|doc\s+comments?)\b", re.I)
+_IMPORT_LINE_RE = re.compile(r"\s*(?:import\s|from\s+\S+\s+import\s|using\s|#include\b)")
+
+
+def _finding_is_about_comment(finding: Finding, line: str, snippets: Sequence[str]) -> bool:
+    """Whether ``finding`` is a claim about the comment ``line`` it is anchored on.
+
+    True when ``line`` is a comment or docstring line (not an import)
+    that holds one of the finding's quoted ``snippets``, and the title
+    or body either says comment/docstring or quotes the comment's own
+    text.
+    """
+    if _IMPORT_LINE_RE.match(line) or not _is_non_usage_line(line):
+        return False
+    if not any(snippet in line for snippet in snippets):
+        return False
+    text = f"{finding.title or ''} {finding.body or ''}"
+    if _COMMENT_SUBJECT_RE.search(text):
+        return True
+    prose = re.sub(r"^\s*(?:/\*+|\*+/?|//+|#+)\s*", "", line).strip().lower()
+    return len(prose) >= 12 and prose in text.replace("`", "").lower()
+
+
 def _nearest_snippet_match(
     lines: Sequence[str], snippet: str, center: int, window: int
 ) -> tuple[int | None, bool]:
@@ -1127,6 +1151,12 @@ def apply_anchor_snap(
             if hunk is None or not (_hunk_tokens(hunk) & evidence):
                 result.append(_mark_anchor_unverified(f))
                 continue
+        if (
+            0 < f.line <= len(lines)
+            and _finding_is_about_comment(f, lines[f.line - 1], snippets)
+        ):
+            result.append(f)
+            continue
         on_non_usage = (
             target != f.line
             and 0 < f.line <= len(lines)
@@ -2728,8 +2758,8 @@ def _also_at_paragraph(
     could not corroborate.
 
     The shared writer of :func:`_rule_cap_body` and of the rebuild
-    :func:`apply_location_verification` does after dropping an
-    unverifiable site: the first :data:`RULE_CAP_LISTED_LOCATIONS`
+    :func:`apply_location_verification` does after moving an
+    unverifiable site out of the verified list: the first :data:`RULE_CAP_LISTED_LOCATIONS`
     locations as backticked ``<file>:<line>`` (``<file>`` alone for a
     file-level one), comma-separated, then `` (+<k> more)`` when ``k``
     are not named.
