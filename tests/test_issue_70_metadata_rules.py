@@ -793,3 +793,242 @@ class TestSkippedChecksAreNamed:
             metadata_rules="on", branch_patterns=["fix=fix/.*"],
         )
         assert "PR metadata" not in forge.summaries[-1]
+
+
+# --- get_commits on Bitbucket Server and Azure DevOps (F25b) -----------------
+
+
+def _http(status: int = 200, body: object = None, headers: dict | None = None):
+    import json as _json_mod
+    from unittest.mock import MagicMock
+
+    import requests
+
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = status
+    resp.ok = 200 <= status < 300
+    resp.headers = {"Content-Type": "application/json; charset=utf-8", **(headers or {})}
+    resp.json.return_value = body
+    resp.text = _json_mod.dumps(body)
+    resp.raise_for_status.side_effect = (
+        None if resp.ok else requests.HTTPError(response=resp)
+    )
+    return resp
+
+
+class _RoutedSession:
+    """A ``requests.Session`` double answering GETs by exact URL.
+
+    A route is a list of responses handed out in order (one per page) or a
+    callable ``(params) -> response``. An unrouted URL raises
+    ``AssertionError``, so a request the adapter should not make fails loudly.
+    """
+
+    def __init__(self, routes: dict):
+        self.routes = {url: list(r) if isinstance(r, list) else r for url, r in routes.items()}
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url, params=None, **_kw):
+        self.calls.append((url, dict(params or {})))
+        route = self.routes.get(url)
+        if route is None:
+            raise AssertionError(f"unrouted GET {url}")
+        if callable(route):
+            return route(dict(params or {}))
+        return route.pop(0)
+
+
+BBS_PR_URL = "https://bitbucket.corp.example/projects/PLAT/repos/api/pull-requests/42"
+BBS_COMMITS = (
+    "https://bitbucket.corp.example/rest/api/1.0/projects/PLAT/repos/api"
+    "/pull-requests/42/commits"
+)
+ADO_PR_URL = "https://dev.azure.com/acme/AcmeWeb/_git/AcmeWeb/pullrequest/551"
+ADO_BASE = "https://dev.azure.com/acme/AcmeWeb/_apis/git/repositories/AcmeWeb"
+ADO_COMMITS = f"{ADO_BASE}/pullrequests/551/commits"
+
+
+def _bbs_commit(sha: str, message: str, parents: int = 1) -> dict:
+    return {
+        "id": sha, "displayId": sha[:11], "message": message,
+        "parents": [{"id": f"{i}" * 40, "displayId": f"{i}" * 11} for i in range(parents)],
+    }
+
+
+def _ado_commit(sha: str, comment: str, parents: int | None = 1, **extra) -> dict:
+    entry: dict = {"commitId": sha, "comment": comment, **extra}
+    if parents is not None:
+        entry["parents"] = [f"{i}" * 40 for i in range(parents)]
+    return entry
+
+
+def _bbs_forge(routes: dict):
+    from prxref.forges.bitbucket_server import ForgeImpl
+
+    ref = ForgeImpl.parse_pr_url(BBS_PR_URL)
+    session = _RoutedSession(routes)
+    return ForgeImpl(session=session), ref, session
+
+
+def _ado_forge(routes: dict):
+    from prxref.forges.azure_devops import ForgeImpl
+
+    ref = ForgeImpl.parse_pr_url(ADO_PR_URL)
+    session = _RoutedSession(routes)
+    return ForgeImpl(session=session), ref, session
+
+
+def _bbs_two_pages():
+    """Newest first, as Data Center lists a PR's commits, across two pages."""
+    return [
+        _http(body={
+            "values": [
+                _bbs_commit("c" * 40, "Merge branch 'main' into feature/x", parents=2),
+                _bbs_commit("b" * 40, "ACME-2 second\n\nbody line"),
+            ],
+            "isLastPage": False, "nextPageStart": 2,
+        }),
+        _http(body={
+            "values": [_bbs_commit("a" * 40, "first without a reference")],
+            "isLastPage": True,
+        }),
+    ]
+
+
+def _ado_two_pages(first_parents: int | None = 1):
+    """Newest first across two pages joined by ``x-ms-continuationtoken``."""
+    pages = {
+        None: _http(
+            body={"count": 2, "value": [
+                _ado_commit("c" * 40, "Merged main into feature", parents=2),
+                _ado_commit("b" * 40, "ACME-2 second\nbody line"),
+            ]},
+            headers={"x-ms-continuationtoken": "tok-2"},
+        ),
+        "tok-2": _http(body={"count": 1, "value": [
+            _ado_commit("a" * 40, "first without a reference", parents=first_parents),
+        ]}),
+    }
+    return lambda params: pages[params.get("continuationToken")]
+
+
+class TestBitbucketServerCommits:
+    def test_pages_oldest_first_with_subjects_and_parent_counts(self):
+        forge, ref, session = _bbs_forge({BBS_COMMITS: _bbs_two_pages()})
+        commits = forge.get_commits(ref, base_sha="0" * 40, head_sha="c" * 40)
+        assert [(c.sha, c.subject, c.parent_count) for c in commits] == [
+            ("a" * 40, "first without a reference", 1),
+            ("b" * 40, "ACME-2 second", 1),
+            ("c" * 40, "Merge branch 'main' into feature/x", 2),
+        ]
+        assert [p.get("start") for _, p in session.calls] == [0, 2]
+
+    def test_a_failed_page_raises_rather_than_returning_short(self):
+        from prxref.forges.base import FeedReadError
+
+        forge, ref, _ = _bbs_forge({BBS_COMMITS: [
+            _http(body={"values": [_bbs_commit("b" * 40, "x")],
+                        "isLastPage": False, "nextPageStart": 1}),
+            _http(status=500, body={"errors": []}),
+        ]})
+        with pytest.raises(FeedReadError, match="HTTP 500"):
+            forge.get_commits(ref)
+
+    def test_an_endless_listing_raises_at_the_page_budget(self, monkeypatch):
+        from prxref.forges import bitbucket_server
+        from prxref.forges.base import FeedReadError
+
+        monkeypatch.setattr(bitbucket_server, "_MAX_PAGES", 2)
+        page = {"values": [_bbs_commit("b" * 40, "x")], "isLastPage": False, "nextPageStart": 1}
+        forge, ref, _ = _bbs_forge({BBS_COMMITS: lambda params: _http(body=page)})
+        with pytest.raises(FeedReadError, match="2-page budget"):
+            forge.get_commits(ref)
+
+
+class TestAzureDevOpsCommits:
+    def test_pages_oldest_first_with_subjects_and_parent_counts(self):
+        forge, ref, session = _ado_forge({ADO_COMMITS: _ado_two_pages()})
+        commits = forge.get_commits(ref, base_sha="0" * 40, head_sha="c" * 40)
+        assert [(c.sha, c.subject, c.parent_count) for c in commits] == [
+            ("a" * 40, "first without a reference", 1),
+            ("b" * 40, "ACME-2 second", 1),
+            ("c" * 40, "Merged main into feature", 2),
+        ]
+        assert [p.get("continuationToken") for _, p in session.calls] == [None, "tok-2"]
+
+    def test_a_listing_without_parents_reads_each_commit_for_them(self):
+        forge, ref, _ = _ado_forge({
+            ADO_COMMITS: lambda params: _http(body={"count": 2, "value": [
+                _ado_commit("c" * 40, "Merge branch 'main'", parents=None),
+                _ado_commit("b" * 40, "ACME-2 second", parents=None),
+            ]}),
+            f"{ADO_BASE}/commits/{'c' * 40}": lambda params: _http(
+                body=_ado_commit("c" * 40, "Merge branch 'main'", parents=2)),
+            f"{ADO_BASE}/commits/{'b' * 40}": lambda params: _http(
+                body=_ado_commit("b" * 40, "ACME-2 second", parents=1)),
+        })
+        commits = forge.get_commits(ref)
+        assert [(c.sha, c.parent_count) for c in commits] == [("b" * 40, 1), ("c" * 40, 2)]
+
+    def test_a_truncated_one_line_comment_is_read_in_full(self):
+        long_subject = "ACME-9 " + "x" * 300
+        forge, ref, _ = _ado_forge({
+            ADO_COMMITS: lambda params: _http(body={"count": 1, "value": [
+                _ado_commit("b" * 40, long_subject[:100], commentTruncated=True),
+            ]}),
+            f"{ADO_BASE}/commits/{'b' * 40}": lambda params: _http(
+                body=_ado_commit("b" * 40, long_subject + "\n\nbody")),
+        })
+        [commit] = forge.get_commits(ref)
+        assert commit.subject == long_subject
+
+    def test_a_failed_page_raises(self):
+        import requests
+
+        forge, ref, _ = _ado_forge({ADO_COMMITS: lambda params: _http(status=401, body={})})
+        with pytest.raises(requests.HTTPError):
+            forge.get_commits(ref)
+
+    def test_an_endless_listing_raises_at_the_page_budget(self, monkeypatch):
+        from prxref.forges import azure_devops
+
+        monkeypatch.setattr(azure_devops, "_MAX_PAGES", 2)
+        forge, ref, _ = _ado_forge({ADO_COMMITS: lambda params: _http(
+            body={"count": 1, "value": [_ado_commit("b" * 40, "x")]},
+            headers={"x-ms-continuationtoken": "again"},
+        )})
+        with pytest.raises(ValueError, match="2 pages"):
+            forge.get_commits(ref)
+
+
+class _AdapterCommitsForge(FakeForge):
+    """FakeForge whose ``get_commits`` is a real adapter's over a mocked session."""
+
+    def __init__(self, adapter, adapter_ref, **kwargs):
+        super().__init__(**kwargs)
+        self._adapter = adapter
+        self._adapter_ref = adapter_ref
+
+    def get_commits(self, ref, *, base_sha="", head_sha=""):
+        return self._adapter.get_commits(
+            self._adapter_ref, base_sha=base_sha, head_sha=head_sha,
+        )
+
+
+@pytest.mark.parametrize("build", [
+    pytest.param(lambda: _bbs_forge({BBS_COMMITS: _bbs_two_pages()}), id="bitbucket-server"),
+    pytest.param(lambda: _ado_forge({ADO_COMMITS: _ado_two_pages()}), id="azure-devops"),
+])
+def test_the_commit_check_runs_on_this_forge_instead_of_skipping(build):
+    adapter, adapter_ref, _ = build()
+    forge = _AdapterCommitsForge(
+        adapter, adapter_ref, diff=_added_file_diff("src/app.py", 20),
+    )
+    res = orchestrator.orchestrate_review(
+        forge, REF, NO_FINDINGS,
+        metadata_rules="on", commit_reference=r"ACME-\d+",
+    )
+    assert res["metadata_rules"]["commit_reference"] == "fail"
+    titles = [n["title"] for n in res["metadata_rules"]["violations"]]
+    assert len(titles) == 1 and "aaaaaaaaaa" in titles[0]
+    assert res["verdict"] == "Approved"
