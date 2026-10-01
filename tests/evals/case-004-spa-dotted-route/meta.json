@@ -9,5 +9,5 @@
       "expected_ref": "S1"
     }
   ],
-  "notes": "Failure mode: a matching rule silently captures inputs another rule handled (issue #67). Pair with case-005, where every capturable input is a UUID with no dot, so the same rule must produce no finding. EVAL_PINS turns routing_probe off, so the route table reaches the worker only through the docs corpus."
+  "notes": "Failure mode: a matching rule silently captures inputs another rule handled (issue #67). Pair with case-005, where every capturable input is a UUID with no dot, so the same rule must produce no finding. EVAL_PINS turns routing_probe off, so the route table reaches the worker only through the docs corpus. The same pin removes the Matching rules prompt section (#67), so an eval run does not exercise that rule and this case measures the model without it."
 }

@@ -9,5 +9,5 @@
       "expected_ref": "S1"
     }
   ],
-  "notes": "Control for case-004 (issue #67). The location rule is the same, but docs/routes.md R-1 makes every :version a UUID with no dot, so the rule captures nothing the SPA serves and the worker must report nothing for it, at most a low-severity note. The decoy has no expected entry; a finding that blames the location rule is an unmatched AI finding."
+  "notes": "Control for case-004 (issue #67). The location rule is the same, but docs/routes.md R-1 makes every :version a UUID with no dot, so the rule captures nothing the SPA serves and the worker must report nothing for it, at most a low-severity note. EVAL_PINS turns routing_probe off, which removes the Matching rules prompt section (#67), so an eval run does not exercise that rule. The decoy has no expected entry; a finding that blames the location rule is an unmatched AI finding."
 }
