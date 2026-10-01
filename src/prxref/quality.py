@@ -3102,33 +3102,196 @@ def apply_spec_grounding(
     ]
 
 
-def apply_evidence_verdicts(
-    findings: Sequence[Finding], *, evidence_active: bool,
-) -> list[Finding]:
-    """Downgrade a finding the execution evidence contradicts to ``warning`` (#69).
+EVIDENCE_DROP_PREFIX: str = "contradicted by execution evidence: "
 
-    ``evidence_active`` says whether any review unit's prompt carried
-    execution evidence, so a finding's ``evidence`` label — the word
-    ``"contradicts"``, the only value :func:`prxref.triage.normalize_evidence`
-    keeps — can exist at all. On such a run, a labelled finding is
-    RELABELLED ``warning``, never dropped: the model judged the
-    contradiction, and this pass only enforces the ceiling on its
-    severity, so a mislabelled label costs a finding its severity, not its
-    existence. Unlabelled findings and already-dropped findings pass
-    through untouched; identity when no evidence was shown.
+_EVIDENCE_HEADER_LINE_RE = re.compile(
+    r"^\s*(?:<\s*)?([A-Za-z][A-Za-z0-9-]*[A-Za-z0-9])\s*:[ \t]*\S"
+)
+_EVIDENCE_MISSING_RE = re.compile(
+    r"(?<![\w-])(?:missing|absent|lacks?|lacking|without|omits?|omitted|no|"
+    r"not\s+(?:set|sent|present|returned|served|included)|"
+    r"(?:does\s+not|doesn't|do\s+not|don't|never)\s+(?:set|send|return|include)s?)(?![\w-])",
+    re.IGNORECASE,
+)
+_EVIDENCE_HEADER_WORD_RE = re.compile(r"\bheaders?\b", re.IGNORECASE)
+_EVIDENCE_MISSING_WINDOW = 40
+_EVIDENCE_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;,\n]|\b(?:but|while|whereas|although|though)\b", re.IGNORECASE,
+)
+_EVIDENCE_HEADER_TOKEN_RE = re.compile(r"(?<![\w-])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+(?![\w-])")
+_EVIDENCE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\"<>()\[\]]+")
+_EVIDENCE_RESOURCE_RE = re.compile(
+    r"(?<![\w.:/*-])(/[\w.~%@+*-]+(?:/[\w.~%@+*-]*)*)"
+    r"|(?<![\w./-])(\*[\w.*-]*\.[\w-]+)"
+)
+_EVIDENCE_TOKEN_TRIM = "\"'`(),;[]<>"
 
-    Pure and order-preserving, like :func:`apply_spec_grounding`, whose
-    slot in ``orchestrate_review`` it shares: it runs right after that
-    pass and before every other one.
+
+def _present_header_names(output: str) -> set[str]:
+    """Lower-cased names of the filled header field lines in ``output``.
+
+    A line counts only as ``Name: value`` — optionally behind curl's
+    ``< `` response marker — with a non-empty value, so a name that merely
+    appears in prose (``no Cache-Control set``) or an empty field is never
+    presence.
     """
-    if not evidence_active:
+    names: set[str] = set()
+    for line in output.splitlines():
+        match = _EVIDENCE_HEADER_LINE_RE.match(line)
+        if match:
+            names.add(match.group(1).lower())
+    return names
+
+
+def _claims_header_missing(text: str, name: str) -> bool:
+    """True when ``text`` says header ``name`` is missing.
+
+    ``name`` must occur as a whole token (case-insensitive), and a missing
+    keyword must sit within a few words of it in the SAME clause (clauses
+    split at ``. ; ,``, a line break, and ``but``/``while``/``although``),
+    with no other hyphenated header-shaped token between the two — so
+    "Cache-Control is set but X-Frame-Options is missing" claims nothing
+    about ``Cache-Control``. The claim must also be about a header: the
+    name is hyphenated (``Cache-Control``) or the text says "header".
+    """
+    if "-" not in name and not _EVIDENCE_HEADER_WORD_RE.search(text):
+        return False
+    pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])", re.IGNORECASE)
+    for clause in _EVIDENCE_CLAUSE_SPLIT_RE.split(text):
+        for match in pattern.finditer(clause):
+            for keyword in _EVIDENCE_MISSING_RE.finditer(clause):
+                if keyword.end() <= match.start():
+                    gap = clause[keyword.end():match.start()]
+                elif keyword.start() >= match.end():
+                    gap = clause[match.end():keyword.start()]
+                else:
+                    continue
+                if len(gap) > _EVIDENCE_MISSING_WINDOW:
+                    continue
+                if any(
+                    tok.lower() != name.lower()
+                    for tok in _EVIDENCE_HEADER_TOKEN_RE.findall(gap)
+                ):
+                    continue
+                return True
+    return False
+
+
+def _url_path(url: str) -> str:
+    """The path of ``url``, or ``""`` when it has none past the host."""
+    rest = url.split("://", 1)[1]
+    slash = rest.find("/")
+    if slash < 0:
+        return ""
+    return rest[slash:].split("?", 1)[0].split("#", 1)[0]
+
+
+def _finding_resources(text: str) -> list[str]:
+    """The URL paths, URLs and globs a finding's text names.
+
+    Repository file paths are deliberately not resources: a finding cites
+    the config file it reviews, which a probe of the served resource never
+    names.
+    """
+    found: list[str] = []
+    for url in _EVIDENCE_URL_RE.findall(text):
+        path = _url_path(url.rstrip(".,;:"))
+        if path and path != "/":
+            found.append(path)
+    scrubbed = _EVIDENCE_URL_RE.sub(" ", text)
+    for match in _EVIDENCE_RESOURCE_RE.finditer(scrubbed):
+        token = (match.group(1) or match.group(2)).rstrip(".,;:")
+        if token and token != "/":
+            found.append(token)
+    return found
+
+
+def _item_resources(item) -> list[str]:
+    """Every token of an item's command and output, URLs reduced to their path."""
+    tokens: list[str] = []
+    for raw in f"{item.command}\n{item.output}".split():
+        token = raw.strip(_EVIDENCE_TOKEN_TRIM)
+        if "://" in token:
+            token = _url_path(token)
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _resource_named(resource: str, tokens: Sequence[str]) -> bool:
+    """True when one of ``tokens`` names ``resource`` (or, for a glob, fits it)."""
+    if "*" in resource:
+        tail = "*/" + resource.lstrip("/*") if not resource.startswith("*") else resource
+        return any(
+            fnmatch.fnmatchcase(t, resource) or fnmatch.fnmatchcase(t, tail)
+            for t in tokens
+        )
+    stem = resource.rstrip("/")
+    return any(t == resource or t == stem or t.startswith(stem + "/") for t in tokens)
+
+
+def apply_evidence_drops(
+    findings: Sequence[Finding], evidence, *, pr_paths: Iterable[str] = (),
+) -> list[Finding]:
+    """Drop a header claim an exit-0 evidence item contradicts (#69, OD11).
+
+    ``evidence`` is the loaded :class:`prxref.evidence.EvidenceBundle`
+    (duck-typed: ``active``, ``items`` and ``unit_items()``), ``None`` when
+    none was configured; ``pr_paths`` is every path of the PR's diff. A
+    finding is dropped as ``contradicted by execution evidence: <cmd>``
+    only when ONE item satisfies all of:
+
+    - its exit code is 0 (a failing or unknown run settles nothing);
+    - its output holds a filled header field line, ``Name: value`` (curl's
+      ``< `` marker allowed, the name case-insensitive), whose name the
+      finding's title or body claims missing: a missing keyword (missing,
+      absent, lacks, without, no, not set, ...) within a few words of the
+      name, and the name hyphenated or the text saying "header";
+    - when the finding names a URL path, a URL or a glob, the item's
+      command or output names that resource (a glob must cover a token
+      of it); when it names none, the item reaches the finding's unit —
+      its paths match the finding's file, or they match no PR path at all
+      (a global item every chunk prompt carries).
+
+    Conservative by construction: nothing is relabelled or downgraded, the
+    model's ``evidence`` label is never read, and a deterministic finding
+    (:func:`prxref.heuristics.is_deterministic`) or one that already has a
+    ``drop_reason`` passes through untouched. Pure, 1:1 and
+    order-preserving, so ``sweep_start`` still marks the boundary; the
+    identity when ``evidence`` is ``None`` or inactive.
+    """
+    if evidence is None or not evidence.active:
         return list(findings)
-    return [
-        replace(f, severity="warning")
-        if f.drop_reason is None and f.evidence == "contradicts"
-        else f
-        for f in findings
-    ]
+    passing = [item for item in evidence.items if item.exit_code == 0]
+    present = {id(item): _present_header_names(item.output) for item in passing}
+    candidates = [item for item in passing if present[id(item)]]
+    if not candidates:
+        return list(findings)
+    global_ids = {id(item) for item in evidence.unit_items(tuple(pr_paths))[1]}
+    tokens = {id(item): _item_resources(item) for item in candidates}
+    out: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None or heuristics.is_deterministic(f):
+            out.append(f)
+            continue
+        text = f"{f.title}\n{f.body}"
+        resources = _finding_resources(text)
+        own_ids = (
+            {id(item) for item in evidence.unit_items((f.file,))[0]} if not resources else set()
+        )
+        hit = None
+        for item in candidates:
+            if not any(_claims_header_missing(text, name) for name in present[id(item)]):
+                continue
+            if resources:
+                if not any(_resource_named(r, tokens[id(item)]) for r in resources):
+                    continue
+            elif id(item) not in own_ids and id(item) not in global_ids:
+                continue
+            hit = item
+            break
+        out.append(replace(f, drop_reason=f"{EVIDENCE_DROP_PREFIX}{hit.command}") if hit else f)
+    return out
 
 
 EXAMPLE_ECHO_PREFIX: str = "echoes the prompt's example: "
