@@ -3212,14 +3212,46 @@ _EVIDENCE_SUBJECT_FILLER = frozenset({
     "were", "be", "been", "being", "still", "currently", "also", "entirely",
     "completely", "itself",
 })
-_EVIDENCE_AFTER_KEYWORD = (_EVIDENCE_SCOPE_WORDS - {"to", "of"}) | frozenset({
-    "entirely", "completely", "altogether", "everywhere", "anywhere", "here",
-    "there", "too", "and", "or", "so", "which", "because", "since", "as",
-})
-_EVIDENCE_AFTER_NAME = (
-    _EVIDENCE_SUBJECT_FILLER | _EVIDENCE_SCOPE_WORDS | _EVIDENCE_AFTER_KEYWORD
+_CSP_TOKENS = (
+    r"[a-z]+(?:-[a-z]+)*-src(?:-elem|-attr)?", "frame-ancestors",
+    "upgrade-insecure-requests", "block-all-mixed-content", "report-uri",
+    "report-to", "sandbox", "base-uri", "form-action", "trusted-types",
+    "require-trusted-types-for", "unsafe-inline", "unsafe-eval",
+    "strict-dynamic", "nonce",
 )
-_EVIDENCE_LEADING_ALIAS_RE = re.compile(r"^\s*\([^()]*\)")
+_PERMISSIONS_TOKENS = (
+    "camera", "microphone", "geolocation", "payment", "usb", "fullscreen",
+    "autoplay", "accelerometer", "gyroscope", "magnetometer",
+    "interest-cohort", "browsing-topics", "display-capture",
+    "clipboard-read", "clipboard-write", "midi", "serial", "bluetooth",
+)
+_EVIDENCE_HEADER_VOCAB: dict[str, tuple[str, ...]] = {
+    "cache-control": (
+        "no-store", "no-cache", "max-age", "s-maxage", "private", "public",
+        "immutable", "must-revalidate", "proxy-revalidate", "no-transform",
+        "stale-while-revalidate", "stale-if-error",
+    ),
+    "strict-transport-security": (
+        "max-age", "includesubdomains", "subdomains", "preload",
+    ),
+    "content-security-policy": _CSP_TOKENS,
+    "content-security-policy-report-only": _CSP_TOKENS,
+    "x-frame-options": ("deny", "sameorigin", "allow-from"),
+    "x-content-type-options": ("nosniff",),
+    "referrer-policy": (
+        "no-referrer", "no-referrer-when-downgrade", "origin",
+        "origin-when-cross-origin", "same-origin", "strict-origin",
+        "strict-origin-when-cross-origin", "unsafe-url",
+    ),
+    "permissions-policy": _PERMISSIONS_TOKENS,
+    "feature-policy": _PERMISSIONS_TOKENS,
+    "set-cookie": ("secure", "httponly", "samesite", "partitioned", "max-age"),
+}
+_EVIDENCE_VOCAB_RES = {
+    header: re.compile(rf"(?<![\w-])(?:{'|'.join(tokens)})(?![\w-])", re.IGNORECASE)
+    for header, tokens in _EVIDENCE_HEADER_VOCAB.items()
+}
+_EVIDENCE_VALUE_SHAPED_RE = re.compile(r"[=\d'\"*/-]")
 _EVIDENCE_CLAUSE_SPLIT_RE = re.compile(
     r"[.;,\n]|\b(?:but|while|whereas|although|though)\b", re.IGNORECASE,
 )
@@ -3260,36 +3292,31 @@ def _claims_header_missing(text: str, name: str) -> bool:
     name is hyphenated (``Cache-Control``) or the text says "header".
 
     A claim about a missing DIRECTIVE or VALUE of the header is not a
-    claim that the header is missing, so it never counts:
+    claim that the header is missing, so it never counts; vocabulary, not
+    word order, decides which it is (:func:`_names_directive`). Otherwise
+    the keyword is tied to the name in either order, whatever follows:
 
     - keyword before the name ("missing Cache-Control", "no X header",
       "lacks a Cache-Control header"): the words between them must not
-      hold a preposition ("missing includeSubDomains in HSTS") or a
-      directive word ("directive", "value", "flag", ...), none of the
-      three words after the name may be a directive word, and the first
-      word after the name (past an alias parenthetical such as "(HSTS)")
-      must end the clause or be filler, a preposition or a connective —
-      any other word is the keyword's object ("missing Cache-Control
-      max-age", "missing Strict-Transport-Security includeSubDomains");
+      hold a preposition ("in", "on", "for", ...);
     - name before the keyword ("Cache-Control is not set", "header
       missing"): the words between them must be filler ("header", "is",
-      ...), and the keyword must end the clause or be followed by a
-      preposition or a connective ("missing from responses"), never by an
-      object ("lacks includeSubDomains", "without no-store", "is missing
-      max-age") or by "to"/"of" ("not set to no-store" is a value claim).
+      ...).
     """
     if "-" not in name and not _EVIDENCE_HEADER_WORD_RE.search(text):
         return False
     pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])", re.IGNORECASE)
+    if not pattern.search(text) or _names_directive(text, name, pattern):
+        return False
     for clause in _EVIDENCE_CLAUSE_SPLIT_RE.split(text):
         for match in pattern.finditer(clause):
             for keyword in _EVIDENCE_MISSING_RE.finditer(clause):
                 if keyword.end() <= match.start():
                     gap = clause[keyword.end():match.start()]
-                    claims = _keyword_before_name(gap, clause[match.end():])
+                    allowed = None
                 elif keyword.start() >= match.end():
                     gap = clause[match.end():keyword.start()]
-                    claims = _keyword_after_name(gap, clause[keyword.end():])
+                    allowed = _EVIDENCE_SUBJECT_FILLER
                 else:
                     continue
                 if len(gap) > _EVIDENCE_MISSING_WINDOW:
@@ -3299,41 +3326,55 @@ def _claims_header_missing(text: str, name: str) -> bool:
                     for tok in _EVIDENCE_HEADER_TOKEN_RE.findall(gap)
                 ):
                     continue
-                if claims:
-                    return True
+                between = _words(gap)
+                if allowed is None:
+                    if any(w in _EVIDENCE_SCOPE_WORDS for w in between):
+                        continue
+                elif any(w not in allowed for w in between):
+                    continue
+                return True
+    return False
+
+
+def _names_directive(text: str, name: str, pattern: re.Pattern[str]) -> bool:
+    """True when ``text`` is about a directive or value of header ``name``.
+
+    Any one of these, matched case-insensitively and on word boundaries
+    that a hyphen does not break (so ``max-age`` never matches inside
+    ``Access-Control-Max-Age``), anywhere in ``text``:
+
+    - a known directive or value token of ``name``
+      (``_EVIDENCE_HEADER_VOCAB``: ``no-store`` for ``Cache-Control``,
+      ``includeSubDomains`` for ``Strict-Transport-Security``, any
+      ``*-src`` for ``Content-Security-Policy``, ...), scanned with every
+      occurrence of the name itself blanked out;
+    - a noun such as "directive", "value", "attribute" or "flag";
+    - a value fragment right after the name: ``name=value`` always, and
+      ``name: value`` when the value is value-shaped (holds ``=``, a
+      digit, a quote, ``*``, ``/`` or a hyphen) or ends the clause, and
+      is not itself a missing keyword ("Cache-Control: missing").
+    """
+    vocab = _EVIDENCE_VOCAB_RES.get(name.lower())
+    if vocab is not None and vocab.search(pattern.sub(" ", text)):
+        return True
+    if any(w in _EVIDENCE_DIRECTIVE_WORDS for w in _words(text)):
+        return True
+    for clause in _EVIDENCE_CLAUSE_SPLIT_RE.split(text):
+        for match in pattern.finditer(clause):
+            fragment = re.match(r"\s*([:=])\s*([^\s`'\"()\[\]<>]+)(.*)", clause[match.end():])
+            if fragment is None:
+                continue
+            sign, value, rest = fragment.groups()
+            if _EVIDENCE_MISSING_RE.match(value) or value.lower() in {"not", "none", "never"}:
+                continue
+            if sign == "=" or _EVIDENCE_VALUE_SHAPED_RE.search(value) or not _words(rest):
+                return True
     return False
 
 
 def _words(text: str) -> list[str]:
     """The lower-cased words of ``text``, punctuation and quotes trimmed."""
     return [w.lower() for w in _EVIDENCE_WORD_RE.findall(text)]
-
-
-def _keyword_before_name(gap: str, after: str) -> bool:
-    """True when "<keyword> <gap> <name> <after>" says the header is missing.
-
-    A leading parenthetical after the name is an alias ("(HSTS)") and is
-    skipped. The next word must then end the clause or be filler, a scope
-    word ("to" and "of" included: "missing HSTS to enforce HTTPS" is about
-    the header) or a connective; any other word is the object of the
-    keyword ("missing HSTS includeSubDomains"), so the claim is about a
-    directive.
-    """
-    between = _words(gap)
-    if any(w in _EVIDENCE_SCOPE_WORDS or w in _EVIDENCE_DIRECTIVE_WORDS for w in between):
-        return False
-    following = _words(_EVIDENCE_LEADING_ALIAS_RE.sub("", after, count=1))[:3]
-    if any(word in _EVIDENCE_DIRECTIVE_WORDS for word in following):
-        return False
-    return not following or following[0] in _EVIDENCE_AFTER_NAME
-
-
-def _keyword_after_name(gap: str, after: str) -> bool:
-    """True when "<name> <gap> <keyword> <after>" says the header is missing."""
-    if any(w not in _EVIDENCE_SUBJECT_FILLER for w in _words(gap)):
-        return False
-    following = _words(after)
-    return not following or following[0] in _EVIDENCE_AFTER_KEYWORD
 
 
 def _url_path(url: str) -> str:
@@ -3419,6 +3460,10 @@ def apply_evidence_drops(
     A claim that a DIRECTIVE or VALUE of a present header is missing
     ("Strict-Transport-Security lacks includeSubDomains") is not a claim
     the header is missing, so a probe showing the header never drops it.
+    Vocabulary decides: a known directive token of that header, a
+    directive noun or a ``name: value`` fragment anywhere in the title or
+    body keeps the finding; without one, a missing claim drops whatever
+    word follows the name ("Missing X-Frame-Options allows clickjacking").
 
     Conservative by construction: nothing is relabelled or downgraded, the
     model's ``evidence`` label is never read, and a deterministic finding
