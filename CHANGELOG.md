@@ -8,6 +8,178 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.29.0] — 2026-09-30
+
+Ten issues: five new review inputs and one new id scheme, and four
+fidelity fixes. A review can now be shown execution evidence — the command
+output of running the PR locally (#69) — and the repository's own standards
+documents (#68); it can check the PR's branch name, commit reference and
+touched areas against team rules with zero model calls (#70), and flag a
+verification script or test the PR adds that no CI job runs (#66); findings
+can carry stable ids that survive rewording (#71). A partial review is no
+longer read as `Approved` (#72), resolved or outdated threads no longer
+silence a finding that is still present (#73), findings that quote code
+snap to the line it actually sits on (#74), and a finding no longer needs
+a rule (#75). The worker prompt also gained a `## Matching rules` section
+(#67), so prompts that probe added or widened matching rules. The config
+schema grows from 78 to 92 keys, and the worker prompt's text changed
+(#67, #75): prompt hashes move once, everywhere, even with every new key
+off.
+
+### Added
+
+- **`--ci-wiring {off,on}` / `PRXREF_CI_WIRING` (#66), default `off`.**
+  When `on`, a deterministic check flags a check the PR *adds* — a
+  verify/smoke/check script or flag, a file that gains a shebang, a test
+  file outside the runner's default include — that no CI configuration
+  file invokes. Its severity is `spec` when the ticket context mentions
+  regression checks, CI, pipelines or automated tests, `warning`
+  otherwise. The inline finding names the script and the CI files
+  searched. A default-include table (pytest, jest/vitest, Go, and test
+  directories) says which test files every runner picks up anyway, so only
+  a test outside it can be unwired; `--ci-wiring-globs GLOBS` /
+  `PRXREF_CI_WIRING_GLOBS` replaces the built-in CI-file globs. The check
+  needs the forge's head-sha file reads or `--repo-dir`; without a
+  repository reader it records why it did not run. The run record gains
+  `ci_wiring`.
+- **In-repo standards documents as chunk context (#68).** At
+  `PRXREF_REPO_CONTEXT=repo` with a repository reader, each chunk worker's
+  prompt gains a last block, `### In-repo standards for this chunk`,
+  holding heading-sliced sections of the repository's own standards
+  documents: `docs/standards/**`, `docs/adr/**`, `STANDARDS*.md`,
+  `SECURITY.md` and `CONTRIBUTING.md`. A section qualifies when something
+  the chunk itself names appears in it — a path atom of a changed file, a
+  name, route or table the added lines reference, or a quoted string
+  literal — and heading matches outrank body matches, so the choice is
+  deterministic. A worker that finds a changed line contradicting a
+  section cites it as `<path>:<line>` in the finding body; when two
+  admitted sections disagree with each other the block says so with a
+  `[note]` line instead of picking a side, and a Superseded or Rejected
+  ADR section is annotated `(status: Superseded)`. The per-chunk budget is
+  `PRXREF_CONTEXT_STANDARDS_MAX_CHARS` (default `4000`).
+  `PRXREF_CONTEXT_STANDARDS_GLOBS` **replaces** the built-in document set;
+  a bare empty value reads as unset (the house rule), and the exact value
+  `off` is the one way to turn standards excerpts off on their own.
+- **`--evidence-file PATH` (repeatable) / `PRXREF_EVIDENCE_FILES` (#69).**
+  Execution evidence — command output from running the PR locally — as
+  review context. Each file is JSON or lenient plain text; an item that
+  names a file of a chunk rides that chunk's prompt, and a global item
+  rides every chunk and the whole-PR sweep. The evidence is fenced,
+  labelled data, not instructions, under a must-not-contradict rule: do
+  not report a finding the evidence contradicts, and cite an item when it
+  helps. A finding the model itself labels as contradicted
+  (`"evidence": "contradicts"`) is downgraded to `warning` by a
+  deterministic pass — relabelled, never dropped, so a mislabel cannot
+  lose a real finding outright. `PRXREF_EVIDENCE_MAX_CHUNK_CHARS`
+  (default `4000`) caps the text one unit carries. The run record gains
+  `evidence`.
+- **Opt-in deterministic PR metadata rules (#70), zero LLM calls.** Set
+  `metadata_rules = "on"` — with `branch_patterns` (entries of the form
+  `type=regex`), `commit_reference`, `area_globs` and `max_areas_per_pr` —
+  to check the PR's own metadata against team rules. These are **flat
+  config keys** (`PRXREF_METADATA_RULES`, `PRXREF_BRANCH_PATTERNS`,
+  `PRXREF_COMMIT_REFERENCE`, `PRXREF_AREA_GLOBS`, `PRXREF_MAX_AREAS_PER_PR`)
+  set in `.prxref.toml` or the environment, *not* a `[metadata]` table as
+  the issue text proposed. The PR's type resolves from its labels first,
+  else the conventional-commit prefix of its title (`fix(scope): …`); a
+  resolved type whose source branch fails its `fullmatch` pattern is a
+  file-level `warning`, as is a PR touching more than `max_areas_per_pr`
+  of the `area_globs` areas. `commit_reference` requires every non-merge
+  commit subject to match its pattern; a PR with a subject that does not
+  is `outofscope`, and forges that cannot list commits (GitHub and Gitea
+  can) skip the check rather than fail it. A PR with no resolvable type,
+  or no source branch, is skipped with its reason, never flagged.
+  Violations are summary-only findings — they never post inline, never
+  touch the verdict, and end their body with
+  `(deterministic check, no model)`. The run record gains `metadata_rules`.
+- **Stable finding ids (#71), behind `PRXREF_STABLE_IDS` (default `off`).**
+  With the key on, every finding gains `id`, `file#rule#<12 hex>` — a hash
+  of the sorted tokens of its claim — so the same finding keeps its id
+  across rewording and one-key anchor drift. A finding also carries
+  `anchor_block`, the enclosing function, YAML key or manifest key at its
+  anchor, and `--format json` rows gain `id`, `anchor_block` and
+  `id_reused_from` (`run`, `verdict` or `thread`, saying where a reused id
+  came from). `PRXREF_VERDICT_STORE` names a JSON verdict store keyed by
+  stable id: a finding whose id the store holds as `refuted` — a verdict a
+  reviewer or operator recorded against it (the code is fine, the claim is
+  wrong, the behaviour is intended) — is dropped as a re-worded duplicate,
+  `refuted in earlier run (<id>)`, instead of posting again. The pipeline
+  only reads the store; recording into it is a script's or UI's call, and
+  an `accepted` verdict matches for `id_reused_from` but drops nothing. `prxref eval compare` gains a `## Stable-id reuse`
+  section between Metrics and Changed labels, holding the fraction of B's
+  active finding ids A already held. The run record gains `stable_ids`.
+- **`PRXREF_LLM_TIMEOUT_PER_1K` (#72), default `1.6`.** When the request
+  deadline is left at its default (`45` s), each model request's deadline
+  scales with its prompt: `min(900, 20 + 1.6 · input_tokens / 1000)`
+  seconds, because a 22k-token prompt cannot be answered in 45 s. An
+  explicit `--timeout` or `PRXREF_LLM_TIMEOUT` disables the scaling and is
+  used as given. Must be greater than 0.
+
+### Changed
+
+- **The config schema grows from 78 to 92 keys (#66, #68, #69, #70, #71,
+  #72).** The fourteen new keys: `PRXREF_LLM_TIMEOUT_PER_1K`,
+  `PRXREF_CI_WIRING`, `PRXREF_CI_WIRING_GLOBS`, `PRXREF_METADATA_RULES`,
+  `PRXREF_BRANCH_PATTERNS`, `PRXREF_COMMIT_REFERENCE`, `PRXREF_AREA_GLOBS`,
+  `PRXREF_MAX_AREAS_PER_PR`, `PRXREF_EVIDENCE_FILES`,
+  `PRXREF_EVIDENCE_MAX_CHUNK_CHARS`, `PRXREF_CONTEXT_STANDARDS_GLOBS`,
+  `PRXREF_CONTEXT_STANDARDS_MAX_CHARS`, `PRXREF_STABLE_IDS` and
+  `PRXREF_VERDICT_STORE`.
+- **The worker prompt gained a `## Matching rules` section (#67).** Each
+  chunk worker is now told to probe added or widened matching rules —
+  location patterns, rewrites, router patterns, globs, allow-lists, regex
+  validators — for inputs they newly capture, and to answer a constrained
+  case with an outofscope note at confidence 0.6. Because prompt text
+  moved, the packaged worker prompt's hash changes once for every run, and
+  prompt-sha comparisons (`run.json`'s `prompts.sha256`, trace files)
+  move with it, even with every new key off.
+- **A finding no longer needs a rule (#75).** The `RULE_REQUEST` text now
+  reads "A finding does not need a rule: if no rule applies, write `null`,"
+  and the example finding shows a ruleless row, so findings the model
+  cannot tie to a team rule post instead of inventing one. This changes
+  the worker and sweep prompt hashes, as above.
+- **The GitHub adapter stops re-anchoring outdated comments (#73).** An
+  outdated review comment is marked outdated rather than laundered through
+  its original line, and review-thread resolution is read through
+  GraphQL's `reviewThreads` (best effort: a refused query falls back to
+  the REST view).
+
+### Fixed
+
+- **Resolved or outdated threads no longer suppress findings (#73).** Only
+  an open, current thread carrying the same claim suppresses a finding.
+  A finding that matches a resolved or outdated thread posts with
+  `Previously raised in <thread>; still present at <file>:<line>.`, the
+  summary line counts the suppressions, and the run record gains a
+  `thread_dedup` stamp.
+- **A partial review is no longer `Approved` (#72).** A failed chunk sets
+  `degraded` with its index and files, the verdict becomes `Incomplete` —
+  the ladder is now `Error` → `Request-Changes` → `Incomplete` →
+  `Approved` — and the coverage line prints `NOT reviewed:` naming the
+  files of every failed unit. Under `PRXREF_FAIL_ON=error` or `any`, an
+  `Incomplete` review exits `1`, because a gate must not read a broken run
+  as green. A chunk that times out now says so:
+  `[chunk i/N] timed out after <t>s; increase --timeout`.
+- **Anchor snapping (#74).** A finding that quotes a token or snippet of
+  the head file snaps to the line that text actually sits on, within
+  ±80 lines of its claimed line. A finding whose quoted evidence cannot
+  be anchored — nothing parseable, a snippet the head file does not hold,
+  an ambiguous multi-match — is flagged `anchor_unverified` and loses 0.1
+  confidence instead of posting at a line its evidence does not hold.
+  "Also at" locations are verified the same way, and a site nothing
+  corroborates is dropped from the list. Line-0 findings join the
+  reworded-duplicate dedup.
+- **Rule applicability (#75).** Rules files support a `scope:` line under
+  an ATX heading (`scope: java, openapi`), which annotates the prompt's
+  heading with `(applies to: java, openapi)` and drives a deterministic
+  pass that clears a wrong `rule` label — one whose section does not cover
+  the finding's file — keeping the finding itself, which then groups and
+  caps by title. Known scope tokens: `java`/`jvm`, `python`,
+  `typescript`/`javascript`/`ts`/`js`, `docs`/`markdown`,
+  `openapi`/`specs`, and `comments` (every path); an unknown token is
+  inert and covers every path, because an unknown word must not silently
+  suppress rules. The run record gains `rule_scope_cleared`.
+
 ## [0.28.0] — 2026-09-29
 
 Team rules reach the model whole (#63). The
@@ -2670,7 +2842,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/sblattj/prxref/releases/tag/v0.29.0
 [0.28.0]: https://github.com/sblattj/prxref/releases/tag/v0.28.0
 [0.27.0]: https://github.com/sblattj/prxref/releases/tag/v0.27.0
 [0.26.0]: https://github.com/sblattj/prxref/releases/tag/v0.26.0
