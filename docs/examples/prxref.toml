@@ -119,13 +119,13 @@ evidence_files = [".prxref/evidence/run.json"]
 evidence_max_chars = 8000
 
 # --- Stable finding ids (#71) ---------------------------------------------------
-# true stamps every finding with a content-derived id (file#rule#12-hex claim
-# hash) that survives reworded titles and anchor drift; false
-# never runs the pass and every id stays null. See docs/env-vars.md.
+# Every finding always carries a content-derived id (file#rule#12-hex claim
+# hash) that survives reworded titles and anchor drift. `stable_ids` is
+# deprecated and ignored: still accepted, `false` only logs a warning.
+# See docs/env-vars.md.
 
-# stable_ids = false
 # JSON verdict store earlier runs' refuted verdicts are read from, keyed by
-# stable id; the review reads it and never writes it. Read unless
-# stable_ids = false. Missing reads as empty; malformed is a configuration
-# error. Path relative to THIS file's directory.
+# stable id; the review reads it and never writes it. Missing reads as
+# empty; malformed is a configuration error. Path relative to THIS file's
+# directory.
 # verdict_store = ".prxref/verdicts.json"

@@ -12,10 +12,11 @@ reorders or re-punctuates the claim and an anchor that moves one YAML key,
 while ``anchor_block`` (the enclosing function, YAML key path or manifest
 key) travels as metadata the id excludes; a ``refuted`` verdict in the
 loaded store drops its finding as ``refuted in earlier run (<id>)`` with
-``id_reused_from="verdict"``; nothing runs — every ``id`` stays ``None``,
-the run record's ``stable_ids`` stays ``None`` — unless the caller turns
-``PRXREF_STABLE_IDS`` on; and the eval churn metric reads 1.0 for identical
-ids and 0.0 for disjoint ones.
+``id_reused_from="verdict"``; a 0.30.0 store entry (no ``title``, keyed by
+the pre-stemming claim hash) still matches; the pass always runs — the
+deprecated ``PRXREF_STABLE_IDS`` / ``stable_ids=False`` is accepted and
+ignored; and the eval churn metric reads 1.0 for identical ids and 0.0 for
+disjoint ones.
 """
 from __future__ import annotations
 
@@ -49,6 +50,7 @@ from prxref.stable_ids import (  # noqa: E402
     apply_stable_ids,
     claim_hash,
     finding_id,
+    legacy_claim_hash,
     stable_id_collisions,
 )
 from prxref.triage import Finding, parse_unified_diff  # noqa: E402
@@ -298,6 +300,48 @@ class TestVerdictStore:
         assert apply_stable_ids([reworded], [], store)[0].drop_reason is None
         assert apply_stable_ids([original], [], store)[0].drop_reason is not None
 
+    def test_a_0_30_0_entry_keyed_by_the_pre_stemming_hash_still_drops(self):
+        legacy_id = "src/config.py#norule#8af723e8c387"
+        store = {"version": 1, "verdicts": {legacy_id: {
+            "verdict": "refuted", "commit": "a" * 40, "run": "run-0.30.0",
+            "created_at": "2026-09-01T00:00:00+00:00",
+        }}}
+        f = _finding(title="Drain duration is hardcoded")
+        assert finding_id(f) != legacy_id
+        out = apply_stable_ids([f], [], store)
+        assert out[0].id == legacy_id
+        assert out[0].drop_reason == f"refuted in earlier run ({legacy_id})"
+        assert out[0].id_reused_from == REUSED_FROM_VERDICT
+
+    def test_the_pre_stemming_fallback_is_scoped_to_the_same_file_and_rule(self):
+        store = {"version": 1, "verdicts": {
+            "src/config.py#norule#8af723e8c387": {"verdict": "refuted"},
+        }}
+        title = "Drain duration is hardcoded"
+        out = apply_stable_ids(
+            [_finding(file="src/other.py", title=title), _finding(title=title, rule="hygiene")],
+            [], store,
+        )
+        assert [f.drop_reason for f in out] == [None, None]
+        assert [f.id_reused_from for f in out] == [None, None]
+
+    def test_legacy_claim_hash_is_the_0_30_0_formula(self):
+        assert legacy_claim_hash("Drain duration is hardcoded") == "8af723e8c387"
+        assert claim_hash("Drain duration is hardcoded") == "4a9ee759b739"
+
+    def test_the_title_bridge_alone_drops_a_reworded_finding_with_a_new_id(self):
+        original = _finding(title="Drain duration hardcoded, should derive from values")
+        orig_id = finding_id(original)
+        store = {"version": 1, "verdicts": {
+            orig_id: {"verdict": "refuted", "title": original.title},
+        }}
+        reworded = _finding(line=9, title="drain duration hardcoded; should derive from config values")
+        assert finding_id(reworded) != orig_id
+        out = apply_stable_ids([reworded], [], store)
+        assert out[0].id == orig_id
+        assert out[0].drop_reason == f"refuted in earlier run ({orig_id})"
+        assert out[0].id_reused_from == REUSED_FROM_VERDICT
+
     def test_the_closest_stored_title_wins(self):
         target = "drain duration hardcoded; should derive from values"
         close = _finding(title="Drain duration hardcoded; derive from config values today, sadly")
@@ -445,11 +489,31 @@ class TestOrchestratorWiring:
         for f in res["findings_active"]:
             assert f.id and f.id.startswith("src/app.py#")
 
-    def test_explicit_off_keeps_ids_null(self):
+    def test_explicit_off_is_deprecated_and_ignored(self):
         res, _ = self._run(Path("."), stable_ids=False)
-        assert res["stable_ids"] is None
+        assert res["stable_ids"] is not None
+        assert res["findings_active"]
         for f in (*res["findings_active"], *res["findings_dropped"]):
-            assert f.id is None
+            assert f.id and f.id.startswith("src/app.py#")
+
+    def test_explicit_off_still_reads_the_store_and_drops_a_refuted_finding(self, tmp_path):
+        finding = Finding(
+            file="src/app.py", line=3, severity="error", confidence=0.9,
+            title="Null deref", body="x may be None when config is missing; data loss follows.",
+        )
+        path = tmp_path / "verdicts.json"
+        verdicts.record(path, [finding], {finding_id(finding): "refuted"}, run="earlier")
+        res, _ = self._run(tmp_path, stable_ids=False, store=str(path))
+        assert res["findings_active"] == []
+        assert res["findings_dropped"][0].drop_reason == (
+            f"refuted in earlier run ({finding_id(finding)})"
+        )
+
+    def test_explicit_off_still_refuses_a_broken_store(self, tmp_path):
+        bad = tmp_path / "verdicts.json"
+        bad.write_text("{not json", encoding="utf-8")
+        with pytest.raises(ConfigError, match="not valid JSON"):
+            self._run(tmp_path, stable_ids=False, store=str(bad))
 
     def test_config_default_is_on(self):
         from prxref.config import _DEFAULTS
@@ -587,3 +651,56 @@ class TestEvalChurnMetric:
             self._record(["a#norule#1", "b#norule#2"], dropped=[False, True]),
             self._record(["a#norule#1"]),
         ) == 1.0
+
+
+class TestDeprecatedKnob:
+    """``PRXREF_STABLE_IDS`` is accepted (never exit 2) but ignored."""
+
+    @pytest.fixture
+    def calls(self, monkeypatch):
+        from prxref import orchestrator
+        from prxref.forges.base import PRRef
+
+        ref = PRRef(
+            forge="github", host="github.com", owner="org", repo="repo",
+            number=7, url="https://github.com/org/repo/pull/7",
+        )
+        recorded: list[dict] = []
+
+        def _orchestrate(**kwargs):
+            recorded.append(kwargs)
+            return {"verdict": "Approved", "findings_active": [], "findings_dropped": []}
+
+        monkeypatch.setattr(orchestrator, "orchestrate_review", _orchestrate)
+        monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: object())
+        monkeypatch.setattr("prxref.cli.detect_forge", lambda url: ref)
+        monkeypatch.setattr("prxref.cli.make_forge", lambda ref: FakeForge())
+        return recorded, ref.url
+
+    @pytest.mark.parametrize("value", ["0", "1", "true", "no", ""])
+    def test_any_value_is_accepted_and_never_reaches_the_review(self, calls, monkeypatch, value):
+        from prxref.cli import main
+
+        recorded, url = calls
+        monkeypatch.setenv("PRXREF_STABLE_IDS", value)
+        assert main(["review", "--pr-url", url, "--no-post"]) == 0
+        assert "stable_ids" not in recorded[0]
+
+    def test_opting_out_logs_that_the_knob_is_ignored(self, calls, monkeypatch, caplog):
+        from prxref.cli import main
+
+        _, url = calls
+        monkeypatch.setenv("PRXREF_STABLE_IDS", "0")
+        with caplog.at_level(logging.WARNING, logger="prxref"):
+            assert main(["review", "--pr-url", url, "--no-post"]) == 0
+        messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("PRXREF_STABLE_IDS" in m and "ignored" in m for m in messages)
+
+    def test_the_default_logs_nothing_about_the_knob(self, calls, monkeypatch, caplog):
+        from prxref.cli import main
+
+        _, url = calls
+        monkeypatch.delenv("PRXREF_STABLE_IDS", raising=False)
+        with caplog.at_level(logging.WARNING, logger="prxref"):
+            assert main(["review", "--pr-url", url, "--no-post"]) == 0
+        assert not [r for r in caplog.records if "PRXREF_STABLE_IDS" in r.getMessage()]
