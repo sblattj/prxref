@@ -218,7 +218,7 @@ def build_unit_context(
     contract_priority: Sequence[str] = (),
     standards_paths: Sequence[str] = (),
     standards_priority: Sequence[str] = (),
-    standards_max_chars: int = 4000,
+    standards_max_chars: int = 6000,
     exclude: Callable[[str], bool] | None = None,
 ) -> UnitContext:
     """The repository context for one worker chunk at level ``mode``.
@@ -240,7 +240,7 @@ def build_unit_context(
     ``standards_paths``, ``standards_priority`` and ``standards_max_chars``
     are the same triple over the standards globs, ``max_chars`` the
     per-chunk budget of :func:`prxref.repo_standards.standards_entries`
-    (the config default 4000 restated).
+    (the config default 6000 restated).
     ``exclude(path)`` true marks a path repository context must never read or
     show, normally :func:`prxref.repo_context.exclude_predicate`; an
     ``exclude`` that raises counts as true.

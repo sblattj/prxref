@@ -12,7 +12,8 @@ which fails the test.
 One ``cases.json`` holds five cases, because ``--cases`` takes one path and
 the directory form cannot express a pull-request case:
 
-- the three ``tests/evals/case-*`` directories, loaded by the directory
+- the first three ``tests/evals/case-*`` directories (the later nginx pair is
+  left out so the golden numbers hold), loaded by the directory
   loader and written back with :func:`prxref.eval_cases.case_to_json`;
 - ``case-pinned``, a ``pr_url`` pinned to two SHAs, served by the forge;
 - ``case-grouped``, a local diff on which the reviewer reports two findings
@@ -50,6 +51,12 @@ from prxref.llm import InvokeResult
 from tests.test_replay import RecordingForge
 
 EVALS_DIR = Path(__file__).parent / "evals"
+DIRECTORY_CASE_IDS = ("case-001-mcp-protocol-upgrade", "case-002-session-token-logging", "case-003-config-schema-pin")
+
+
+def _directory_cases():
+    """The three spec-grounded directory cases this golden pipeline is built on."""
+    return [case for case in load_cases(EVALS_DIR) if case.id in DIRECTORY_CASE_IDS]
 REVIEWER = "reviewer-m"
 JUDGE = "judge-m"
 WORKER_OPENING = "You review one chunk of a pull-request diff per call."
@@ -288,7 +295,7 @@ def _row_at(record: dict, file: str, line: int) -> dict[str, Any]:
 @pytest.fixture
 def pipeline(rig, tmp_path, capsys, caplog):
     """Run both arms, score both, compare twice, then rescore ``base``; every step through ``cli.main``."""
-    directory_cases = [case_to_json(case) for case in load_cases(EVALS_DIR)]
+    directory_cases = [case_to_json(case) for case in _directory_cases()]
     cases = _write_dataset(tmp_path / "dataset", [*directory_cases, PINNED_CASE, GROUPED_CASE])
     rules = tmp_path / "rules.md"
     rules.write_text(f"# Team rules\n\n{ARM_MARKER}\n", encoding="utf-8")
@@ -382,7 +389,7 @@ None.
 
 class TestTheDataset:
     def test_the_directory_cases_reach_the_run_exactly_as_the_directory_loader_reads_them(self, tmp_path):
-        directory = load_cases(EVALS_DIR)
+        directory = _directory_cases()
         cases = _write_dataset(tmp_path / "dataset", [*map(case_to_json, directory), PINNED_CASE, GROUPED_CASE])
         loaded = load_cases(cases)
         assert [case.id for case in loaded] == CASE_IDS

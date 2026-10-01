@@ -1,0 +1,13 @@
+{
+  "id": "case-005-spa-uuid-route",
+  "title": "Asset-extension location rule beside a server_tokens violation; the rule captures no real route",
+  "source_prs": [],
+  "planted_violations": [
+    {
+      "id": "V1",
+      "description": "server_tokens on; docs/nginx-hardening.md H-1 requires off",
+      "expected_ref": "S1"
+    }
+  ],
+  "notes": "Control for case-004 (issue #67). The location rule is the same, but docs/routes.md R-1 makes every :version a UUID with no dot, so the rule captures nothing the SPA serves and the worker must report nothing for it, at most a low-severity note. The decoy has no expected entry; a finding that blames the location rule is an unmatched AI finding."
+}

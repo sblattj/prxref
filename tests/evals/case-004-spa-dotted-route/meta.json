@@ -1,0 +1,13 @@
+{
+  "id": "case-004-spa-dotted-route",
+  "title": "Asset-extension location rule captures dotted /items/:version routes the spec says the SPA must serve",
+  "source_prs": [],
+  "planted_violations": [
+    {
+      "id": "V1",
+      "description": "location ~* \\.[^/]+$ { return 404; } matches /items/v1.2; docs/routes.md R-1 requires dotted versions and R-2 forbids an error status outside /static/",
+      "expected_ref": "S1"
+    }
+  ],
+  "notes": "Failure mode: a matching rule silently captures inputs another rule handled (issue #67). Pair with case-005, where every capturable input is a UUID with no dot, so the same rule must produce no finding. EVAL_PINS turns routing_probe off, so the route table reaches the worker only through the docs corpus."
+}
