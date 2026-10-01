@@ -138,11 +138,13 @@ class TestFindingRuleField:
         assert names == [
             *BASE_FIELDS,
             "rule", "locations", "suggestion", "suggestion_end_line",
-            "previous_thread",
+            "previous_thread", "anchor_unverified",
         ]
         assert Finding("a.py", 1, "error", 0.9, "t", "b").rule is None
         # Issue #73's previously-raised note trails everything else.
         assert Finding("a.py", 1, "error", 0.9, "t", "b").previous_thread is None
+        # Issue #74's anchor-snap mark trails even that.
+        assert Finding("a.py", 1, "error", 0.9, "t", "b").anchor_unverified is False
 
     def test_positional_construction_through_scope_still_works(self):
         f = Finding("a.py", 1, "error", 0.9, "t", "b", None, SCOPE_OUT)

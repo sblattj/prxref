@@ -185,7 +185,8 @@ class TestQualityDoc:
     def test_the_rule_cap_runs_after_grouping_and_before_the_gate(self):
         names = [name for _, name in _pass_table()]
         assert names.index("apply_rule_cap") == names.index("apply_rule_grouping") + 1
-        assert names.index("apply_quality_gate") == names.index("apply_rule_cap") + 1
+        assert names.index("apply_location_verification") == names.index("apply_rule_cap") + 1
+        assert names.index("apply_quality_gate") == names.index("apply_location_verification") + 1
 
     def test_the_drop_reason_row_follows_grouped_into(self):
         section = _section(QUALITY_MD, "## Drop reasons")

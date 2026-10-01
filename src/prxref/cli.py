@@ -929,6 +929,13 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     still carries its own ``rule``). A finding object without ``rule`` or
     ``locations`` reports ``null`` for it, and one without ``suggestion``
     reports ``null`` and ``0``.
+
+    ``anchor_unverified`` follows ``locations`` and is always present
+    (issue #74): ``true`` on a model finding whose quoted evidence the
+    anchor-snap pass could not locate — no snippet parseable while
+    file-level, a snippet the head file does not hold, or an ambiguous
+    multi-match — whose confidence the same pass lowered. ``false`` on
+    every other row, and on a finding object without the attribute.
     """
     locations = getattr(f, "locations", None) or ()
     suggestion = getattr(f, "suggestion", None)
@@ -942,6 +949,7 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "suggestion": suggestion,
         "suggestion_end_line": getattr(f, "suggestion_end_line", 0) if suggestion is not None else 0,
         "locations": [{"file": path, "line": line} for path, line in locations] or None,
+        "anchor_unverified": bool(getattr(f, "anchor_unverified", False)),
         "title": f.title,
         "body": f.body,
         "drop_reason": drop_reason,

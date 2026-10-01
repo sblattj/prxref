@@ -35,7 +35,7 @@ URL = "https://github.com/org/repo/pull/7"
 CLI_REF = PRRef(forge="github", host="github.com", owner="org", repo="repo", number=7, url=URL)
 ROW_KEYS = [
     "file", "line", "severity", "confidence", "scope", "rule", "suggestion", "suggestion_end_line",
-    "locations", "title", "body", "drop_reason",
+    "locations", "anchor_unverified", "title", "body", "drop_reason",
 ]
 FROZEN = "warning a.py:5 T (confidence 0.90)"
 

@@ -126,6 +126,16 @@ class Finding:
     at <file>:<line>."`` and renders as a suffix on the posted inline body
     and the summary bullet. ``None`` on every other finding; not part of any
     identity or dedup key.
+
+    ``anchor_unverified`` is set by :func:`prxref.quality.apply_anchor_snap`
+    (issue #74) on a MODEL finding whose quoted evidence could not anchor it:
+    no snippet parseable while it sits file-level, a snippet the head file
+    does not hold, or an ambiguous multi-match. The same ``replace`` lowers
+    its confidence by :data:`prxref.quality.ANCHOR_UNVERIFIED_CONFIDENCE_HIT`,
+    so the quality gate may still drop it. ``False`` on every other finding
+    (a deterministic check's anchor is its own evidence, so its findings are
+    never stamped); it changes no posting behaviour and is not part of any
+    identity or dedup key.
     """
 
     file: str
@@ -141,6 +151,7 @@ class Finding:
     suggestion: str | None = None
     suggestion_end_line: int = 0
     previous_thread: str | None = None
+    anchor_unverified: bool = False
 
 
 @dataclass

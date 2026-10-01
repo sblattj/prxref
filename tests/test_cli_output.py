@@ -54,7 +54,7 @@ NEW_RECORD_KEYS = [
 ]
 FINDING_KEYS = [
     "file", "line", "severity", "confidence", "scope", "rule", "suggestion", "suggestion_end_line",
-    "locations", "title", "body", "drop_reason",
+    "locations", "anchor_unverified", "title", "body", "drop_reason",
 ]
 
 RULES = {
