@@ -19,7 +19,8 @@ Two formats parse, tried in order:
   ``exit_code``, ``output`` and ``files`` optional; an entry without a
   usable ``command`` is a configuration error, not a silent skip.
 - **Plain text** — the lenient fallback for a file that is not JSON:
-  blank-line-separated blocks, each block's first line the command, an
+  blank-line-separated blocks (a ``$ cmd`` line also opens an item), each
+  block's first line the command with any ``$ `` prompt stripped, an
   ``exit: N`` (or ``exit=N``) line anywhere after it the exit code, and
   the remaining lines the output. A whitespace-only file loads as an
   empty bundle, like an empty ticket-context file.
@@ -338,16 +339,29 @@ def _parse_json_items(text: str, *, source: str, path: str) -> list[EvidenceItem
 def _parse_text_items(text: str) -> list[EvidenceItem]:
     """Parse a plain-text evidence file: blank-line-separated blocks.
 
-    Each block's first line is the command; a later ``exit: N`` (or
+    Each block's first line is the command, with an optional leading
+    ``$ `` prompt stripped; a ``$ `` line also opens a new item without
+    a blank line before it. A later ``exit: N`` (or
     ``exit=N``) line supplies the exit code and leaves the output; every
     other line is the output. A file with no block yields no item.
     """
     items: list[EvidenceItem] = []
-    for block in re.split(r"\n[ \t]*\n+", text):
-        lines = [ln for ln in block.splitlines() if ln.strip()]
-        if not lines:
-            continue
+    blocks: list[list[str]] = []
+    for raw in re.split(r"\n[ \t]*\n+", text):
+        current: list[str] = []
+        for ln in raw.splitlines():
+            if not ln.strip():
+                continue
+            if ln.lstrip().startswith("$ ") and current:
+                blocks.append(current)
+                current = []
+            current.append(ln)
+        if current:
+            blocks.append(current)
+    for lines in blocks:
         command = lines[0].strip()
+        if command.startswith("$ "):
+            command = command[2:].strip()
         exit_code = 0
         output: list[str] = []
         for ln in lines[1:]:
