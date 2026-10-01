@@ -172,7 +172,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
    ``spec_grounding``, ``size_advisory``, ``prompt_templates``,
    ``scoped_rules``, ``rule_counts``, ``rule_scope_cleared``,
-   ``repo_context``; ``replay`` on replays only, and
+   ``repo_context``, ``evidence``; ``replay`` on replays only, and
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
@@ -190,7 +190,7 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
 8. Post: summary rendered from ``reviewer.load_prompt("summary")``, or from
    the operator's ``summary.md`` override when ``prompts`` carries one, with
    placeholders ``{verdict} {title} {file_count} {error_count}
-   {warning_count} {spec_count} {spec_note} {ticket_note}
+   {warning_count} {spec_count} {spec_note} {ticket_note} {evidence_note}
    {outofscope_count} {findings} {attribution}`` filled, along with the
    marker slots and the optional slots of :func:`_render_summary`
    (per-severity finding groups, head SHA, chunk and token counts), plus
@@ -277,6 +277,7 @@ from .quality import (
     active,
     apply_anchor_snap,
     apply_containment_note,
+    apply_evidence_verdicts,
     apply_example_echo_check,
     apply_hedge_gate,
     apply_line_align,
@@ -314,6 +315,7 @@ from .triage import (
     Finding,
     added_lines_by_file,
     count_size_relevant_changes,
+    normalize_evidence,
     normalize_rule,
     normalize_scope,
     parse_unified_diff,
@@ -474,7 +476,7 @@ _FALLBACK_SUMMARY_TEMPLATE = (
     "Files reviewed: {file_count} · {error_marker} {error_count} error · "
     "{warning_marker} {warning_count} warning · {spec_marker} {spec_count} spec · "
     "{outofscope_marker} {outofscope_count} outofscope\n"
-    "{spec_note}{ticket_note}\n"
+    "{spec_note}{ticket_note}{evidence_note}\n"
     "{findings}\n\n{attribution}"
 )
 
@@ -562,6 +564,8 @@ def orchestrate_review(
     max_areas_per_pr: int = 2,
     ci_wiring: str = "off",
     ci_wiring_globs: Sequence[str] = (),
+    evidence: Any = None,
+    evidence_max_chunk_chars: int = 4000,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -571,7 +575,7 @@ def orchestrate_review(
     output_tokens, posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions, incremental, ci_wiring, degraded}``, plus
+    suggestions, incremental, ci_wiring, evidence, degraded}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
     :func:`_run_record`, so the last sixteen keys are always present and are
@@ -753,6 +757,31 @@ def orchestrate_review(
     ``{candidates, ci_files, picked_up_default, triggered}``, echoed by
     one ``ci_wiring ok`` trace event. Never changes the verdict or the
     exit code.
+
+    ``evidence`` (issue #69) is the loaded execution evidence
+    (:class:`prxref.evidence.EvidenceBundle`, as
+    :func:`prxref.evidence.load_evidence` returns it, duck-typed like
+    ``rules`` and ``ticket``: ``active``, ``record()``, ``block_for()``,
+    ``global_block()`` and ``matched_for()``), and ``evidence_max_chunk_chars``
+    (``PRXREF_EVIDENCE_MAX_CHUNK_CHARS``; the default restates
+    ``config._DEFAULTS`` the way ``MAX_WORKERS`` does) is the per-unit
+    character budget of its prompt blocks. ``None`` (an empty list
+    configured) turns it off, and an unset run's prompts, posts, record
+    and trace are exactly a run without it. When active, each chunk's
+    prompt carries the evidence items its paths matched plus the global
+    ones, and the sweep's prompt the global ones alone, each item fenced
+    and labelled data-not-instructions under a must-not-contradict rule;
+    the worker may answer with a per-finding ``"evidence": "contradicts"``
+    label, read only on units whose prompt carried evidence, and
+    :func:`quality.apply_evidence_verdicts` — right after spec grounding —
+    RELABELS such a finding ``warning`` rather than dropping it, counted by
+    one INFO line, one ``evidence downgrade`` trace event and the summary's
+    evidence note (``{evidence_note}``, after the ticket note). The
+    ``evidence`` key of every exit is ``{files, items, matched_chunks,
+    max_chars}`` (paths as configured, never the evidence text), echoed by
+    one ``evidence ok`` trace event, and an EMPTY bundle (files that held
+    no item) is recorded like an empty ticket: noted, never an error.
+    Never changes the verdict or the exit code.
 
     ``replay`` is the evaluation-replay stamp built by the CLI
     (``{base_sha, head_sha, threads, diff_file, description, as_of,
@@ -1092,6 +1121,7 @@ def orchestrate_review(
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "ci_wiring": None,
+        "evidence": None,
         "degraded": None,
         "chunks_over_budget": 0,
         "largest_chunk_tokens": 0,
@@ -1126,6 +1156,15 @@ def orchestrate_review(
             "chunk_read_cap_hit": False,
             "run_read_cap_hit": False,
             "units": None,
+        }
+    # Like the ticket: an EMPTY bundle (files that held no item) is still
+    # recorded — the paths and the 0 items — it just reaches no prompt.
+    evidence_active = evidence is not None and bool(evidence.active)
+    if evidence is not None:
+        run_inputs["evidence"] = {
+            **evidence.record(),
+            "matched_chunks": 0,
+            "max_chars": evidence_max_chunk_chars,
         }
     summary_template = prompts.override("summary") if prompts is not None else ""
     ticket_active = ticket is not None and bool(ticket.active)
@@ -1375,6 +1414,37 @@ def orchestrate_review(
         }
         _warn_scoped_cap(scoped_rules, [*scoped_blocks, sweep_block], scoped_rules_max_chars)
 
+    # Evidence blocks (#69), built before the fan-out like the scoped
+    # blocks: each chunk's unit gets its matched items plus the global
+    # ones inside its PromptContext copy, and the sweep's gets the global
+    # ones alone (a chunk's matched items are that chunk's business, not
+    # the sweep's), so its block is built against every chunk path at
+    # once: an item matching ANY chunk is spent on that chunk. The ok
+    # event fires here too, once matched_chunks is known — the record is
+    # one claim, echoed whole. matched_chunks counts the chunks whose
+    # paths matched at least one item.
+    evidence_blocks: list[str] | None = None
+    sweep_evidence_block = ""
+    if evidence_active:
+        chunk_paths = [
+            [p for f in chunk for p in (f.path, f.old_path) if p] for chunk in chunks
+        ]
+        evidence_blocks = [
+            evidence.block_for(paths, evidence_max_chunk_chars) for paths in chunk_paths
+        ]
+        sweep_evidence_block = evidence.global_block(
+            [p for paths in chunk_paths for p in paths], evidence_max_chunk_chars,
+        )
+        run_inputs["evidence"]["matched_chunks"] = sum(
+            1 for paths in chunk_paths if evidence.matched_for(paths)
+        )
+        tracer.event("evidence", "ok", **run_inputs["evidence"])
+        logger.info(
+            "evidence: %d item(s) from %d file(s); matched items reach %d of %d chunk(s)",
+            len(evidence.items), len(evidence.files),
+            run_inputs["evidence"]["matched_chunks"], len(chunks),
+        )
+
     # Pruned BEFORE the threads are listed, and both before the review units
     # run. The prune-then-list order is load-bearing: reading threads first
     # would let this run's findings be suppressed as already-discussed against
@@ -1533,6 +1603,7 @@ def orchestrate_review(
         repo_plan=repo_plan, unit_records=unit_records,
         parse_retries=llm_parse_retries,
         followup_floor=followup_floor, followup_records=followup_records,
+        evidence_blocks=evidence_blocks,
     )
     if repo_plan is not None and unit_records is not None:
         run_inputs["repo_context"] = _repo_context_record(
@@ -1563,6 +1634,7 @@ def orchestrate_review(
             trace_dir=trace_dir,
             prompt_context=prompt_context, scoped_block=sweep_block,
             parse_retries=llm_parse_retries,
+            evidence_block=sweep_evidence_block,
         )
     )
     if run_inputs["parse_retries"] is not None:
@@ -1728,6 +1800,28 @@ def orchestrate_review(
         )
         tracer.event("specs", "relabel", findings=relabelled)
     findings = graded
+
+    # Evidence verdicts (#69), in spec grounding's slot: the only pass that
+    # reads a finding's ``evidence`` label, and it RELABELS rather than
+    # drops — the model judged the contradiction, this only enforces the
+    # severity ceiling on it, so a wrong label costs severity, never the
+    # finding. 1:1 and order-preserving, so sweep_start still marks the
+    # boundary.
+    evidence_downgraded = 0
+    if evidence_active:
+        downgraded = apply_evidence_verdicts(findings, evidence_active=True)
+        evidence_downgraded = sum(
+            1
+            for before, after in zip(findings, downgraded, strict=True)
+            if before.severity != after.severity
+        )
+        if evidence_downgraded:
+            logger.info(
+                "evidence: downgraded %d finding(s) the evidence contradicts to warning",
+                evidence_downgraded,
+            )
+            tracer.event("evidence", "downgrade", findings=evidence_downgraded)
+        findings = downgraded
 
     # The first pass that drops: an echo of the prompt's own example never
     # reaches the thread, consistency or grouping comparisons, a cap, or
@@ -1913,6 +2007,7 @@ def orchestrate_review(
         run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
     )
     incremental_note = _incremental_note(scope, len(files))
+    evidence_note = _evidence_note(run_inputs["evidence"], evidence_downgraded)
     posted = False
     inline_posted = 0
     post_failures: list[tuple[str, str]] = []
@@ -1939,6 +2034,7 @@ def orchestrate_review(
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
+            evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
@@ -2015,6 +2111,7 @@ def orchestrate_review(
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
+            evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
@@ -2045,6 +2142,7 @@ def orchestrate_review(
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
+            evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
             summary_template=summary_template,
@@ -3329,6 +3427,7 @@ def _run_workers(
     parse_retries: int = 0,
     followup_floor: float | None = None,
     followup_records: list[dict[str, Any] | None] | None = None,
+    evidence_blocks: Sequence[str] | None = None,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -3369,6 +3468,9 @@ def _run_workers(
                 repo_plan=repo_plan, unit_records=unit_records,
                 parse_retries=parse_retries,
                 followup_floor=followup_floor, followup_records=followup_records,
+                evidence_block=(
+                    evidence_blocks[i] if evidence_blocks is not None else ""
+                ),
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -3513,6 +3615,7 @@ def _invoke_chunk(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
             accept_suggestion=prompt_context.suggestion_active,
+            accept_evidence=prompt_context.evidence_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -3590,15 +3693,18 @@ def _run_worker(
     parse_retries: int = 0,
     followup_floor: float | None = None,
     followup_records: list[dict[str, Any] | None] | None = None,
+    evidence_block: str = "",
 ) -> dict:
     tracer = tracer if tracer is not None else get_tracer()
     t0 = time.perf_counter()
-    # The chunk's own scoped rules replace the run-wide worker block; both
-    # attempts below take this context, so the retry keeps the chunk's rules.
-    unit_context = (
-        prompt_context if scoped_block is None
-        else replace(prompt_context, rules_worker=scoped_block.text)
-    )
+    # The chunk's own scoped rules replace the run-wide worker block, and
+    # its evidence block rides beside them (#69); both attempts below take
+    # this context, so the retry keeps the chunk's rules and evidence.
+    unit_context = prompt_context
+    if scoped_block is not None:
+        unit_context = replace(unit_context, rules_worker=scoped_block.text)
+    if evidence_block:
+        unit_context = replace(unit_context, evidence_block=evidence_block)
     # Logged on ENTRY, not only on completion. A chunk that never finishes
     # otherwise leaves no evidence it ever started, so a hang cannot be
     # attributed to a chunk, a file, or a model.
@@ -3723,6 +3829,7 @@ def _run_sweep(
     prompt_context: PromptContext = NO_PROMPT_CONTEXT,
     scoped_block: Any = None,
     parse_retries: int = 0,
+    evidence_block: str = "",
 ) -> dict:
     """Run the whole-PR systemic sweep as one worker-style review unit.
 
@@ -3741,7 +3848,11 @@ def _run_sweep(
     failed chunk in the caller's coverage accounting. ``scoped_block``, the
     sweep's path-scoped rules block, replaces ``rules_sweep`` in the context
     and its files ride the ``sweep start`` event as ``rules``; ``None`` (no
-    scoped rules) leaves both exactly as they were. ``parse_retries`` is
+    scoped rules) leaves both exactly as they were. ``evidence_block``
+    (issue #69) is the sweep's GLOBAL evidence block — a chunk's matched
+    items are that chunk's business — and fills ``evidence_block`` in the
+    context the same way; ``""`` (the default) leaves the prompt as it was.
+    ``parse_retries`` is
     passed to the reviewer unchanged (issue #21), and the result carries
     the meta's ``parse_retries`` and ``first_error`` exactly as a chunk's
     does (:func:`_retry_meta`); a sweep that raised carries neither.
@@ -3750,6 +3861,8 @@ def _run_sweep(
     t0 = time.perf_counter()
     if scoped_block is not None:
         prompt_context = replace(prompt_context, rules_sweep=scoped_block.text)
+    if evidence_block:
+        prompt_context = replace(prompt_context, evidence_block=evidence_block)
     digest = systemic.build_digest(files, token_budget)
     digested = {f.path for f in files}
     discussion = [t for t in threads if t.path in digested]
@@ -3787,6 +3900,7 @@ def _run_sweep(
         finding = _coerce_finding(
             item, accept_scope=prompt_context.scope_active,
             accept_rule=prompt_context.rule_active,
+            accept_evidence=prompt_context.evidence_active,
         )
         if finding is not None:
             findings.append(finding)
@@ -3824,7 +3938,7 @@ def _run_sweep(
 
 def _coerce_finding(
     item, *, accept_scope: bool = False, accept_rule: bool = False,
-    accept_suggestion: bool = False,
+    accept_suggestion: bool = False, accept_evidence: bool = False,
 ) -> Finding | None:
     if isinstance(item, Finding):
         return item
@@ -3847,6 +3961,7 @@ def _coerce_finding(
                 rule=normalize_rule(item.get("rule")) if accept_rule else None,
                 suggestion=suggestion,
                 suggestion_end_line=suggestion_end_line,
+                evidence=normalize_evidence(item.get("evidence")) if accept_evidence else None,
             )
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("dropping malformed finding %r: %s", item, e)
@@ -3873,6 +3988,7 @@ def _render_summary(
     thread_accounting: str = "",
     spec_note: str = "",
     ticket_note: str = "",
+    evidence_note: str = "",
     cost_label: str = "",
     size_advisory_line: str = "",
     summary_template: str = "",
@@ -3887,10 +4003,11 @@ def _render_summary(
     receiving that placeholder's value. The five marker slots
     (``{error_marker}`` ... ``{out_of_ticket_marker}``,
     :func:`markers.marker_slots`) are filled from the effective glyph table,
-    as are the bullets and the outside-ticket heading. ``spec_note`` and
-    ``ticket_note`` ride ``{spec_note}{ticket_note}`` on the line after the counts; each
-    carries its own trailing newline when non-empty, so empty notes leave the
-    summary byte-identical. ``{findings}`` lists the in-ticket and unjudged
+    as are the bullets and the outside-ticket heading. ``spec_note``,
+    ``ticket_note`` and ``evidence_note`` ride
+    ``{spec_note}{ticket_note}{evidence_note}`` on the line after the counts;
+    each carries its own trailing newline when non-empty, so empty notes
+    leave the summary byte-identical. ``{findings}`` lists the in-ticket and unjudged
     findings first; findings outside the ticket (scope ``"out"``) follow
     under a bold ``Outside the ticket (N)`` heading led by
     :func:`markers.out_of_ticket_marker`; when no other finding exists,
@@ -4013,6 +4130,7 @@ def _render_summary(
         "outofscope_count": str(counts["outofscope"]),
         "spec_note": spec_note,
         "ticket_note": ticket_note,
+        "evidence_note": evidence_note,
         "findings": bullets,
         "attribution": attribution,
         "inline_accounting": accounting,
@@ -4159,6 +4277,29 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
             f"> ⚠️ Spec fetch failed for {len(failed)} source(s): {reasons}"
         )
     return "\n".join(lines) + "\n"
+
+
+def _evidence_note(record: Mapping[str, Any] | None, downgraded: int) -> str:
+    """Render the summary's execution-evidence note (#69), ``""`` when none was supplied.
+
+    One blockquote line says what was supplied (items, and the files they
+    came from) and how far the matched items reached (how many chunk
+    prompts), so a PR reader can tell an evidence-backed review from an
+    unevidenced one; a second clause, only when any finding conceded a
+    contradiction, says how many were downgraded to ``warning``. The note
+    rides ``{evidence_note}`` after ``{ticket_note}``, and carries its own
+    trailing newline, so an empty return leaves the summary byte-identical.
+    """
+    if record is None:
+        return ""
+    line = (
+        f"> ℹ️ Execution evidence: {record.get('items', 0)} item(s) from "
+        f"{len(record.get('files') or [])} file(s); matched items reached "
+        f"{record.get('matched_chunks', 0)} chunk prompt(s)"
+    )
+    if downgraded:
+        line += f"; {downgraded} contradicted finding(s) downgraded to warning"
+    return line + "\n"
 
 
 def _log_safe_origin(origin: str) -> str:

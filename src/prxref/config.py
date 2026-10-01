@@ -333,6 +333,33 @@ LLM / pipeline:
                                 Characters of ticket text kept in the
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
+  PRXREF_EVIDENCE_FILES         Execution evidence (#69): paths to files of
+                                commands the caller ran (a CI step, an
+                                agent, a script) — nginx -t, helm lint, the
+                                test suite, HTTP probes. Each file is JSON
+                                (a top-level array, or an object holding an
+                                "evidence" array of {command, exit_code,
+                                output, files}) or plain text (blank-line-
+                                separated blocks, the first line the
+                                command, an exit: N line the exit code).
+                                Items whose paths match a chunk ride that
+                                chunk's prompt; the rest ride every prompt,
+                                the whole-PR sweep's included, and a worker
+                                must not report a finding the evidence
+                                contradicts. A missing, unreadable or
+                                non-UTF-8 file, or JSON of the wrong shape,
+                                is a configuration error. Comma- or
+                                whitespace-separated; the repeatable
+                                ``--evidence-file PATH`` flag replaces this
+                                list for one run. Empty (the default) = no
+                                evidence
+  PRXREF_EVIDENCE_MAX_CHUNK_CHARS
+                                Execution evidence (#69): characters of
+                                evidence text one review unit's prompt may
+                                carry; a unit's matched items go in ahead of
+                                the global ones and items that no longer fit
+                                are left out whole behind one truncation
+                                line; positive int (default 4000)
   PRXREF_REPO_CONTEXT           Repository context (0.16.0): "off" (default) |
                                 "diff" | "repo". "off" adds no repository
                                 context entry, read, trace event or log line;
@@ -687,6 +714,13 @@ _DEFAULTS: dict[str, object] = {
     "prompts_dir": None,
     "ticket_context_file": "",
     "ticket_context_max_chars": 6000,
+    # Execution evidence (#69): caller-run command results as review
+    # context. The list mirrors spec_sources/scoped_rules (paths from the
+    # environment or the repeatable --evidence-file flag, which replaces
+    # it); the int is the per-unit prompt budget the orchestrator trims
+    # blocks to.
+    "evidence_files": [],
+    "evidence_max_chunk_chars": 4000,
     "repo_context": "off",
     "repo_context_max_chars": 12000,
     "repo_context_max_reads": 200,
@@ -772,7 +806,7 @@ _INT_KEYS = frozenset({
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
-    "max_areas_per_pr",
+    "max_areas_per_pr", "evidence_max_chunk_chars",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -783,7 +817,7 @@ _BOOL_KEYS = frozenset({
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
-    "branch_patterns", "area_globs", "ci_wiring_globs",
+    "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -892,6 +926,7 @@ _RANGES: dict[str, _Range] = {
     "repo_context_max_reads": _Range(0),
     "repo_context_max_chunk_reads": _Range(0),
     "max_areas_per_pr": _Range(0, low_inclusive=True),
+    "evidence_max_chunk_chars": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
@@ -927,6 +962,7 @@ FILE_KEYS = frozenset({
     "review_rules", "review_rules_max_chars",
     "scoped_rules", "scoped_rules_max_chars", "prompts_dir",
     "ticket_context_file", "ticket_context_max_chars",
+    "evidence_files", "evidence_max_chunk_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "incremental",
@@ -977,7 +1013,7 @@ ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 
 _FILE_PATH_KEYS = frozenset({
     "review_rules", "scoped_rules", "prompts_dir", "ticket_context_file",
-    "spec_sources",
+    "spec_sources", "evidence_files",
 })
 
 

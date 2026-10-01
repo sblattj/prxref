@@ -450,7 +450,18 @@ class TestWebhookDaemon:
             "prxref.cli._run_review", lambda url, **kw: seen.append((url, kw)),
         )
         cli._webhook_handler(CLI_URL)
-        assert seen == [(CLI_URL, {"post": True, "context_file": "", "config_file": None})]
+        assert seen == [(
+            CLI_URL,
+            {"post": True, "context_file": "", "evidence_files": [""], "config_file": None},
+        )]
+
+    def test_a_configured_evidence_file_never_reaches_a_webhook_review(
+        self, runtime, monkeypatch,
+    ):
+        monkeypatch.setenv("PRXREF_EVIDENCE_FILES", "/nonexistent/run.json")
+        cli._webhook_handler(CLI_URL)
+        assert len(runtime.orchestrate) == 1
+        assert runtime.orchestrate[0]["evidence"] is None
 
     def test_a_configured_ticket_file_never_reaches_a_webhook_review(
         self, runtime, monkeypatch,

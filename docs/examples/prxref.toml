@@ -91,3 +91,11 @@ ci_wiring = "on"
 # Globs REPLACING the built-in CI-file set (empty/unset keeps it); at most
 # 12 CI files are read per run.
 ci_wiring_globs = [".github/workflows/*.y*ml", ".gitlab-ci.yml", "Jenkinsfile"]
+
+# --- Execution evidence (#69) ------------------------------------------------
+# Command outputs from running this PR locally, shown to review units as
+# trusted context. JSON or plain text; see docs/env-vars.md.
+
+evidence_files = [".prxref/evidence/run.json"]
+# Evidence characters one review unit receives; 0 turns the block off.
+evidence_max_chunk_chars = 4000
