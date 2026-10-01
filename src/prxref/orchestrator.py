@@ -81,6 +81,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    or sweep template the run rendered, packaged or overridden, is dropped
    as ``echoes the prompt's example: "<title>"``, counted by a
    ``prompts echo`` trace event)
+   → ``apply_evidence_drops`` (#69, only with execution evidence loaded:
+   a finding claiming a header missing that an exit-0 item shows as a
+   filled header field line is dropped as ``contradicted by execution
+   evidence: <cmd>``, counted by an ``evidence drop`` trace event)
    → ``apply_location_validation`` (a ``file``
    naming no path of the parsed diff is dropped, not rendered) →
    ``apply_manifest_claim_check`` (a
@@ -278,7 +282,7 @@ from .quality import (
     active,
     apply_anchor_snap,
     apply_containment_note,
-    apply_evidence_verdicts,
+    apply_evidence_drops,
     apply_example_echo_check,
     apply_hedge_gate,
     apply_line_align,
@@ -778,12 +782,12 @@ def orchestrate_review(
     prompt carries the evidence items its paths matched plus the global
     ones, and the sweep's prompt the global ones alone, each item fenced
     and labelled data-not-instructions under a must-not-contradict rule;
-    the worker may answer with a per-finding ``"evidence": "contradicts"``
-    label, read only on units whose prompt carried evidence, and
-    :func:`quality.apply_evidence_verdicts` — right after spec grounding —
-    RELABELS such a finding ``warning`` rather than dropping it, counted by
-    one INFO line, one ``evidence downgrade`` trace event and the summary's
-    evidence note (``{evidence_note}``, after the ticket note). The
+    :func:`quality.apply_evidence_drops` — right after the example echo
+    check — DROPS a finding claiming a header missing that an exit-0 item
+    shows as a filled header field line for the resource the finding
+    names, as ``contradicted by execution evidence: <cmd>``, counted by one
+    INFO line, one ``evidence drop`` trace event and the summary's evidence
+    note (``{evidence_note}``, after the ticket note). The
     ``evidence`` key of every exit is ``{files, items, matched_chunks,
     max_chars}`` (paths as configured, never the evidence text), echoed by
     one ``evidence ok`` trace event, and an EMPTY bundle (files that held
@@ -1857,28 +1861,6 @@ def orchestrate_review(
         tracer.event("specs", "relabel", findings=relabelled)
     findings = graded
 
-    # Evidence verdicts (#69), in spec grounding's slot: the only pass that
-    # reads a finding's ``evidence`` label, and it RELABELS rather than
-    # drops — the model judged the contradiction, this only enforces the
-    # severity ceiling on it, so a wrong label costs severity, never the
-    # finding. 1:1 and order-preserving, so sweep_start still marks the
-    # boundary.
-    evidence_downgraded = 0
-    if evidence_active:
-        downgraded = apply_evidence_verdicts(findings, evidence_active=True)
-        evidence_downgraded = sum(
-            1
-            for before, after in zip(findings, downgraded, strict=True)
-            if before.severity != after.severity
-        )
-        if evidence_downgraded:
-            logger.info(
-                "evidence: downgraded %d finding(s) the evidence contradicts to warning",
-                evidence_downgraded,
-            )
-            tracer.event("evidence", "downgrade", findings=evidence_downgraded)
-        findings = downgraded
-
     # The first pass that drops: an echo of the prompt's own example never
     # reaches the thread, consistency or grouping comparisons, a cap, or
     # sweep dedup, and its audit copy keeps the model's raw anchor. 1:1 and
@@ -1896,6 +1878,30 @@ def orchestrate_review(
         )
         tracer.event("prompts", "echo", findings=echoes)
     findings = checked
+
+    # Evidence drops (#69, OD11) right behind the echo check, before every
+    # thread, consistency or cap comparison: a header claim an exit-0
+    # header line contradicts never lifts a sibling's severity or takes a
+    # cap slot. Deterministic only — the model's label is never read — and
+    # 1:1 and order-preserving, so sweep_start still marks the boundary.
+    evidence_dropped = 0
+    if evidence_active:
+        settled = apply_evidence_drops(
+            findings, evidence,
+            pr_paths=[p for f in files for p in (f.path, f.old_path) if p],
+        )
+        evidence_dropped = sum(
+            1
+            for before, after in zip(findings, settled, strict=True)
+            if before.drop_reason is None and after.drop_reason is not None
+        )
+        if evidence_dropped:
+            logger.info(
+                "evidence: dropped %d finding(s) the execution evidence contradicts",
+                evidence_dropped,
+            )
+            tracer.event("evidence", "drop", findings=evidence_dropped)
+        findings = settled
 
     findings = apply_location_validation(findings, [f.path for f in files])
     # BEFORE apply_line_align, deliberately: the manifest check compares the
@@ -2080,7 +2086,7 @@ def orchestrate_review(
         run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
     )
     incremental_note = _incremental_note(scope, len(files))
-    evidence_note = _evidence_note(run_inputs["evidence"], evidence_downgraded)
+    evidence_note = _evidence_note(run_inputs["evidence"], evidence_dropped)
     posted = False
     inline_posted = 0
     post_failures: list[tuple[str, str]] = []
@@ -4390,14 +4396,15 @@ def _spec_note(sources: Sequence[Any], digest: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _evidence_note(record: Mapping[str, Any] | None, downgraded: int) -> str:
+def _evidence_note(record: Mapping[str, Any] | None, dropped: int) -> str:
     """Render the summary's execution-evidence note (#69), ``""`` when none was supplied.
 
     One blockquote line says what was supplied (items, and the files they
     came from) and how far the matched items reached (how many chunk
     prompts), so a PR reader can tell an evidence-backed review from an
-    unevidenced one; a second clause, only when any finding conceded a
-    contradiction, says how many were downgraded to ``warning``. The note
+    unevidenced one; a second clause, only when the evidence contradicted
+    any finding, says how many :func:`quality.apply_evidence_drops`
+    dropped. The note
     rides ``{evidence_note}`` after ``{ticket_note}``, and carries its own
     trailing newline, so an empty return leaves the summary byte-identical.
     """
@@ -4408,8 +4415,8 @@ def _evidence_note(record: Mapping[str, Any] | None, downgraded: int) -> str:
         f"{len(record.get('files') or [])} file(s); matched items reached "
         f"{record.get('matched_chunks', 0)} chunk prompt(s)"
     )
-    if downgraded:
-        line += f"; {downgraded} contradicted finding(s) downgraded to warning"
+    if dropped:
+        line += f"; {dropped} finding(s) the evidence contradicts dropped"
     return line + "\n"
 
 

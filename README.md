@@ -78,9 +78,9 @@ adds that no CI configuration file invokes; the PR metadata rules (#70,
 `metadata_rules = "on"` in `.prxref.toml` with `branch_patterns`,
 `commit_reference` and `area_globs`), which check the branch name, the
 commit subjects and the touched areas with zero model calls; and the
-execution-evidence verdict (#69, `--evidence-file`), which downgrades a
-finding the model itself concedes is contradicted by the evidence to
-`warning`.
+execution-evidence drop (#69, `--evidence-file`), which drops a finding
+claiming a header is missing when an exit-0 evidence item shows that header
+as a `Name: value` line for the resource the finding names.
 
 The passes, the checks, every `drop_reason` string, and which of them have a
 knob: [docs/quality.md](docs/quality.md).

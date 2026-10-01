@@ -163,8 +163,8 @@ class Finding:
     in its prompt contradicts the finding, and ``None`` otherwise —
     including on every unit whose prompt carried no evidence. It is not
     serialized with the finding's JSON, not part of any identity or dedup
-    key, and only :func:`prxref.quality.apply_evidence_verdicts` reads it
-    (it downgrades a ``contradicts`` finding to ``warning``).
+    key, and no pass reads it: the evidence drop
+    (:func:`prxref.quality.apply_evidence_drops`) is deterministic.
 
     ``id``, ``anchor_block`` and ``id_reused_from`` are the stable-id
     fields (issue #71), stamped by
