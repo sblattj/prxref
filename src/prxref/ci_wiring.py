@@ -343,6 +343,11 @@ def invokes(text: str, path: str, candidate: CiCandidate) -> bool:
     )
 
 
+def mentions_ci_work(text: str | None) -> bool:
+    """True when ``text`` mentions regression checks, CI, pipelines or automated tests."""
+    return bool(text and _SPEC_TICKET_RE.search(text))
+
+
 def ci_wiring_findings(
     files: Sequence[FileDiff],
     *,
@@ -359,7 +364,8 @@ def ci_wiring_findings(
     :data:`DEFAULT_CI_GLOBS` (the replace-not-append rule: an operator
     value replaces the built-in set, and an empty one reads as unset).
     ``ticket_text`` is the ``--context-file`` ticket's text (None when
-    there is no ticket): matching :data:`_SPEC_TICKET_RE` makes the
+    there is no ticket; the orchestrator also raises the severity for a
+    ``--spec`` source that matches, once the specs are fetched): matching :data:`_SPEC_TICKET_RE` makes the
     findings ``spec``, else they are ``warning`` — spec grounding still
     relabels a ``spec`` to ``warning`` on an ungrounded run, the desired
     safe default.
@@ -397,9 +403,7 @@ def ci_wiring_findings(
     ]
     read_files = [ci_path for ci_path, _ in texts]
 
-    severity = (
-        "spec" if ticket_text and _SPEC_TICKET_RE.search(ticket_text) else "warning"
-    )
+    severity = "spec" if mentions_ci_work(ticket_text) else "warning"
     searched = (
         "\n".join(f"- `{ci_path}`" for ci_path in read_files)
         if read_files
