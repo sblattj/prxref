@@ -73,21 +73,29 @@ size_warn_lines = 800
 size_ignore_globs = ["docs/generated/**"]
 
 # --- PR metadata rules (#70) -------------------------------------------------
-# Flat keys — the config file is flat, so a [metadata] table is an error.
-# "on" runs only the checks their own keys configure.
+# A separate rules file, relative to this file and inside the repository;
+# "on" instead runs the checks from the flat keys branch_patterns,
+# commit_reference, area_globs and max_areas_per_pr. A rules file and a flat
+# key together are an error. .prxref/metadata.toml could read:
+#
+#   # Every non-merge commit subject must contain this.
+#   commit_reference = "ACME-[0-9]+"
+#   # More than this many distinct areas is flagged.
+#   max_areas_per_pr = 2
+#
+#   # The WHOLE source branch must match the PR type's pattern (fullmatch).
+#   # The type comes from the PR's labels first, else the title's
+#   # conventional-commit prefix ("fix: ..." -> fix); an unresolved type
+#   # is skipped, not flagged.
+#   [branch_patterns]
+#   fix = "fix/.*"
+#   feature = "feature/.*"
+#
+#   [area_globs]
+#   backend = ["src/**", "lib/**"]
+#   frontend = "web/**"
 
-metadata_rules = "on"
-# type=regex: the WHOLE source branch must match the PR type's pattern
-# (fullmatch, so fix=fix/.* fits fix/42). The type comes from the PR's
-# labels first, else the title's conventional-commit prefix ("fix: ..." ->
-# fix); an unresolved type is skipped, not flagged.
-branch_patterns = ["fix=fix/.*", "feature=feature/.*"]
-# Every non-merge commit subject must contain this; needs the forge's
-# commit listing (GitHub, Gitea), else the check skips itself.
-commit_reference = "ACME-[0-9]+"
-# name=glob areas; more than max_areas_per_pr distinct areas is flagged.
-area_globs = ["backend=src/**", "frontend=web/**"]
-max_areas_per_pr = 2
+metadata_rules = ".prxref/metadata.toml"
 
 # --- CI wiring (#66) ---------------------------------------------------------
 # "on" flags a check-shaped file the PR adds (a verify/smoke/check script

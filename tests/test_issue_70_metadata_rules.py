@@ -18,12 +18,15 @@ Three layers, each pinned on its own:
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
-from prxref import config, metadata_rules, orchestrator
+from prxref import cli, config, metadata_rules, orchestrator
 from prxref.cli import _build_json_result, _fail_on_exit, _print_summary
 from prxref.forges.base import CommitData, PRData
-from prxref.llm import ConfigError
+from prxref.llm import ConfigError, InvokeResult
 from prxref.triage import FileDiff
 from tests.test_orchestrator import REF, FakeForge, FakeLLM, _added_file_diff, make_pr
 
@@ -340,17 +343,31 @@ class TestConfigKeys:
     def test_the_types_are_declared(self):
         assert "max_areas_per_pr" in config._INT_KEYS
         assert {"branch_patterns", "area_globs"} <= config._LIST_KEYS
-        assert set(config._CHOICE_KEYS["metadata_rules"]) == {"off", "on"}
+        assert "metadata_rules" not in config._CHOICE_KEYS
+        assert "metadata_rules" in config._FILE_PATH_KEYS
+        assert config.METADATA_RULES_SWITCHES == {"", "off", "on"}
 
     def test_the_cap_range_allows_zero(self):
         assert config._RANGES["max_areas_per_pr"] == config._Range(0, low_inclusive=True)
         assert config._RANGES["max_areas_per_pr"].accepts(0) is True
         assert config._RANGES["max_areas_per_pr"].accepts(-1) is False
 
-    def test_an_unknown_value_for_the_switch_is_a_config_error(self, monkeypatch):
+    def test_any_other_value_names_a_rules_file_that_must_exist(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv(config.CONFIG_FILE_ENV, raising=False)
         monkeypatch.setenv("PRXREF_METADATA_RULES", "maybe")
-        with pytest.raises(ConfigError, match=r"^PRXREF_METADATA_RULES: must be one of"):
-            config.load_config()
+        assert config.load_config()["metadata_rules"] == "maybe"
+        assert cli.main(["config", "check"]) == 2
+        err = capsys.readouterr().err
+        assert err.startswith(
+            "configuration error: PRXREF_METADATA_RULES: cannot read metadata rules file 'maybe'"
+        )
+
+    def test_a_value_that_is_not_a_string_is_a_config_error(self):
+        with pytest.raises(ConfigError, match=r"^metadata_rules: must be 'off', 'on' or a rules"):
+            config.load_config(metadata_rules=["on"])
 
 
 class TestConfigFileValidation:
@@ -793,3 +810,259 @@ class TestSkippedChecksAreNamed:
             metadata_rules="on", branch_patterns=["fix=fix/.*"],
         )
         assert "PR metadata" not in forge.summaries[-1]
+
+
+# --- the separate rules file (OD8: metadata_rules names a TOML file) --------
+
+DIFF = Path(__file__).resolve().parent / "fixtures" / "issue17" / "pr.diff"
+AREAS_FAIL = (
+    "max_areas_per_pr = 1\n"
+    "[area_globs]\n"
+    'db = "db/**"\n'
+    'java = ["src/main/**", "src/test/**"]\n'
+)
+
+
+class _CountingLLM:
+    """Answers every review unit with no findings, counting the calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        self.calls += 1
+        return InvokeResult(
+            text=json.dumps({"findings": [], "escalations": []}), model="fake", backend="fake",
+        )
+
+
+@pytest.fixture
+def workdir(tmp_path, monkeypatch):
+    """An empty working directory with no config file and no metadata env."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(config.CONFIG_FILE_ENV, raising=False)
+    for key in ("METADATA_RULES", "BRANCH_PATTERNS", "COMMIT_REFERENCE",
+                "AREA_GLOBS", "MAX_AREAS_PER_PR"):
+        monkeypatch.delenv(f"PRXREF_{key}", raising=False)
+    return tmp_path
+
+
+@pytest.fixture
+def stub_llm(monkeypatch):
+    llm = _CountingLLM()
+    monkeypatch.setenv("PRXREF_LLM_MODELS", "fake")
+    monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: llm)
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("metadata rules must not touch the network")
+
+    monkeypatch.setattr("requests.Session.request", _no_network)
+    return llm
+
+
+@pytest.fixture
+def recorder(monkeypatch):
+    calls: list[dict] = []
+
+    def _orchestrate(**kwargs):
+        calls.append(kwargs)
+        return {"verdict": "Approved", "findings_active": [], "findings_dropped": []}
+
+    monkeypatch.setattr("prxref.orchestrator.orchestrate_review", _orchestrate)
+    monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: object())
+    return calls
+
+
+def _review(*extra: str) -> int:
+    return cli.main(["review", "--diff-file", str(DIFF), "--no-post", *extra])
+
+
+def _json_review(capsys, *extra: str) -> tuple[int, dict | None, str]:
+    code = _review("--format", "json", *extra)
+    out, err = capsys.readouterr()
+    return code, (json.loads(out) if code == 0 else None), err
+
+
+class TestRulesFile:
+    def test_metadata_rules_reads_a_rules_file(self, workdir, stub_llm, capsys, monkeypatch):
+        (workdir / "metadata.toml").write_text(AREAS_FAIL, encoding="utf-8")
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        code, payload, _ = _json_review(capsys)
+        assert code == 0
+        stamp = payload["metadata_rules"]
+        assert stamp["area_globs"] == "fail"
+        [note] = stamp["violations"]
+        assert note["title"].startswith("PR touches 2 areas (max 1)")
+        assert stamp["branch_pattern"] == "skipped: no branch patterns"
+
+    def test_the_flag_names_a_rules_file_too(self, workdir, stub_llm, capsys):
+        (workdir / "metadata.toml").write_text(AREAS_FAIL, encoding="utf-8")
+        code, payload, _ = _json_review(capsys, "--metadata-rules", "metadata.toml")
+        assert code == 0
+        assert payload["metadata_rules"]["area_globs"] == "fail"
+
+    def test_a_passing_rules_file_stamps_pass(self, workdir, stub_llm, capsys, monkeypatch):
+        (workdir / "metadata.toml").write_text(
+            AREAS_FAIL.replace("max_areas_per_pr = 1", "max_areas_per_pr = 2"),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        code, payload, _ = _json_review(capsys)
+        assert code == 0
+        assert payload["metadata_rules"]["area_globs"] == "pass"
+        assert payload["metadata_rules"]["violations"] == []
+
+    def test_the_file_values_reach_orchestrate_as_on(self, workdir, recorder, monkeypatch):
+        (workdir / "metadata.toml").write_text(
+            'commit_reference = "ACME-[0-9]+"\n'
+            '[branch_patterns]\nfix = "fix/.+"\nfeat = "feat/.+"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        assert _review() == 0
+        (kwargs,) = recorder
+        assert kwargs["metadata_rules"] == "on"
+        assert list(kwargs["branch_patterns"]) == ["fix=fix/.+", "feat=feat/.+"]
+        assert kwargs["commit_reference"] == "ACME-[0-9]+"
+        assert list(kwargs["area_globs"]) == []
+        assert kwargs["max_areas_per_pr"] == 2
+
+    def test_on_keeps_the_flat_keys_as_a_back_compat_alias(self, workdir, recorder, monkeypatch):
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "on")
+        monkeypatch.setenv("PRXREF_BRANCH_PATTERNS", "fix=fix/.+")
+        assert _review() == 0
+        (kwargs,) = recorder
+        assert kwargs["metadata_rules"] == "on"
+        assert kwargs["branch_patterns"] == ["fix=fix/.+"]
+
+    @pytest.mark.parametrize("value", ["off", ""])
+    def test_the_flag_turns_the_checks_off(self, workdir, recorder, monkeypatch, value):
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "on")
+        assert _review("--metadata-rules", value) == 0
+        (kwargs,) = recorder
+        assert kwargs["metadata_rules"] == "off"
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        ('branch_patterns = {fix = "fix/("}\n', "regex does not compile"),
+        ('branch_pattern = ["fix=fix/.+"]\n', "unknown key 'branch_pattern'"),
+        ("max_areas_per_pr = -1\n", "max_areas_per_pr"),
+        ('max_areas_per_pr = "two"\n', "must be an integer"),
+        ('commit_reference = "ACME-["\n', "commit_reference: regex does not compile"),
+        ('area_globs = ["=src/**"]\n', "both sides non-empty"),
+        ("area_globs = {backend = 3}\n", "area_globs"),
+        ("[metadata\n", "invalid TOML"),
+    ])
+    def test_a_bad_rules_file_exits_2(self, workdir, recorder, capsys, monkeypatch, text, expected):
+        (workdir / "metadata.toml").write_text(text, encoding="utf-8")
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        assert _review() == 2
+        assert recorder == []
+        err = capsys.readouterr().err
+        assert err.startswith("configuration error: PRXREF_METADATA_RULES: metadata.toml")
+        assert expected in err
+
+    def test_a_missing_rules_file_exits_2_naming_the_flag(self, workdir, recorder, capsys):
+        assert _review("--metadata-rules", "gone.toml") == 2
+        assert recorder == []
+        assert capsys.readouterr().err.startswith("configuration error: --metadata-rules: ")
+
+    def test_an_oversized_rules_file_exits_2(self, workdir, recorder, capsys, monkeypatch):
+        (workdir / "metadata.toml").write_text(
+            "# " + "x" * metadata_rules.RULES_FILE_MAX_CHARS + "\n", encoding="utf-8",
+        )
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        assert _review() == 2
+        assert "too large" in capsys.readouterr().err
+
+    def test_config_check_validates_the_rules_file(self, workdir, capsys, monkeypatch):
+        (workdir / "metadata.toml").write_text('branch_patterns = ["nope"]\n', encoding="utf-8")
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        assert cli.main(["config", "check"]) == 2
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert (
+            "configuration error: PRXREF_METADATA_RULES: metadata.toml: branch_patterns:"
+            in err
+        )
+
+    def test_a_rules_file_and_a_flat_key_together_exit_2(
+        self, workdir, recorder, capsys, monkeypatch,
+    ):
+        (workdir / "metadata.toml").write_text(AREAS_FAIL, encoding="utf-8")
+        monkeypatch.setenv("PRXREF_METADATA_RULES", "metadata.toml")
+        monkeypatch.setenv("PRXREF_COMMIT_REFERENCE", "ACME-[0-9]+")
+        assert _review() == 2
+        assert recorder == []
+        err = capsys.readouterr().err
+        assert "PRXREF_COMMIT_REFERENCE" in err
+        assert "rules file" in err
+
+    def test_the_config_file_names_a_contained_rules_file(self, workdir, recorder):
+        (workdir / "rules").mkdir()
+        (workdir / "rules" / "metadata.toml").write_text(AREAS_FAIL, encoding="utf-8")
+        (workdir / config.CONFIG_FILE_NAME).write_text(
+            'metadata_rules = "rules/metadata.toml"\n', encoding="utf-8",
+        )
+        assert _review() == 0
+        (kwargs,) = recorder
+        assert kwargs["metadata_rules"] == "on"
+        assert list(kwargs["area_globs"]) == [
+            "db=db/**", "java=src/main/**", "java=src/test/**",
+        ]
+        assert kwargs["max_areas_per_pr"] == 1
+
+    def test_the_config_file_cannot_point_outside_the_repository(
+        self, workdir, recorder, capsys,
+    ):
+        (workdir / config.CONFIG_FILE_NAME).write_text(
+            'metadata_rules = "../metadata.toml"\n', encoding="utf-8",
+        )
+        assert _review() == 2
+        assert "must stay inside the repository" in capsys.readouterr().err
+
+    def test_the_config_file_keeps_on_as_a_plain_value(self, workdir):
+        path = workdir / config.CONFIG_FILE_NAME
+        path.write_text('metadata_rules = "on"\n', encoding="utf-8")
+        assert config.load_config(config_file=path)["metadata_rules"] == "on"
+
+
+class TestRulesFileLoader:
+    def _load(self, tmp_path, text):
+        path = tmp_path / "m.toml"
+        path.write_text(text, encoding="utf-8")
+        return metadata_rules.load_metadata_rules(
+            str(path), max_chars=metadata_rules.RULES_FILE_MAX_CHARS, source="SRC",
+        )
+
+    def test_the_list_forms_match_the_flat_keys(self, tmp_path):
+        loaded = self._load(tmp_path, (
+            'branch_patterns = ["fix=fix/.+"]\n'
+            'area_globs = ["backend=src/**"]\n'
+        ))
+        assert loaded.branch_patterns == ("fix=fix/.+",)
+        assert loaded.area_globs == ("backend=src/**",)
+        assert loaded.commit_reference == ""
+        assert loaded.max_areas_per_pr == 2
+
+    def test_an_empty_file_configures_nothing(self, tmp_path):
+        assert self._load(tmp_path, "") == metadata_rules.MetadataRules()
+
+    def test_the_documented_example_loads(self, tmp_path):
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "config-file.md").read_text(
+            encoding="utf-8",
+        )
+        section = doc[doc.index("### PR metadata rules"):]
+        example = section.split("```toml\n", 1)[1].split("```", 1)[0]
+        loaded = self._load(tmp_path, example)
+        assert loaded == metadata_rules.MetadataRules(
+            branch_patterns=("fix=fix/.*", "feature=feature/.*"),
+            commit_reference="ACME-[0-9]+",
+            area_globs=("backend=src/**", "backend=lib/**", "frontend=web/**"),
+            max_areas_per_pr=2,
+        )
+
+    @pytest.mark.parametrize("value", [None, "", "off", "on"])
+    def test_a_value_that_is_not_a_path_loads_nothing(self, value):
+        assert metadata_rules.load_metadata_rules(
+            value, max_chars=metadata_rules.RULES_FILE_MAX_CHARS, source="SRC",
+        ) is None

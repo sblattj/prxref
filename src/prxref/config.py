@@ -225,11 +225,20 @@ LLM / pipeline:
                                 detection, never replacing it. Empty
                                 (default) adds nothing.
   PRXREF_METADATA_RULES         Opt-in deterministic PR-metadata checks
-                                (#70): "off" (default) runs none, keeps
-                                every prompt, finding and run-record key
-                                byte-identical, and stamps nothing;
-                                "on" runs the three checks below. Each is
-                                configured by its own key and skips itself
+                                (#70): "off" (default) or empty runs none,
+                                keeps every prompt, finding and run-record
+                                key byte-identical, and stamps nothing. A
+                                path names a separate TOML rules file
+                                holding the four check settings below
+                                (branch_patterns and area_globs also as
+                                tables), loaded and validated before any
+                                network call: an unreadable, oversized
+                                (64 KiB) or invalid file, or a flat key
+                                below set beside it, exits 2. From the
+                                config file the path stays inside the
+                                repository. "on" is the back-compat alias
+                                that runs the checks from the flat keys
+                                below. Each check skips itself
                                 (recorded in the run record's
                                 ``metadata_rules`` stamp, never a finding)
                                 when unconfigured or when the PR offers
@@ -878,11 +887,10 @@ _DEFAULTS: dict[str, object] = {
         "cloudbuild.yaml",
         ".travis.yml",
     ],
-    # PR-metadata rules (#70): the single opt-in switch plus one key per
-    # check. Flat, like every other key — the config file is a flat TOML
-    # document, so a [metadata] table would be rejected by the reader.
-    # Empty / "off" defaults keep every check off and the run record free
-    # of the metadata_rules key.
+    # PR-metadata rules (#70): "off", "on" (the back-compat alias reading
+    # the four flat keys below) or the path to a separate TOML rules file
+    # holding the same four settings. The "off" default keeps every check
+    # off and the run record free of the metadata_rules key.
     "metadata_rules": "off",
     # Stable finding ids (#71): on by default; "0" opts out. The store
     # is read only when a path is set (None = no persistence, in-run
@@ -957,7 +965,6 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "routing_probe": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
-    "metadata_rules": frozenset({"off", "on"}),
     "ci_wiring": frozenset({"off", "on"}),
 }
 
@@ -973,6 +980,16 @@ _SEED_OFF = "off"
 # so the built-in set stays); ``--context-standards-globs ""``, a TOML ``[]``
 # and a TOML ``"off"`` all turn it off.
 _STANDARDS_GLOBS_OFF = "off"
+
+# ``metadata_rules``'s values that are not a rules-file path (#70): "off"
+# and "" run no checks, "on" is the back-compat alias reading the flat keys.
+# Any other value is a path to a TOML rules file, loaded by
+# prxref.metadata_rules.load_metadata_rules before any network call.
+METADATA_RULES_SWITCHES = frozenset({"", "off", "on"})
+
+# The flat keys a metadata rules file replaces; setting one beside a rules
+# file is refused rather than silently ignored.
+_METADATA_FLAT_KEYS = ("branch_patterns", "commit_reference", "area_globs", "max_areas_per_pr")
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
 # prxref.orchestrator (config stays a leaf module); pinned together by
@@ -1149,7 +1166,7 @@ ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 
 _FILE_PATH_KEYS = frozenset({
     "review_rules", "scoped_rules", "prompts_dir", "ticket_context_file",
-    "spec_sources", "evidence_files", "verdict_store",
+    "spec_sources", "evidence_files", "verdict_store", "metadata_rules",
 })
 
 
@@ -1355,7 +1372,9 @@ def read_config_file(path: Path, *, display: str | None = None) -> dict[str, obj
                         f"set PRXREF_SPEC_SOURCES in the pipeline for web and "
                         f"Jira sources; see {CONFIG_DOCS_URL}"
                     )
-        if key in _FILE_PATH_KEYS:
+        if key in _FILE_PATH_KEYS and not (
+            key == "metadata_rules" and value.strip() in METADATA_RULES_SWITCHES
+        ):
             if isinstance(value, list):
                 value = [_contained_path(key, v, base, name) for v in value]
             else:
@@ -1531,6 +1550,36 @@ def _check_bullet_separator(cfg: dict[str, object], sources: dict[str, str]) -> 
         )
 
 
+def _check_metadata_switch(
+    cfg: dict[str, object], sources: dict[str, str], supplied: set[str],
+) -> None:
+    """Validate ``metadata_rules`` (#70): a switch value or a rules-file path.
+
+    The value must be a string. ``off``, ``""`` and ``on`` are switches;
+    anything else names a rules file, which is opened later, before any
+    network call, by :func:`prxref.metadata_rules.load_metadata_rules`. A
+    rules file replaces the four flat keys, so an operator who also set one
+    of them (env, file or override; a default does not count) gets a
+    ``ConfigError`` naming both inputs instead of a value silently ignored.
+    """
+    value = cfg["metadata_rules"]
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"{sources['metadata_rules']}: must be 'off', 'on' or a rules file "
+            f"path, got {value!r}"
+        )
+    if value.strip() in METADATA_RULES_SWITCHES:
+        return
+    for key in _METADATA_FLAT_KEYS:
+        if key in supplied:
+            raise ConfigError(
+                f"{sources[key]}: cannot be set together with the metadata rules "
+                f"file {value!r} ({sources['metadata_rules']}); put the setting in "
+                f"the rules file, or set {sources['metadata_rules']} to 'on' to "
+                f"use the flat keys"
+            )
+
+
 def _check_metadata_rules(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """Validate the PR-metadata rule keys (#70); every entry must parse.
 
@@ -1692,6 +1741,7 @@ def load_config_with_sources(
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)
+    _check_metadata_switch(cfg, sources, supplied)
     _check_metadata_rules(cfg, sources)
     return cfg, layers
 
