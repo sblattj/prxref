@@ -279,7 +279,7 @@ class TestHappyPath:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries", "context_followup",
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "degraded",
         }
         assert res["verdict"] == "Request-Changes"
@@ -753,7 +753,7 @@ class TestMaxTokensThreading:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries", "context_followup",
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "degraded",
         }
 
@@ -1070,7 +1070,7 @@ class TestQualityGateKnobsAreThreaded:
             "sampling",
             "cost_usd", "cost_estimated", "review_rules", "ticket_context",
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-            "rule_counts", "repo_context", "parse_retries", "context_followup",
+            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "degraded",
         }
 
@@ -1082,7 +1082,7 @@ RESULT_KEYS = {
     "elapsed_ms", "input_tokens", "output_tokens", "posted", "sampling",
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context", "parse_retries", "context_followup",
+    "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
     "suggestions", "incremental", "degraded",
 }
 

@@ -239,7 +239,7 @@ class TestJsonKey:
     def test_repo_context_rides_right_after_rule_counts(self):
         keys = list(cli._build_json_result({"verdict": "Approved", "repo_context": SAMPLE,
                                             "sampling": {"seed": 1}, "replay": {}}))
-        assert keys.index("repo_context") == keys.index("rule_counts") + 1
+        assert keys.index("repo_context") == keys.index("rule_scope_cleared") + 1
         assert keys[keys.index("repo_context") + 1:] == [
             "parse_retries", "context_followup", "suggestions", "incremental", "degraded", "config_file",
             "sampling", "replay",

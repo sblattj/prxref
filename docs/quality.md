@@ -80,7 +80,7 @@ dropped as `duplicate of chunk finding (reworded, similarity <s>)`.
 `(deterministic check, no model)` takes no part in severity consistency
 (pass 7): it joins no group, so no model finding raises it or is raised by
 it, and its text does not count toward a code token's rarity. One other pass
-can still change its severity or confidence: finding grouping (pass 10,
+can still change its severity or confidence: finding grouping (pass 11,
 opt-in). When a chunk worker's finding in the same file names no rule and
 has the same normalized title, the group's anchor takes the highest severity
 and confidence, so a deterministic anchor can be raised, and a deterministic
@@ -105,11 +105,12 @@ it (noted in the table).
 | 7 | `apply_severity_consistency` | Rewrites only: groups findings and raises every member to the group's maximum severity. Two rules group findings, and a group binds transitively: a shared normalized title, in any file; or a shared rare code token (one in the text of at most 2 findings) when the two sit in the same file or their titles name a common problem class. A deterministic finding (see [Deterministic checks](#deterministic-checks-findings-prxref-computes-itself)) is left out: it is never raised, never raises another finding, and its text does not count toward a token's rarity. |
 | 8 | `apply_removal_claim_check` | Drops a claim that a **named** path was removed when the post-image still carries it. The removal verb must **govern** that path (`removed src/app.py`, `src/app.py was removed`); a bare "removed" elsewhere in the body is not a removal claim. |
 | 9 | `apply_hedge_gate` | Drops a finding whose own text conditions the defect on a precondition never established from the diff. One part of the body is not read, in any finding whatever its severity: after a `Spec:` marker (that exact spelling; the opening quote is optional), the text the finding copies verbatim from the injected spec digest, compared case-insensitively, up to a closing quote. A condition inside a real constraint belongs to the spec, not the model. Everything else is read: text the digest does not hold, so a made-up `Spec: "…"` hides nothing; every quote when no digest was injected (no spec sources, or an ungrounded run); and the title. Known limitation: a quote with no closing quote after its verbatim text, or one that departs from the digest before its closing quote, is exempt only up to the last quote mark inside its verbatim part (an apostrophe counts), and not at all when there is none. |
-| 10 | `apply_rule_grouping` | Opt-in: runs only with `PRXREF_GROUP_FINDINGS` set to `1`. Folds chunk findings in one file that name the same rule (compared case-insensitively), or that name no rule and share a normalized title, into one finding. The finding with the smallest positive line anchors the group; a file-level (line 0) finding anchors only when no member has a line. The anchor takes the group's highest severity and highest confidence, and its body gains `Also at:` followed by each other line of the group as a backticked `<file>:<line>`. Every other member is dropped as `grouped into <file>:<line>`. Only active findings at or above the confidence floor are grouped, and whole-PR sweep findings are never grouped. The same rule in two files makes two groups. Runs **after** the thread, removal and hedge passes, so a dropped finding is never listed as a location, and **before** the gate, so the error cap counts groups, not lines. |
-| 11 | `apply_rule_cap` | Runs only when a review rules file is loaded (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`) and `PRXREF_MAX_FINDINGS_PER_RULE` is above 0, which it is by default (2); the model is then asked to name the rule it applied, as with grouping. Caps how many findings one rule produces across the whole review. It considers the findings grouping would (active chunk findings with a valid severity, at or above the confidence floor) and keys them on their rule (compared case-insensitively, with whitespace collapsed) or, when they name none, on their normalized title; the two kinds never mix, and unlike grouping the file is not part of the key. A representative from pass 10 counts once. Within one key the findings are ranked by severity, then confidence, then content, and the first `<n>` (the cap) are kept with their own severity and confidence. Every other one is dropped as `rule cap exceeded (max <n>): listed at <file>:<line>`, naming the best (first-ranked) kept finding. That finding's `locations` gains each folded finding's location and each folded finding's own `locations`, deduplicated, without its own location, and sorted by file and line; its body's last paragraph becomes `Also at:` followed by at most five of them as backticked `<file>:<line>` (a file-level one as its bare `<file>`), then `(+<k> more)` for the other `<k>`, replacing a paragraph pass 10 wrote rather than adding a second. Whole-PR sweep findings are never counted, capped or folded. Runs **after** grouping and **before** the gate, so the error, warning and outofscope caps count what it kept. |
-| 12 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap, and the optional per-review warning and outofscope caps (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`; unset caps nothing, and `spec` is never capped). Returns its findings in content order. |
-| 13 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. A chunk finding that grouping folded away (`grouped into <file>:<line>`) or the per-rule cap folded away (`rule cap exceeded (max <n>): listed at <file>:<line>`) still counts here, because the finding it was folded into lists its location. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line (never line 0) whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. |
-| 14 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
+| 10 | `apply_rule_scope_check` | Clears — never drops — the `rule` label of a finding no scoped section of the loaded team rules covers (#75). A rules file declares a section's scope with a `scope: <token>[, <token>]…` line directly under an ATX heading (`##` to `####`); each such heading also gains an “`(applies to: …)`” note in the team-rules block the model reads, so the scope is visible before the fact and cleared after it. A label survives only when it names a scoped section — the label equals the section's heading text or is its leading words, both compared case-insensitively with whitespace collapsed — and every token of that section's scope covers the finding's path: `java`/`jvm` covers `*.java`, `*.kt`, `pom.xml` and `build.gradle*`; `python` covers `*.py`; `typescript`/`javascript`/`ts`/`js` cover `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs` and `*.cjs`; `docs`/`markdown` covers `*.md`, `*.mdx`, `*.rst` and `*.txt`; `openapi`/`specs` covers `*.yaml`, `*.yml` and `*.json` whose name mentions `openapi` or `swagger` or that sit under a `spec`/`specs`/`openapi`/`swagger` directory; `comments` covers every path. Every token of the line must cover the path, so a line names an intersection (`scope: java, comments` reaches Java comment rules). A token outside the vocabulary is inert — it covers every path, because an unknown word must not silently suppress rules. Everything else — an invented name, a rule from a section that declares no scope once any section does, or a matching section whose scope does not cover the file — has `rule` cleared to `null` and the finding kept, so it groups and caps by normalized title like any ruleless finding. Runs on its own guard — any loaded rules file (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`) that declares at least one section scope, whatever the grouping and cap switches say — **after** the hedge gate and **before** grouping and the per-rule cap, so a wrong label never keys either; the run record's `rule_scope_cleared` counts the cleared labels and is `null` when the check did not run. |
+| 11 | `apply_rule_grouping` | Opt-in: runs only with `PRXREF_GROUP_FINDINGS` set to `1`. Folds chunk findings in one file that name the same rule (compared case-insensitively), or that name no rule and share a normalized title, into one finding. The finding with the smallest positive line anchors the group; a file-level (line 0) finding anchors only when no member has a line. The anchor takes the group's highest severity and highest confidence, and its body gains `Also at:` followed by each other line of the group as a backticked `<file>:<line>`. Every other member is dropped as `grouped into <file>:<line>`. Only active findings at or above the confidence floor are grouped, and whole-PR sweep findings are never grouped. The same rule in two files makes two groups. Runs **after** the thread, removal and hedge passes, so a dropped finding is never listed as a location, and **before** the gate, so the error cap counts groups, not lines. |
+| 12 | `apply_rule_cap` | Runs only when a review rules file is loaded (`PRXREF_REVIEW_RULES` or `PRXREF_SCOPED_RULES`) and `PRXREF_MAX_FINDINGS_PER_RULE` is above 0, which it is by default (2); the model is then asked to name the rule it applied, as with grouping. Caps how many findings one rule produces across the whole review. It considers the findings grouping would (active chunk findings with a valid severity, at or above the confidence floor) and keys them on their rule (compared case-insensitively, with whitespace collapsed) or, when they name none, on their normalized title; the two kinds never mix, and unlike grouping the file is not part of the key. A representative from pass 11 counts once. Within one key the findings are ranked by severity, then confidence, then content, and the first `<n>` (the cap) are kept with their own severity and confidence. Every other one is dropped as `rule cap exceeded (max <n>): listed at <file>:<line>`, naming the best (first-ranked) kept finding. That finding's `locations` gains each folded finding's location and each folded finding's own `locations`, deduplicated, without its own location, and sorted by file and line; its body's last paragraph becomes `Also at:` followed by at most five of them as backticked `<file>:<line>` (a file-level one as its bare `<file>`), then `(+<k> more)` for the other `<k>`, replacing a paragraph pass 11 wrote rather than adding a second. Whole-PR sweep findings are never counted, capped or folded. Runs **after** grouping and **before** the gate, so the error, warning and outofscope caps count what it kept. |
+| 13 | `apply_quality_gate` | Severity vocabulary, confidence floor, per-review error cap, and the optional per-review warning and outofscope caps (`PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`; unset caps nothing, and `spec` is never capped). Returns its findings in content order. |
+| 14 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. A chunk finding that grouping folded away (`grouped into <file>:<line>`) or the per-rule cap folded away (`rule cap exceeded (max <n>): listed at <file>:<line>`) still counts here, because the finding it was folded into lists its location. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line (never line 0) whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. |
+| 15 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
 
 Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
@@ -262,7 +263,7 @@ gains a `drop_reason` for its scope.
 
 ## Grouped findings in the output
 
-With `PRXREF_GROUP_FINDINGS` set to `1`, a group (pass 10) reaches the output
+With `PRXREF_GROUP_FINDINGS` set to `1`, a group (pass 11) reaches the output
 as one active finding, its representative, plus a dropped audit copy of every
 other member.
 
@@ -276,7 +277,7 @@ other member.
   `grouped into <file>:<line>`, `locations` `null`, and its own `rule`, which
   may differ in case from the representative's. `prxref eval` credits a group
   at the row's own location and at each entry of `locations`, never at a
-  member row. The per-rule cap (pass 11) fills both keys too: while it is
+  member row. The per-rule cap (pass 12) fills both keys too: while it is
   active, `rule` is filled as it is under grouping, and the best finding of
   a rule it folds carries `locations` that can span files, listing every
   folded location and not only the five its `Also at:` paragraph shows. Each
@@ -288,7 +289,9 @@ other member.
   `null` on every row. The run record and `--format json` also carry
   `rule_counts`, the per-rule cap's tally (its rows are described in
   [the README's `--format json` list](../README.md#cli-flags)): `[]` when
-  nothing repeated, and `null` when the cap did not run.
+  nothing repeated, and `null` when the cap did not run. They carry
+  `rule_scope_cleared` too (#75): the count of rule labels pass 10 cleared,
+  `null` when no loaded rules file declares a section scope.
 - **Text output** (`--no-post` or `-v`). Every active finding that names a
   rule, a representative included, ends its line in ` [rule: <rule>]`, after
   any ` [scope: in]` or ` [scope: out]` tag. A representative's body carries
@@ -339,6 +342,13 @@ correct-but-underscoped "this throws" from reading as a smaller bug than it is.
 It runs last, so the posted comment and the dropped-audit copy carry the same
 text.
 
+One clearing is not a drop reason either. `apply_rule_scope_check` (pass 10,
+#75) sets a finding's `rule` to `null` when no scoped section of the loaded
+team rules covers it — the finding itself stays active, so it posts and groups
+and caps by its normalized title like any ruleless finding. Nothing is dropped,
+so the only trace of the clearing is the label's own `null` and the run
+record's `rule_scope_cleared` count.
+
 ## What is and is not tunable
 
 - `PRXREF_CONFIDENCE_FLOOR` and `PRXREF_MAX_ERROR_FINDINGS` move
@@ -353,7 +363,9 @@ text.
   one rule may produce across the review in `apply_rule_cap`, and `0` turns
   it off. These seven are the only knobs here. See
   [Tuning for Your Team](env-vars.md#tuning-for-your-team).
-- The hedge gate, the manifest checks, the removal-claim check, and the
+- The hedge gate, the manifest checks, the removal-claim check, the
+  rule-scope check (#75 — the scope vocabulary lives in the rules file's
+  `scope:` lines, not in configuration), and the
   pinned-off toggle check have **no knob**. They are correctness checks against the diff itself, not noise
   levers. The example-echo check has none either: a finding that repeats the
   prompt's own example was never found in the diff. To change what it drops,
