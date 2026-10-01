@@ -726,6 +726,18 @@ Standard output is Markdown, in this order:
   `Severity agreement`, `Chunks failed`, `Elapsed`, `Review cost` and
   `Judge cost`. A severity or category only one run has reads `n/a` on the
   other side.
+- `## Stable-id reuse` (#71): printed between `## Metrics` and
+  `## Changed labels`, and only when at least one case both runs score
+  carries finding ids in its `record.json` — a `PRXREF_STABLE_IDS=on` run;
+  two runs without ids print nothing here, byte-identical to a build
+  without the section. The table `| Case | A ids | B ids | Reuse |` holds
+  one row per shared case with ids on at least one side. `A ids` / `B ids`
+  count that side's active findings carrying an `id`; `Reuse` is the
+  fraction of B's active finding ids that A already held
+  (`stable_id_reuse`), rendered as a percentage, so `100%` means B
+  re-raised exactly A's findings and `0%` means the two share none. A side
+  with no ids reads `n/a`, and so does its reuse: a missing side is not
+  zero reuse, it is nothing to measure.
 - `## Changed labels`: a table `| Case | Label | Location | A | B |` of every
   label in both runs whose grade changed, sorted by case and label id. A
   cell reads `full (1)`, `partial (0.5)`, `none (0)` or `judge_error`. When

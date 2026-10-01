@@ -72,6 +72,16 @@ dedup, and the containment note. A filtered finding is never discarded
 silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
 
+Three more deterministic checks are opt-in: the CI wiring check (#66,
+`--ci-wiring`), which flags a verification script, shebang or test the PR
+adds that no CI configuration file invokes; the PR metadata rules (#70,
+`metadata_rules = "on"` in `.prxref.toml` with `branch_patterns`,
+`commit_reference` and `area_globs`), which check the branch name, the
+commit subjects and the touched areas with zero model calls; and the
+execution-evidence verdict (#69, `--evidence-file`), which downgrades a
+finding the model itself concedes is contradicted by the evidence to
+`warning`.
+
 The passes, the checks, every `drop_reason` string, and which of them have a
 knob: [docs/quality.md](docs/quality.md).
 
@@ -317,7 +327,7 @@ PRXREF_REPO_CONTEXT=repo prxref review --diff-file pr.diff --repo-dir ./widget
 |---|---|
 | `off` (default) | Nothing from repository context: no entry, no repository read, no `repo_context` trace event. The same-file definitions and dependency versions, Java and Kotlin ones included since 0.17.0, do not depend on this setting. |
 | `diff` | Definitions from the PR's other changed files, and, for a type another chunk changes, the lines changed inside it. Java and Kotlin type declarations are found as well as JavaScript, TypeScript and Python ones. With a reader, a definition one file of the chunk references and another file of the same chunk holds outside its hunks is found too. |
-| `repo` | Also definitions from files outside the diff, found through imports, Java's same-package file convention, and a search of file names; a `### Contract excerpts` block with the OpenAPI operation or schema, JSON Schema, or earlier migration that a changed route, table or name matches; and, with a file listing, a last block, `### Code elsewhere that reads state this chunk writes`: short excerpts of unchanged code in the same language that reads a map, table or other state the chunk's added lines write to (at most 6 per chunk, ranked last in the budget). |
+| `repo` | Also definitions from files outside the diff, found through imports, Java's same-package file convention, and a search of file names; a `### Contract excerpts` block with the OpenAPI operation or schema, JSON Schema, or earlier migration that a changed route, table or name matches; with a file listing, a `### Code elsewhere that reads state this chunk writes` block: short excerpts of unchanged code in the same language that reads a map, table or other state the chunk's added lines write to (at most 6 per chunk, ranked last in the budget); and, last, a `### In-repo standards for this chunk` block of heading-sliced sections of the repository's own standards documents (`docs/standards/**`, `docs/adr/**`, `STANDARDS*.md`, `SECURITY.md`, `CONTRIBUTING.md`), ranked per chunk by what the chunk itself names, capped by `PRXREF_CONTEXT_STANDARDS_MAX_CHARS` (default `4000`) and disabled with `PRXREF_CONTEXT_STANDARDS_GLOBS=off` (#68). |
 
 - **Where it reads.** Files are read at the PR head through the forge (every forge adapter can read and list files, see [docs/forges.md](docs/forges.md)), or from `--repo-dir` when given. With neither, `diff` builds its entries from the diff's hunk lines, and `repo` does the same with a WARNING. At `repo` the repository's file listing is read once per run; without one, a WARNING says the name search and the contract files outside the PR are off.
 - **What it never reads.** A floor that is always on keeps `**/expected.json`, `**/cases.json`, `**/case.json`, `**/prxref-eval/**`, `**/.env*`, `**/*.pem` and `**/*.key` out of every listing, read and repository-context entry. `PRXREF_CONTEXT_EXCLUDE_GLOBS` adds globs to it, and cannot take a floor path back out. Neither hides a changed file's hunks, which reach the prompt as the diff. `PRXREF_CONTEXT_CONTRACT_GLOBS` replaces the built-in set of contract globs.
@@ -525,8 +535,8 @@ The full reference is [docs/evals.md](docs/evals.md).
 
 | Code | Meaning |
 |---|---|
-| `0` | The run finished — **including every review error**: a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. With `PRXREF_FAIL_ON` set to `error` or `any` (see below), only two outcomes turn this into `1`: a completed review whose active findings trip the policy, and a review that does not complete — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed). An empty PR diff is not a failure (verdict `Approved`, exit `0`), and an unrecognized URL stays `0` because nothing was reviewed. |
-| `1` | **Gated review outcome** — only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that does not complete also exits `1` — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed). An empty PR diff is not a failure (verdict `Approved`, exit `0`). The reason is printed to stderr. |
+| `0` | The run finished — **including every review error**: a network failure, an LLM timeout, bad forge credentials, an unrecognized URL, or a review in which every chunk failed. Diagnostics go to stderr; the pipeline step stays green. With `PRXREF_FAIL_ON` set to `error` or `any` (see below), only two outcomes turn this into `1`: a completed review whose active findings trip the policy, and a review that does not complete — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed) or verdict `Incomplete` (some chunk reviews failed, so the review only partially happened; the verdict ladder is `Error` → `Request-Changes` → `Incomplete` → `Approved`). An empty PR diff is not a failure (verdict `Approved`, exit `0`), and an unrecognized URL stays `0` because nothing was reviewed. |
+| `1` | **Gated review outcome** — only when `PRXREF_FAIL_ON` is set: `error` exits `1` when the completed review carries an active error-severity finding, `any` exits `1` on any active finding, and under either value a review that does not complete also exits `1` — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed) or verdict `Incomplete` (some chunk reviews failed). An empty PR diff is not a failure (verdict `Approved`, exit `0`). The reason is printed to stderr. |
 | `2` | **Usage or configuration error** — no subcommand, invalid command-line arguments, or a required value missing, malformed, outside its valid range, or outside its key's allowed vocabulary (`PRXREF_FAIL_ON` accepts only `never`, `error`, `any`). The message names the source that supplied it: the environment variable, or the CLI flag when a flag is what you typed. |
 
 ```

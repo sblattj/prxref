@@ -219,6 +219,76 @@ It appears in these places:
 
 Nothing about the rules is added to the posted comments.
 
+## Section scopes
+
+A rules body can say which part of the repository one of its sections is
+about. The declaration is a `scope:` line directly under an ATX heading
+(one to four `#`), and it does two things: the heading the model sees
+gains an `(applies to: …)` annotation, and a deterministic pass clears a
+finding's `rule` label when that section cannot cover the finding's file.
+
+```markdown
+# Team rules
+
+## Java conventions
+scope: java
+
+- blocker: a public method that returns null instead of an Optional.
+
+## API changes need an updated spec
+scope: openapi, docs
+
+- major: a route added without a matching spec entry.
+```
+
+**The grammar.**
+
+- A section starts at an ATX heading and its scope is the section's
+  **first non-blank line** after the heading, read as
+  `scope: <token>[, <token>]…` — the key case-insensitive, the tokens
+  casefolded and split on commas and whitespace, duplicates dropped. A
+  `scope:` line anywhere else in a section is ordinary rules text, and so
+  is one the character cap already cut off: the walk reads the capped body
+  the prompt shows, so a section the cap removed is not checked either.
+- A heading with no `scope:` line, or one whose line names no token,
+  declares nothing. A body with no scoped section at all — every rules
+  file written before this — renders byte-identically and every
+  rule-scope feature stays off.
+- Front matter is not read: scopes are per section by design, so a
+  file-global `scope` key is ignored like any other unknown front-matter
+  key.
+
+**The annotation.** Pure text, nothing removed: a scoped section's heading
+gains ` (applies to: <token>, <token>)` with the tokens in file order, in
+every unit's `## Team review rules` block, so the model sees which
+sections cannot cover the file it is reading.
+
+**The clearing pass.** Once any loaded section declares a scope, a
+finding's `rule` label survives only when it names a section of the loaded
+rules — the label and the heading text, both whitespace-collapsed and
+casefolded, are equal, or the label is the heading's leading words (a
+model that drops a heading's trailing words still matches; one that cites
+a single mid-heading word does not) — **and** every `scope:` token of that
+section covers the finding's path. Every other label is cleared to `null`;
+the finding itself is never dropped, so it rejoins the ruleless findings
+downstream: grouping keys it on its normalized title and the per-rule cap
+caps it by title. The run record and `--format json` carry the count as
+`rule_scope_cleared` (`null` when no loaded section declares a scope,
+`0` when the check ran and cleared nothing).
+
+**The token vocabulary.** A token covers a path by its basename,
+case-sensitively:
+
+| Token | Covers |
+|---|---|
+| `java`, `jvm` | `*.java`, `*.kt`, `pom.xml`, `build.gradle*` |
+| `python` | `*.py` |
+| `typescript`, `javascript`, `ts`, `js` | `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs` |
+| `docs`, `markdown` | `*.md`, `*.mdx`, `*.rst`, `*.txt` |
+| `openapi`, `specs` | `*.yaml`, `*.yml`, `*.json` whose basename mentions `openapi` or `swagger`, or that sits under a `spec`/`specs`/`openapi`/`swagger` directory |
+| `comments` | every path |
+| anything else | every path — inert, because an unknown word must not silently suppress rules |
+
 ## Path-scoped rules
 
 Some rules concern only part of a repository: Java conventions mean nothing
