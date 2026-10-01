@@ -709,8 +709,9 @@ class ForgeImpl:
         ``base_sha``/``head_sha`` are accepted and ignored. It pages with
         ``$top`` and a ``continuationToken`` taken from the previous
         response's ``x-ms-continuationtoken`` header, at most ``_MAX_PAGES``
-        pages (more raises ``ValueError`` rather than returning short), and
-        lists newest first, so the entries are reversed. Each keeps its
+        pages (more raises ``ValueError`` rather than returning short). The
+        documentation states no order; newest first (git log order) is
+        assumed and not probed live, so the entries are reversed. Each keeps its
         ``commitId`` as the sha, the first line of ``comment`` as the
         subject, and ``len(parents)`` as the parent count.
 
