@@ -286,8 +286,15 @@ def apply_stable_ids(
             entry = _store_entry(store, fid)
             if entry is not None:
                 reused = REUSED_FROM_VERDICT
-                if entry.get("verdict") == "refuted":
+                label = entry.get("verdict")
+                norm = label.strip().casefold() if isinstance(label, str) else None
+                if norm == "refuted":
                     f = replace(f, drop_reason=f"refuted in earlier run ({fid})")
+                elif norm != "accepted":
+                    logger.warning(
+                        "verdict store entry %s has unrecognised verdict %r; ignored",
+                        fid, label,
+                    )
             elif threads and previously_discussed_thread(f, threads):
                 reused = REUSED_FROM_THREAD
         stamped = replace(f, id=fid, anchor_block=anchor, id_reused_from=reused)
