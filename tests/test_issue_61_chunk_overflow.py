@@ -288,7 +288,9 @@ class TestTheRecordFields:
         payload = cli._build_json_result(_review(THREE_FILES, max_chunks=1, token_budget=500))
         keys = list(payload)
         at = keys.index("chunks_failed")
-        assert keys[at + 1 : at + 5] == list(CHUNK_KEYS)
+        # failed_chunks (#72) sits between chunks_failed and this block.
+        assert keys[at + 1] == "failed_chunks"
+        assert keys[at + 2 : at + 6] == list(CHUNK_KEYS)
         assert [payload[k] for k in CHUNK_KEYS] == [1, 1200, 2, 500]
 
     def test_a_partial_result_gives_null_not_a_crash(self):

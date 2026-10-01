@@ -1,9 +1,9 @@
-# HANDOFF — v0.29.0 shipped: ten issues, one swarm (#66–#75)
+# HANDOFF — v0.30.0 shipped: ten issues, one swarm (#66–#75)
 
 **Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-30 · **Supersedes** the
 v0.28.0 handoff.
 
-0.29.0 is the first swarm-cut release: one run, 25 seats, eight waves,
+0.30.0 is the first swarm-cut release: one run, 25 seats, eight waves,
 every issue from #66 through #75 fixed, each verified against its own
 acceptance criteria on the integrated branch, and batched into this
 release. The theme the issues share is honesty about what a review
@@ -19,14 +19,24 @@ CI-wiring detection #66, deterministic PR-metadata rules #70), a worker
 instruction for matching-rule capture (#67), and — off by default —
 stable finding ids with a persisted verdict store (#71).
 
+A concurrent session shipped 0.29.0 mid-run: PR #77 merged the first
+half of #72 (the partial-run names, `failed_chunks`, the 120 s flat
+deadline) and tagged v0.29.0 while the swarm's waves were still
+verifying. This release merges that main back in, completes #72 around
+it — the `Incomplete` verdict, `degraded`, deadline scaling that only
+extends — and ships the other nine issues as 0.30.0.
+
 ## What landed
 
 - **#72** `Incomplete` verdict (Error → Request-Changes → Incomplete →
-  Approved); `degraded` carries the failed chunks; `NOT reviewed:` in the
-  coverage line; `FAIL_ON error|any` exits 1 on it. The default deadline
-  scales `min(900, 20 + 1.6·input_tokens/1000)` —
-  `PRXREF_LLM_TIMEOUT_PER_1K` — only while the timeout is at its default;
-  an explicit `--timeout`/`PRXREF_LLM_TIMEOUT` disables scaling.
+  Approved); `degraded` carries the failed chunks; `FAIL_ON error|any`
+  exits 1 on it. The default deadline is 120 s flat (0.29.0's raise from
+  45 s) and, while left at it, the openai-compat family scales each
+  request's deadline up with the prompt —
+  `max(120, min(900, 20 + 1.6·input_tokens/1000))` via
+  `PRXREF_LLM_TIMEOUT_PER_1K` — so scaling only ever extends a deadline
+  the earlier releases would have granted; an explicit
+  `--timeout`/`PRXREF_LLM_TIMEOUT` disables scaling.
 - **#73** only an open, current thread suppresses; `Thread` gained
   `outdated` and `url`; GitHub stopped re-anchoring outdated comments
   (`original_line` laundering) and reads review-thread resolution via a
@@ -87,6 +97,12 @@ stable finding ids with a persisted verdict store (#71).
    pre-#73 rule, and a `--format json` key the docs promised but the code
    never emitted (`metadata_rules` — fixed before tagging). Read-only
    verifier seats driving the real API are cheap and catch exactly this.
+6. **Fetch before naming a version.** A concurrent session merged and
+   tagged v0.29.0 while this run was mid-wave; the swarm's branch was
+   cut from a stale main and its release commit claimed a version that
+   already shipped. `git fetch origin --tags` + `gh release list` before
+   bumping, and expect the merge: the late merge cost an hour of
+   conflict resolution that a fetch at wave-1 would have made a non-event.
 
 ## The coupling that will catch the next person (counts updated)
 
@@ -107,18 +123,20 @@ counts moved.
 
 ## Release shape (follow this next time)
 
-Same as 0.28.0: bump `pyproject.toml` and `src/prxref/__init__.py`,
-`uv lock`, push the release branch, open the PR with `Fixes #NN` for
-every closed issue, merge, then `git tag v0.29.0 && git push origin
-v0.29.0`. The tag runs `.github/workflows/release.yml` (GitHub release
-with wheel **and** sdist; PyPI by OIDC trusted publishing).
+Bump `pyproject.toml` and `src/prxref/__init__.py`, `uv lock`, push the
+release branch, open the PR with `Fixes #NN` for every closed issue,
+merge, then `git tag v0.30.0 && git push origin v0.30.0`. The tag runs
+`.github/workflows/release.yml` (GitHub release with wheel **and**
+sdist; PyPI by OIDC trusted publishing). Before naming the version:
+`git fetch origin --tags` and check `gh release list` — a concurrent
+session shipped 0.29.0 mid-run once.
 
 ## Verified at release
 
 ```
-10506 passed                                  uv run pytest -q
+10515 passed                                  uv run pytest -q
 All checks passed!                            uv run ruff check src tests
-0.29.0                                        uv run prxref --version
+0.30.0                                        uv run prxref --version
 ```
 
 Both verifier seats re-ran each issue's acceptance criteria against the
@@ -150,76 +168,73 @@ reports live at
 
 ---
 
-# v0.28.0 handoff (superseded; its lessons hold)
+# v0.29.0 handoff (superseded; its lessons hold)
 
-**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-29 · **Supersedes** the
-v0.27.0 handoff.
+# HANDOFF — v0.29.0 shipped: partial reviews name what they skipped (#72)
 
-0.28.0 is a one-default release: `PRXREF_REVIEW_RULES_MAX_CHARS` rises
-from 12000 to 24000 (#63), matching `PRXREF_SCOPED_RULES_MAX_CHARS`, so
-the two caps no longer disagree. Team rules files mined from reviewer
-comments routinely run 18k to 22k characters, and the old default cut
-their tail — usually the last groups in the file (tests, observability,
-process) — behind one WARNING most CI runs never surface. The loader, the
-prompt block and the run record are unchanged; the record's `max_chars`
-simply reports 24000 unless the variable says otherwise. The cost: a
-rules file between 12k and 24k characters now reaches every review unit
-whole, up to roughly 3000 more input tokens per unit at the top of that
-range, and `PRXREF_REVIEW_RULES_MAX_CHARS=12000` restores the old
-behavior. The user-facing account is the `[0.28.0]` section of
-`CHANGELOG.md`.
+**Repo:** `sblattj/prxref` (public) · **Released:** 2026-09-30 · **Supersedes** the
+v0.28.0 handoff.
+
+0.29.0 fixes #72. A run where some review units fail used to report
+`verdict: Approved` with only a `chunks_failed` count, so a consumer
+reading the verdict or a gate built on it could not tell which files got
+no review. The run record now carries `failed_chunks`, and the per-model
+deadline default rises from 45 s to 120 s, because reasoning models
+routinely need 50 s or more for a large chunk and the old default
+dropped normal chunks on every run. The user-facing account is the
+`[0.29.0]` section of `CHANGELOG.md`.
 
 ## What landed
 
-- **The default.** `config._DEFAULTS["review_rules_max_chars"]` 12000 →
-  24000, and the `config.py` docstring table's `(default …)` line with it.
-  `tests/test_docs_consistency.py` then forces `.env.example` and
-  `docs/env-vars.md` along, which both name the default in prose.
-- **Docs.** `README.md`; `docs/review-rules.md` (the cap bullet, the
-  truncation-line example, the record example, the `-v` line, the scoped
-  per-file examples, and the cost section, now ~6000 tokens per unit at
-  the default); `.env.example`. The doc examples pair a body size with
-  the cap, and a truncated example that kept its 18344-character file
-  would have become impossible (18344 < 24000 truncates nothing), so the
-  example file is now 27344 characters.
-- **Tests.** `tests/test_issue_63_rules_cap_default.py` (new): the default
-  matches the scoped cap and flows through `load_config`; a
-  20295-character body loads whole with no `prxref.rules` warning; and
-  `PRXREF_REVIEW_RULES_MAX_CHARS=12000` still truncates it with the
-  raise-the-cap warning. Four existing spots assert the real default and
-  followed it: `_POSITIVE_INT_KNOBS` in `tests/test_config.py`, the
-  loader-call record in `tests/test_cli_inputs.py`, the CLI `_expected`
-  record in `tests/test_issue_63_review_rules.py`, and the eval
-  `SCOPED_RECORD` fixture in `tests/test_eval_run_inputs.py`.
+- **`failed_chunks` on the record.** `orchestrator._failed_chunks` builds
+  one `{unit, kind, files, error}` per failed unit in review order:
+  `kind` is `chunk` (its files, in chunk order) or `sweep` (the
+  cross-file sweep, no files). Both the partial-success exit and the
+  total-failure exit set it. `_run_record` defaults it to `None`, so an
+  exit that never reached review (empty diff, config error) still has the
+  key.
+- **JSON.** `cli._build_json_result` adds `failed_chunks` after
+  `config_file` (before `sampling`/`replay`), so every existing key keeps
+  its position and the 0.22.0 golden hashes only need the new key popped.
+- **Text.** `_print_summary` prints `not reviewed: <files>` after
+  `coverage:`, `not reviewed: cross-file sweep` when the sweep failed, and
+  `hint: a review unit hit the model deadline; raise --timeout or
+  PRXREF_LLM_TIMEOUT` when any failure was a timeout.
+- **Default deadline.** `config._DEFAULTS["llm_timeout"]` and
+  `llm_backends.DEFAULT_TIMEOUT` are 120.0; `.env.example`,
+  `docs/env-vars.md` and `docs/llm.md` follow.
+- **Unchanged on purpose.** The verdict vocabulary and `degraded` (post
+  failures only, #48) keep their meaning, so gates and CI fallbacks built
+  on them behave as before.
 
-## What this release taught
+## Tests
 
-1. **A default is pinned in more places than the config tables.** One
-   number moved and four test files needed it. Grepping `12000` does not
-   separate "the default" from "an explicit cap a test passes"
-   (`max_chars=12000` helper defaults, fabricated formatter fixtures) or
-   from the unrelated `repo_context_max_chars` default, which is also
-   12000 and did NOT move. A full-suite run right after the first edit is
-   the only reliable census, and explicit-cap fixtures that pass either
-   way must be left alone.
-2. **Doc examples encode two numbers, not one.** `docs/review-rules.md`
-   shows `chars=18344 (truncated at 12000)`; raising only the cap would
-   make the example self-contradictory. When a cap default moves, every
-   example pairing a size with it must stay arithmetically possible.
-3. **`ruff format` is not this project's style.** `uv run ruff format
-   --check .` wants to reformat 246 files; only `ruff check` is enforced.
-   Running `ruff format` on a touched file injects hundreds of unrelated
-   lines into the diff. Lint, don't format.
+`tests/test_issue_72_failed_chunks.py` covers a clean run (`[]`), a failed
+chunk with its files, a failed sweep, a total failure naming every chunk,
+the JSON key, the text lines and the timeout hint, and the 120 s default.
+Pinned record-key sets, JSON key-order assertions and the 45 s default
+assertions were updated. Full suite: 10034 passed; ruff clean.
 
-## The coupling that will catch the next person adding a config key
+## Live check
 
-`tests/test_docs_consistency.py` checks `docs/env-vars.md` and `.env.example`
-against `config._DEFAULTS` **in both directions**. It also asserts two hard-coded
-integers, built as `f"**{len(_DEFAULTS)}** configuration keys"` and
-`f"for {len(_DEFAULTS)+len(_LEGACY_ENV_ALIASES)} accepted variable names"`.
+The same real 566-line diff through `--diff-file` on the `claude-cli`
+backend: at `--timeout 40`, v0.28.0 lost 1 of 4 units with no file list.
+At `--timeout 20` the fix reported the failed chunk's 5 files, the
+timeout error and the hint. Evidence is on PR #76.
 
-So a new config key is not a one-file change. It changes these surfaces
-together:
+## Next
+
+- Consumers that gate on partial reviews can read `failed_chunks` directly
+  instead of inferring from `chunks_failed`.
+- ~~A per-chunk adaptive deadline (scaling with input size) is still open
+  as a possible follow-up to #72's second expectation.~~ Shipped in
+  0.30.0 (`PRXREF_LLM_TIMEOUT_PER_1K`, extending above the 120 s floor).
+
+---
+
+# The 0.28.0-era archive (checklists and coupling inventory, kept current)
+
+## Next
 
 - `_DEFAULTS`, plus whichever of the `_INT_KEYS`, `_FLOAT_KEYS`, `_BOOL_KEYS`,
   `_LIST_KEYS`, `_RANGES` and `_CHOICE_KEYS` tables apply to it
@@ -842,8 +857,8 @@ Follow-ups a maintainer can act on:
 
 | Item | Value |
 |---|---|
-| Released version | `0.29.0` (minor: ten issues #66–#75; new config keys ×14, `Thread.outdated`/`url`, optional `Forge.get_commits`, `Finding` trailing `previous_thread`/`anchor_unverified`/`evidence`/`id`/`anchor_block`/`id_reused_from`, `Incomplete` verdict) |
-| Registration points | config-file classification: `config.FILE_KEYS` / `config.ENV_ONLY_KEYS` with `_ENV_ONLY_REASONS`, and `_FILE_PATH_KEYS` for contained paths; CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`, where order matters only as a guard, and Gitea's any-host pattern must keep refusing the other forges' hosts) and the `impls` dict in `config.py` (`make_forge`); webhooks: the header dispatch in `webhooks.verify_signature`, where a forge that also sends GitHub's headers must be checked before GitHub; repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter, and the optional `Forge.get_commits` (GitHub and Gitea only, #70); thread currency: `Thread.outdated`/`Thread.url` (#73); verdicts: `verdicts.py`'s version-1 store shape (#71); rules scopes: `scope:` lines under rules-file headings, parsed by `rules.parse_rule_sections` (#75); the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank (0.29.0 added the `standard` reason; standards sections flow through `repo_standards` and the `standards` kind); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` (0.29.0 added `evidence_block`) |
+| Released version | `0.30.0` (minor: ten issues #66–#75, with #72 completing the fix 0.29.0 started; new config keys ×14, `Thread.outdated`/`url`, optional `Forge.get_commits`, `Finding` trailing `previous_thread`/`anchor_unverified`/`evidence`/`id`/`anchor_block`/`id_reused_from`, `Incomplete` verdict) |
+| Registration points | config-file classification: `config.FILE_KEYS` / `config.ENV_ONLY_KEYS` with `_ENV_ONLY_REASONS`, and `_FILE_PATH_KEYS` for contained paths; CI fallback: `ci_fallback.detect_ci` (which CI) and `cli._emit_fallback` (what each CI gets); forges: the tuple in `forges/base.py` (`detect_forge`, where order matters only as a guard, and Gitea's any-host pattern must keep refusing the other forges' hosts) and the `impls` dict in `config.py` (`make_forge`); webhooks: the header dispatch in `webhooks.verify_signature`, where a forge that also sends GitHub's headers must be checked before GitHub; repository listing: the optional `Forge.list_paths` in `forges/base.py`, on every adapter; summary read-back: the optional `Forge.get_summary`, on every adapter, and the optional `Forge.get_commits` (GitHub and Gitea only, #70); thread currency: `Thread.outdated`/`Thread.url` (#73); verdicts: `verdicts.py`'s version-1 store shape (#71); rules scopes: `scope:` lines under rules-file headings, parsed by `rules.parse_rule_sections` (#75); the reviewed-head marker: `orchestrator.REVIEWED_HEAD_PREFIX` and `REVIEWED_HEAD_SUFFIX`; repository-context entries: `repo_context.KINDS`, where an entry's kind picks the prompt block it renders in and the tuple's order ranks nothing, and `REASONS`, whose order is the budget's rank (0.30.0 added the `standard` reason; standards sections flow through `repo_standards` and the `standards` kind); LLM backends: `llm_backends.BACKENDS`; glyphs: `prxref.markers`; subcommands: `cli._build_parser`; prompt templates: `prompt_templates.TEMPLATE_NAMES` and `OPTIONAL_PLACEHOLDERS` (0.30.0 added `evidence_block`) |
 | Version strings | `pyproject.toml`, `src/prxref/__init__.py`, and `uv.lock` |
 | Test command | `uv run pytest` (dev tools are a `[dependency-groups]` group, not an extra) |
 | Release assets | wheel **and** sdist attached by `release.yml`; PyPI by OIDC trusted publishing |

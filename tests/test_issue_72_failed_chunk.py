@@ -136,34 +136,34 @@ class TestPartialRunVerdictAndRecord:
             }],
         }
 
-    def test_the_run_record_carries_failed_chunks_only_on_a_partial_run(
-        self, monkeypatch,
-    ):
+    def test_the_run_record_carries_failed_chunks_as_unit_dicts(self, monkeypatch):
         monkeypatch.setattr(
             orchestrator.reviewer, "review_chunk", _flaky_review_chunk(itertools.count(1)),
         )
         res = orchestrate_review(
             FakeForge(diff=TWO_FILE_DIFF), REF, FakeLLM("{}"), post=False, max_chunks=2,
         )
-        assert res["failed_chunks"] == [(FLAKY_ERROR, ["src/one.py"])]
+        assert res["failed_chunks"] == [
+            {"unit": 1, "kind": "chunk", "files": ["src/one.py"], "error": FLAKY_ERROR},
+        ]
 
-    def test_a_clean_run_keeps_the_pre_72_key_set_and_null_degraded(self):
-        """The new keys ride partial runs only, like ``degraded`` always has."""
+    def test_a_clean_run_carries_an_empty_list_and_null_degraded(self):
+        """0.29.0 released the key as always-present; clean means ``[]``."""
         res = orchestrate_review(
             FakeForge(diff=_added_file_diff("src/app.py", 20)), REF,
             FakeLLM("{}"), post=False,
         )
         assert res["verdict"] == "Approved"
         assert res["degraded"] is None
-        assert "failed_chunks" not in res
+        assert res["failed_chunks"] == []
 
-    def test_a_clean_json_payload_has_no_failed_chunks_key(self):
+    def test_a_clean_json_payload_carries_an_empty_failed_chunks(self):
         res = orchestrate_review(
             FakeForge(diff=_added_file_diff("src/app.py", 20)), REF,
             FakeLLM("{}"), post=False,
         )
         payload = _build_json_result(res)
-        assert "failed_chunks" not in payload
+        assert payload["failed_chunks"] == []
         assert payload["degraded"] is None
 
     def test_a_partial_json_payload_gains_failed_chunks_after_chunks_failed(
@@ -178,7 +178,9 @@ class TestPartialRunVerdictAndRecord:
         payload = _build_json_result(res)
         keys = list(payload)
         assert keys[keys.index("failed_chunks") - 1] == "chunks_failed"
-        assert payload["failed_chunks"] == [(FLAKY_ERROR, ["src/one.py"])]
+        assert payload["failed_chunks"] == [
+            {"unit": 1, "kind": "chunk", "files": ["src/one.py"], "error": FLAKY_ERROR},
+        ]
 
 
 class TestTextCoverageLine:
@@ -196,7 +198,8 @@ class TestTextCoverageLine:
         )
         assert self._lines(res) == [
             "verdict: Incomplete",
-            "coverage: 2/3 chunks reviewed; NOT reviewed: src/one.py",
+            "coverage: 2/3 chunks reviewed",
+            "not reviewed: src/one.py",
         ]
 
     def test_a_failed_sweep_says_systemic_sweep_rather_than_nothing(
@@ -216,7 +219,8 @@ class TestTextCoverageLine:
         )
         assert self._lines(res) == [
             "verdict: Incomplete",
-            "coverage: 1/2 chunks reviewed; NOT reviewed: systemic sweep",
+            "coverage: 1/2 chunks reviewed",
+            "not reviewed: cross-file sweep",
         ]
 
     def test_a_record_without_the_file_list_keeps_the_old_line(self):
@@ -247,7 +251,7 @@ class TestTheTimeoutReasonIsRewritten:
         res = orchestrate_review(
             FakeForge(diff=TWO_FILE_DIFF), REF, FakeLLM("{}"), post=False, max_chunks=2,
         )
-        assert res["failed_chunks"][0][0] == (
+        assert res["failed_chunks"][0]["error"] == (
             "[chunk 1/2] timed out after 47s; increase --timeout"
         )
         # The row in degraded carries the same rewritten reason.
@@ -267,7 +271,7 @@ class TestTheTimeoutReasonIsRewritten:
         res = orchestrate_review(
             FakeForge(diff=TWO_FILE_DIFF), REF, FakeLLM("{}"), post=False, max_chunks=2,
         )
-        assert res["failed_chunks"][0][0] == "LLMError: malformed response"
+        assert res["failed_chunks"][0]["error"] == "LLMError: malformed response"
 
 
 class TestTheGate:
@@ -362,14 +366,17 @@ def _client(session, **kwargs) -> OpenAICompatClient:
 
 
 class TestDeadlineScalingInTheClient:
-    BIG = "x" * (22_000 * 4)  # ~22k tokens at the 4-chars-per-token estimate
+    # ~80k tokens at the 4-chars-per-token estimate: past the ~62.5k-token
+    # point where the scaled value crosses 0.29.0's 120 s floor, so the
+    # scaling is actually observable on the wire. Below it the floor wins.
+    BIG = "x" * (80_000 * 4)
 
     def test_the_default_timeout_scales_with_the_prompt(self):
         session = _DeadlineCapturingSession(_resp())
         client = _client(session, timeout_per_1k=DEFAULT_TIMEOUT_PER_1K)
         client.invoke("system", self.BIG)
-        # max(45, 20 + 1.6 * ~22) == ~55.2 (the system half adds a token or two)
-        assert session.calls[0]["timeout"][1] == pytest.approx(55.2, abs=0.01)
+        # max(120, 20 + 1.6 * ~80) == ~148 (the system half adds a token or two)
+        assert session.calls[0]["timeout"][1] == pytest.approx(148.0, abs=0.01)
 
     def test_a_small_prompt_never_loses_the_default_deadline(self):
         session = _DeadlineCapturingSession(_resp())
@@ -410,7 +417,7 @@ class TestDeadlineScalingInTheClient:
         }, session=session)
         assert client.timeout_per_1k == DEFAULT_TIMEOUT_PER_1K
         client.invoke("system", self.BIG)
-        assert session.calls[0]["timeout"][1] == pytest.approx(55.2, abs=0.01)
+        assert session.calls[0]["timeout"][1] == pytest.approx(148.0, abs=0.01)
 
     def test_a_false_layer_hint_disables_scaling_via_the_factory(self):
         session = _DeadlineCapturingSession(_resp())
@@ -431,7 +438,7 @@ class TestDeadlineScalingInTheClient:
         }, session=session)
         assert client.timeout_per_1k == 2.5
         client.invoke("system", self.BIG)
-        assert session.calls[0]["timeout"][1] == pytest.approx(75.0, abs=0.01)
+        assert session.calls[0]["timeout"][1] == pytest.approx(220.0, abs=0.01)
 
     def test_a_malformed_coefficient_is_a_config_error(self):
         with pytest.raises(Exception, match="PRXREF_LLM_TIMEOUT_PER_1K"):
@@ -503,9 +510,13 @@ class TestPartialRunByteIdentityOfCleanOutput:
         from tests.test_issue_38_cli_config import BASE_JSON
 
         expected = BASE_JSON.replace(
+            '"chunks_failed": 0,',
+            '"chunks_failed": 0, "failed_chunks": null,',
+        ).replace(
             '"incremental": null, "degraded": null}',
             '"incremental": null, "ci_wiring": null, "evidence": null, '
-            '"stable_ids": null, "degraded": null, "metadata_rules": null, "config_file": null}',
+            '"stable_ids": null, "degraded": null, "metadata_rules": null, '
+            '"config_file": null}',
         )
         assert json.dumps(_build_json_result({
             "verdict": "Approved", "findings_active": [], "findings_dropped": [],

@@ -647,31 +647,6 @@ def _scope_counts(result: dict) -> tuple[int, int, int]:
     return n_in, n_out, len(scopes) - n_in - n_out
 
 
-def _unreviewed_files_label(failed_chunks: Any) -> str:
-    """The ``NOT reviewed`` file list for the text ``coverage:`` line (#72).
-
-    ``failed_chunks`` is the run record's list of ``(error, files)`` pairs,
-    one per failed review unit. Files from every failed unit are joined in
-    order, deduplicated (two failed chunks cannot share a file today, but
-    the label must not lie if that ever changes); a unit with an empty file
-    list is the systemic sweep, which names itself in its reason, so it
-    contributes ``systemic sweep`` rather than nothing. Returns ``""`` for
-    anything unshaped — a partial or error-shaped result — so the line
-    keeps exactly its pre-#72 form there.
-    """
-    if not isinstance(failed_chunks, list):
-        return ""
-    names: list[str] = []
-    for entry in failed_chunks:
-        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
-            continue
-        files = [f for f in entry[1] if isinstance(f, str)]
-        names.extend(files or ["systemic sweep"])
-    seen: set[str] = set()
-    unique = [n for n in names if not (n in seen or seen.add(n))]
-    return ", ".join(unique)
-
-
 def _print_summary(
     result: Any,
     elapsed_s: float,
@@ -681,10 +656,9 @@ def _print_summary(
 ) -> None:
     """Print the text-mode summary of one review.
 
-    Always printed: ``verdict:``; ``coverage:`` when a chunk failed —
-    extended, when the record carries the failed units' file lists, with
-    ``; NOT reviewed: <files>`` (``systemic sweep`` when the failed unit is
-    the sweep, which names itself rather than files);
+    Always printed: ``verdict:``; ``coverage:`` when a chunk failed, then
+    ``not reviewed:`` naming each failed chunk's files (and the cross-file
+    sweep when it failed) and a ``hint:`` when a failure was a deadline;
     ``chunks:`` when a chunk ran over the token budget or a file was placed
     past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
     when the PR-size advisory fired; and ``replay:`` when the run was a
@@ -712,11 +686,16 @@ def _print_summary(
     failed = record.get("chunks_failed", 0)
     if failed:
         reviewed = record.get("chunks_reviewed", 0)
-        line = f"coverage: {reviewed}/{reviewed + failed} chunks reviewed"
-        unreviewed = _unreviewed_files_label(record.get("failed_chunks"))
-        if unreviewed:
-            line = f"{line}; NOT reviewed: {unreviewed}"
-        print(line, file=target)
+        print(f"coverage: {reviewed}/{reviewed + failed} chunks reviewed", file=target)
+        units = record.get("failed_chunks")
+        units = [u for u in units if isinstance(u, dict)] if isinstance(units, list) else []
+        files = [p for u in units for p in (u.get("files") or [])]
+        if files:
+            print(f"not reviewed: {', '.join(files)}", file=target)
+        if any(u.get("kind") == "sweep" for u in units):
+            print("not reviewed: cross-file sweep", file=target)
+        if any("timeout" in str(u.get("error", "")).lower() for u in units):
+            print("hint: a review unit hit the model deadline; raise --timeout or PRXREF_LLM_TIMEOUT", file=target)
     chunks_line = _chunk_pressure_line(record)
     if chunks_line:
         print(chunks_line, file=target)
@@ -1001,8 +980,9 @@ def _build_json_result(result: Any) -> dict:
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
-    ``config_file``, then
-    ``sampling`` and ``replay`` when present.
+    ``config_file``, then ``sampling`` and ``replay`` when present.
+    ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
+    ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -1072,10 +1052,7 @@ def _build_json_result(result: Any) -> dict:
         "chunk_count": result.get("chunk_count"),
         "chunks_reviewed": result.get("chunks_reviewed"),
         "chunks_failed": result.get("chunks_failed"),
-        # Present only on a partial run (#72), like "degraded": a clean
-        # payload's key set is pinned by the golden tests.
-        **({"failed_chunks": result.get("failed_chunks")}
-           if result.get("failed_chunks") else {}),
+        "failed_chunks": result.get("failed_chunks"),
         "chunks_over_budget": result.get("chunks_over_budget"),
         "largest_chunk_tokens": result.get("largest_chunk_tokens"),
         "overflow_files": result.get("overflow_files"),

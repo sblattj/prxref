@@ -64,12 +64,16 @@ from .llm import ConfigError, InvokeResult, LLMClient
 DEFAULT_BASE_URL = ""
 DEFAULT_API_KEY = ""
 DEFAULT_MODELS = ""
-DEFAULT_TIMEOUT = 45.0
+DEFAULT_TIMEOUT = 120.0
 # Deadline scaling (issue #72): with the timeout left at its default the
 # openai-compat client sizes each request's deadline from the prompt instead
-# of holding one fixed value that a large chunk cannot fit inside. The
-# calibration point: a 22k-token prompt answered in ~55s, while the 45s
-# default cut it off — prefill and decode both grow with the input.
+# of holding one fixed value a large chunk cannot fit inside. The floor is
+# the configured default — 0.29.0 raised it from 45 s to 120 s flat — so
+# scaling only ever EXTENDS a deadline the earlier releases would have
+# granted: within the chunk budget the scaled value stays below the floor,
+# while the sweep or a packed overflow chunk can run far larger. The
+# calibration point: a 22k-token prompt answered in ~55s; prefill and decode
+# both grow with the input.
 SCALED_DEADLINE_BASE_S = 20.0
 SCALED_DEADLINE_CAP_S = 900.0
 DEFAULT_TIMEOUT_PER_1K = 1.6
@@ -782,12 +786,13 @@ def create_llm_client(
     as ``reasoning_effort=`` (litellm maps it per provider), and to
     claude-cli as its effort setting; empty omits it, and kiro-cli ignores
     it.
-    PRXREF_LLM_TIMEOUT (seconds, default 45.0, must be > 0) becomes the
+    PRXREF_LLM_TIMEOUT (seconds, default 120.0, must be > 0) becomes the
     client's ``default_timeout``. While it is left at that default the
     openai-compat client also scales each request's deadline from the
-    prompt (issue #72): ``max(45, min(900, 20 + per_1k * estimated_input_
+    prompt (issue #72): ``max(120, min(900, 20 + per_1k * estimated_input_
     tokens / 1000))``, with the estimate taken from the prompt text because
-    usage is only reported after the request. PRXREF_LLM_TIMEOUT_PER_1K
+    usage is only reported after the request — scaling only extends, never
+    shrinks, the deadline. PRXREF_LLM_TIMEOUT_PER_1K
     (float, must be > 0, default 1.6) tunes the per-1k coefficient for slow
     endpoints; it applies to the openai-compat family only. An explicit
     PRXREF_LLM_TIMEOUT or ``--timeout`` disables scaling entirely: the value
