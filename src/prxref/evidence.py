@@ -54,17 +54,27 @@ output holds that header as a filled ``Name: value`` field line, for the
 resource the finding names (or, naming none, an item that reaches the
 finding's file). Nothing is downgraded, and the model's own verdict on a
 contradiction is never what drops a finding.
+
+The other direction is :func:`failure_findings`: an item with a non-zero
+exit code whose output names a position (``path:line``, ``path:line:col``
+or ``path(line,col)``) in one of the PR's changed files raises one
+deterministic warning there, citing the command, its exit code and the
+output line, at most :data:`FAILURE_FINDINGS_CAP` per run.
+:func:`drop_restated_failures` drops a model finding that restates one of
+them at the same file and line, so the PR gets one comment, not two.
 """
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from .heuristics import _BODY_SUFFIX, is_deterministic
 from .llm import ConfigError
 from .text_inputs import read_capped_file
 from .ticket import fence
+from .triage import Finding
 
 #: Characters kept from one evidence file, before parsing. The cap bounds
 #: memory and the record, never the prompts: those are bounded per unit by
@@ -435,3 +445,194 @@ def load_evidence(paths, *, max_chars: int, source: str) -> EvidenceBundle | Non
         except json.JSONDecodeError:
             items.extend(_parse_text_items(text))
     return EvidenceBundle(items=tuple(items), files=configured)
+
+
+#: The most findings :func:`failure_findings` raises in one run (#69, OD11),
+#: across every item: a failing suite can print hundreds of positions, and
+#: the review is not the place to repeat them all.
+FAILURE_FINDINGS_CAP = 10
+
+#: The ``drop_reason`` prefix :func:`drop_restated_failures` writes; the
+#: item's command follows it.
+RESTATED_DROP_PREFIX = "restates execution evidence: "
+
+_POSITION_RE = re.compile(
+    r"^(?P<path>[^\s:()]+?)"
+    r"(?::(?P<line>\d+)(?::\d+)*|\((?P<paren>\d+)(?:,\s*\d+)?\))"
+    r":?$"
+)
+_POSITION_TRIM = "\"'`,;[]<>"
+_CODE_RE = re.compile(r"(?<![\w-])(?:[A-Z]{1,5}\d{2,5}|[a-z]+(?:-[a-z]+){2,})(?![\w-])")
+_WRAPPERS = frozenset({
+    "uv", "run", "npx", "bunx", "pnpm", "yarn", "npm", "poetry", "pipenv",
+    "bundle", "exec", "python", "python3", "-m", "sudo", "env", "go", "cargo",
+})
+_TITLE_MAX = 100
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """One position a failing item names in a changed file."""
+
+    item: EvidenceItem
+    file: str
+    line: int
+    diagnostic: str
+    message: str
+
+
+def _resolve(path: str, pr_paths: tuple[str, ...]) -> str | None:
+    """The one PR path ``path`` names, or ``None`` when none or several do.
+
+    ``path`` matches a PR path it equals, is a path-segment suffix of
+    (``app.py`` for ``src/app.py``), or ends with as a segment suffix (an
+    absolute CI path such as ``/home/runner/work/r/r/src/app.py``).
+    """
+    hits = {
+        pr for pr in pr_paths
+        if _path_matches(path, pr) or path.endswith("/" + pr)
+    }
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _failures(evidence, pr_paths) -> tuple[list[_Failure], int]:
+    """Every position failing items name in a changed file, capped.
+
+    Returns the first :data:`FAILURE_FINDINGS_CAP` distinct
+    ``(file, line)`` positions, in item and output order, and how many
+    more were left out. Each output line contributes its first position
+    token at most; the command line is never read for positions.
+    """
+    if evidence is None or not evidence.active:
+        return [], 0
+    paths = tuple(dict.fromkeys(_normalise_path(p) for p in pr_paths if p))
+    found: list[_Failure] = []
+    seen: set[tuple[str, int]] = set()
+    left_out = 0
+    for item in evidence.items:
+        if item.exit_code == 0:
+            continue
+        for raw in item.output.splitlines():
+            diagnostic = raw.strip()
+            for token in _SPLIT_RE.split(diagnostic):
+                match = _POSITION_RE.match(token.strip(_POSITION_TRIM))
+                if not match:
+                    continue
+                path = _normalise_path(match.group("path"))
+                if not path or not _PATH_TOKEN_RE.match(path):
+                    continue
+                line = int(match.group("line") or match.group("paren"))
+                target = _resolve(path, paths)
+                if line > 0 and target is not None and (target, line) not in seen:
+                    seen.add((target, line))
+                    if len(found) < FAILURE_FINDINGS_CAP:
+                        message = diagnostic.split(token, 1)[-1].strip(" :-")
+                        found.append(_Failure(item, target, line, diagnostic, message))
+                    else:
+                        left_out += 1
+                break
+    return found, left_out
+
+
+def _finding(failure: _Failure) -> Finding:
+    item = failure.item
+    message = failure.message or f"`{item.command}` fails here"
+    if len(message) > _TITLE_MAX:
+        message = message[: _TITLE_MAX - 1].rstrip() + "…"
+    body = (
+        f"Execution evidence: `{item.command}` exited with exit code "
+        f"{item.exit_code} and reports `{failure.file}:{failure.line}`:\n\n"
+        f"{fence(failure.diagnostic)}\n\n"
+        f"Fix what it reports, or fix the check if it is wrong.{_BODY_SUFFIX}"
+    )
+    return Finding(
+        file=failure.file,
+        line=failure.line,
+        severity="warning",
+        confidence=1.0,
+        title=f"Failing check: {message}",
+        body=body,
+    )
+
+
+def failure_findings(evidence, pr_paths) -> list[Finding]:
+    """Raise one deterministic finding per position failing evidence names (#69).
+
+    ``evidence`` is the loaded :class:`EvidenceBundle` (``None`` or an
+    inactive bundle raises nothing) and ``pr_paths`` the PR's changed file
+    paths. An item with a non-zero exit code is read line by line; a line
+    whose first position token (``path:line``, ``path:line:col`` or
+    ``path(line,col)``, a trailing colon allowed) names exactly one PR path
+    — equal, a path-segment suffix of it, or an absolute path ending in it
+    — and a line above 0 raises a ``warning`` at confidence ``1.0`` on that
+    file and line. Its title is ``Failing check: <the rest of the line>``;
+    its body cites the command, the exit code and the fenced output line,
+    and ends with the deterministic marker
+    (:func:`prxref.heuristics.is_deterministic`), so severity consistency
+    leaves it alone. A position named twice raises once (the first item
+    wins), a path outside the PR or matching two PR paths raises nothing,
+    and the command line is never read for positions. At most
+    :data:`FAILURE_FINDINGS_CAP` findings are raised per run, in item and
+    output order. Pure: no I/O, no model.
+    """
+    return [_finding(f) for f in _failures(evidence, pr_paths)[0]]
+
+
+def failures_left_out(evidence, pr_paths) -> int:
+    """How many positions :func:`failure_findings` left out past the cap."""
+    return _failures(evidence, pr_paths)[1]
+
+
+def _restatement_tokens(failure: _Failure) -> set[str]:
+    """The words that tie a model finding to ``failure``: codes and the tool."""
+    tokens = {m.group(0).lower() for m in _CODE_RE.finditer(failure.message)}
+    for word in failure.item.command.split():
+        name = word.rsplit("/", 1)[-1].lower()
+        if name in _WRAPPERS or name.startswith("-"):
+            continue
+        if len(name) >= 3 and re.fullmatch(r"[a-z][\w.+-]*", name):
+            tokens.add(name)
+        break
+    return tokens
+
+
+def drop_restated_failures(findings, evidence, pr_paths) -> list[Finding]:
+    """Drop a model finding that restates a raised failure (#69, OD11).
+
+    A finding is dropped as ``restates execution evidence: <cmd>`` when it
+    sits on the file and line of a position :func:`failure_findings` raises
+    for the same ``evidence`` and ``pr_paths``, and its title or body names
+    that failure as a whole word: a code from the output line (``F401``,
+    ``TS2322``, ``no-unused-vars``) or the command's tool (``ruff``, past
+    wrappers such as ``uv run`` or ``npx``). A different claim on the same
+    line is kept. A deterministic finding and one that already has a
+    ``drop_reason`` pass through untouched. Pure, 1:1 and
+    order-preserving; the identity when nothing is raised.
+    """
+    failures = _failures(evidence, pr_paths)[0]
+    if not failures:
+        return list(findings)
+    by_position: dict[tuple[str, int], list[_Failure]] = {}
+    for failure in failures:
+        by_position.setdefault((failure.file, failure.line), []).append(failure)
+    out: list[Finding] = []
+    for f in findings:
+        hits = by_position.get((f.file, f.line))
+        if not hits or f.drop_reason is not None or is_deterministic(f):
+            out.append(f)
+            continue
+        text = f"{f.title}\n{f.body}".lower()
+        hit = next(
+            (
+                failure for failure in hits
+                if any(
+                    re.search(rf"(?<![\w-]){re.escape(t)}(?![\w-])", text)
+                    for t in _restatement_tokens(failure)
+                )
+            ),
+            None,
+        )
+        out.append(
+            replace(f, drop_reason=f"{RESTATED_DROP_PREFIX}{hit.item.command}") if hit else f
+        )
+    return out
