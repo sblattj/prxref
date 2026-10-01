@@ -127,10 +127,11 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-14. ``apply_rule_scope_check``: clear ``rule`` on a finding no scoped
-     section of the loaded team rules covers (#75) — the label matches no
-     ATX section that declares a ``scope:`` line, or that section's tokens
-     do not cover the finding's path — leaving the finding itself active,
+14. ``apply_rule_scope_check``: clear ``rule`` on a finding whose
+     scoped section of the loaded team rules does not cover its path (#75) —
+     the label names an ATX section (by heading or rule line) that declares
+     a ``scope:`` line whose tokens miss the path; unknown labels and empty
+     paths keep their label — leaving the finding itself active,
      so it groups and caps by normalized title like any ruleless finding.
      A scope token outside the vocabulary is inert. It drops nothing, runs
      between ``apply_hedge_gate`` and the grouping/cap passes so a wrong
@@ -2268,33 +2269,41 @@ def _scope_token_covers(token: str, path: str) -> bool:
     return True
 
 
+def _label_names(label: str, key: str) -> bool:
+    """True when a casefolded rule ``label`` names ``key`` (a heading or rule line): equal, or its leading words."""
+    if not key or not label or not key.startswith(label):
+        return False
+    return len(key) == len(label) or not key[len(label)].isalnum()
+
+
 def apply_rule_scope_check(
     findings: Sequence[Finding], *, sections: Sequence[RuleSection]
 ) -> tuple[list[Finding], int]:
-    """Clear ``rule`` on a finding no scoped section of the team rules covers (#75).
+    """Clear ``rule`` on a finding whose scoped section does not cover its path (#75).
 
-    A finding's ``rule`` survives only when it names a section of the loaded
-    rules — the label and the section's heading text, both whitespace-collapsed
-    and casefolded, are equal, or the label is the heading's leading words (a
-    model that drops a heading's trailing words still matches; one that cites
-    a single mid-heading word does not) — AND every ``scope:`` token of that
-    section covers the finding's path per :func:`_scope_token_covers`:
-    ``java``/``jvm`` cover ``*.java``, ``*.kt``, ``pom.xml`` and
-    ``build.gradle*``; ``python`` covers ``*.py``; ``typescript``,
-    ``javascript``, ``ts`` and ``js`` cover the TypeScript and JavaScript
-    extensions; ``docs``/``markdown`` cover ``*.md``, ``*.mdx``, ``*.rst``
-    and ``*.txt``; ``openapi``/``specs`` cover ``*.yaml``, ``*.yml`` and
-    ``*.json`` whose basename mentions ``openapi`` or ``swagger`` or that sit
-    under a ``spec``/``specs``/``openapi``/``swagger`` directory; ``comments``
-    covers every path; and a token outside the vocabulary is inert and covers
-    every path too, because an unknown word must not silently suppress rules.
+    A finding's ``rule`` label maps to a scoped section when, both
+    whitespace-collapsed and casefolded, it equals the section's heading
+    text or one of its rule lines (bullets and numbered items), or is their
+    leading words (a model that drops trailing words still maps; one that
+    cites a single mid-heading word does not). The label is cleared to
+    ``None`` only when it maps to at least one section and NO mapped
+    section's ``scope:`` tokens all cover the finding's path per
+    :func:`_scope_token_covers`: ``java``/``jvm`` cover ``*.java``, ``*.kt``,
+    ``pom.xml`` and ``build.gradle*``; ``python`` covers ``*.py``;
+    ``typescript``, ``javascript``, ``ts`` and ``js`` cover the TypeScript
+    and JavaScript extensions; ``docs``/``markdown`` cover ``*.md``,
+    ``*.mdx``, ``*.rst`` and ``*.txt``; ``openapi``/``specs`` cover
+    ``*.yaml``, ``*.yml`` and ``*.json`` whose basename mentions ``openapi``
+    or ``swagger`` or that sit under a ``spec``/``specs``/``openapi``/
+    ``swagger`` directory; ``comments`` covers every path; and a token
+    outside the vocabulary is inert and covers every path too.
 
-    Every other label — one no section carries (an invented name, or a rule
-    from a section that declares no scope once any section does), or a
-    matching section whose tokens do not cover the file — is cleared to
-    ``None``. The finding itself is never dropped, so it rejoins the ruleless
-    paths downstream: ``apply_rule_grouping`` keys it on its normalized title
-    and ``apply_rule_cap`` caps it by title. Pure and order-preserving:
+    Every other label is kept: one that maps to no scoped section (an
+    unknown name, or a rule from an unscoped section), and any label on a
+    finding with an empty path, which cannot be judged. The finding itself
+    is never dropped, so a cleared one rejoins the ruleless paths
+    downstream: ``apply_rule_grouping`` keys it on its normalized title and
+    ``apply_rule_cap`` caps it by title. Pure and order-preserving:
     already-dropped findings and ruleless ones pass through untouched, and
     only ``rule`` moves. Returns the findings and how many labels were
     cleared.
@@ -2304,7 +2313,10 @@ def apply_rule_scope_check(
     orchestrator does not call this at all in that case.
     """
     scoped = tuple(
-        (" ".join(section.name.split()).casefold(), tuple(section.scopes))
+        (
+            tuple(" ".join(key.split()).casefold() for key in (section.name, *section.items)),
+            tuple(section.scopes),
+        )
         for section in sections
     )
     if not scoped:
@@ -2315,15 +2327,16 @@ def apply_rule_scope_check(
         if finding.drop_reason is not None or not isinstance(finding.rule, str) or not finding.rule:
             out.append(finding)
             continue
-        label = " ".join(finding.rule.split()).casefold()
         path = finding.file if isinstance(finding.file, str) else ""
-        covered = any(
-            (label == name or name.startswith(f"{label} "))
-            and all(_scope_token_covers(token, path) for token in tokens)
-            for name, tokens in scoped
+        label = " ".join(finding.rule.split()).casefold()
+        mapped = [
+            tokens for keys, tokens in scoped if any(_label_names(label, key) for key in keys)
+        ]
+        misses = bool(path) and bool(mapped) and not any(
+            all(_scope_token_covers(token, path) for token in tokens) for tokens in mapped
         )
-        out.append(finding if covered else replace(finding, rule=None))
-        cleared += 0 if covered else 1
+        out.append(replace(finding, rule=None) if misses else finding)
+        cleared += 1 if misses else 0
     return out, cleared
 
 

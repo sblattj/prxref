@@ -1987,7 +1987,7 @@ def orchestrate_review(
     if rule_sections:
         findings, cleared_labels = apply_rule_scope_check(findings, sections=rule_sections)
         logger.info(
-            "rule scope: cleared %d rule label(s) that no section covers", cleared_labels,
+            "rule scope: cleared %d rule label(s) whose scoped section does not cover the file", cleared_labels,
         )
         tracer.event("rulescope", "ok", cleared=cleared_labels)
         run_inputs["rule_scope_cleared"] = cleared_labels
