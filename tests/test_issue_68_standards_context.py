@@ -560,6 +560,32 @@ class TestTheOffSentinel:
         assert cfg["context_standards_max_chars"] == 2500
 
 
+class TestTheConfigFileTurnsStandardsOff:
+    """A ``.prxref.toml`` can switch discovery off with ``[]`` or ``"off"``."""
+
+    @pytest.mark.parametrize("literal", ["[]", '"off"'])
+    def test_an_empty_array_or_off_empties_the_glob_set(self, tmp_path, literal):
+        path = tmp_path / ".prxref.toml"
+        path.write_text(f"context_standards_globs = {literal}\n")
+
+        cfg = load_config(config_file=path)
+
+        assert cfg["context_standards_globs"] == []
+
+    def test_a_non_empty_array_still_replaces_the_set(self, tmp_path):
+        path = tmp_path / ".prxref.toml"
+        path.write_text('context_standards_globs = ["docs/x/**"]\n')
+
+        assert load_config(config_file=path)["context_standards_globs"] == ["docs/x/**"]
+
+    def test_any_other_string_is_still_a_config_error(self, tmp_path):
+        path = tmp_path / ".prxref.toml"
+        path.write_text('context_standards_globs = "docs/**"\n')
+
+        with pytest.raises(config.ConfigError, match="array of strings"):
+            load_config(config_file=path)
+
+
 class TestAZeroBudgetDisablesTheStandards:
     def test_env_zero_loads_as_zero(self, monkeypatch):
         monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_MAX_CHARS", "0")
