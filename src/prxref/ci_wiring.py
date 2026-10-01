@@ -22,19 +22,30 @@ is ``spec`` when the ticket mentions regression checks, CI, pipelines or
 automated tests (relabeled ``warning`` by spec grounding on an ungrounded
 run) and ``warning`` otherwise.
 
+A CI step that runs the check through a runner is followed exactly one hop:
+``make verify`` reads the root Makefile (``GNUmakefile``, ``makefile``,
+``Makefile``, GNU make's lookup order) and counts the check wired when the
+``verify`` rule's own recipe names it; ``npm run verify``, ``npm test``,
+``yarn verify`` and ``pnpm run verify`` do the same over the root
+``package.json`` ``scripts`` entry. A runner file is read only when a CI
+invocation line names a runner and some check is not invoked directly,
+and only when the listing shows it (or the source cannot list).
+
 Known false negatives, accepted for v1 and documented here rather than
 hidden: an invocation embedded inside a folded YAML block scalar the
 indentation scanner mis-slices, a CI job that renames the script before
-running it (``cp scripts/verify.sh stage.sh``), and a make/npm target that
-runs the check without naming its path (``make verify`` matches nothing —
-target matching is deferred as the highest false-positive risk). The
-conservative direction is under-flagging.
+running it (``cp scripts/verify.sh stage.sh``), and a runner chain deeper
+than one hop — a make prerequisite (``verify: smoke``), a recipe calling
+``$(MAKE) smoke``, ``make -C sub`` / ``make -f other.mk``, a workspace
+``npm --prefix web run verify``, or a ``justfile``/``Taskfile``/``tox.ini``
+runner. The conservative direction is under-flagging.
 """
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -92,6 +103,44 @@ _INVOCATION_KEYS = frozenset({
 #: A line that is a command outright, no YAML key above it: a plain shell
 #: line, a Makefile recipe body, a Jenkins ``sh '...'`` step.
 _PLAIN_COMMAND_PREFIXES = ("sh ", "bash ", "./", "make ", "pytest ", "npm run ")
+
+#: The root Makefile names, in GNU make's lookup order: the first one the
+#: source returns is the one ``make`` would run.
+MAKEFILE_NAMES: tuple[str, ...] = ("GNUmakefile", "makefile", "Makefile")
+
+#: The root npm manifest whose ``scripts`` entries npm, yarn and pnpm run.
+PACKAGE_JSON = "package.json"
+
+#: Every runner file the one-hop follow may read, at most once each per run.
+RUNNER_FILES: tuple[str, ...] = MAKEFILE_NAMES + (PACKAGE_JSON,)
+
+_RUNNER_RE = re.compile(r"(?<![\w./$-])(make|npm|pnpm|yarn)(?![\w.-])([^;&|()\n]*)")
+
+_MAKE_REDIRECT_OPTIONS = ("-C", "-f", "--directory", "--file", "--makefile")
+
+_MAKE_ARG_OPTIONS = frozenset({"-o", "-W", "-I", "--old-file", "--what-if", "--include-dir"})
+
+_MAKE_COUNT_OPTIONS = frozenset({"-j", "-l", "--jobs", "--load-average"})
+
+_NPM_REDIRECT_OPTIONS = (
+    "--prefix", "-C", "--dir", "--cwd", "--filter", "-F", "-w", "--workspace",
+)
+
+_NPM_RUN_VERBS = frozenset({"run", "run-script", "rum", "urn"})
+
+_NPM_SCRIPT_ALIASES = {
+    "t": "test", "tst": "test", "test": "test",
+    "start": "start", "stop": "stop", "restart": "restart",
+}
+
+_YARN_BUILTINS = frozenset({
+    "add", "audit", "bin", "cache", "ci", "config", "create", "dedupe", "dlx",
+    "exec", "i", "import", "info", "init", "install", "link", "list", "ls",
+    "outdated", "pack", "publish", "remove", "rm", "store", "unlink", "up",
+    "update", "upgrade", "why", "workspace", "workspaces", "x",
+})
+
+_MAKE_RULE_RE = re.compile(r"^(?P<targets>[^\s:=#][^:=#]*?)\s*::?(?!=)(?P<rest>.*)$")
 
 
 @dataclass(frozen=True)
@@ -326,7 +375,165 @@ def _mentions(line: str, path: str, basename: str) -> bool:
     )
 
 
-def invokes(text: str, path: str, candidate: CiCandidate) -> bool:
+def _make_targets(tokens: list[str]) -> set[tuple[str, str]]:
+    """The ``("make", target)`` pairs one ``make`` argument list runs.
+
+    Options are skipped (with their argument where one is required), a
+    ``NAME=value`` assignment is not a target, and no target at all is
+    the default goal, spelled ``""``. An option that points make at
+    another directory or makefile yields nothing: the root Makefile is
+    not the one it runs.
+    """
+    targets: set[str] = set()
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith(_MAKE_REDIRECT_OPTIONS):
+            return set()
+        if token in _MAKE_ARG_OPTIONS:
+            skip_next = True
+            continue
+        if token in _MAKE_COUNT_OPTIONS:
+            continue
+        if token.startswith("-"):
+            continue
+        if token.isdigit() or "=" in token:
+            continue
+        targets.add(token.strip("'\""))
+    return {("make", target) for target in targets} or {("make", "")}
+
+
+def _npm_script(tool: str, tokens: list[str]) -> str | None:
+    """The package.json script one npm, yarn or pnpm argument list runs, or None."""
+    positional: list[str] = []
+    for token in tokens:
+        if token.startswith(_NPM_REDIRECT_OPTIONS):
+            return None
+        if token.startswith("-"):
+            continue
+        positional.append(token.strip("'\""))
+    if not positional:
+        return None
+    verb = positional[0]
+    if verb in _NPM_RUN_VERBS:
+        return positional[1] if len(positional) > 1 else None
+    if tool == "npm":
+        return _NPM_SCRIPT_ALIASES.get(verb)
+    if verb in _YARN_BUILTINS:
+        return None
+    return _NPM_SCRIPT_ALIASES.get(verb, verb)
+
+
+def runner_targets(line: str) -> set[tuple[str, str]]:
+    """The runner entries one CI invocation line runs.
+
+    ``("make", target)`` for each ``make`` target (``""`` is the default
+    goal), ``("npm", script)`` for an ``npm run``/``npm test``/``yarn``/
+    ``pnpm`` script; a command chained with ``&&``, ``;`` or ``|`` is read
+    segment by segment. ``cmake`` and ``$(MAKE)`` are not ``make``, and a
+    runner pointed elsewhere (``make -C sub``, ``npm --prefix web``) yields
+    nothing. Pure: reads only ``line``.
+    """
+    out: set[tuple[str, str]] = set()
+    for match in _RUNNER_RE.finditer(line):
+        tool, rest = match.group(1), match.group(2)
+        tokens = rest.split()
+        if tool == "make":
+            out |= _make_targets(tokens)
+            continue
+        script = _npm_script(tool, tokens)
+        if script:
+            out.add(("npm", script))
+    return out
+
+
+def _make_recipes(text: str) -> tuple[dict[str, list[str]], str | None]:
+    """The recipe lines per target of a Makefile, plus its default goal.
+
+    A rule line (``a b: prereqs`` or ``a:: prereqs``, ``a: ; cmd`` with an
+    inline recipe) opens the recipe its tab-indented lines fill; any other
+    non-blank, non-comment line closes it. Recipe prefixes ``@``, ``-`` and
+    ``+`` are dropped and a ``#`` comment recipe line never counts. The
+    default goal is the first target that does not start with ``.`` and
+    has no ``%`` pattern. Prerequisites are not recorded: the follow is
+    one hop.
+    """
+    recipes: dict[str, list[str]] = {}
+    default_goal: str | None = None
+    current: list[str] | None = None
+
+    def add(targets: list[str], command: str) -> None:
+        command = command.strip().lstrip("@-+").strip()
+        if not command or command.startswith("#"):
+            return
+        for target in targets:
+            recipes.setdefault(target, []).append(command)
+
+    for raw in text.replace("\r\n", "\n").split("\n"):
+        if raw.startswith("\t"):
+            if current is not None:
+                add(current, raw[1:])
+            continue
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _MAKE_RULE_RE.match(raw)
+        if match is None:
+            current = None
+            continue
+        current = match.group("targets").split()
+        for target in current:
+            recipes.setdefault(target, [])
+            if default_goal is None and not target.startswith(".") and "%" not in target:
+                default_goal = target
+        _, semicolon, inline = match.group("rest").partition(";")
+        if semicolon:
+            add(current, inline)
+    return recipes, default_goal
+
+
+def _npm_scripts(text: str) -> dict[str, str]:
+    """The string-valued ``scripts`` entries of a package.json text; ``{}`` when malformed."""
+    try:
+        manifest = json.loads(text)
+    except ValueError:
+        return {}
+    scripts = manifest.get("scripts") if isinstance(manifest, dict) else None
+    if not isinstance(scripts, dict):
+        return {}
+    return {name: body for name, body in scripts.items() if isinstance(body, str)}
+
+
+def _makefile(runners: Mapping[str, str]) -> str | None:
+    """The root Makefile name ``make`` would run among ``runners``, or None."""
+    return next((name for name in MAKEFILE_NAMES if name in runners), None)
+
+
+def _runner_commands(
+    runners: Mapping[str, str], hop: tuple[str, str],
+) -> list[str]:
+    """The command lines the runner entry ``hop`` runs, one hop deep."""
+    tool, target = hop
+    if tool == "make":
+        name = _makefile(runners)
+        if name is None:
+            return []
+        recipes, default_goal = _make_recipes(runners[name])
+        goal = target or default_goal
+        return recipes.get(goal, []) if goal else []
+    body = _npm_scripts(runners[PACKAGE_JSON]).get(target) if PACKAGE_JSON in runners else None
+    return [body] if body else []
+
+
+def invokes(
+    text: str,
+    path: str,
+    candidate: CiCandidate,
+    *,
+    runners: Mapping[str, str] | None = None,
+) -> bool:
     """True when the CI file ``text`` at ``path`` invokes ``candidate``.
 
     An invocation is an invocation line (see :func:`_invocation_lines`)
@@ -334,13 +541,68 @@ def invokes(text: str, path: str, candidate: CiCandidate) -> bool:
     contains ``scripts/verify.sh`` — or its bare basename at word
     boundaries, so ``verify.sh`` alone matches too. A mention in a
     comment, a ``name:`` label or a folded-scalar mis-slice never counts.
-    Pure: reads only the text it is handed.
+
+    ``runners`` maps a root runner file name (:data:`RUNNER_FILES`) to its
+    text. When given, an invocation line running a make target or an
+    npm-family script (see :func:`runner_targets`) also counts when that
+    target's own recipe or script body names the candidate the same way —
+    one hop, never a prerequisite or a nested runner call. Pure: reads
+    only the texts it is handed.
     """
     basename = PurePosixPath(candidate.path).name
+    lines = _invocation_lines(text)
+    if any(_mentions(line, candidate.path, basename) for line in lines):
+        return True
+    if not runners:
+        return False
     return any(
-        _mentions(line, candidate.path, basename)
-        for line in _invocation_lines(text)
+        _mentions(command, candidate.path, basename)
+        for line in lines
+        for hop in runner_targets(line)
+        for command in _runner_commands(runners, hop)
     )
+
+
+def _hop_label(hop: tuple[str, str]) -> str:
+    """The canonical command spelling of a runner entry, for the finding body."""
+    tool, target = hop
+    if tool == "make":
+        return f"make {target}".rstrip()
+    return f"npm run {target}"
+
+
+def _read_runners(
+    hops: set[tuple[str, str]],
+    read: Callable[[str], str | None],
+    listing: Collection[str] | None,
+) -> dict[str, str]:
+    """The runner files ``hops`` need, read through ``read``; never raises.
+
+    Only the Makefile when a make hop exists, only package.json when an
+    npm hop does; a name the listing does not show is never read, and the
+    Makefile names stop at the first one the source returns. A read that
+    raises or returns a non-string is a miss.
+    """
+    tools = {tool for tool, _ in hops}
+    wanted: list[tuple[str, ...]] = []
+    if "make" in tools:
+        wanted.append(MAKEFILE_NAMES)
+    if "npm" in tools:
+        wanted.append((PACKAGE_JSON,))
+    present = set(listing) if listing is not None else None
+    out: dict[str, str] = {}
+    for names in wanted:
+        for name in names:
+            if present is not None and name not in present:
+                continue
+            try:
+                text = read(name)
+            except Exception:  # noqa: BLE001
+                text = None
+            if isinstance(text, str):
+                out[name] = text
+                break
+    return out
 
 
 def mentions_ci_work(text: str | None) -> bool:
@@ -376,9 +638,14 @@ def ci_wiring_findings(
     deterministic suffix — and the run-record stamp
     ``{"candidates", "ci_files", "picked_up_default", "triggered"}``
     (``triggered`` exactly when a finding was raised). At most
-    :data:`MAX_CI_FILES` files are read, and none when there is no
-    candidate. Deterministic: no model, no randomness, the only I/O the
-    ``read`` callable.
+    :data:`MAX_CI_FILES` CI files are read, and none when there is no
+    candidate. When a CI invocation line runs a make target or an
+    npm-family script and some candidate is not invoked directly, the root
+    runner files it needs (:data:`RUNNER_FILES`, at most one Makefile and
+    one package.json) are read too and followed one hop; the body lists
+    each one read after the CI files, naming the commands it was followed
+    from, while ``ci_files`` stays the CI files alone. Deterministic: no
+    model, no randomness, the only I/O the ``read`` callable.
     """
     candidates = candidate_checks(files)
     picked_up_default = sorted({
@@ -403,16 +670,39 @@ def ci_wiring_findings(
     ]
     read_files = [ci_path for ci_path, _ in texts]
 
+    runners: dict[str, str] = {}
+    hops = {
+        hop
+        for _, text in texts
+        for line in _invocation_lines(text)
+        for hop in runner_targets(line)
+    }
+    if hops and not all(
+        any(invokes(text, ci_path, candidate) for ci_path, text in texts)
+        for candidate in candidates
+    ):
+        runners = _read_runners(hops, read, listing)
+
     severity = "spec" if mentions_ci_work(ticket_text) else "warning"
+    searched_lines = [f"- `{ci_path}`" for ci_path in read_files]
+    for name in sorted(runners):
+        tool = "make" if name in MAKEFILE_NAMES else "npm"
+        followed = ", ".join(
+            f"`{_hop_label(hop)}`" for hop in sorted(hops) if hop[0] == tool
+        )
+        searched_lines.append(f"- `{name}` (followed from {followed})")
     searched = (
-        "\n".join(f"- `{ci_path}`" for ci_path in read_files)
-        if read_files
+        "\n".join(searched_lines)
+        if searched_lines
         else "- (no CI configuration file was found)"
     )
     findings: list[Finding] = []
     for candidate in candidates:
         verb = "added" if candidate.new else "changed"
-        if any(invokes(text, ci_path, candidate) for ci_path, text in texts):
+        if any(
+            invokes(text, ci_path, candidate, runners=runners)
+            for ci_path, text in texts
+        ):
             continue
         findings.append(Finding(
             file=candidate.path,
