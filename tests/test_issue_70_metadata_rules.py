@@ -25,6 +25,7 @@ from __future__ import annotations
 import pytest
 
 from prxref import config, heuristics, metadata_rules, orchestrator
+from prxref.cli import _build_json_result
 from prxref.forges.base import CommitData, PRData
 from prxref.llm import ConfigError
 from prxref.triage import FileDiff
@@ -597,3 +598,31 @@ class TestOrchestratorWiring:
         )
         assert res["metadata_rules"]["area_globs"] == "fail"
         assert any("2 areas (max 1)" in f.title for f in res["findings_active"])
+
+
+# --- --format json ------------------------------------------------------------
+
+
+class TestJsonPayload:
+    def test_off_still_emits_the_key_as_null(self):
+        """The release-wide rule (#38 and every key since): the JSON key is
+        always present, even though the off run-record omits it."""
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        res = orchestrator.orchestrate_review(forge, REF, NO_FINDINGS)
+        assert "metadata_rules" not in res
+        payload = _build_json_result(res)
+        assert payload["metadata_rules"] is None
+        assert list(payload)[list(payload).index("degraded") + 1] == "metadata_rules"
+
+    def test_on_carries_the_stamp_verbatim(self):
+        forge = FakeForge(
+            pr=make_pr(title="fix: handle empty input"),
+            diff=_added_file_diff("src/app.py", 20),
+        )
+        res = orchestrator.orchestrate_review(
+            forge, REF, NO_FINDINGS,
+            metadata_rules="on", branch_patterns=["fix=^fix/"],
+        )
+        payload = _build_json_result(res)
+        assert payload["metadata_rules"] == res["metadata_rules"]
+        assert payload["metadata_rules"]["branch_pattern"] == "fail"

@@ -1000,7 +1000,8 @@ def _build_json_result(result: Any) -> dict:
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
-    ``evidence``, ``stable_ids``, ``degraded``, ``config_file``, then
+    ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
+    ``config_file``, then
     ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
@@ -1044,7 +1045,11 @@ def _build_json_result(result: Any) -> dict:
     :func:`_emit_fallback`), and so is
     ``config_file`` (#38: ``null`` when the run read no repository config
     file; otherwise ``{"path", "sha256", "keys"}``, see
-    :func:`_config_file_stamp`);
+    :func:`_config_file_stamp`), and so is
+    ``metadata_rules`` (#70: ``null`` whenever ``PRXREF_METADATA_RULES`` is
+    ``off``; otherwise ``{branch_pattern, commit_reference, area_globs}``,
+    each ``pass``, ``fail`` or ``skipped: <reason>``, from
+    :func:`prxref.metadata_rules.run_metadata_checks`);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -1098,6 +1103,7 @@ def _build_json_result(result: Any) -> dict:
         "evidence": result.get("evidence"),
         "stable_ids": result.get("stable_ids"),
         "degraded": result.get("degraded"),
+        "metadata_rules": result.get("metadata_rules"),
         "config_file": result.get("config_file"),
     }
     if "sampling" in result:

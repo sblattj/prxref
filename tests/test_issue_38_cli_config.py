@@ -161,7 +161,8 @@ class TestRecordKey:
             "keys": ["max_chunks", "post_mode"],
         }
         keys = list(payload)
-        assert keys[keys.index("degraded") + 1] == "config_file"
+        assert keys[keys.index("degraded") + 1] == "metadata_rules"
+        assert keys[keys.index("metadata_rules") + 1] == "config_file"
 
     def test_a_file_outside_the_working_directory_is_named_by_its_path(
         self, tmp_path, recorder, capsys, monkeypatch,
@@ -217,7 +218,7 @@ class TestNoFileInvariant:
         expected = BASE_JSON.replace(
             '"incremental": null, "degraded": null}',
             '"incremental": null, "ci_wiring": null, "evidence": null, '
-            '"stable_ids": null, "degraded": null, "config_file": null}',
+            '"stable_ids": null, "degraded": null, "metadata_rules": null, "config_file": null}',
         )
         assert capsys.readouterr().out == expected
 
