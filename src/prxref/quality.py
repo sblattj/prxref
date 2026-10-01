@@ -2618,8 +2618,14 @@ def _own_locations(finding: Finding) -> list[tuple[str, int]]:
     ]
 
 
-def _also_at_paragraph(locations: Sequence[tuple[str, int]]) -> str:
+def _also_at_paragraph(
+    locations: Sequence[tuple[str, int]], label: str = "Also at"
+) -> str:
     """The ``Also at:`` paragraph for ``locations``, capped at five names.
+
+    ``label`` is ``Also at`` for corroborated sites and ``Also at
+    (unverified)`` for the ones :func:`apply_location_verification`
+    could not corroborate.
 
     The shared writer of :func:`_rule_cap_body` and of the rebuild
     :func:`apply_location_verification` does after dropping an
@@ -2633,7 +2639,7 @@ def _also_at_paragraph(locations: Sequence[tuple[str, int]]) -> str:
         for file, line in locations[:RULE_CAP_LISTED_LOCATIONS]
     )
     unlisted = len(locations) - RULE_CAP_LISTED_LOCATIONS
-    return f"Also at: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
+    return f"{label}: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
 
 
 def _rule_cap_body(
@@ -2794,16 +2800,19 @@ def rule_cap_counts(
     return rows
 
 
-_ALSO_AT_PARAGRAPH_RE = re.compile(r"(?:^|\n\n)Also at: .*\Z", re.DOTALL)
+_ALSO_AT_PARAGRAPH_RE = re.compile(
+    r"(?:^|\n\n)Also at(?: \(unverified\))?: .*\Z", re.DOTALL
+)
 
 
 def _strip_also_at(body: str) -> str:
-    """The body without its trailing ``Also at:`` paragraph, if it has one.
+    """The body without its trailing ``Also at:`` paragraphs, if it has any.
 
-    Only the last paragraph is read, because both writers
-    (:func:`_fold_group`, :func:`_rule_cap_body`) append it there and the
-    cap replaces rather than repeats. A body with no such paragraph comes
-    back unchanged.
+    The writers (:func:`_fold_group`, :func:`_rule_cap_body`, and the
+    ``Also at (unverified):`` paragraph :func:`apply_location_verification`
+    appends after them) put them last, and the cap replaces rather than
+    repeats, so everything from the first one onward is cut. A body with
+    no such paragraph comes back unchanged.
     """
     match = _ALSO_AT_PARAGRAPH_RE.search(body)
     return body[: match.start()] if match else body
@@ -2839,7 +2848,9 @@ def apply_location_verification(
     snippets (:func:`_quoted_snippets` — the ``Also at:`` paragraph's own
     backticked ``<file>:<line>`` spans are path citations, never
     evidence) within ``window`` of EACH listed site: a site no snippet
-    corroborates is dropped from ``locations`` and from the paragraph.
+    corroborates leaves ``locations`` and the ``Also at:`` paragraph and is
+    listed instead under a separate last paragraph, ``Also at
+    (unverified):``, so the reader still sees it.
 
     A site whose file cannot be read is left untouched — no head file
     means no verdict — and a representative with no snippet parseable
@@ -2847,16 +2858,18 @@ def apply_location_verification(
     file-level site (line 0) is kept when any snippet occurs anywhere in
     its file: file-level claims its file, not a line.
 
-    When at least one site drops, the trailing ``Also at:`` paragraph is
-    rebuilt from the sites that stayed, through the shared
+    When at least one site is uncorroborated, the trailing ``Also at:``
+    paragraph is rebuilt from the sites that stayed, followed by the
+    ``Also at (unverified):`` paragraph, through the shared
     :func:`_also_at_paragraph` writer (at most five named, then
     ``(+<k> more)``; a group paragraph the cap shape now shares with the
     cap). A representative that keeps every site is returned as the SAME
     object, so a caller can count rewrites by identity; the result has
     the input's length and order. ``read=None`` returns
     ``list(findings)`` unchanged. Nothing is dropped and no
-    ``drop_reason`` is written: the folded members' own reasons stay, and
-    only the representative's list shrinks.
+    ``drop_reason`` is written: the folded members' own reasons stay.
+    The rewrite is idempotent: a second run finds every remaining
+    ``locations`` site corroborated and returns the same objects.
     """
     if read is None:
         return list(findings)
@@ -2868,7 +2881,7 @@ def apply_location_verification(
             continue
         snippets = _quoted_snippets(f.title or "", f.body or "")
         kept: list[tuple[str, int]] = []
-        dropped = False
+        unverified: list[tuple[str, int]] = []
         for path, line in locations:
             content = read(path)
             lines = content.splitlines() if isinstance(content, str) else None
@@ -2877,13 +2890,15 @@ def apply_location_verification(
             ):
                 kept.append((path, line))
             else:
-                dropped = True
-        if not dropped:
+                unverified.append((path, line))
+        if not unverified:
             result.append(f)
             continue
         body = _strip_also_at(f.body or "")
+        paragraphs = [_also_at_paragraph(unverified, "Also at (unverified)")]
         if kept:
-            paragraph = _also_at_paragraph(kept)
+            paragraphs.insert(0, _also_at_paragraph(kept))
+        for paragraph in paragraphs:
             body = f"{body.rstrip()}\n\n{paragraph}" if body.strip() else paragraph
         result.append(replace(f, locations=tuple(kept), body=body.rstrip()))
     return result
