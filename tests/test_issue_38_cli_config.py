@@ -40,6 +40,7 @@ BASE_JSON = (
     '"cost_usd": null, "cost_estimated": null, "posted": false, "review_rules": null, '
     '"ticket_context": null, "spec_grounding": null, "size_advisory": null, '
     '"prompt_templates": null, "scoped_rules": null, "rule_counts": null, '
+    '"rule_scope_cleared": null, '
     '"repo_context": null, "parse_retries": null, "context_followup": null, '
     '"suggestions": null, "incremental": null, "degraded": null}\n'
 )

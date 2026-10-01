@@ -43,13 +43,13 @@ JSON_KEYS = [
     "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget", "elapsed_ms",
     "input_tokens", "output_tokens", "cost_usd", "cost_estimated", "posted",
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "repo_context", "parse_retries", "context_followup", "suggestions", "incremental",
-    "degraded", "config_file",
+    "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+    "suggestions", "incremental", "degraded", "config_file",
 ]
 NEW_RECORD_KEYS = [
     "cost_usd", "cost_estimated", "review_rules", "ticket_context", "spec_grounding", "size_advisory",
-    "prompt_templates", "scoped_rules", "rule_counts", "repo_context", "parse_retries",
-    "context_followup", "suggestions", "incremental", "degraded", "config_file",
+    "prompt_templates", "scoped_rules", "rule_counts", "rule_scope_cleared", "repo_context",
+    "parse_retries", "context_followup", "suggestions", "incremental", "degraded", "config_file",
 ]
 FINDING_KEYS = [
     "file", "line", "severity", "confidence", "scope", "rule", "suggestion", "suggestion_end_line",

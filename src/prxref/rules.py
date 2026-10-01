@@ -85,6 +85,13 @@ _KEY_RE = re.compile(r"^([A-Za-z_][\w-]*)[ \t]*:(.*)$")
 _ENTRY_RE = re.compile(
     r"""^[ \t]+(['"]?)([^:'"#\s-][^:'"#]*?)\1[ \t]*:[ \t]*(['"]?)([A-Za-z]+)\3[ \t]*$"""
 )
+# An ATX heading that opens a rules-body section (#75): one to four ``#`` at
+# the start of the line, then a space or tab, then non-empty heading text.
+_SECTION_RE = re.compile(r"^#{1,4}[ \t]+(.+?)[ \t]*$")
+# A section's scope declaration (#75): ``scope:`` (the key case-insensitive)
+# followed by tokens split on commas and whitespace.
+_SCOPE_LINE_RE = re.compile(r"^scope[ \t]*:(.*)$", re.IGNORECASE)
+_SCOPE_SPLIT_RE = re.compile(r"[,\s]+")
 
 
 @dataclass(frozen=True)
@@ -100,7 +107,12 @@ class ReviewRules:
     file's path globs in file order, as :func:`parse_applies_to` returns
     them, or ``None`` when the file applies to every unit;
     :func:`load_review_rules` always leaves it ``None``, and neither
-    :meth:`prompt_block` nor :meth:`record` reads it.
+    :meth:`prompt_block` nor :meth:`record` reads it. ``sections`` is
+    :func:`parse_rule_sections` over the capped body — the ATX sections
+    that declare a ``scope:`` line (#75) — ``()`` for a body with none;
+    :meth:`prompt_block` re-walks the body to annotate those sections, the
+    orchestrator reads it for the applicability check, and :meth:`record`
+    never does (it would leak rules text).
     """
 
     path: str
@@ -108,6 +120,7 @@ class ReviewRules:
     severity_map: Mapping[str, str]
     ignored_keys: tuple[str, ...] = ()
     applies_to: tuple[str, ...] | None = None
+    sections: tuple[RuleSection, ...] = ()
 
     def prompt_block(self, unit: str) -> str:
         """The system-prompt block for one review unit (``"worker"`` or ``"sweep"``).
@@ -117,9 +130,13 @@ class ReviewRules:
         sweep applies only whole-PR or cross-file rules. A severity paragraph
         listing the map in file order follows when the map is non-empty, then
         the body inside ``<team_rules>`` tags when it is non-empty, then a
-        truncation line when the cap cut it. Deterministic, and ``""`` when
-        both the body and the map are empty, so an empty file adds nothing.
-        Any other ``unit`` raises ``ValueError``.
+        truncation line when the cap cut it. Each ATX section of the body
+        that declares a ``scope:`` line gains `` (applies to: <token>,
+        ...)`` after its heading text (#75) — annotation only, no text
+        removed — and a body with no such section renders byte-identically
+        to the pre-#75 block. Deterministic, and ``""`` when both the body
+        and the map are empty, so an empty file adds nothing. Any other
+        ``unit`` raises ``ValueError``.
         """
         if unit not in _FRAMING:
             raise ValueError(f"unit must be one of {', '.join(_UNITS)}, got {unit!r}")
@@ -134,7 +151,7 @@ class ReviewRules:
                 "problem by the team's definition, then write the mapped word in `severity`."
             )
         if self.body.text:
-            parts.append(f"<team_rules>\n{self.body.text}\n</team_rules>")
+            parts.append(f"<team_rules>\n{_annotate_rule_scopes(self.body.text)}\n</team_rules>")
         if self.body.truncated:
             parts.append(
                 f"[team rules truncated: only the first {self.body.max_chars} of "
@@ -250,6 +267,107 @@ def split_front_matter(
             raise fail(lineno, f"'{word}' is mapped twice ({previous} and {tier})")
         severity_map[word] = tier
     return severity_map, tuple(ignored), "\n".join(lines[close + 1:])
+
+
+@dataclass(frozen=True)
+class RuleSection:
+    """One ATX-headed section of a rules body that declares a ``scope:`` line (#75).
+
+    ``name`` is the heading text with its whitespace collapsed, as written:
+    the caller casefolds it when matching a finding's ``rule`` label against
+    the section. ``scopes`` holds the ``scope:`` line's tokens, casefolded
+    and split on commas and whitespace, in file order, duplicates dropped.
+    A section without a ``scope:`` line — or one whose ``scope:`` line names
+    no token — is not returned by :func:`parse_rule_sections` at all, so a
+    body with no such line parses to ``()`` and every rule-scope feature
+    stays off.
+    """
+
+    name: str
+    scopes: tuple[str, ...]
+
+
+def _scope_tokens(line: str) -> tuple[str, ...]:
+    """The scope tokens of one candidate line, casefolded; ``()`` when it is not a ``scope:`` line."""
+    match = _SCOPE_LINE_RE.match(line.strip())
+    if match is None:
+        return ()
+    tokens: list[str] = []
+    for token in _SCOPE_SPLIT_RE.split(match.group(1).strip()):
+        folded = token.casefold()
+        if token and folded not in tokens:
+            tokens.append(folded)
+    return tuple(tokens)
+
+
+def _scoped_sections(lines: Sequence[str]):
+    """Yield ``(heading line index, name, scope tokens)`` for each scoped section of ``lines``.
+
+    The walk that both the parser and the prompt annotation run: a section starts
+    at an ATX heading (:data:`_SECTION_RE`) and its scope, when it has one,
+    is the section's FIRST non-blank line after the heading read as a
+    ``scope:`` line (:data:`_SCOPE_LINE_RE`). A ``scope:`` line anywhere
+    else in a section is ordinary rules text, and so is one the character
+    cap already cut off — the walk reads the capped body the prompt shows.
+    Only a heading with both a name and at least one token is yielded, in
+    body order; the generator resumes AT the candidate line, so a scope
+    line is consumed once and a following heading still opens the next
+    section.
+    """
+    index = 0
+    while index < len(lines):
+        heading = _SECTION_RE.match(lines[index])
+        if heading is None:
+            index += 1
+            continue
+        name = " ".join(heading.group(1).split())
+        rest = index + 1
+        while rest < len(lines) and not lines[rest].strip():
+            rest += 1
+        tokens = _scope_tokens(lines[rest]) if rest < len(lines) else ()
+        if name and tokens:
+            yield index, name, tokens
+        index = rest
+
+
+def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
+    """Parse ``body``'s scoped ATX sections (#75): one :class:`RuleSection` each, in body order.
+
+    A section starts at a Markdown ATX heading — one to four ``#`` at the
+    start of the line followed by a space or tab — and its name is the
+    heading text with whitespace collapsed. Its scope sits on the section's
+    first non-blank line after the heading and reads
+    ``scope: <token>[, <token>]...`` (the key case-insensitive, the tokens
+    casefolded and split on commas and whitespace). Callers pass the CAPPED
+    body the prompt shows, so a section the cap cut away is not parsed
+    either: the model cannot see it, so it is not one a label can be
+    checked against.
+
+    Only sections that declare at least one token are returned. A body with
+    none — every rules file written before #75 — parses to ``()``, which
+    leaves :meth:`ReviewRules.prompt_block` byte-identical and the
+    orchestrator's applicability check off. Front matter is not read: a
+    file-global ``scope`` would trip the ignored-keys path, and scopes are
+    per section by design.
+    """
+    return tuple(
+        RuleSection(name=name, scopes=tokens)
+        for _index, name, tokens in _scoped_sections(body.split("\n"))
+    )
+
+
+def _annotate_rule_scopes(text: str) -> str:
+    """Append each scoped section's ``(applies to: ...)`` after its heading line (#75).
+
+    Pure annotation, nothing removed: a heading whose section declares a
+    scope gains `` (applies to: <token>, <token>)`` with the tokens in file
+    order, so the model sees which sections cannot cover the file it is
+    reading. Text with no scoped section comes back byte-identical.
+    """
+    lines = text.split("\n")
+    for index, _name, tokens in _scoped_sections(lines):
+        lines[index] = f"{lines[index].rstrip()} (applies to: {', '.join(tokens)})"
+    return "\n".join(lines)
 
 
 APPLIES_TO_KEYS: frozenset[str] = frozenset({"applies_to", "applyto"})
@@ -508,7 +626,10 @@ def load_review_rules(path: str | None, *, max_chars: int, source: str) -> Revie
         )
     if not capped.text and not severity_map:
         logger.warning("%s: rules file %r is empty; no rules injected", source, path)
-    return ReviewRules(path=path, body=capped, severity_map=severity_map, ignored_keys=ignored)
+    return ReviewRules(
+        path=path, body=capped, severity_map=severity_map, ignored_keys=ignored,
+        sections=parse_rule_sections(capped.text),
+    )
 
 
 _ANY_DIRS = "**/"
@@ -616,8 +737,9 @@ class ScopedRules:
     ``PRXREF_REVIEW_RULES_MAX_CHARS`` and fingerprinted by the raw file
     bytes, its own ``severity_map``, its unused front-matter keys in
     ``ignored_keys`` (``applies_to`` and ``applyTo`` are used, so never
-    listed), and its ``applies_to`` globs, or ``None`` when it reaches every
-    unit. ``severity_map`` merges the files' maps, each team word at its
+    listed), its ``applies_to`` globs, or ``None`` when it reaches every
+    unit, and its scoped ``sections`` (:func:`parse_rule_sections`, #75).
+    ``severity_map`` merges the files' maps, each team word at its
     first position in load order; no two files map one word to different
     tiers.
 
@@ -929,7 +1051,8 @@ def _load_scoped_file(path: str, *, max_chars: int, source: str) -> tuple[Review
     if not capped.text and not severity_map:
         logger.warning("%s: rules file %r is empty; no rules injected", source, path)
     rules = ReviewRules(
-        path=path, body=capped, severity_map=severity_map, ignored_keys=unused, applies_to=applies_to,
+        path=path, body=capped, severity_map=severity_map, ignored_keys=unused,
+        applies_to=applies_to, sections=parse_rule_sections(capped.text),
     )
     return rules, (_severity_lines(text) if severity_map else {})
 

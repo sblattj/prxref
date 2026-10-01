@@ -212,7 +212,7 @@ It appears in these places:
 
 | Where | What |
 |---|---|
-| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run) |
+| `--format json` | the `review_rules` key, always present, `null` when off; a loaded file also turns on the per-rule cap, whose tally is the `rule_counts` key (`null` when the cap did not run); a body that declares a `scope:` line under an ATX heading also runs the rule-scope check (#75), whose `rule_scope_cleared` key follows (`null` when no section declares a scope) |
 | `-v` text output | `rules: .prxref/rules.md sha256=<first 12 hex> chars=27344 (truncated at 24000)` |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `rules ok` event whose meta is the record, right after `run start`; a `rules remap` event with `findings=<n>` when the map rewrote any finding |
 | `--trace-dir` | the rules block itself, in every `<unit>.system.md` |
@@ -460,7 +460,7 @@ rules are configured:
 
 | Where | What |
 |---|---|
-| `--format json` | the `scoped_rules` key, right after `prompt_templates`, always present, `null` when off; the per-rule cap's `rule_counts` key follows it (`null` when the cap did not run) |
+| `--format json` | the `scoped_rules` key, right after `prompt_templates`, always present, `null` when off; the per-rule cap's `rule_counts` key follows it (`null` when the cap did not run), then the rule-scope check's `rule_scope_cleared` (#75, `null` when no loaded section declares a scope) |
 | `-v` text output | `scoped rules: 2 file(s) .prxref/scoped/helm.md=<first 12 hex> .prxref/scoped/java.md=<first 12 hex> cap=24000`, after the `rules:` line when there is one |
 | JSONL trace (`PRXREF_TRACE_FILE`) | one `scoped_rules ok` event whose meta is the record without `units`, right after `rules ok` (after `run start` with no always-on file); each `chunk start` and `sweep start` event carries its unit's rows as `rules` |
 | `--trace-dir` | each unit's own block, in its `<unit>.system.md`; chunk files count from 0, so the `chunk start` event with `index` N is `chunk{N-1}.system.md` |

@@ -464,6 +464,7 @@ class TestASuccessfulPostIsUnchanged:
         payload = json.loads(out)
         assert payload.pop("degraded") is None
         assert payload.pop("config_file") is None
+        assert payload.pop("rule_scope_cleared") is None  # 0.29 (#75): null when no scope declared
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]

@@ -96,13 +96,19 @@ _SCOPE_EXAMPLE = f',\n      "scope": "{SCOPE_IN}"'
 # ``PromptContext.rule_request`` when ``PRXREF_GROUP_FINDINGS`` is on or the
 # per-rule cap is active (a review rules file loaded and
 # ``PRXREF_MAX_FINDINGS_PER_RULE`` above 0). The label it asks for is what
-# :func:`prxref.triage.normalize_rule` keeps.
+# :func:`prxref.triage.normalize_rule` keeps. A finding that no rule covers
+# — none exists, or the one the model would name is scoped elsewhere (#75) —
+# is told to leave ``rule`` out, and the deterministic scope check clears a
+# label that slipped through anyway.
 RULE_REQUEST = "\n\n".join((
     "## Rule names",
     "When a finding applies a named rule or standard from the team review rules, add a "
     "\"rule\" key to it: that rule's short name, written as the rules write it, on one "
-    f"line of at most {RULE_MAX_CHARS} characters. Otherwise leave \"rule\" out, and never "
-    "make a name up.",
+    f"line of at most {RULE_MAX_CHARS} characters. A finding does not need a rule: if no "
+    "rule in the team review rules covers the defect — or the rule you would name is "
+    "scoped to another language, file type, or artifact (for example a Java-only rule "
+    "on a TypeScript file) — leave \"rule\" out. Never name a rule whose stated scope "
+    "does not cover this finding, and never make a name up.",
     '"rule" never changes "severity" or "confidence".',
 ))
 
