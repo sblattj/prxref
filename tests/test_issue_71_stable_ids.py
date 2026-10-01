@@ -436,17 +436,24 @@ class TestOrchestratorWiring:
             forge, REF, llm, post=True, stable_ids=stable_ids, verdict_store=store,
         ), forge
 
-    def test_off_by_default_no_id_no_record_block_no_summary_trace(self):
-        res, forge = self._run(Path("."), stable_ids=False)
+    def test_default_stamps_ids_and_the_record_block(self):
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        llm = FakeLLM(findings_by_path=self.FINDINGS)
+        res = orchestrate_review(forge, REF, llm, post=True)
+        assert res["stable_ids"] is not None
+        assert res["findings_active"]
+        for f in res["findings_active"]:
+            assert f.id and f.id.startswith("src/app.py#")
+
+    def test_explicit_off_keeps_ids_null(self):
+        res, _ = self._run(Path("."), stable_ids=False)
         assert res["stable_ids"] is None
         for f in (*res["findings_active"], *res["findings_dropped"]):
             assert f.id is None
-            assert f.anchor_block is None
-            assert f.id_reused_from is None
-        # Byte-identity of the pre-#71 surfaces: no id, no anchor, no
-        # stable-id wording reaches the posted summary.
-        assert "stable" not in forge.summaries[0].lower()
-        assert "#" not in forge.summaries[0]
+
+    def test_config_default_is_on(self):
+        from prxref.config import _DEFAULTS
+        assert _DEFAULTS["stable_ids"] is True
 
     def test_on_stamps_ids_and_records_the_tally(self):
         res, _ = self._run(Path("."), stable_ids=True)

@@ -964,7 +964,7 @@ def eval_compare(args: argparse.Namespace) -> int:
       A run with no judge has the judge cost ``none``, counted as 0.
     - ``## Stable-id reuse``, between Metrics and Changed labels, ONLY
       when at least one case both runs score carries finding ids in its
-      ``record.json`` (a ``PRXREF_STABLE_IDS=1`` run; two runs without
+      ``record.json`` (a default run; two runs without
       ids print nothing here, byte-identical to a prxref without the
       section): the table ``| Case | A ids | B ids | Reuse |``, one row
       per shared case with ids on at least one side, the reuse being the

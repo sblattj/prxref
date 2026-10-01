@@ -886,7 +886,7 @@ def capture(name: str, **knobs) -> tuple[str, dict]:
             trace_dir = os.path.join(tmp, "units")
             res = orchestrator.orchestrate_review(
                 forge, REF, llm, post=True, max_workers=1,
-                trace_file=trace_file, trace_dir=trace_dir, **extra(), **knobs,
+                trace_file=trace_file, trace_dir=trace_dir, stable_ids=False, **extra(), **knobs,
             )
             payload = {
                 "prompts": [[_sha(s), _sha(u)] for s, u in sorted(llm.prompts)],

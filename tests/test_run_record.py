@@ -139,6 +139,7 @@ def _run(monkeypatch, path, tmp_path, **kw):
     trace = tmp_path / "run.jsonl"
     kw.setdefault("post", False)
     kw.setdefault("ci_wiring", "off")
+    kw.setdefault("stable_ids", False)
     res = orchestrate_review(forge, REF, llm, trace_file=str(trace), **kw)
     events = [json.loads(x) for x in trace.read_text().splitlines() if x.strip()]
     return res, forge, events

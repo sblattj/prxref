@@ -575,7 +575,7 @@ def orchestrate_review(
     ci_wiring_globs: Sequence[str] = (),
     evidence: Any = None,
     evidence_max_chunk_chars: int = 4000,
-    stable_ids: bool = False,
+    stable_ids: bool = True,
     verdict_store: str | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
@@ -906,7 +906,7 @@ def orchestrate_review(
     of that severity. ``outofscope`` is the minor severity, not the ticket
     scope ``out``.
 
-    ``stable_ids`` turns on stable finding ids (issue #71,
+    ``stable_ids`` (default on; ``PRXREF_STABLE_IDS=0`` turns it off) controls stable finding ids (issue #71,
     ``PRXREF_STABLE_IDS``). After both thread gates and before the
     severity-consistency pass, :func:`prxref.stable_ids.apply_stable_ids`
     stamps every finding with a content-derived ``id``
@@ -925,7 +925,7 @@ def orchestrate_review(
     as ``refuted`` is dropped with ``refuted in earlier run (<id>)``.
     The run record's ``stable_ids`` is ``{"assigned", "reused_from_verdict",
     "reused_from_thread", "collisions"}`` when on, ``null`` when off.
-    Off (the default), the pass never runs, every finding keeps
+    Off, the pass never runs, every finding keeps
     ``id=None``, and the prompts, posts, trace and logs are exactly a
     run without the feature.
 
