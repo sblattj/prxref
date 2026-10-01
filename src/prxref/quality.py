@@ -1176,7 +1176,7 @@ def is_duplicate_of_existing(
         return False
 
     for t in threads:
-        if t.resolved or t.outdated:
+        if t.lapsed:
             continue
         if _duplicate_matches_thread(
             finding, t, finding_tokens,
@@ -1303,7 +1303,7 @@ def apply_settled_thread_suppression(
         author = ""
         if finding_tokens:
             for t in threads:
-                if t.resolved or t.outdated:
+                if t.lapsed:
                     continue
                 if t.path is None:
                     continue
@@ -1343,7 +1343,7 @@ def previously_discussed_thread(
     if not finding_tokens:
         return None
     for t in threads:
-        if not (t.resolved or t.outdated):
+        if not t.lapsed:
             continue
         if _duplicate_matches_thread(
             finding, t, finding_tokens,
