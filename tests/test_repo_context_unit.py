@@ -30,7 +30,7 @@ from prxref.repo_context import EXCLUDE_FLOOR, REASONS, ContextEntry, exclude_pr
 from prxref.repo_contracts import literal_contract_paths, select_contract_files
 from prxref.repo_reader import RepoReader, repo_dir_reader
 from prxref.repo_resolve import Candidate
-from prxref.repo_unit import EMPTY_UNIT, MODES, UnitContext, build_unit_context
+from prxref.repo_unit import EMPTY_UNIT, MODES, UNIT_MODES, UnitContext, build_unit_context
 from prxref.rules import match_globs
 from prxref.triage import build_chunks, parse_unified_diff
 
@@ -482,12 +482,25 @@ class TestOrder:
         _build()
         assert canned.called == ["diff", "contract", "standards", "resolver"]
 
-    def test_diff_mode_calls_only_the_diff_source(self, canned):
+    def test_diff_mode_calls_only_the_diff_and_standards_sources(self, canned):
+        """Standards discovery is independent of the level (#68, OD2)."""
         canned.sources["contract"] = [_entry("spec.yaml", 1, "contract", kind="contract")]
         canned.sources["resolver"] = [_entry("a.java", 1, "import")]
         unit = _build(mode="diff")
-        assert canned.called == ["diff"]
+        assert canned.called == ["diff", "standards"]
         assert unit == EMPTY_UNIT
+
+    def test_standards_mode_calls_only_the_standards_source(self, canned):
+        canned.sources["diff"] = [_entry("a.java", 1, "cross-chunk")]
+        canned.sources["contract"] = [_entry("spec.yaml", 1, "contract", kind="contract")]
+        canned.sources["standards"] = [_entry("s/standards.md", 1, "standard", kind="standards")]
+        unit = _build(mode="standards")
+        assert canned.called == ["standards"]
+        assert [e.path for e in unit.entries] == ["s/standards.md"]
+
+    def test_standards_mode_without_a_reader_calls_nothing(self, canned):
+        assert _build(mode="standards", read=None) == EMPTY_UNIT
+        assert canned.called == []
 
     def test_repo_without_a_reader_calls_only_the_diff_source(self, canned):
         _build(read=None)
@@ -505,6 +518,7 @@ class TestOrder:
 
     def test_modes(self):
         assert MODES == ("off", "diff", "repo")
+        assert UNIT_MODES == ("off", "diff", "repo", "standards")
         assert EMPTY_UNIT == UnitContext((), (), (), 0)
 
 

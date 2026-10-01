@@ -192,6 +192,7 @@ class TestLayout:
         common = {
             "post": False, "no_threads": True, "rules_file": rules_file,
             "scoped_rules": None, "prompts_dir": None, "repo_dir": None, "config_file": None,
+            "ci_wiring": "off", "routing_probe": "off", "context_standards_globs": [],
         }
         assert review.calls == [
             {
@@ -479,8 +480,28 @@ class TestRunJson:
         assert list(run["config"]) == list(evals.RUN_CONFIG_KEYS)
         assert run["config"]["max_chunks"] == 3
         assert run["config"]["llm_models"] == ["model-x", "model-y"]
-        cfg = config.load_config()
+        cfg = config.load_config(**evals.EVAL_PINS)
         assert run["config"] == {key: cfg[key] for key in evals.RUN_CONFIG_KEYS}
+
+    def test_the_default_on_features_are_pinned_off_and_recorded(self, tmp_path, monkeypatch):
+        """OD2: CI wiring, the routing probe and standards discovery never reach a baseline."""
+        monkeypatch.setenv("PRXREF_CI_WIRING", "on")
+        monkeypatch.setenv("PRXREF_ROUTING_PROBE", "on")
+        monkeypatch.setenv("PRXREF_REPO_CONTEXT", "repo")
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_GLOBS", "docs/standards/**")
+        review = FakeReview()
+
+        _run(_args(_dataset(tmp_path), tmp_path / "out"), review)
+
+        for call in review.calls:
+            assert call["ci_wiring"] == "off"
+            assert call["routing_probe"] == "off"
+            assert call["context_standards_globs"] == []
+        run = _read(tmp_path / "out" / "L" / "run.json")
+        assert run["config"]["ci_wiring"] == "off"
+        assert run["config"]["routing_probe"] == "off"
+        assert run["config"]["context_standards_globs"] == []
+        assert run["config"]["repo_context"] == "repo"
 
     def test_cases_path_is_kept_exactly_as_given(self, tmp_path, monkeypatch):
         _dataset(tmp_path)
@@ -743,6 +764,34 @@ class TestThroughTheCli:
         monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: llm)
         monkeypatch.setattr("requests.Session.request", _no_network)
         return llm
+
+    def test_the_real_runner_reviews_with_the_default_on_features_off(
+        self, tmp_path, stub_llm, monkeypatch,
+    ):
+        monkeypatch.setenv("PRXREF_CI_WIRING", "on")
+        monkeypatch.setenv("PRXREF_ROUTING_PROBE", "on")
+        monkeypatch.setenv("PRXREF_REPO_CONTEXT", "repo")
+        seen: list[dict[str, Any]] = []
+        real = __import__("prxref.orchestrator", fromlist=["orchestrate_review"])
+
+        def _capture(**kwargs):
+            seen.append({
+                key: kwargs[key]
+                for key in ("ci_wiring", "routing_probe", "context_standards_globs", "repo_context")
+            })
+            return real_orchestrate(**kwargs)
+
+        real_orchestrate = real.orchestrate_review
+        monkeypatch.setattr(real, "orchestrate_review", _capture)
+
+        code = cli.main(["eval", "run", "--cases", str(self._directory_dataset(tmp_path)),
+                         "--label", "pinned", "--out", str(tmp_path / "runs")])
+
+        assert code == 0
+        assert seen == [
+            {"ci_wiring": "off", "routing_probe": "off", "context_standards_globs": [],
+             "repo_context": "repo"},
+        ] * 2
 
     def _directory_dataset(self, tmp_path: Path) -> Path:
         root = tmp_path / "dataset"

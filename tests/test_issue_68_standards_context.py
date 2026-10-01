@@ -616,3 +616,87 @@ class TestAZeroBudgetDisablesTheStandards:
         assert forge.content_calls[STANDARDS_DOC] > 0
         prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
         assert STANDARDS_HEADER in prompts["app/middleware.py"][0]
+
+
+class TestStandardsRunWithoutRepoContext:
+    """OD2: standards discovery is on by default, decoupled from ``PRXREF_REPO_CONTEXT``.
+
+    Any reader and a non-empty glob set with a budget above 0 is enough; the
+    repository-context level only adds the other sources.
+    """
+
+    def _review(self, forge, **kwargs):
+        llm = _RecordingLLM()
+        kwargs.setdefault("max_files_per_chunk", 1)
+        kwargs.setdefault("context_standards_globs", STANDARD_GLOBS)
+        res = orchestrator.orchestrate_review(forge, REF, llm, post=False, **kwargs)
+        return res, llm
+
+    def test_the_default_repo_context_still_shows_the_standard(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        res, llm = self._review(_RepoForge(TWO_CHUNK_DIFF, tmp_path))
+
+        prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
+        prompt = prompts["app/middleware.py"][0]
+        assert STANDARDS_HEADER in prompt
+        assert f"{STANDARDS_DOC}:12: ## HSTS" in prompt
+        for other in prompts["tools/helper.py"]:
+            assert STANDARDS_HEADER not in other
+        record = res["repo_context"]
+        assert record["mode"] == "standards"
+        assert record["standards_globs"] == list(STANDARD_GLOBS)
+        kinds = {
+            e["kind"] for row in record["units"]["chunks"] for e in row["entries"]
+        }
+        assert kinds == {"standards"}
+
+    def test_the_diff_level_shows_the_standard_too(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        res, llm = self._review(_RepoForge(HSTS_DIFF, tmp_path), repo_context="diff")
+
+        (prompt,) = _worker_prompts(llm, ["app/middleware.py"])["app/middleware.py"]
+        assert f"{STANDARDS_DOC}:12: ## HSTS" in prompt
+        assert res["repo_context"]["mode"] == "diff"
+
+    def test_an_empty_glob_set_leaves_the_off_run_untouched(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(HSTS_DIFF, tmp_path)
+        res, llm = self._review(forge, context_standards_globs=())
+
+        assert forge.content_calls[STANDARDS_DOC] == 0
+        (prompt,) = _worker_prompts(llm, ["app/middleware.py"])["app/middleware.py"]
+        assert STANDARDS_HEADER not in prompt
+        assert res["repo_context"] is None
+
+    def test_a_zero_budget_leaves_the_off_run_untouched(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(HSTS_DIFF, tmp_path)
+        res, _ = self._review(forge, context_standards_max_chars=0)
+
+        assert forge.content_calls[STANDARDS_DOC] == 0
+        assert res["repo_context"] is None
+
+    def test_a_repo_without_standards_documents_records_nothing(self, tmp_path):
+        _write(tmp_path, "README.md", "# hello\n")
+        res, llm = self._review(_RepoForge(HSTS_DIFF, tmp_path))
+
+        assert res["repo_context"] is None
+        (prompt,) = _worker_prompts(llm, ["app/middleware.py"])["app/middleware.py"]
+        assert STANDARDS_HEADER not in prompt
+
+    def test_a_forge_without_a_reader_records_nothing(self):
+        llm = _RecordingLLM()
+        res = orchestrator.orchestrate_review(
+            FakeForge(diff=HSTS_DIFF), REF, llm, post=False,
+            context_standards_globs=STANDARD_GLOBS,
+        )
+
+        assert res["repo_context"] is None
+        assert all(STANDARDS_HEADER not in user for _s, user in llm.calls)
+
+    def test_the_default_config_reads_the_built_in_globs_at_repo_context_off(self):
+        cfg = load_config()
+
+        assert cfg["repo_context"] == "off"
+        assert cfg["context_standards_globs"] == BUILTIN_GLOBS
+        assert cfg["context_standards_max_chars"] > 0

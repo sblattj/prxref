@@ -437,10 +437,11 @@ LLM / pipeline:
                                 read either way; the sweep prompt never
                                 carries it. Matched exactly; any other
                                 value is a configuration error
-  PRXREF_CI_WIRING             CI wiring (#66): "off" (the default) reads
-                                nothing, changes no byte of the review and
-                                stamps ci_wiring=null on the run record.
-                                "on" flags a check-shaped file the PR adds
+  PRXREF_CI_WIRING             CI wiring (#66): "off" reads nothing,
+                                changes no byte of the review and stamps
+                                ci_wiring=null on the run record.
+                                "on" (the default) flags a check-shaped
+                                file the PR adds
                                 (a script whose name or a --flag it gains
                                 says verify/smoke/check, a file that gains
                                 a shebang, a new test file outside the
@@ -451,8 +452,10 @@ LLM / pipeline:
                                 or automated tests ("warning" otherwise),
                                 listing the CI files searched. Needs the
                                 forge's head-sha file reads or --repo-dir;
-                                without a reader the run logs one WARNING
-                                naming PRXREF_CI_WIRING and records why.
+                                without a reader the run logs one notice
+                                naming PRXREF_CI_WIRING (a WARNING when
+                                "on" was set, INFO on the default) and
+                                records why.
                                 Matched exactly; any other value is a
                                 configuration error. Never changes the
                                 verdict or the exit code
@@ -855,12 +858,13 @@ _DEFAULTS: dict[str, object] = {
         ".github/CONTRIBUTING.md",
     ],
     "context_standards_max_chars": 6000,
-    # CI wiring (#66): the opt-in switch plus the CI-file globs. The globs
+    # CI wiring (#66): the switch, on by default (OD2; the eval harness pins
+    # it off), plus the CI-file globs. The globs
     # default is non-empty and replace-not-append like
     # ``context_contract_globs`` above; the list restates
     # ``ci_wiring.DEFAULT_CI_GLOBS`` (config stays a leaf module), pinned
     # together by tests/test_issue_66_ci_wiring.py.
-    "ci_wiring": "off",
+    "ci_wiring": "on",
     "ci_wiring_globs": [
         ".github/workflows/*.y*ml",
         ".gitlab-ci.yml",

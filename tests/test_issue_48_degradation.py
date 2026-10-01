@@ -468,7 +468,8 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("degraded") is None
         assert payload.pop("config_file") is None
         assert payload.pop("rule_scope_cleared") is None  # 0.29 (#75): null when no scope declared
-        assert payload.pop("ci_wiring") is None
+        # #66: on by default (OD2); this forge has no reader, so the check records why.
+        assert payload.pop("ci_wiring") == {"triggered": False, "reason": "no reader"}
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
         assert payload.pop("stable_ids") is None  # #71: null when PRXREF_STABLE_IDS is off
         assert payload.pop("metadata_rules") is None  # #70: null when PRXREF_METADATA_RULES is off
