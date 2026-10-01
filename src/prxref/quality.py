@@ -3165,6 +3165,25 @@ _EVIDENCE_MISSING_RE = re.compile(
 )
 _EVIDENCE_HEADER_WORD_RE = re.compile(r"\bheaders?\b", re.IGNORECASE)
 _EVIDENCE_MISSING_WINDOW = 40
+_EVIDENCE_WORD_RE = re.compile(r"[^\s\"'`(),;:\[\]<>]+")
+_EVIDENCE_SCOPE_WORDS = frozenset({
+    "in", "on", "of", "for", "from", "to", "at", "within", "inside", "under",
+    "by", "when", "across",
+})
+_EVIDENCE_DIRECTIVE_WORDS = frozenset({
+    "directive", "directives", "value", "values", "attribute", "attributes",
+    "parameter", "parameters", "flag", "flags", "option", "options", "token",
+    "tokens", "setting", "settings",
+})
+_EVIDENCE_SUBJECT_FILLER = frozenset({
+    "header", "headers", "field", "response", "http", "is", "are", "was",
+    "were", "be", "been", "being", "still", "currently", "also", "entirely",
+    "completely", "itself",
+})
+_EVIDENCE_AFTER_KEYWORD = _EVIDENCE_SCOPE_WORDS | frozenset({
+    "entirely", "completely", "altogether", "everywhere", "anywhere", "here",
+    "there", "too", "and", "or", "so", "which", "because", "since", "as",
+})
 _EVIDENCE_CLAUSE_SPLIT_RE = re.compile(
     r"[.;,\n]|\b(?:but|while|whereas|although|though)\b", re.IGNORECASE,
 )
@@ -3194,7 +3213,7 @@ def _present_header_names(output: str) -> set[str]:
 
 
 def _claims_header_missing(text: str, name: str) -> bool:
-    """True when ``text`` says header ``name`` is missing.
+    """True when ``text`` says header ``name`` itself is missing.
 
     ``name`` must occur as a whole token (case-insensitive), and a missing
     keyword must sit within a few words of it in the SAME clause (clauses
@@ -3203,6 +3222,22 @@ def _claims_header_missing(text: str, name: str) -> bool:
     "Cache-Control is set but X-Frame-Options is missing" claims nothing
     about ``Cache-Control``. The claim must also be about a header: the
     name is hyphenated (``Cache-Control``) or the text says "header".
+
+    A claim about a missing DIRECTIVE or VALUE of the header is not a
+    claim that the header is missing, so it never counts:
+
+    - keyword before the name ("missing Cache-Control", "no X header",
+      "lacks a Cache-Control header"): the words between them must not
+      hold a preposition ("missing includeSubDomains in HSTS") or a
+      directive word ("directive", "value", "flag", ...), and none of the
+      three words after the name may be a directive word or another
+      hyphenated token ("missing Cache-Control max-age directive");
+    - name before the keyword ("Cache-Control is not set", "header
+      missing"): the words between them must be filler ("header", "is",
+      ...), and the keyword must end the clause or be followed by a
+      preposition or a connective ("missing from responses"), never by an
+      object ("lacks includeSubDomains", "without no-store", "is missing
+      max-age").
     """
     if "-" not in name and not _EVIDENCE_HEADER_WORD_RE.search(text):
         return False
@@ -3212,8 +3247,10 @@ def _claims_header_missing(text: str, name: str) -> bool:
             for keyword in _EVIDENCE_MISSING_RE.finditer(clause):
                 if keyword.end() <= match.start():
                     gap = clause[keyword.end():match.start()]
+                    claims = _keyword_before_name(gap, clause[match.end():])
                 elif keyword.start() >= match.end():
                     gap = clause[match.end():keyword.start()]
+                    claims = _keyword_after_name(gap, clause[keyword.end():])
                 else:
                     continue
                 if len(gap) > _EVIDENCE_MISSING_WINDOW:
@@ -3223,8 +3260,34 @@ def _claims_header_missing(text: str, name: str) -> bool:
                     for tok in _EVIDENCE_HEADER_TOKEN_RE.findall(gap)
                 ):
                     continue
-                return True
+                if claims:
+                    return True
     return False
+
+
+def _words(text: str) -> list[str]:
+    """The lower-cased words of ``text``, punctuation and quotes trimmed."""
+    return [w.lower() for w in _EVIDENCE_WORD_RE.findall(text)]
+
+
+def _keyword_before_name(gap: str, after: str) -> bool:
+    """True when "<keyword> <gap> <name> <after>" says the header is missing."""
+    between = _words(gap)
+    if any(w in _EVIDENCE_SCOPE_WORDS or w in _EVIDENCE_DIRECTIVE_WORDS for w in between):
+        return False
+    following = _words(after)[:3]
+    for word in following:
+        if word in _EVIDENCE_DIRECTIVE_WORDS:
+            return False
+    return not (following and _EVIDENCE_HEADER_TOKEN_RE.fullmatch(following[0]))
+
+
+def _keyword_after_name(gap: str, after: str) -> bool:
+    """True when "<name> <gap> <keyword> <after>" says the header is missing."""
+    if any(w not in _EVIDENCE_SUBJECT_FILLER for w in _words(gap)):
+        return False
+    following = _words(after)
+    return not following or following[0] in _EVIDENCE_AFTER_KEYWORD
 
 
 def _url_path(url: str) -> str:
@@ -3291,7 +3354,8 @@ def apply_evidence_drops(
     finding is dropped as ``contradicted by execution evidence: <cmd>``
     only when ONE item satisfies all of:
 
-    - its exit code is 0 (a failing or unknown run settles nothing);
+    - its exit code is 0 (a failing run settles nothing, and neither does
+      one whose exit status is unknown: ``exit_code`` is ``None``);
     - its output holds a filled header field line, ``Name: value`` (curl's
       ``< `` marker allowed, the name case-insensitive), whose name the
       finding's title or body claims missing: a missing keyword (missing,
@@ -3299,9 +3363,16 @@ def apply_evidence_drops(
       name, and the name hyphenated or the text saying "header";
     - when the finding names a URL path, a URL or a glob, the item's
       command or output names that resource (a glob must cover a token
-      of it); when it names none, the item reaches the finding's unit —
-      its paths match the finding's file, or they match no PR path at all
-      (a global item every chunk prompt carries).
+      of it); when it names none, the item's command probes no specific
+      resource either (no URL path past ``/``, no ``/path`` and no glob —
+      a probe of ``/index.html`` says nothing about the font files a
+      finding means) and the item reaches the finding's unit — its paths
+      match the finding's file, or they match no PR path at all (a global
+      item every chunk prompt carries).
+
+    A claim that a DIRECTIVE or VALUE of a present header is missing
+    ("Strict-Transport-Security lacks includeSubDomains") is not a claim
+    the header is missing, so a probe showing the header never drops it.
 
     Conservative by construction: nothing is relabelled or downgraded, the
     model's ``evidence`` label is never read, and a deterministic finding
@@ -3319,6 +3390,7 @@ def apply_evidence_drops(
         return list(findings)
     global_ids = {id(item) for item in evidence.unit_items(tuple(pr_paths))[1]}
     tokens = {id(item): _item_resources(item) for item in candidates}
+    probed = {id(item): _finding_resources(item.command) for item in candidates}
     out: list[Finding] = []
     for f in findings:
         if f.drop_reason is not None or heuristics.is_deterministic(f):
@@ -3336,7 +3408,7 @@ def apply_evidence_drops(
             if resources:
                 if not any(_resource_named(r, tokens[id(item)]) for r in resources):
                     continue
-            elif id(item) not in own_ids and id(item) not in global_ids:
+            elif probed[id(item)] or (id(item) not in own_ids and id(item) not in global_ids):
                 continue
             hit = item
             break
