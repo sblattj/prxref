@@ -333,8 +333,12 @@ context uses (the forge's `get_file_content` at the head sha, else
   MODEL reported — `model_lines`, captured before line align, so a demoted
   finding is searched from where the model said the defect sits. The
   nearest occurrence of the first matching snippet wins, ties to the
-  earliest. The anchor moves only when the move is real: the finding is
-  file-level, or the match is more than 5 lines from its aligned line. A
+  earliest. Import and comment/Javadoc lines are a tiebreak, not evidence:
+  a code line holding the snippet anywhere in the window beats them, and a
+  comment line is matched only when nothing else holds it. The anchor moves
+  only when the move is real: the finding is file-level, it sits on an
+  import or comment line while a code line holds the snippet, or the match
+  is more than 5 lines from its aligned line. A
   match inside a diff hunk that shares an evidence token with the claim
   settles an ambiguity; otherwise an unbreakable tie keeps the line and
   marks the finding instead of guessing between siblings. A file-level finding whose snippet lies only outside the window anchors
