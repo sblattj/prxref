@@ -71,6 +71,27 @@ def _rule_char_dropped(ch: str) -> bool:
     return ch in _RULE_BIDI_CONTROLS or unicodedata.category(ch) in _RULE_DROPPED_CATEGORIES
 
 
+#: The one ``evidence`` label a finding may carry (#69): the model marked
+#: the finding as contradicted by the execution evidence shown in its
+#: prompt, so the deterministic pass downgrades it to ``warning``.
+EVIDENCE_CONTRADICTS: str = "contradicts"
+
+
+def normalize_evidence(raw: object) -> str | None:
+    """Map a model-supplied ``evidence`` value onto its label, or ``None``.
+
+    Only the exact word ``contradicts`` (any case, surrounding whitespace
+    stripped) survives; every other value — a non-string, ``None``, a
+    misspelling, a free-text explanation — maps to ``None``, because the
+    deterministic pass acts on the label alone and must never guess a
+    contradiction from prose. Never raises.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    return value if value == EVIDENCE_CONTRADICTS else None
+
+
 def normalize_rule(raw: object) -> str | None:
     """Map a model-supplied ``rule`` value onto a short label, or ``None``.
 
@@ -126,6 +147,15 @@ class Finding:
     at <file>:<line>."`` and renders as a suffix on the posted inline body
     and the summary bullet. ``None`` on every other finding; not part of any
     identity or dedup key.
+
+    ``evidence`` is one finding-level verdict execution evidence produced
+    (issue #69): ``"contradicts"``, as normalized by
+    :func:`normalize_evidence`, when the model concedes the evidence shown
+    in its prompt contradicts the finding, and ``None`` otherwise —
+    including on every unit whose prompt carried no evidence. It is not
+    serialized with the finding's JSON, not part of any identity or dedup
+    key, and only :func:`prxref.quality.apply_evidence_verdicts` reads it
+    (it downgrades a ``contradicts`` finding to ``warning``).
     """
 
     file: str
@@ -141,6 +171,7 @@ class Finding:
     suggestion: str | None = None
     suggestion_end_line: int = 0
     previous_thread: str | None = None
+    evidence: str | None = None
 
 
 @dataclass

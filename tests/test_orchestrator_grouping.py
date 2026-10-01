@@ -711,12 +711,16 @@ class TestCliWiring:
 # "summary_only" renders no prompt. Both were re-derived again for issue
 # #67's "Matching rules" section in worker.md: the worker prompt system
 # hashes (and the unit-file hashes that embed them) are the only movers;
-# "summary_only" still renders no prompt.
+# "summary_only" renders no prompt. Re-derived once more for issue #69's
+# {evidence_block} slot in worker.md and systemic.md: rendered prompts are
+# byte-identical (the slot blanks), so "main" and "summary_only" do not
+# move; only "override" does, because its override templates are derived
+# from the live ones, so their recorded sha256/chars gained the slot.
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {
     "main": "2b153b5cb7f81f8a1a32148fa49f28a24edd55ffe38b476fa55b1d1408df5848",
-    "override": "26d2e827b9e327e9ac61a81cf0eff28a5d29ce08c890dfa6cec6999d9cfc0df1",
+    "override": "6f08787e6b66c5b5cdb2ff4c9648af843f9b8fdf167a1dba97d303ca0edff56c",
     "summary_only": "1539f1e036492cf3437e08b9263413c6cf9f1cb4f5378753dcc602fff62715a5",
 }
 

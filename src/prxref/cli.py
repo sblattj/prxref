@@ -238,6 +238,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--evidence-file",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "execution evidence (a command, its exit code and output) a CI "
+            "step, agent or script produced; repeatable; replaces "
+            "PRXREF_EVIDENCE_FILES, and '' turns it off for this run"
+        ),
+    )
+    rev.add_argument(
         "--rules-file",
         default=None,
         metavar="PATH",
@@ -687,7 +698,8 @@ def _print_summary(
     each in load order, then ``cap=<per-unit cap>``), ``prompts:`` (the
     directory, then ``<name>=<sha256 prefix>`` for each overridden template
     in name order), ``ticket:`` (with the active findings' scope counts),
-    ``spec:``, and ``repo context:`` (the repository-context level, reader,
+    ``spec:``, ``evidence:`` (the evidence files and items, #69) and
+    ``repo context:`` (the repository-context level, reader,
     listing, read count, read cap and entry totals; see
     :func:`_repo_context_line`). ``result`` may be partial, or not a dict at
     all; a missing or ``None`` record prints nothing, so ``repo context:``
@@ -764,6 +776,14 @@ def _print_summary(
         print(
             f"spec: {_dash(spec.get('ok'))}/{_dash(spec.get('sources'))} source(s) ok, "
             f"{_dash(spec.get('constraints'))} constraint(s)",
+            file=target,
+        )
+    evidence = record.get("evidence")
+    if isinstance(evidence, dict):
+        files = evidence.get("files")
+        files = files if isinstance(files, list) else []
+        print(
+            f"evidence: {len(files)} file(s), {_dash(evidence.get('items'))} item(s)",
             file=target,
         )
     repo = record.get("repo_context")
@@ -961,7 +981,8 @@ def _build_json_result(result: Any) -> dict:
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
-    ``degraded``, ``config_file``, then ``sampling`` and ``replay`` when present.
+    ``evidence``, ``degraded``, ``config_file``, then ``sampling`` and
+    ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -988,7 +1009,11 @@ def _build_json_result(result: Any) -> dict:
     ``off``; otherwise ``{candidates, ci_files, picked_up_default,
     triggered}`` from :func:`prxref.ci_wiring.ci_wiring_findings`, or
     ``{"triggered": false, "reason": ...}`` when the run had no reader or
-    the stage failed), and so
+    the stage failed), and so is
+    ``evidence`` (#69: ``null`` whenever no evidence file is configured;
+    otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
+    configured, the item count, how many chunk prompts matched items rode,
+    and the per-unit character budget; never the evidence text), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
@@ -1048,6 +1073,7 @@ def _build_json_result(result: Any) -> dict:
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
         "ci_wiring": result.get("ci_wiring"),
+        "evidence": result.get("evidence"),
         "degraded": result.get("degraded"),
         "config_file": result.get("config_file"),
     }
@@ -1489,6 +1515,7 @@ def _run_review(
     config_file: Path | None = None,
     ci_wiring: str | None = None,
     ci_wiring_globs: list[str] | None = None,
+    evidence_files: list[str] | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1511,7 +1538,8 @@ def _run_review(
         if ref is None:
             return None
     # --max-chunks, --timeout, --spec, --rules-file, --scoped-rules,
-    # --context-file and --prompts-dir arrive as load_config overrides (None is
+    # --context-file, --prompts-dir and --evidence-file arrive as
+    # load_config overrides (None is
     # ignored, "" is not), so each flag rides exactly the path its environment
     # variable does: --max-chunks and --timeout are range-checked on the same
     # pass as PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, --spec and
@@ -1535,6 +1563,7 @@ def _run_review(
         prompts_dir=prompts_dir,
         ci_wiring=ci_wiring,
         ci_wiring_globs=ci_wiring_globs,
+        evidence_files=evidence_files,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1547,6 +1576,7 @@ def _run_review(
             "prompts_dir": "--prompts-dir",
             "ci_wiring": "--ci-wiring",
             "ci_wiring_globs": "--ci-wiring-globs",
+            "evidence_files": "--evidence-file",
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -1562,6 +1592,7 @@ def _run_review(
     # fails exactly where this would.
     inputs = load_path_inputs(cfg, layers, config_file=config_file, loaders=_path_loaders())
     rules, scoped, ticket, prompts = inputs.rules, inputs.scoped, inputs.ticket, inputs.prompts
+    evidence = inputs.evidence
     repo = _open_repo_dir(repo_dir)
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -1681,6 +1712,8 @@ def _run_review(
         full_review_reason=full_review_reason,
         ci_wiring=cfg["ci_wiring"],
         ci_wiring_globs=cfg["ci_wiring_globs"],
+        evidence=evidence,
+        evidence_max_chunk_chars=cfg["evidence_max_chunk_chars"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
@@ -1737,16 +1770,22 @@ def _webhook_handler(url: str, *, config_file: Path | None = None) -> None:
     observe the daemon against a real repo without writing to it.
 
     ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
-    webhook: one static ticket file cannot describe every PR the daemon sees,
-    so its findings always carry scope ``unknown``. The team rules file, the
-    ``PRXREF_SCOPED_RULES`` files and the ``PRXREF_PROMPTS_DIR`` templates
-    still come from the daemon's environment, re-read on every webhook. The
+    webhook, and ``evidence_files=[""]`` blanks
+    ``PRXREF_EVIDENCE_FILES`` the same way: one static ticket or evidence
+    file cannot describe every PR the daemon sees, so its findings always
+    carry scope ``unknown`` and no unit's prompt carries evidence. The
+    team rules file, the ``PRXREF_SCOPED_RULES`` files and the
+    ``PRXREF_PROMPTS_DIR`` templates still come from the daemon's
+    environment, re-read on every webhook. The
     daemon passes no replay flag, so it never replays. ``config_file`` is
     the file ``serve --config`` or ``PRXREF_CONFIG_FILE`` named, re-read on
     every webhook, or ``None`` for none.
     """
     try:
-        _run_review(url, post=True, context_file="", config_file=config_file)
+        _run_review(
+            url, post=True, context_file="", evidence_files=[""],
+            config_file=config_file,
+        )
     except Exception:
         logger.exception("webhook review failed for %s", url)
 
@@ -1932,6 +1971,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
                 [g.strip() for g in args.ci_wiring_globs.split(",") if g.strip()] or None
                 if args.ci_wiring_globs is not None else None
             ),
+            evidence_files=args.evidence_file,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

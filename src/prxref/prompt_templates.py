@@ -78,7 +78,9 @@ logger = logging.getLogger(__name__)
 CONTEXT_MARKER = _CONTEXT_MARKER
 TEMPLATE_NAMES: tuple[str, ...] = ("worker", "systemic", "summary")
 REVIEW_TEMPLATES: frozenset[str] = frozenset({"worker", "systemic"})
-OPTIONAL_PLACEHOLDERS: frozenset[str] = frozenset({"scope_example", "rule_example", "suggestion_example"})
+OPTIONAL_PLACEHOLDERS: frozenset[str] = frozenset({
+    "scope_example", "rule_example", "suggestion_example", "evidence_block",
+})
 SUMMARY_REQUIRED: frozenset[str] = frozenset({"findings"})
 SUMMARY_MARKER_PLACEHOLDERS: frozenset[str] = frozenset(MARKER_SLOTS.values())
 SUMMARY_GROUPS: tuple[str, ...] = ("error", "warning", "spec", "outofscope", "outside_ticket")

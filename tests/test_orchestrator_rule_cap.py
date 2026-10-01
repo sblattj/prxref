@@ -618,7 +618,7 @@ class TestOffPathMatchesBase:
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
-            "suggestions", "incremental", "ci_wiring", "degraded", *CHUNK_KEYS,
+            "suggestions", "incremental", "ci_wiring", "evidence", "degraded", *CHUNK_KEYS,
         }
         assert res["rule_counts"] is None
         assert res["rule_scope_cleared"] is None  # no section scope: #75's check never ran
@@ -628,7 +628,8 @@ class TestOffPathMatchesBase:
         assert payload == [*A81_JSON_KEYS[:at], *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
                            "rule_scope_cleared",
                            "repo_context", "parse_retries", "context_followup", "suggestions",
-                           "incremental", "ci_wiring", "degraded", "config_file", "sampling"]
+                           "incremental", "ci_wiring", "evidence", "degraded", "config_file",
+                           "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

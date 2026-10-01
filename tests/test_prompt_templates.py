@@ -436,4 +436,6 @@ class TestOptionalSlots:
         assert _warnings(caplog) == []
 
     def test_the_optional_set_is_exactly_the_feature_slots(self):
-        assert OPTIONAL_PLACEHOLDERS == frozenset({"scope_example", "rule_example", "suggestion_example"})
+        assert OPTIONAL_PLACEHOLDERS == frozenset({
+            "scope_example", "rule_example", "suggestion_example", "evidence_block",
+        })
