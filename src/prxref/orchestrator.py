@@ -65,11 +65,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    its file and line — a chunk worker's own restatement of the same toggle
    included — and only the higher-ranked one of the two (severity, then
    confidence, then content) survives, same as any other same-side pair.
-   The opt-in PR-metadata findings (#70, ``metadata_rules``) join that
-   same splice with the same chunk-side standing and the same
-   deterministic exemption, computed before any worker runs; they are
-   summary-only, so the inline batch is selected from the findings that
-   are not them (by object identity, never by a reserved rule name):
+   The opt-in PR-metadata checks (#70, ``metadata_rules``) are NOT part
+   of that splice: their violations are summary notes, never findings, so
+   none of the passes below sees them:
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
@@ -260,7 +258,7 @@ from .markers import (
     out_of_ticket_marker,
     severity_marker,
 )
-from .metadata_rules import run_metadata_checks
+from .metadata_rules import MetadataNote, run_metadata_checks
 from .prompt_templates import (
     CONTEXT_MARKER,
     REVIEW_TEMPLATES,
@@ -728,19 +726,19 @@ def orchestrate_review(
     ``get_commits``, without which the check reports itself skipped) and
     ``area_globs`` with ``max_areas_per_pr`` (the diff's paths may not
     spread over more named areas than that). All three are pure, computed
-    before any worker runs and making no LLM call of their own; each
-    violation is a ``warning`` / ``outofscope`` finding with confidence 1.0,
-    folded in beside the heuristics findings at the chunk/sweep boundary
-    and SUMMARY-ONLY — the inline batch is selected from the findings that
-    are not them, by object identity threaded from the check, never by a
-    reserved rule name a model finding could match. With
-    ``metadata_rules`` off (the default) nothing runs, no
+    before any worker runs and making no LLM call of their own. Each
+    violation is a :class:`prxref.metadata_rules.MetadataNote`, never a
+    finding (owner decision OD8): the notes are rendered in a ``PR
+    metadata`` section of every posted summary (:func:`_metadata_section`)
+    and never enter ``findings_active``, so no quality pass, severity cap,
+    stable id, inline batch, verdict or ``PRXREF_FAIL_ON`` gate sees them.
+    With ``metadata_rules`` off (the default) nothing runs, no
     ``metadata_rules`` key is stamped on the run record, and the run is
     byte-identical to one without the feature; on, the record carries
-    ``{branch_pattern, commit_reference, area_globs}`` each
-    ``"pass"``/``"fail"``/``"skipped: <reason>"``, echoed by one
-    ``metadata_rules ok`` trace event. None of it touches the verdict or
-    the exit code.
+    ``{branch_pattern, commit_reference, area_globs, violations}`` — each
+    check ``"pass"``/``"fail"``/``"skipped: <reason>"``, and
+    ``violations`` one ``{check, title, detail}`` row per note — echoed by
+    one ``metadata_rules ok`` trace event.
 
     ``ci_wiring`` (issue #66) turns on the CI-wiring check:
     ``ci_wiring_globs`` (``PRXREF_CI_WIRING_GLOBS``; the default restates
@@ -1326,30 +1324,38 @@ def orchestrate_review(
     # worker dispatch — so the no-LLM guarantee is structural: nothing below
     # can schedule a model call on their behalf. Opt-in: with
     # metadata_rules off (the default) this block runs nothing, stamps no
-    # run-record key and changes no byte of the review.
-    metadata_findings: list[Finding] = []
+    # run-record key and changes no byte of the review. Violations are
+    # summary notes, never findings (OD8): they ride metadata_section into
+    # every summary render and never join the finding pipeline.
+    metadata_notes: list[MetadataNote] = []
     if metadata_rules == "on":
         commits, commit_skip = (
             _fetch_pr_commits(forge, ref, pr) if commit_reference else (None, "")
         )
         try:
-            metadata_findings, stamp = run_metadata_checks(
+            metadata_notes, statuses = run_metadata_checks(
                 pr, files, commits,
                 branch_patterns=branch_patterns, commit_reference=commit_reference,
                 area_globs=area_globs, max_areas_per_pr=max_areas_per_pr,
                 commit_skip_reason=commit_skip or "no commit source",
             )
-            run_inputs["metadata_rules"] = stamp
-            tracer.event("metadata_rules", "ok", **stamp)
+            run_inputs["metadata_rules"] = {
+                **statuses, "violations": [n.as_dict() for n in metadata_notes],
+            }
+            tracer.event(
+                "metadata_rules", "ok", **statuses, violations=len(metadata_notes),
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("metadata rules failed (continuing without them): %s", e)
-            metadata_findings = []
+            metadata_notes = []
             run_inputs["metadata_rules"] = {
-                "checks": f"skipped: metadata stage failed: {e.__class__.__name__}"
+                "checks": f"skipped: metadata stage failed: {e.__class__.__name__}",
+                "violations": [],
             }
             tracer.event(
                 "metadata_rules", "fail", reason=f"{e.__class__.__name__}: {e}"
             )
+    metadata_section = _metadata_section(metadata_notes)
 
     # CI wiring (#66), computed on the same pre-dispatch doctrine: the
     # check makes no LLM call, so nothing below can schedule one on its
@@ -1428,7 +1434,7 @@ def orchestrate_review(
         # needs an added, non-binary line, so it rarely fires on this path.
         release_shape = heuristics.release_shape_findings(files)
         toggle_findings = heuristics.toggle_pinned_off_findings(files)
-        deterministic_findings = release_shape + toggle_findings + metadata_findings + ci_findings
+        deterministic_findings = release_shape + toggle_findings + ci_findings
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
             **_cost_meta(run_inputs),
@@ -1439,7 +1445,6 @@ def orchestrate_review(
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             toggle_findings=toggle_findings,
-            metadata_findings=metadata_findings,
             ci_findings=ci_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
@@ -1447,6 +1452,7 @@ def orchestrate_review(
             ticket_note=ticket_note,
             cost_label=_cost_label(run_inputs, post_cost),
             size_advisory_line=size_advisory_line,
+            metadata_section=metadata_section,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             reviewed_head=_mark_reviewed_head(
@@ -1812,18 +1818,12 @@ def orchestrate_review(
     # finding" and keep the model's restatement instead.
     release_shape = heuristics.release_shape_findings(files)
     toggle_findings = heuristics.toggle_pinned_off_findings(files)
-    # Metadata findings (#70) join the same splice with the same
-    # chunk-side standing; they are file-level (line 0) like
-    # release_shape, so the reworded-dedup tier never compares them, and
-    # severity consistency exempts them through the shared deterministic
-    # body suffix. CI-wiring findings (#66) join them the same way —
-    # file-level on the check's own path, and INLINE candidates rather
-    # than summary-only: unlike the metadata findings they never thread
-    # through the exclusion set below, so a genuinely unwired check
-    # reaches the PR as a comment on the file that adds it.
-    deterministic_findings = (
-        release_shape + toggle_findings + metadata_findings + ci_findings
-    )
+    # CI-wiring findings (#66) join the same splice with the same
+    # chunk-side standing — file-level on the check's own path, and inline
+    # candidates, so a genuinely unwired check reaches the PR as a comment
+    # on the file that adds it. PR-metadata violations (#70) are not
+    # findings and never join it (OD8).
+    deterministic_findings = release_shape + toggle_findings + ci_findings
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
     )
@@ -2140,6 +2140,7 @@ def orchestrate_review(
             evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            metadata_section=metadata_section,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -2158,21 +2159,9 @@ def orchestrate_review(
     # inline batch rides on it; an inline-mode run has no summary to gate on.
     inline_attempted = 0
     inline_failed = False
-    # Metadata findings are summary-only by design (#70): they report on the
-    # PR as a whole, not on a line, so the inline batch is selected from the
-    # findings that are not them. The exclusion is an explicit identity set
-    # threaded from the check that produced the findings — never a reserved
-    # rule or title a model finding could accidentally match. The quality
-    # passes above replace() a finding only when they change it, and none of
-    # them changes one of these (file-level, deterministic-suffixed,
-    # confidence 1.0); the worst case of a future pass that did is one
-    # summary finding also posted inline — fail-open, never a silent loss.
-    # With the feature off the set is empty and this is exactly findings_active.
-    metadata_only = {id(f) for f in metadata_findings}
-    inline_pool = [f for f in findings_active if id(f) not in metadata_only]
-    if post_inline_wanted and inline_pool and (posted or not post_summary_wanted):
+    if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
         ordered = sorted(
-            inline_pool,
+            findings_active,
             key=lambda f: (
                 _SEVERITY_RANK.get(f.severity, 3),
                 _SCOPE_RANK.get(f.scope, 0),
@@ -2200,11 +2189,10 @@ def orchestrate_review(
     # promises a per-finding comment the PR never received. The counts only
     # exist after posting, so the disclosure rides a second post_summary call,
     # which the forges already implement as an update-in-place. Both sides
-    # count the inline-eligible pool (#70: metadata findings are summary-only
-    # by design, so they are neither promised nor accounted as missing).
+    # count the active findings.
     if (
         post_summary_wanted and posted and post_inline_wanted
-        and len(inline_pool) > inline_posted
+        and len(findings_active) > inline_posted
     ):
         refreshed = _render_summary(
             pr, files, verdict, findings_active, model,
@@ -2217,10 +2205,11 @@ def orchestrate_review(
             evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            metadata_section=metadata_section,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
-                len(inline_pool), inline_attempted, inline_posted,
+                len(findings_active), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
             ),
             thread_accounting=_thread_dedup_accounting(
@@ -2248,6 +2237,7 @@ def orchestrate_review(
             evidence_note=evidence_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            metadata_section=metadata_section,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -4176,6 +4166,7 @@ def _render_summary(
     summary_template: str = "",
     incremental_note: str = "",
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
+    metadata_section: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -4201,6 +4192,10 @@ def _render_summary(
     banner, so it is the first thing under the forge's summary marker.
     ``incremental_note`` (:func:`_incremental_note`, ``""`` on every run that
     is not incremental) follows it the same way.
+    ``metadata_section`` (:func:`_metadata_section`, ``""`` when the
+    PR-metadata checks are off or found nothing) goes above the footer on
+    every template, ahead of any other appended block, so an empty one
+    leaves the summary byte-identical.
     ``summary_template`` is an operator override of ``summary.md``
     (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
     the packaged template through ``reviewer.load_prompt``, and only that
@@ -4326,7 +4321,7 @@ def _render_summary(
     })
     uncovered = uncovered_summary_groups(found)
     stray = [f for f in findings_active if _summary_group_of(f) in uncovered]
-    extras: list[str] = []
+    extras: list[str] = [metadata_section] if metadata_section else []
     if stray:
         logger.warning(
             "summary template has no {findings} and no slot for the %s finding group(s); "
@@ -4411,6 +4406,24 @@ def _size_advisory(
 def _plural(n: int, unit: str) -> str:
     """``unit`` for exactly one, else ``unit + "s"`` (0 lines, 1 line, 2 lines)."""
     return unit if n == 1 else f"{unit}s"
+
+
+def _metadata_section(notes: Sequence[MetadataNote]) -> str:
+    """The ``PR metadata`` summary section for ``notes``, or ``""`` for none.
+
+    A bold ``PR metadata`` heading, then one ``- <title> — <detail>``
+    bullet per violation in check order, closed by the reminder that the
+    checks are deterministic and never change the verdict. The orchestrator
+    hands it to every summary render (:func:`_render_summary`), which places
+    it above the footer.
+    """
+    if not notes:
+        return ""
+    bullets = "\n".join(f"- {n.title} — {n.detail}" for n in notes)
+    return (
+        f"**PR metadata**\n\n{bullets}\n\n"
+        "_Deterministic checks, no model; they never change the verdict._"
+    )
 
 
 def _size_advisory_line(stats: Mapping[str, Any] | None) -> str:
@@ -4682,7 +4695,6 @@ def _summary_only_run(
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
     toggle_findings: list[Finding] | None = None,
-    metadata_findings: list[Finding] | None = None,
     ci_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
@@ -4690,6 +4702,7 @@ def _summary_only_run(
     ticket_note: str = "", cost_label: str = "", size_advisory_line: str = "",
     summary_template: str = "", reviewed_head: str | None = None,
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
+    metadata_section: str = "",
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -4701,17 +4714,12 @@ def _summary_only_run(
     and quality passes a chunk-sourced finding gets
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
     they reach ``findings_active`` / ``verdict`` / the summary. The
-    PR-metadata findings (#70, ``metadata_findings``) and the CI-wiring
-    findings (#66, ``ci_findings``) join them the same
-    way; no inline batch is ever posted from this exit, so the
-    summary-only contract needs no enforcement here. Location validation
-    runs only when the diff holds files: a metadata finding about a branch
-    name exists even on an empty diff, where it anchors on ``""`` and
-    there is no diff path set to validate against — the deterministic
-    producers are trusted with their own anchors, exactly as they are on
-    the empty-diff path that predates them (both heuristics yield ``[]``
-    with no files, so the guard changes nothing when the feature is off).
-    No
+    CI-wiring findings (#66, ``ci_findings``) join them the same way.
+    Location validation runs only when the diff holds files; every
+    deterministic producer yields ``[]`` with no files, so the guard only
+    spares an empty path set. The PR-metadata notes (#70) are not findings:
+    they arrive pre-rendered as ``metadata_section``, so a branch violation
+    on an empty diff still reaches the summary. No
     :func:`apply_line_align` call here: both heuristics already anchor on a
     real diff line and there is no worker-supplied anchor to re-corroborate.
     An empty diff still yields ``release_shape_findings=[]`` and
@@ -4723,9 +4731,9 @@ def _summary_only_run(
     gate's knobs, threaded from :func:`orchestrate_review`. No grouping
     pass runs here: there is no chunk finding to group.
 
-    ``ticket_note``, ``cost_label``, ``size_advisory_line`` and
-    ``summary_template`` are handed to :func:`_render_summary` unchanged; all
-    four default to ``""``, which renders the summary exactly as before. So
+    ``ticket_note``, ``cost_label``, ``size_advisory_line``,
+    ``metadata_section`` and ``summary_template`` are handed to
+    :func:`_render_summary` unchanged; all five default to ``""``, which renders the summary exactly as before. So
     is ``summary_bullet_separator``, whose default is
     :data:`SUMMARY_BULLET_SEPARATOR`.
     ``reviewed_head`` is stamped on the body by :func:`_with_reviewed_head`;
@@ -4740,7 +4748,7 @@ def _summary_only_run(
 
     findings = (
         list(release_shape_findings or []) + list(toggle_findings or [])
-        + list(metadata_findings or []) + list(ci_findings or [])
+        + list(ci_findings or [])
     )
     if findings:
         if files:
@@ -4773,6 +4781,7 @@ def _summary_only_run(
             ticket_note=ticket_note,
             cost_label=cost_label,
             size_advisory_line=size_advisory_line,
+            metadata_section=metadata_section,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
         )

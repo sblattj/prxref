@@ -661,7 +661,9 @@ def _print_summary(
     sweep when it failed) and a ``hint:`` when a failure was a deadline;
     ``chunks:`` when a chunk ran over the token budget or a file was placed
     past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
-    when the PR-size advisory fired; and ``replay:`` when the run was a
+    when the PR-size advisory fired; one ``pr metadata:`` line naming each
+    PR-metadata violation (#70; the checks are summary notes, never
+    findings); and ``replay:`` when the run was a
     replay, so a replay can never be read as a live review.
     The ``replay:`` line carries the stamp as ``key=value`` pairs, ending in
     ``description=<status>`` and, when a cutoff was chosen,
@@ -702,6 +704,11 @@ def _print_summary(
     size = record.get("size_advisory")
     if isinstance(size, dict) and size.get("message"):
         print(f"size advisory: {size['message']}", file=target)
+    metadata = record.get("metadata_rules")
+    violations = metadata.get("violations") if isinstance(metadata, dict) else None
+    for note in violations if isinstance(violations, list) else []:
+        if isinstance(note, dict) and note.get("title"):
+            print(f"pr metadata: {note['title']}", file=target)
     replay = record.get("replay")
     if isinstance(replay, dict):
         as_of = replay.get("as_of")
@@ -1027,9 +1034,11 @@ def _build_json_result(result: Any) -> dict:
     file; otherwise ``{"path", "sha256", "keys"}``, see
     :func:`_config_file_stamp`), and so is
     ``metadata_rules`` (#70: ``null`` whenever ``PRXREF_METADATA_RULES`` is
-    ``off``; otherwise ``{branch_pattern, commit_reference, area_globs}``,
-    each ``pass``, ``fail`` or ``skipped: <reason>``, from
-    :func:`prxref.metadata_rules.run_metadata_checks`);
+    ``off``; otherwise ``{branch_pattern, commit_reference, area_globs,
+    violations}``, each check ``pass``, ``fail`` or ``skipped: <reason>``
+    from :func:`prxref.metadata_rules.run_metadata_checks`, and
+    ``violations`` one ``{check, title, detail}`` row per violation — the
+    violations are summary notes, never ``findings`` rows);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
