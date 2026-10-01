@@ -444,10 +444,15 @@ LLM / pipeline:
                                 decides which inputs match (a web-server
                                 location or rewrite, a router pattern, a
                                 glob, a regex validator), which inputs it
-                                newly captures. "off" cuts that section
-                                out, so the worker prompt is the template
-                                without it byte for byte. No extra call or
-                                read either way; the sweep prompt never
+                                newly captures. With a file reader, "on"
+                                also reads the conventional route-table
+                                files for a chunk that adds a web-server or
+                                static-host rule and appends their route
+                                lines as a context block. "off" cuts that
+                                section out, so the worker prompt is the
+                                template without it byte for byte, and
+                                reads nothing. No extra LLM call either
+                                way; the sweep prompt never
                                 carries it. Matched exactly; any other
                                 value is a configuration error
   PRXREF_CI_WIRING             CI wiring (#66): "off" reads nothing,
