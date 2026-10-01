@@ -347,7 +347,9 @@ class PromptContext:
     whether the template is the packaged one or an override that carries
     the section; the result is that template without the section byte for
     byte. An override without the section renders the same either way, and
-    the sweep never carries it.
+    the sweep never carries it. The orchestrator also reads it to decide
+    whether a chunk's context blocks carry the route tables outside the
+    diff.
     """
 
     rules_worker: str = ""

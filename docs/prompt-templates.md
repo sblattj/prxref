@@ -65,7 +65,7 @@ Each review template is split at its first `## Review Context` line:
 | `{ticket_context}` | the fenced `### Ticket context` block followed by a blank line, or nothing without a ticket | both |
 | `{spec_digest}` | the spec-constraint digest, or `(no specs provided for this review)` | both |
 | `{diff}` | the chunk's diff | `worker.md` |
-| `{context_blocks}` | the summary of the PR's other files and the file context read around the chunk, or nothing | `worker.md` |
+| `{context_blocks}` | the summary of the PR's other files and the file context read around the chunk (with `PRXREF_ROUTING_PROBE=on`, also the `### Route tables outside this diff` block for a chunk that adds a web-server or static-host rule), or nothing | `worker.md` |
 | `{digest}` | the digest of the whole diff | `systemic.md` |
 | `{scope_example}` | a `"scope": "in"` field for the example finding while a ticket is configured, else nothing | both |
 | `{rule_example}` | a `"rule"` field for the example finding while finding grouping (`PRXREF_GROUP_FINDINGS`) is on, else nothing | both |

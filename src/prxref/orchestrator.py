@@ -1106,7 +1106,9 @@ def orchestrate_review(
     ``routing_probe`` (``PRXREF_ROUTING_PROBE``, issue #67) is ``"on"`` (the
     default) or ``"off"``; any other value raises ``ValueError`` before any
     forge call. On, every chunk worker's SYSTEM prompt keeps the worker
-    template's ``## Matching rules`` section. Off, that section is cut out
+    template's ``## Matching rules`` section, and a chunk that adds a
+    web-server or static-host rule also carries the route tables outside the
+    diff (:func:`_route_lines`). Off, that section is cut out
     (:attr:`reviewer.PromptContext.routing_probe`), so every worker prompt,
     the follow-up re-send included, is the template without it byte for
     byte; the sweep prompt is the same either way.
@@ -3306,22 +3308,48 @@ def _make_file_reader(
     return read
 
 
+def _route_lines(chunk, reader, all_files) -> list[str]:
+    """The routing probe's route-table lines for one chunk; never raises.
+
+    Empty unless the chunk adds a web-server or static-host matching rule
+    (:func:`prxref.chunk_context.has_routing_rule`). The conventional
+    route-table paths are read through ``reader``, skipping every PR diff
+    file in ``all_files`` (the chunk itself when ``None``).
+    """
+    try:
+        if not chunk_context.has_routing_rule(chunk_context.chunk_files(chunk)):
+            return []
+        diff_paths = {getattr(f, "path", "") for f in (all_files if all_files is not None else chunk)}
+        return chunk_context.route_table_lines(reader, exclude=diff_paths)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("route tables unavailable: %s", e)
+        return []
+
+
 def _context_blocks(
     chunk, reader, *, include_definitions: bool, unit: repo_unit.UnitContext | None = None,
+    routing_probe: bool = False, all_files=None,
 ) -> str:
-    """Render the chunk's dependency, definition, contract, reader and standards blocks; never raises.
+    """Render the chunk's dependency, definition, contract, reader, standards and route blocks; never raises.
 
     ``unit`` is the chunk's repository context. Its definition lines follow
     the same-file definitions under one header, its contract lines form the
     contracts block, its reader lines the readers block and its standards
-    lines the last block; they render with no
+    lines the standards block; they render with no
     ``reader`` too, over empty dependency and same-file lists. ``None``, or a
     unit with no lines, is exactly the rendering without repository context.
+
+    ``routing_probe`` (:attr:`reviewer.PromptContext.routing_probe`, issue
+    #67) with a ``reader`` adds the route tables outside the diff as the last
+    block (:func:`_route_lines`); ``all_files`` is the PR's parsed file list,
+    whose paths are never re-read for it. False, the default, renders
+    exactly as before.
     """
     extra = unit.definition_lines if unit is not None else ()
     contracts = unit.contract_lines if unit is not None else ()
     readers = unit.reader_lines if unit is not None else ()
     standards = unit.standards_lines if unit is not None else ()
+    routes = _route_lines(chunk, reader, all_files) if routing_probe and reader is not None else []
     if reader is None and not (extra or contracts or readers or standards):
         return ""
     deps: list[str] = []
@@ -3336,13 +3364,13 @@ def _context_blocks(
             )
         except Exception as e:  # noqa: BLE001
             logger.debug("chunk context unavailable: %s", e)
-            if not (extra or contracts or readers or standards):
+            if not (extra or contracts or readers or standards or routes):
                 return ""
             deps, defs = [], []
     try:
         return chunk_context.render_context_blocks(
             deps, defs, extra_def_lines=extra, contract_lines=contracts,
-            reader_lines=readers, standards_lines=standards,
+            reader_lines=readers, standards_lines=standards, route_lines=routes,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("chunk context unavailable: %s", e)
@@ -3949,7 +3977,10 @@ def _invoke_chunk(
     looked-up definitions (issue #22). ``""`` (the default) leaves the
     blocks exactly as they were.
     """
-    blocks = _context_blocks(chunk, reader, include_definitions=include_definitions, unit=unit)
+    blocks = _context_blocks(
+        chunk, reader, include_definitions=include_definitions, unit=unit,
+        routing_probe=prompt_context.routing_probe, all_files=all_files,
+    )
     if extra_blocks:
         blocks = "\n\n".join(part for part in (blocks.strip(), extra_blocks.strip()) if part)
     try:
@@ -4033,7 +4064,10 @@ def _chunk_followup(
 
     try:
         shown = (
-            _context_blocks(chunk, reader, include_definitions=True, unit=unit)
+            _context_blocks(
+                chunk, reader, include_definitions=True, unit=unit,
+                routing_probe=prompt_context.routing_probe, all_files=all_files,
+            )
             + reviewer.render_chunk(chunk, context_lines)
         )
         return followup.run_chunk_followup(

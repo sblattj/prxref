@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from prxref import config
+from prxref import chunk_context, config
 from prxref.cli import main
 from prxref.forges.base import PRData, PRRef
 from prxref.llm import ConfigError, InvokeResult
@@ -465,3 +465,204 @@ def test_routing_probe_bogus_env_exits_2_naming_the_variable(monkeypatch, capsys
     assert rc == 2
     _, err = capsys.readouterr()
     assert "PRXREF_ROUTING_PROBE" in err
+
+
+# ---------------------------------------------------------------------------
+# Test F: the route table the probe checks against usually sits OUTSIDE the
+# diff. With the probe on and a forge file reader, a chunk adding a web-server
+# or static-host matching rule fetches the conventional route-table files at
+# the PR head and renders their route lines as a context block, so the model
+# can check the newly captured inputs against what the repo defines.
+# ---------------------------------------------------------------------------
+
+NGINX_ONLY_DIFF = (FIXTURES / "nginx_only.diff").read_text(encoding="utf-8")
+ROUTES_DOTTED = (FIXTURES / "routes_dotted.tsx").read_text(encoding="utf-8")
+ROUTES_UUID = (FIXTURES / "routes_uuid.tsx").read_text(encoding="utf-8")
+ROUTE_TABLE_PATH = "src/routes.tsx"
+
+
+class _RouteForge(_FakeForge):
+    """A fake forge whose file reader serves one route table at the PR head
+    and records every path the run asked for."""
+
+    def __init__(self, pr: PRData, diff: str, files: dict[str, str]):
+        super().__init__(pr, diff)
+        self.files = files
+        self.reads: list[str] = []
+
+    def get_file_content(self, ref, path, *, sha):
+        self.reads.append(path)
+        return self.files.get(path)
+
+
+class _RaisingRouteForge(_FakeForge):
+    def get_file_content(self, ref, path, *, sha):
+        raise RuntimeError("forge read exploded")
+
+
+class _RouteAwareLLM:
+    """Answers with the canned text only when the system prompt carries the
+    Matching rules section AND the user prompt carries the route-table line;
+    records every user prompt."""
+
+    EMPTY = '{"findings":[],"escalations":[]}'
+
+    def __init__(self, text: str, needle: str):
+        self.text = text
+        self.needle = needle
+        self.users: list[str] = []
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        self.users.append(user)
+        hit = "## Matching rules" in system and self.needle in user
+        return InvokeResult(
+            text=self.text if hit else self.EMPTY,
+            input_tokens=10, output_tokens=5,
+            model="route-test-model", backend="fake", elapsed_ms=1,
+        )
+
+    def worker_prompts(self) -> list[str]:
+        return [u for u in self.users if "### Diff" in u]
+
+
+def test_route_table_fixtures_sit_outside_the_diff():
+    files = parse_unified_diff(NGINX_ONLY_DIFF)
+    assert {f.path for f in files} == {"conf/nginx.conf"}
+    assert ROUTE_TABLE_PATH in chunk_context.ROUTE_TABLE_CANDIDATES
+
+
+def test_route_table_outside_the_diff_reaches_the_prompt_and_the_warning_survives():
+    forge = _RouteForge(_make_pr(), NGINX_ONLY_DIFF, {ROUTE_TABLE_PATH: ROUTES_DOTTED})
+    llm = _RouteAwareLLM(MATCHING_FINDING_JSON, '"/items/:version"')
+
+    result = orchestrate_review(forge, REF, llm, post=False)
+
+    assert ROUTE_TABLE_PATH in forge.reads
+    (user,) = llm.worker_prompts()
+    assert chunk_context.ROUTES_HEADER in user
+    assert f'{ROUTE_TABLE_PATH}:7:   {{ path: "/items/:version"' in user
+    assert "e.g. /items/v1.2" in user
+    matches = [f for f in result["findings_active"] if "/items/v1.2" in f.body]
+    assert matches, result["findings_active"]
+    assert matches[0].severity == "warning"
+    assert (matches[0].file, matches[0].line) == ("conf/nginx.conf", RULE_LINE)
+
+
+def test_route_table_outside_the_diff_uuid_variant_posts_nothing():
+    forge = _RouteForge(_make_pr(), NGINX_ONLY_DIFF, {ROUTE_TABLE_PATH: ROUTES_UUID})
+    llm = _RouteAwareLLM('{"findings":[],"escalations":[]}', '"/items/:id"')
+
+    result = orchestrate_review(forge, REF, llm, post=False)
+
+    (user,) = llm.worker_prompts()
+    assert chunk_context.ROUTES_HEADER in user
+    assert ":id is a UUID" in user
+    assert not [
+        f for f in result["findings_active"]
+        if f.file == "conf/nginx.conf" and f.severity != "outofscope"
+    ]
+
+
+def test_routing_probe_off_reads_no_route_table():
+    forge = _RouteForge(_make_pr(), NGINX_ONLY_DIFF, {ROUTE_TABLE_PATH: ROUTES_DOTTED})
+    llm = _RouteAwareLLM(MATCHING_FINDING_JSON, '"/items/:version"')
+
+    orchestrate_review(forge, REF, llm, post=False, routing_probe="off")
+
+    assert not set(forge.reads) & set(chunk_context.ROUTE_TABLE_CANDIDATES)
+    (user,) = llm.worker_prompts()
+    assert chunk_context.ROUTES_HEADER not in user
+
+
+def test_non_routing_chunk_reads_no_route_table():
+    diff = (
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " import os\n"
+        "+print(os.getcwd())\n"
+        " x = 1\n"
+    )
+    forge = _RouteForge(_make_pr(), diff, {ROUTE_TABLE_PATH: ROUTES_DOTTED})
+    llm = _RouteAwareLLM(MATCHING_FINDING_JSON, '"/items/:version"')
+
+    orchestrate_review(forge, REF, llm, post=False)
+
+    assert not set(forge.reads) & set(chunk_context.ROUTE_TABLE_CANDIDATES)
+    assert chunk_context.ROUTES_HEADER not in llm.worker_prompts()[0]
+
+
+def test_route_table_in_the_diff_is_not_fetched_again():
+    diff = SPA_DOTTED_DIFF.replace("docs/routes.md", ROUTE_TABLE_PATH)
+    forge = _RouteForge(_make_pr(), diff, {ROUTE_TABLE_PATH: ROUTES_DOTTED})
+    llm = _RouteAwareLLM(MATCHING_FINDING_JSON, '"/items/:version"')
+
+    orchestrate_review(forge, REF, llm, post=False)
+
+    assert "src/routes.ts" in forge.reads
+    for user in llm.worker_prompts():
+        assert chunk_context.ROUTES_HEADER not in user
+
+
+def test_route_table_read_failure_leaves_the_prompt_without_the_block():
+    forge = _RaisingRouteForge(_make_pr(), NGINX_ONLY_DIFF)
+    llm = _RouteAwareLLM(MATCHING_FINDING_JSON, '"/items/:version"')
+
+    result = orchestrate_review(forge, REF, llm, post=False)
+
+    (user,) = llm.worker_prompts()
+    assert chunk_context.ROUTES_HEADER not in user
+    assert result["findings_active"] == []
+
+
+@pytest.mark.parametrize("path, line, want", [
+    ("conf/nginx.conf", "  location ~* \\.[^/]+$ { return 404; }", True),
+    ("deploy/nginx/site.conf", "    rewrite ^/old/(.*)$ /new/$1 last;", True),
+    ("public/.htaccess", "RewriteRule ^ index.html [L]", True),
+    ("public/_redirects", "/*    /index.html   200", True),
+    ("vercel.json", '  "rewrites": [{ "source": "/(.*)", "destination": "/" }]', True),
+    ("Caddyfile", "  try_files {path} /index.html", True),
+    ("conf/nginx.conf", "  # a comment about location", False),
+    ("conf/nginx.conf", "  gzip on;", False),
+    ("app/main.py", "location = '/x'", False),
+    ("public/_redirects", "# comment", False),
+])
+def test_routing_rule_trigger(path, line, want):
+    files = [chunk_context.ChunkFile(path=path, added=(line,))]
+    assert chunk_context.has_routing_rule(files) is want
+
+
+def test_route_table_lines_are_capped_and_exclude_non_route_lines():
+    big = "\n".join(f'  {{ path: "/r{i}/:id", element: <P{i} /> }},' for i in range(500))
+    text = 'import x from "y";\n' + big
+
+    def read(path):
+        return text if path == ROUTE_TABLE_PATH else None
+
+    lines = chunk_context.route_table_lines(read)
+
+    assert sum(len(entry) for entry in lines) <= chunk_context.MAX_ROUTE_CHARS + 80
+    assert lines[-1].startswith("…")
+    assert not any("import x" in entry for entry in lines)
+    assert lines[0] == f'{ROUTE_TABLE_PATH}:2:   {{ path: "/r0/:id", element: <P0 /> }},'
+
+
+def test_route_table_lines_skip_excluded_and_survive_a_raising_reader():
+    def read(path):
+        return ROUTES_DOTTED if path == ROUTE_TABLE_PATH else None
+
+    assert chunk_context.route_table_lines(read, exclude={ROUTE_TABLE_PATH}) == []
+
+    def boom(path):
+        raise RuntimeError("nope")
+
+    assert chunk_context.route_table_lines(boom) == []
+
+
+def test_render_context_blocks_route_lines_render_last_and_are_identity_when_empty():
+    base = chunk_context.render_context_blocks(["dep"], ["def"])
+    assert chunk_context.render_context_blocks(["dep"], ["def"], route_lines=()) == base
+    out = chunk_context.render_context_blocks(["dep"], ["def"], route_lines=["a:1: x"])
+    assert out.startswith(base + "\n\n" + chunk_context.ROUTES_HEADER)
+    assert out.endswith("a:1: x")
