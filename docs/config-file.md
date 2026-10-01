@@ -181,7 +181,7 @@ its `PRXREF_` name.
 | `max_inline_comments` | integer | Most inline comments posted per review ([more](env-vars.md#llm--pipeline)). |
 | `group_findings` | boolean | Fold findings that break one rule in one file into one comment ([more](env-vars.md#llm--pipeline)). |
 | `suggestions` | string | `on` asks for applicable code suggestions ([more](env-vars.md#llm--pipeline)). |
-| `routing_probe` | string | `off` drops the worker prompt's matching-rules section ([more](env-vars.md#llm--pipeline)). |
+| `routing_probe` | string | `off` drops the worker prompt's matching-rules section and its route-table reads ([more](env-vars.md#llm--pipeline)). |
 | `incremental` | string | `on` re-reviews only the files changed since the last reviewed head ([more](env-vars.md#llm--pipeline)). |
 
 ### Limits
