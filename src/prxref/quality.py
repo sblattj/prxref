@@ -2,8 +2,7 @@
 
 Twenty passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, pass 10 only when ``PRXREF_STABLE_IDS`` turns stable finding
-ids on (#71, ``prxref.stable_ids.apply_stable_ids``), pass 14 only when
+severity map, pass 14 only when
 the loaded rules file declares at least
 one section scope, pass 15 only when ``PRXREF_GROUP_FINDINGS`` turns
 finding grouping on, and pass 16 only when a team rules file is loaded
@@ -82,23 +81,23 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
    :data:`DEFAULT_LINE_TOLERANCE` from the match. A finding whose
    snippet the head file does not hold, whose multi-match it cannot
    break, or that sits file-level with no snippet at all is marked
-   ``anchor_unverified`` and loses
-   :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT` of confidence, so the gate
-   may drop it; an unreadable file, a dropped finding and a
+   ``anchor_unverified`` with its confidence
+   unchanged; an unreadable file, a dropped finding and a
    deterministic check's finding are untouched.
 8. ``apply_thread_dedup``: drop findings that duplicate an already-open
    and current thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``; a
-   resolved or outdated thread never matches (issue #73).
+   resolved or outdated thread never matches (issue #73) unless it is a
+   won't-fix decision (``Thread.wont_fix``: Azure ``wontFix`` /
+   ``byDesign`` or an explicit human "won't fix"), which keeps matching.
 9. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing open, current thread already argued out — same path
    plus shared distinctive tokens, with NO line test, because line alignment
    has already demoted a file-level finding to line 0 by this point;
-   resolved or outdated threads are skipped here too (issue #73)
-   (``settled in thread: <author>``).
-10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): opt-in
-    via ``PRXREF_STABLE_IDS`` — off entirely by default, and then never
-    called. When on, it stamps every finding with a content-derived
+   resolved or outdated threads are skipped here too (issue #73), except
+   a won't-fix one (``settled in thread: <author>``).
+10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): always
+    runs (the deprecated ``PRXREF_STABLE_IDS`` is ignored). It stamps every finding with a content-derived
     ``id`` (``<file>#<rule or norule>#<12-hex claim hash>`` over the
     title's sorted content words — no model, no embedding), an
     ``anchor_block`` (enclosing function, YAML key path or manifest key,
@@ -128,16 +127,21 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-14. ``apply_rule_scope_check``: clear ``rule`` on a finding no scoped
-     section of the loaded team rules covers (#75) — the label matches no
-     ATX section that declares a ``scope:`` line, or that section's tokens
-     do not cover the finding's path — leaving the finding itself active,
+14. ``apply_rule_scope_check``: clear ``rule`` on a finding whose
+     scoped section of the loaded team rules does not cover its path (#75) —
+     the label names an ATX section (by heading or rule line) whose scope —
+     a ``scope:`` line, or the language nouns of its heading — misses the
+     path; unknown labels and empty
+     paths keep their label — leaving the finding itself active,
      so it groups and caps by normalized title like any ruleless finding.
      A scope token outside the vocabulary is inert. It drops nothing, runs
      between ``apply_hedge_gate`` and the grouping/cap passes so a wrong
      label never keys them, and is skipped entirely (the run record's
      ``rule_scope_cleared`` stays ``null``) when no loaded section declares
-     a scope.
+     a scope. Its claim-category half, ``apply_rule_category_check``, runs
+     right after on every section of the loaded rules, scoped or not, and
+     clears a label whose rule names another kind of defect than the
+     finding's title (``rules.claim_kinds``), keeping it on any ambiguity.
 15. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
@@ -162,8 +166,9 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     site against a source (issue #74). This pass re-runs pass 7's search
     for the representative's own quoted snippets within
     :data:`ANCHOR_SNAP_WINDOW` lines of each ``Also at:`` site and drops
-    the sites nothing corroborates, rewriting ``locations`` and the
-    paragraph through the shared :func:`_also_at_paragraph` writer. An
+    the sites nothing corroborates, moving them out of ``locations`` and
+    the ``Also at:`` paragraph into a last ``Also at (unverified):``
+    paragraph written by the shared :func:`_also_at_paragraph` writer. An
     unreadable file, a dropped finding and a representative with no
     snippet parseable keep every site; nothing is dropped from the review.
     It runs once, after grouping and the cap (``locations`` is final
@@ -246,13 +251,7 @@ DEFAULT_LINE_TOLERANCE: int = 5
 # the issue documents sit 14 to 70 lines past the nearest hunk — outside
 # every hunk, which is exactly why the diff-bounded passes cannot reach them
 # — so the window is a file-range scan, not a hunk-bounded one.
-ANCHOR_SNAP_WINDOW: int = 80
-
-# Confidence taken off a finding apply_anchor_snap marks ``anchor_unverified``
-# (issue #74). 0.1 is one gate step below the common 0.7/0.8 model
-# confidences: a finding whose evidence cannot be located is demoted, and one
-# that was already borderline dies at the quality gate naturally.
-ANCHOR_UNVERIFIED_CONFIDENCE_HIT: float = 0.1
+ANCHOR_SNAP_WINDOW: int = 100
 
 # A period that is not followed by whitespace is member access, a filename, or
 # a version — not a sentence break — so the hedge rules may span it.
@@ -889,6 +888,12 @@ def apply_line_align(
     way whenever the file also carries token-bearing added lines, so a
     blank line never outranks the line the evidence lives on.
 
+    A deterministic finding (:func:`prxref.heuristics.is_deterministic`)
+    whose line is an added line keeps it: the check's own position (a
+    toggle call, a failing linter's ``path:line``) is the evidence, so no
+    content pass second-guesses it. On any other line it snaps like a
+    model anchor, so it never posts outside the diff.
+
     When ``added_lines_by_file`` is omitted or has no entry for a file,
     the finding's line is dropped to 0 (file-level). A file-level
     citation stays file-level.
@@ -899,6 +904,9 @@ def apply_line_align(
     for f in findings:
         added = by_file.get(f.file, set())
         hunks = hunks_by_file.get(f.file)
+        if f.line > 0 and f.line in added and heuristics.is_deterministic(f):
+            result.append(f)
+            continue
         new_line = (
             _resolve_body_cited_anchor(f, hunks, added, tolerance=tolerance)
             if hunks
@@ -967,6 +975,39 @@ def _quoted_snippets(title: str, body: str) -> list[str]:
     return snippets
 
 
+_NON_USAGE_LINE_RE = re.compile(
+    r"\s*(?:import\s|from\s+\S+\s+import\s|using\s|#include\b|\*|/\*|//|#)"
+)
+
+
+def _is_non_usage_line(line: str) -> bool:
+    """Whether ``line`` is an import or a comment/Javadoc line, not a usage."""
+    return _NON_USAGE_LINE_RE.match(line) is not None
+
+
+_COMMENT_SUBJECT_RE = re.compile(r"\b(?:comments?|docstrings?|javadoc|jsdoc|doc\s+comments?)\b", re.I)
+_IMPORT_LINE_RE = re.compile(r"\s*(?:import\s|from\s+\S+\s+import\s|using\s|#include\b)")
+
+
+def _finding_is_about_comment(finding: Finding, line: str, snippets: Sequence[str]) -> bool:
+    """Whether ``finding`` is a claim about the comment ``line`` it is anchored on.
+
+    True when ``line`` is a comment or docstring line (not an import)
+    that holds one of the finding's quoted ``snippets``, and the title
+    says comment/docstring or the title or body quotes the comment's own
+    text. A body that only mentions a comment in passing does not count.
+    """
+    if _IMPORT_LINE_RE.match(line) or not _is_non_usage_line(line):
+        return False
+    if not any(snippet in line for snippet in snippets):
+        return False
+    text = f"{finding.title or ''} {finding.body or ''}"
+    if _COMMENT_SUBJECT_RE.search(finding.title or ""):
+        return True
+    prose = re.sub(r"^\s*(?:/\*+|\*+/?|//+|#+)\s*", "", line).strip().lower()
+    return len(prose) >= 12 and prose in text.replace("`", "").lower()
+
+
 def _nearest_snippet_match(
     lines: Sequence[str], snippet: str, center: int, window: int
 ) -> tuple[int | None, bool]:
@@ -974,13 +1015,17 @@ def _nearest_snippet_match(
 
     Returns ``(line, ambiguous)``: the nearest match, ties going to the
     earliest line, and whether two or more matches share that nearest
-    distance — a tie the finding's own text cannot break.
+    distance — a tie the finding's own text cannot break. Import and
+    comment lines lose to a code line: they are matched only when no code
+    line in the window holds the snippet.
     """
     matches = [
         number
         for number in range(1, len(lines) + 1)
         if snippet in lines[number - 1] and abs(number - center) <= window
     ]
+    code = [n for n in matches if not _is_non_usage_line(lines[n - 1])]
+    matches = code or matches
     if not matches:
         return None, False
     nearest = min(matches, key=lambda number: (abs(number - center), number))
@@ -988,15 +1033,22 @@ def _nearest_snippet_match(
     return nearest, tie > 1
 
 
+def _unique_file_match(lines: Sequence[str], snippets: Sequence[str]) -> int | None:
+    """Line of the first snippet that occurs on exactly one line of the file.
+
+    Returns ``None`` when no snippet occurs, or the first snippet that does
+    occur is shared by several lines.
+    """
+    for snippet in snippets:
+        matches = [n for n, line in enumerate(lines, 1) if snippet in line]
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    return None
+
+
 def _mark_anchor_unverified(finding: Finding) -> Finding:
-    """Stamp ``anchor_unverified`` and lower confidence in one ``replace``."""
-    return replace(
-        finding,
-        anchor_unverified=True,
-        confidence=max(
-            0.0, float(finding.confidence or 0.0) - ANCHOR_UNVERIFIED_CONFIDENCE_HIT
-        ),
-    )
+    """Stamp ``anchor_unverified`` and leave the confidence untouched."""
+    return replace(finding, anchor_unverified=True)
 
 
 def apply_anchor_snap(
@@ -1030,12 +1082,14 @@ def apply_anchor_snap(
     matched line's hunk (when the diff supplies one) shares no evidence
     token with the claim, the anchor is NOT moved — the pass refuses to
     guess between siblings — and the finding is marked
-    ``anchor_unverified`` with its confidence lowered by
-    :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT` (a sub-floor result then dies
-    at :func:`apply_quality_gate` naturally). The same mark-and-lower
+    ``anchor_unverified`` with its confidence unchanged. The same mark
     applies when the file reads but no snippet occurs anywhere in it, and
     when a finding sits file-level (line 0) with no snippet parseable at
     all: in each case the claim quotes code the head file cannot show.
+    A file-level (line 0) finding whose snippet occurs only outside the
+    window anchors on the snippet's single whole-file occurrence; when that
+    occurrence is not unique it is marked ``anchor_unverified`` instead, so
+    a line-level claim is never left silently at line 0.
 
     Otherwise the anchor moves to the matched line only when the move is
     real — the finding is file-level, or the match lies beyond
@@ -1081,6 +1135,13 @@ def apply_anchor_snap(
             # hold at all — or a file-level claim with no snippet to look
             # for at all — is unverified quoted evidence.
             unverified = (f.line <= 0) if not snippets else not present
+            if f.line <= 0 and present:
+                far = _unique_file_match(lines, snippets)
+                if far is None:
+                    result.append(_mark_anchor_unverified(f))
+                else:
+                    result.append(replace(f, line=far))
+                continue
             result.append(_mark_anchor_unverified(f) if unverified else f)
             continue
         if ambiguous:
@@ -1090,7 +1151,19 @@ def apply_anchor_snap(
             if hunk is None or not (_hunk_tokens(hunk) & evidence):
                 result.append(_mark_anchor_unverified(f))
                 continue
-        if f.line <= 0 or abs(target - f.line) > DEFAULT_LINE_TOLERANCE:
+        if (
+            0 < f.line <= len(lines)
+            and _finding_is_about_comment(f, lines[f.line - 1], snippets)
+        ):
+            result.append(f)
+            continue
+        on_non_usage = (
+            target != f.line
+            and 0 < f.line <= len(lines)
+            and _is_non_usage_line(lines[f.line - 1])
+            and not _is_non_usage_line(lines[target - 1])
+        )
+        if f.line <= 0 or on_non_usage or abs(target - f.line) > DEFAULT_LINE_TOLERANCE:
             result.append(replace(f, line=target))
         else:
             result.append(f)
@@ -1181,16 +1254,18 @@ def is_duplicate_of_existing(
     end. A single-line thread is measured exactly as before.
 
     A ``resolved`` or ``outdated`` thread never matches (issue #73): only an
-    open, current thread suppresses a finding. A forge that cannot report
-    either state reports ``False``, which keeps the thread eligible exactly
-    as before the fields existed.
+    open, current thread suppresses a finding — or a won't-fix one
+    (``Thread.wont_fix``, an Azure ``wontFix`` / ``byDesign`` status or an
+    explicit human "won't fix"), which keeps suppressing whatever its state.
+    A forge that cannot report either state reports ``False``, which keeps
+    the thread eligible exactly as before the fields existed.
     """
     finding_tokens = _tokens(f"{finding.title} {finding.body}")
     if not finding_tokens:
         return False
 
     for t in threads:
-        if t.resolved or t.outdated:
+        if t.lapsed:
             continue
         if _duplicate_matches_thread(
             finding, t, finding_tokens,
@@ -1300,6 +1375,8 @@ def apply_settled_thread_suppression(
     one is skipped, because "resolved" says the reviewers closed the thread —
     often for an unrelated sub-issue while the code it flagged is unchanged —
     and re-posting the finding is then the honest output, not a re-litigation.
+    A won't-fix thread (``Thread.wont_fix``) is the exception and still
+    settles: the reviewers closed it as a decision to leave the code alone.
     A thread with no path — a general, unanchored PR comment, near-universal
     on Bitbucket Server — cannot be "same path" as any finding and is skipped
     rather than compared. Order-preserving, pure, and already-dropped findings
@@ -1317,7 +1394,7 @@ def apply_settled_thread_suppression(
         author = ""
         if finding_tokens:
             for t in threads:
-                if t.resolved or t.outdated:
+                if t.lapsed:
                     continue
                 if t.path is None:
                     continue
@@ -1334,6 +1411,47 @@ def apply_settled_thread_suppression(
     return result
 
 
+def open_thread_for_drop(
+    finding: Finding,
+    threads: Sequence[Thread],
+    line_window: int = 30,
+    min_shared_tokens: int = 2,
+    min_shared_for_distant: int = 4,
+    min_shared_settled: int = SETTLED_MIN_SHARED_TOKENS,
+) -> Thread | None:
+    """The open, current thread a thread gate suppressed this finding against.
+
+    The open-thread twin of :func:`previously_discussed_thread`: the first
+    thread that matches under :func:`apply_thread_dedup`'s tiered rule, else
+    under :func:`apply_settled_thread_suppression`'s same-path rule, so the
+    summary and the run record can name the thread behind each
+    ``duplicate of existing thread`` or ``settled in thread`` drop (issue
+    #73). Returns ``None`` when no open thread matches.
+    """
+    finding_tokens = _tokens(f"{finding.title} {finding.body}")
+    if not finding_tokens:
+        return None
+    for t in threads:
+        if t.lapsed:
+            continue
+        if _duplicate_matches_thread(
+            finding, t, finding_tokens,
+            line_window=line_window,
+            min_shared_tokens=min_shared_tokens,
+            min_shared_for_distant=min_shared_for_distant,
+        ):
+            return t
+    for t in threads:
+        if t.lapsed or t.path is None:
+            continue
+        if _normalised_path(t.path) != _normalised_path(finding.file):
+            continue
+        body_tokens = _tokens(t.body_snippet or "")
+        if len(finding_tokens & body_tokens) >= min_shared_settled:
+            return t
+    return None
+
+
 def previously_discussed_thread(
     finding: Finding,
     threads: Sequence[Thread],
@@ -1345,7 +1463,8 @@ def previously_discussed_thread(
     """The resolved-or-outdated thread that already raised this finding's subject.
 
     The mirror of both suppression gates run against CLOSED threads only
-    (issue #73): a finding that survives :func:`apply_thread_dedup` and
+    (issue #73), skipping a won't-fix thread, which the gates still match:
+    a finding that survives :func:`apply_thread_dedup` and
     :func:`apply_settled_thread_suppression` matched no open, current thread,
     but it can still restate a subject a resolved or outdated thread raised —
     that fact is worth a previously-raised note on the posted finding, not a
@@ -1357,7 +1476,7 @@ def previously_discussed_thread(
     if not finding_tokens:
         return None
     for t in threads:
-        if not (t.resolved or t.outdated):
+        if not t.lapsed:
             continue
         if _duplicate_matches_thread(
             finding, t, finding_tokens,
@@ -2236,80 +2355,43 @@ def apply_hedge_gate(
     return out
 
 
-# Rule-scope vocabulary (#75): which paths one ``scope:`` token of a rules
-# section covers. Matched against the path's BASENAME, case-sensitively, with
-# fnmatch. A token absent from every table here covers every path — it is
-# inert, because an unknown word must not silently suppress rules — and so
-# does the explicit ``comments`` token.
-_JAVA_SCOPE_GLOBS: tuple[str, ...] = ("*.java", "*.kt", "pom.xml", "build.gradle*")
-_TS_SCOPE_GLOBS: tuple[str, ...] = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs")
-_DOCS_SCOPE_GLOBS: tuple[str, ...] = ("*.md", "*.mdx", "*.rst", "*.txt")
-_SCOPE_BASENAME_GLOBS: Mapping[str, tuple[str, ...]] = {
-    "java": _JAVA_SCOPE_GLOBS,
-    "jvm": _JAVA_SCOPE_GLOBS,
-    "python": ("*.py",),
-    "typescript": _TS_SCOPE_GLOBS,
-    "javascript": _TS_SCOPE_GLOBS,
-    "ts": _TS_SCOPE_GLOBS,
-    "js": _TS_SCOPE_GLOBS,
-    "docs": _DOCS_SCOPE_GLOBS,
-    "markdown": _DOCS_SCOPE_GLOBS,
-}
-_SPEC_SCOPE_TOKENS: frozenset[str] = frozenset({"openapi", "specs"})
-_SPEC_SCOPE_SUFFIXES: tuple[str, ...] = (".yaml", ".yml", ".json")
-_SPEC_NAME_MARKS: tuple[str, ...] = ("openapi", "swagger")
-_SPEC_SCOPE_DIRS: frozenset[str] = frozenset({"spec", "specs", "openapi", "swagger"})
-
-
-def _scope_token_covers(token: str, path: str) -> bool:
-    """True when one ``scope:`` token covers a finding's ``path`` (#75).
-
-    ``token`` is casefolded as :func:`prxref.rules.parse_rule_sections`
-    returns it; ``path`` is a diff path, POSIX and relative to the repository
-    root. Every token outside the vocabulary returns ``True`` — inert, never
-    filtering — and so does ``comments``.
-    """
-    base = path.rsplit("/", 1)[-1].casefold()
-    globs = _SCOPE_BASENAME_GLOBS.get(token)
-    if globs is not None:
-        return any(fnmatch.fnmatchcase(base, pattern) for pattern in globs)
-    if token in _SPEC_SCOPE_TOKENS:
-        if not any(base.endswith(suffix) for suffix in _SPEC_SCOPE_SUFFIXES):
-            return False
-        directories = (part.casefold() for part in path.split("/")[:-1])
-        return any(mark in base for mark in _SPEC_NAME_MARKS) or any(
-            part in _SPEC_SCOPE_DIRS for part in directories
-        )
-    return True
+def _label_names(label: str, key: str) -> bool:
+    """True when a casefolded rule ``label`` names ``key`` (a heading or rule line): equal, or its leading words."""
+    if not key or not label or not key.startswith(label):
+        return False
+    return len(key) == len(label) or not key[len(label)].isalnum()
 
 
 def apply_rule_scope_check(
     findings: Sequence[Finding], *, sections: Sequence[RuleSection]
 ) -> tuple[list[Finding], int]:
-    """Clear ``rule`` on a finding no scoped section of the team rules covers (#75).
+    """Clear ``rule`` on a finding whose scoped section does not cover its path (#75).
 
-    A finding's ``rule`` survives only when it names a section of the loaded
-    rules — the label and the section's heading text, both whitespace-collapsed
-    and casefolded, are equal, or the label is the heading's leading words (a
-    model that drops a heading's trailing words still matches; one that cites
-    a single mid-heading word does not) — AND every ``scope:`` token of that
-    section covers the finding's path per :func:`_scope_token_covers`:
-    ``java``/``jvm`` cover ``*.java``, ``*.kt``, ``pom.xml`` and
-    ``build.gradle*``; ``python`` covers ``*.py``; ``typescript``,
-    ``javascript``, ``ts`` and ``js`` cover the TypeScript and JavaScript
-    extensions; ``docs``/``markdown`` cover ``*.md``, ``*.mdx``, ``*.rst``
-    and ``*.txt``; ``openapi``/``specs`` cover ``*.yaml``, ``*.yml`` and
-    ``*.json`` whose basename mentions ``openapi`` or ``swagger`` or that sit
-    under a ``spec``/``specs``/``openapi``/``swagger`` directory; ``comments``
-    covers every path; and a token outside the vocabulary is inert and covers
-    every path too, because an unknown word must not silently suppress rules.
+    A finding's ``rule`` label maps to a scoped section when, both
+    whitespace-collapsed and casefolded, it equals the section's heading
+    text or one of its rule lines (bullets and numbered items), or is their
+    leading words (a model that drops trailing words still maps; one that
+    cites a single mid-heading word does not). The label is cleared to
+    ``None`` only when it maps to at least one section and NO mapped
+    section's scope covers the finding's path per
+    :func:`prxref.rules.scope_covers` — every token of a ``scope:`` line,
+    any noun of a scope inferred from the heading — each token judged by
+    :func:`prxref.rules.scope_token_covers`: ``java``/``jvm`` cover ``*.java``, ``*.kt``,
+    ``pom.xml`` and ``build.gradle*``; ``python`` covers ``*.py``;
+    ``typescript``, ``javascript``, ``ts`` and ``js`` cover the TypeScript
+    and JavaScript extensions; ``docs``/``markdown`` cover ``*.md``,
+    ``*.mdx``, ``*.rst`` and ``*.txt``; ``openapi``/``specs`` cover
+    ``*.yaml``, ``*.yml`` and ``*.json`` whose basename mentions ``openapi``
+    or ``swagger`` or that sit under a ``spec``/``specs``/``openapi``/
+    ``swagger`` directory; ``comments`` covers every path; and a token
+    outside the vocabulary is inert and covers every path too.
 
-    Every other label — one no section carries (an invented name, or a rule
-    from a section that declares no scope once any section does), or a
-    matching section whose tokens do not cover the file — is cleared to
-    ``None``. The finding itself is never dropped, so it rejoins the ruleless
-    paths downstream: ``apply_rule_grouping`` keys it on its normalized title
-    and ``apply_rule_cap`` caps it by title. Pure and order-preserving:
+    Every other label is kept: one that maps to no scoped section (an
+    unknown name, or a rule from an unscoped section), and any label on a
+    finding with an empty path, which cannot be judged. The finding itself
+    is never dropped, so a cleared one rejoins the ruleless paths
+    downstream: ``apply_rule_grouping`` keys it on its normalized title and
+    ``apply_rule_cap`` caps it by title. Pure and order-preserving:
     already-dropped findings and ruleless ones pass through untouched, and
     only ``rule`` moves. Returns the findings and how many labels were
     cleared.
@@ -2318,8 +2400,13 @@ def apply_rule_scope_check(
     from the loaded rules files; the empty tuple clears nothing, and the
     orchestrator does not call this at all in that case.
     """
+    from .rules import scope_covers
+
     scoped = tuple(
-        (" ".join(section.name.split()).casefold(), tuple(section.scopes))
+        (
+            tuple(" ".join(key.split()).casefold() for key in (section.name, *section.items)),
+            (tuple(section.scopes), section.any_scope),
+        )
         for section in sections
     )
     if not scoped:
@@ -2330,15 +2417,100 @@ def apply_rule_scope_check(
         if finding.drop_reason is not None or not isinstance(finding.rule, str) or not finding.rule:
             out.append(finding)
             continue
-        label = " ".join(finding.rule.split()).casefold()
         path = finding.file if isinstance(finding.file, str) else ""
-        covered = any(
-            (label == name or name.startswith(f"{label} "))
-            and all(_scope_token_covers(token, path) for token in tokens)
-            for name, tokens in scoped
+        label = " ".join(finding.rule.split()).casefold()
+        mapped = [
+            tokens for keys, tokens in scoped if any(_label_names(label, key) for key in keys)
+        ]
+        misses = bool(path) and bool(mapped) and not any(
+            scope_covers(tokens, path, any_token=any_scope) for tokens, any_scope in mapped
         )
-        out.append(finding if covered else replace(finding, rule=None))
-        cleared += 0 if covered else 1
+        out.append(replace(finding, rule=None) if misses else finding)
+        cleared += 1 if misses else 0
+    return out, cleared
+
+
+def _category_mismatch(finding: Finding, label: str, keyed: Sequence[tuple[tuple[str, ...], RuleSection]]) -> bool:
+    """True when the rule ``label`` names is of a different claim kind than ``finding`` (#75)."""
+    from .rules import claim_kinds
+
+    rule_kinds: set[str] = set()
+    style_headings = True
+    mapped = False
+    for keys, section in keyed:
+        hits = [key for key in keys if _label_names(label, key)]
+        if not hits:
+            continue
+        mapped = True
+        section_kinds = claim_kinds(section.name)
+        style_headings = style_headings and section_kinds == {"style"}
+        rule_kinds |= section_kinds
+        for key in hits:
+            rule_kinds |= claim_kinds(key)
+    if not mapped:
+        return False
+    finding_kinds = claim_kinds(finding.title)
+    if rule_kinds and finding_kinds:
+        return not rule_kinds & finding_kinds
+    severity = finding.severity.strip().lower() if isinstance(finding.severity, str) else ""
+    return not finding_kinds and style_headings and rule_kinds == {"style"} and severity == "error"
+
+
+def apply_rule_category_check(
+    findings: Sequence[Finding], *, sections: Sequence[RuleSection]
+) -> tuple[list[Finding], int]:
+    """Clear ``rule`` on a finding whose cited rule names another kind of defect (#75).
+
+    The claim-category half of the applicability check, beside the path half
+    in :func:`apply_rule_scope_check`. ``sections`` is every rule section of
+    the loaded rules files, scoped or not, as
+    :func:`prxref.rules.parse_rule_index` returns them. A finding's ``rule``
+    label maps to a rule the same way the path half maps it: both
+    whitespace-collapsed and casefolded, the label equals a section's
+    heading text or one of its rule lines, or is their leading words. A
+    label that maps to nothing is kept (an unknown name is never judged).
+
+    The rule's kinds are :func:`prxref.rules.claim_kinds` of every mapped
+    heading and rule line plus each mapped section's heading; the finding's
+    kinds are those of its title alone. The label is cleared to ``None`` on
+    positive evidence only, either of:
+
+    - both sides name a kind and share none, for example a ``Stale
+      duplicate Javadoc`` finding (``docs``) citing ``Remove fields never
+      read`` (``unused``);
+    - every mapped section's heading, and the rule as a whole, names only
+      the ``style`` kind, the finding's severity is ``error`` and its title
+      names no kind: a
+      correctness defect is not covered by a style or naming rule.
+
+    Every other label is kept, including any whose rule or title names no
+    kind, so an ambiguous case never loses its label. The finding itself is
+    never dropped, and a cleared one rejoins the ruleless paths downstream
+    (grouped and capped by normalized title). Pure and order-preserving:
+    already-dropped, ruleless and untitled findings pass through as the same
+    objects, and only ``rule`` moves. Returns the findings and how many
+    labels were cleared; empty ``sections`` clears nothing.
+    """
+    keyed = tuple(
+        (tuple(" ".join(key.split()).casefold() for key in (section.name, *section.items)), section)
+        for section in sections
+    )
+    if not keyed:
+        return list(findings), 0
+    out: list[Finding] = []
+    cleared = 0
+    for finding in findings:
+        if (
+            finding.drop_reason is not None
+            or not isinstance(finding.rule, str) or not finding.rule
+            or not isinstance(finding.title, str) or not finding.title.strip()
+        ):
+            out.append(finding)
+            continue
+        label = " ".join(finding.rule.split()).casefold()
+        clear = bool(label) and _category_mismatch(finding, label, keyed)
+        out.append(replace(finding, rule=None) if clear else finding)
+        cleared += 1 if clear else 0
     return out, cleared
 
 
@@ -2576,12 +2748,18 @@ def _own_locations(finding: Finding) -> list[tuple[str, int]]:
     ]
 
 
-def _also_at_paragraph(locations: Sequence[tuple[str, int]]) -> str:
+def _also_at_paragraph(
+    locations: Sequence[tuple[str, int]], label: str = "Also at"
+) -> str:
     """The ``Also at:`` paragraph for ``locations``, capped at five names.
 
+    ``label`` is ``Also at`` for corroborated sites and ``Also at
+    (unverified)`` for the ones :func:`apply_location_verification`
+    could not corroborate.
+
     The shared writer of :func:`_rule_cap_body` and of the rebuild
-    :func:`apply_location_verification` does after dropping an
-    unverifiable site: the first :data:`RULE_CAP_LISTED_LOCATIONS`
+    :func:`apply_location_verification` does after moving an
+    unverifiable site out of the verified list: the first :data:`RULE_CAP_LISTED_LOCATIONS`
     locations as backticked ``<file>:<line>`` (``<file>`` alone for a
     file-level one), comma-separated, then `` (+<k> more)`` when ``k``
     are not named.
@@ -2591,7 +2769,7 @@ def _also_at_paragraph(locations: Sequence[tuple[str, int]]) -> str:
         for file, line in locations[:RULE_CAP_LISTED_LOCATIONS]
     )
     unlisted = len(locations) - RULE_CAP_LISTED_LOCATIONS
-    return f"Also at: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
+    return f"{label}: {listed}" + (f" (+{unlisted} more)" if unlisted > 0 else "")
 
 
 def _rule_cap_body(
@@ -2752,16 +2930,19 @@ def rule_cap_counts(
     return rows
 
 
-_ALSO_AT_PARAGRAPH_RE = re.compile(r"(?:^|\n\n)Also at: .*\Z", re.DOTALL)
+_ALSO_AT_PARAGRAPH_RE = re.compile(
+    r"(?:^|\n\n)Also at(?: \(unverified\))?: .*\Z", re.DOTALL
+)
 
 
 def _strip_also_at(body: str) -> str:
-    """The body without its trailing ``Also at:`` paragraph, if it has one.
+    """The body without its trailing ``Also at:`` paragraphs, if it has any.
 
-    Only the last paragraph is read, because both writers
-    (:func:`_fold_group`, :func:`_rule_cap_body`) append it there and the
-    cap replaces rather than repeats. A body with no such paragraph comes
-    back unchanged.
+    The writers (:func:`_fold_group`, :func:`_rule_cap_body`, and the
+    ``Also at (unverified):`` paragraph :func:`apply_location_verification`
+    appends after them) put them last, and the cap replaces rather than
+    repeats, so everything from the first one onward is cut. A body with
+    no such paragraph comes back unchanged.
     """
     match = _ALSO_AT_PARAGRAPH_RE.search(body)
     return body[: match.start()] if match else body
@@ -2797,7 +2978,9 @@ def apply_location_verification(
     snippets (:func:`_quoted_snippets` — the ``Also at:`` paragraph's own
     backticked ``<file>:<line>`` spans are path citations, never
     evidence) within ``window`` of EACH listed site: a site no snippet
-    corroborates is dropped from ``locations`` and from the paragraph.
+    corroborates leaves ``locations`` and the ``Also at:`` paragraph and is
+    listed instead under a separate last paragraph, ``Also at
+    (unverified):``, so the reader still sees it.
 
     A site whose file cannot be read is left untouched — no head file
     means no verdict — and a representative with no snippet parseable
@@ -2805,16 +2988,18 @@ def apply_location_verification(
     file-level site (line 0) is kept when any snippet occurs anywhere in
     its file: file-level claims its file, not a line.
 
-    When at least one site drops, the trailing ``Also at:`` paragraph is
-    rebuilt from the sites that stayed, through the shared
+    When at least one site is uncorroborated, the trailing ``Also at:``
+    paragraph is rebuilt from the sites that stayed, followed by the
+    ``Also at (unverified):`` paragraph, through the shared
     :func:`_also_at_paragraph` writer (at most five named, then
     ``(+<k> more)``; a group paragraph the cap shape now shares with the
     cap). A representative that keeps every site is returned as the SAME
     object, so a caller can count rewrites by identity; the result has
     the input's length and order. ``read=None`` returns
     ``list(findings)`` unchanged. Nothing is dropped and no
-    ``drop_reason`` is written: the folded members' own reasons stay, and
-    only the representative's list shrinks.
+    ``drop_reason`` is written: the folded members' own reasons stay.
+    The rewrite is idempotent: a second run finds every remaining
+    ``locations`` site corroborated and returns the same objects.
     """
     if read is None:
         return list(findings)
@@ -2826,7 +3011,7 @@ def apply_location_verification(
             continue
         snippets = _quoted_snippets(f.title or "", f.body or "")
         kept: list[tuple[str, int]] = []
-        dropped = False
+        unverified: list[tuple[str, int]] = []
         for path, line in locations:
             content = read(path)
             lines = content.splitlines() if isinstance(content, str) else None
@@ -2835,13 +3020,15 @@ def apply_location_verification(
             ):
                 kept.append((path, line))
             else:
-                dropped = True
-        if not dropped:
+                unverified.append((path, line))
+        if not unverified:
             result.append(f)
             continue
         body = _strip_also_at(f.body or "")
+        paragraphs = [_also_at_paragraph(unverified, "Also at (unverified)")]
         if kept:
-            paragraph = _also_at_paragraph(kept)
+            paragraphs.insert(0, _also_at_paragraph(kept))
+        for paragraph in paragraphs:
             body = f"{body.rstrip()}\n\n{paragraph}" if body.strip() else paragraph
         result.append(replace(f, locations=tuple(kept), body=body.rstrip()))
     return result
@@ -2997,33 +3184,327 @@ def apply_spec_grounding(
     ]
 
 
-def apply_evidence_verdicts(
-    findings: Sequence[Finding], *, evidence_active: bool,
-) -> list[Finding]:
-    """Downgrade a finding the execution evidence contradicts to ``warning`` (#69).
+EVIDENCE_DROP_PREFIX: str = "contradicted by execution evidence: "
 
-    ``evidence_active`` says whether any review unit's prompt carried
-    execution evidence, so a finding's ``evidence`` label — the word
-    ``"contradicts"``, the only value :func:`prxref.triage.normalize_evidence`
-    keeps — can exist at all. On such a run, a labelled finding is
-    RELABELLED ``warning``, never dropped: the model judged the
-    contradiction, and this pass only enforces the ceiling on its
-    severity, so a mislabelled label costs a finding its severity, not its
-    existence. Unlabelled findings and already-dropped findings pass
-    through untouched; identity when no evidence was shown.
+_EVIDENCE_HEADER_LINE_RE = re.compile(
+    r"^\s*(?:<\s*)?([A-Za-z][A-Za-z0-9-]*[A-Za-z0-9])\s*:[ \t]*\S"
+)
+_EVIDENCE_MISSING_RE = re.compile(
+    r"(?<![\w-])(?:missing|absent|lacks?|lacking|without|omits?|omitted|no|"
+    r"not\s+(?:set|sent|present|returned|served|included)|"
+    r"(?:does\s+not|doesn't|do\s+not|don't|never)\s+(?:set|send|return|include)s?)(?![\w-])",
+    re.IGNORECASE,
+)
+_EVIDENCE_HEADER_WORD_RE = re.compile(r"\bheaders?\b", re.IGNORECASE)
+_EVIDENCE_MISSING_WINDOW = 40
+_EVIDENCE_WORD_RE = re.compile(r"[^\s\"'`(),;:\[\]<>]+")
+_EVIDENCE_SCOPE_WORDS = frozenset({
+    "in", "on", "of", "for", "from", "to", "at", "within", "inside", "under",
+    "by", "when", "across",
+})
+_EVIDENCE_DIRECTIVE_WORDS = frozenset({
+    "directive", "directives", "value", "values", "attribute", "attributes",
+    "parameter", "parameters", "flag", "flags", "option", "options", "token",
+    "tokens", "setting", "settings",
+})
+_EVIDENCE_SUBJECT_FILLER = frozenset({
+    "header", "headers", "field", "response", "http", "is", "are", "was",
+    "were", "be", "been", "being", "still", "currently", "also", "entirely",
+    "completely", "itself",
+})
+_CSP_TOKENS = (
+    r"[a-z]+(?:-[a-z]+)*-src(?:-elem|-attr)?", "frame-ancestors",
+    "upgrade-insecure-requests", "block-all-mixed-content", "report-uri",
+    "report-to", "sandbox", "base-uri", "form-action", "trusted-types",
+    "require-trusted-types-for", "unsafe-inline", "unsafe-eval",
+    "strict-dynamic", "nonce",
+)
+_PERMISSIONS_TOKENS = (
+    "camera", "microphone", "geolocation", "payment", "usb", "fullscreen",
+    "autoplay", "accelerometer", "gyroscope", "magnetometer",
+    "interest-cohort", "browsing-topics", "display-capture",
+    "clipboard-read", "clipboard-write", "midi", "serial", "bluetooth",
+)
+_EVIDENCE_HEADER_VOCAB: dict[str, tuple[str, ...]] = {
+    "cache-control": (
+        "no-store", "no-cache", "max-age", "s-maxage", "private", "public",
+        "immutable", "must-revalidate", "proxy-revalidate", "no-transform",
+        "stale-while-revalidate", "stale-if-error",
+    ),
+    "strict-transport-security": (
+        "max-age", "includesubdomains", "subdomains", "preload",
+    ),
+    "content-security-policy": _CSP_TOKENS,
+    "content-security-policy-report-only": _CSP_TOKENS,
+    "x-frame-options": ("deny", "sameorigin", "allow-from"),
+    "x-content-type-options": ("nosniff",),
+    "referrer-policy": (
+        "no-referrer", "no-referrer-when-downgrade", "origin",
+        "origin-when-cross-origin", "same-origin", "strict-origin",
+        "strict-origin-when-cross-origin", "unsafe-url",
+    ),
+    "permissions-policy": _PERMISSIONS_TOKENS,
+    "feature-policy": _PERMISSIONS_TOKENS,
+    "set-cookie": ("secure", "httponly", "samesite", "partitioned", "max-age"),
+}
+_EVIDENCE_VOCAB_RES = {
+    header: re.compile(rf"(?<![\w-])(?:{'|'.join(tokens)})(?![\w-])", re.IGNORECASE)
+    for header, tokens in _EVIDENCE_HEADER_VOCAB.items()
+}
+_EVIDENCE_VALUE_SHAPED_RE = re.compile(r"[=\d'\"*/-]")
+_EVIDENCE_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;,\n]|\b(?:but|while|whereas|although|though)\b", re.IGNORECASE,
+)
+_EVIDENCE_HEADER_TOKEN_RE = re.compile(r"(?<![\w-])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+(?![\w-])")
+_EVIDENCE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\"<>()\[\]]+")
+_EVIDENCE_RESOURCE_RE = re.compile(
+    r"(?<![\w.:/*-])(/[\w.~%@+*-]+(?:/[\w.~%@+*-]*)*)"
+    r"|(?<![\w./-])(\*[\w.*-]*\.[\w-]+)"
+)
+_EVIDENCE_TOKEN_TRIM = "\"'`(),;[]<>"
 
-    Pure and order-preserving, like :func:`apply_spec_grounding`, whose
-    slot in ``orchestrate_review`` it shares: it runs right after that
-    pass and before every other one.
+
+def _present_header_names(output: str) -> set[str]:
+    """Lower-cased names of the filled header field lines in ``output``.
+
+    A line counts only as ``Name: value`` — optionally behind curl's
+    ``< `` response marker — with a non-empty value, so a name that merely
+    appears in prose (``no Cache-Control set``) or an empty field is never
+    presence.
     """
-    if not evidence_active:
+    names: set[str] = set()
+    for line in output.splitlines():
+        match = _EVIDENCE_HEADER_LINE_RE.match(line)
+        if match:
+            names.add(match.group(1).lower())
+    return names
+
+
+def _claims_header_missing(text: str, name: str) -> bool:
+    """True when ``text`` says header ``name`` itself is missing.
+
+    ``name`` must occur as a whole token (case-insensitive), and a missing
+    keyword must sit within a few words of it in the SAME clause (clauses
+    split at ``. ; ,``, a line break, and ``but``/``while``/``although``),
+    with no other hyphenated header-shaped token between the two — so
+    "Cache-Control is set but X-Frame-Options is missing" claims nothing
+    about ``Cache-Control``. The claim must also be about a header: the
+    name is hyphenated (``Cache-Control``) or the text says "header".
+
+    A claim about a missing DIRECTIVE or VALUE of the header is not a
+    claim that the header is missing, so it never counts; vocabulary, not
+    word order, decides which it is (:func:`_names_directive`). Otherwise
+    the keyword is tied to the name in either order, whatever follows:
+
+    - keyword before the name ("missing Cache-Control", "no X header",
+      "lacks a Cache-Control header"): the words between them must not
+      hold a preposition ("in", "on", "for", ...);
+    - name before the keyword ("Cache-Control is not set", "header
+      missing"): the words between them must be filler ("header", "is",
+      ...).
+    """
+    if "-" not in name and not _EVIDENCE_HEADER_WORD_RE.search(text):
+        return False
+    pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])", re.IGNORECASE)
+    if not pattern.search(text) or _names_directive(text, name, pattern):
+        return False
+    for clause in _EVIDENCE_CLAUSE_SPLIT_RE.split(text):
+        for match in pattern.finditer(clause):
+            for keyword in _EVIDENCE_MISSING_RE.finditer(clause):
+                if keyword.end() <= match.start():
+                    gap = clause[keyword.end():match.start()]
+                    allowed = None
+                elif keyword.start() >= match.end():
+                    gap = clause[match.end():keyword.start()]
+                    allowed = _EVIDENCE_SUBJECT_FILLER
+                else:
+                    continue
+                if len(gap) > _EVIDENCE_MISSING_WINDOW:
+                    continue
+                if any(
+                    tok.lower() != name.lower()
+                    for tok in _EVIDENCE_HEADER_TOKEN_RE.findall(gap)
+                ):
+                    continue
+                between = _words(gap)
+                if allowed is None:
+                    if any(w in _EVIDENCE_SCOPE_WORDS for w in between):
+                        continue
+                elif any(w not in allowed for w in between):
+                    continue
+                return True
+    return False
+
+
+def _names_directive(text: str, name: str, pattern: re.Pattern[str]) -> bool:
+    """True when ``text`` is about a directive or value of header ``name``.
+
+    Any one of these, matched case-insensitively and on word boundaries
+    that a hyphen does not break (so ``max-age`` never matches inside
+    ``Access-Control-Max-Age``), anywhere in ``text``:
+
+    - a known directive or value token of ``name``
+      (``_EVIDENCE_HEADER_VOCAB``: ``no-store`` for ``Cache-Control``,
+      ``includeSubDomains`` for ``Strict-Transport-Security``, any
+      ``*-src`` for ``Content-Security-Policy``, ...), scanned with every
+      occurrence of the name itself blanked out;
+    - a noun such as "directive", "value", "attribute" or "flag";
+    - a value fragment right after the name: ``name=value`` always, and
+      ``name: value`` when the value is value-shaped (holds ``=``, a
+      digit, a quote, ``*``, ``/`` or a hyphen) or ends the clause, and
+      is not itself a missing keyword ("Cache-Control: missing").
+    """
+    vocab = _EVIDENCE_VOCAB_RES.get(name.lower())
+    if vocab is not None and vocab.search(pattern.sub(" ", text)):
+        return True
+    if any(w in _EVIDENCE_DIRECTIVE_WORDS for w in _words(text)):
+        return True
+    for clause in _EVIDENCE_CLAUSE_SPLIT_RE.split(text):
+        for match in pattern.finditer(clause):
+            fragment = re.match(r"\s*([:=])\s*([^\s`'\"()\[\]<>]+)(.*)", clause[match.end():])
+            if fragment is None:
+                continue
+            sign, value, rest = fragment.groups()
+            if _EVIDENCE_MISSING_RE.match(value) or value.lower() in {"not", "none", "never"}:
+                continue
+            if sign == "=" or _EVIDENCE_VALUE_SHAPED_RE.search(value) or not _words(rest):
+                return True
+    return False
+
+
+def _words(text: str) -> list[str]:
+    """The lower-cased words of ``text``, punctuation and quotes trimmed."""
+    return [w.lower() for w in _EVIDENCE_WORD_RE.findall(text)]
+
+
+def _url_path(url: str) -> str:
+    """The path of ``url``, or ``""`` when it has none past the host."""
+    rest = url.split("://", 1)[1]
+    slash = rest.find("/")
+    if slash < 0:
+        return ""
+    return rest[slash:].split("?", 1)[0].split("#", 1)[0]
+
+
+def _finding_resources(text: str) -> list[str]:
+    """The URL paths, URLs and globs a finding's text names.
+
+    Repository file paths are deliberately not resources: a finding cites
+    the config file it reviews, which a probe of the served resource never
+    names.
+    """
+    found: list[str] = []
+    for url in _EVIDENCE_URL_RE.findall(text):
+        path = _url_path(url.rstrip(".,;:"))
+        if path and path != "/":
+            found.append(path)
+    scrubbed = _EVIDENCE_URL_RE.sub(" ", text)
+    for match in _EVIDENCE_RESOURCE_RE.finditer(scrubbed):
+        token = (match.group(1) or match.group(2)).rstrip(".,;:")
+        if token and token != "/":
+            found.append(token)
+    return found
+
+
+def _item_resources(item) -> list[str]:
+    """Every token of an item's command and output, URLs reduced to their path."""
+    tokens: list[str] = []
+    for raw in f"{item.command}\n{item.output}".split():
+        token = raw.strip(_EVIDENCE_TOKEN_TRIM)
+        if "://" in token:
+            token = _url_path(token)
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _resource_named(resource: str, tokens: Sequence[str]) -> bool:
+    """True when one of ``tokens`` names ``resource`` (or, for a glob, fits it)."""
+    if "*" in resource:
+        tail = "*/" + resource.lstrip("/*") if not resource.startswith("*") else resource
+        return any(
+            fnmatch.fnmatchcase(t, resource) or fnmatch.fnmatchcase(t, tail)
+            for t in tokens
+        )
+    stem = resource.rstrip("/")
+    return any(t == resource or t == stem or t.startswith(stem + "/") for t in tokens)
+
+
+def apply_evidence_drops(
+    findings: Sequence[Finding], evidence, *, pr_paths: Iterable[str] = (),
+) -> list[Finding]:
+    """Drop a header claim an exit-0 evidence item contradicts (#69, OD11).
+
+    ``evidence`` is the loaded :class:`prxref.evidence.EvidenceBundle`
+    (duck-typed: ``active``, ``items`` and ``unit_items()``), ``None`` when
+    none was configured; ``pr_paths`` is every path of the PR's diff. A
+    finding is dropped as ``contradicted by execution evidence: <cmd>``
+    only when ONE item satisfies all of:
+
+    - its exit code is 0 (a failing run settles nothing, and neither does
+      one whose exit status is unknown: ``exit_code`` is ``None``);
+    - its output holds a filled header field line, ``Name: value`` (curl's
+      ``< `` marker allowed, the name case-insensitive), whose name the
+      finding's title or body claims missing: a missing keyword (missing,
+      absent, lacks, without, no, not set, ...) within a few words of the
+      name, and the name hyphenated or the text saying "header";
+    - when the finding names a URL path, a URL or a glob, the item's
+      command or output names that resource (a glob must cover a token
+      of it); when it names none, the item's command probes no specific
+      resource either (no URL path past ``/``, no ``/path`` and no glob —
+      a probe of ``/index.html`` says nothing about the font files a
+      finding means) and the item reaches the finding's unit — its paths
+      match the finding's file, or they match no PR path at all (a global
+      item every chunk prompt carries).
+
+    A claim that a DIRECTIVE or VALUE of a present header is missing
+    ("Strict-Transport-Security lacks includeSubDomains") is not a claim
+    the header is missing, so a probe showing the header never drops it.
+    Vocabulary decides: a known directive token of that header, a
+    directive noun or a ``name: value`` fragment anywhere in the title or
+    body keeps the finding; without one, a missing claim drops whatever
+    word follows the name ("Missing X-Frame-Options allows clickjacking").
+
+    Conservative by construction: nothing is relabelled or downgraded, the
+    model's ``evidence`` label is never read, and a deterministic finding
+    (:func:`prxref.heuristics.is_deterministic`) or one that already has a
+    ``drop_reason`` passes through untouched. Pure, 1:1 and
+    order-preserving, so ``sweep_start`` still marks the boundary; the
+    identity when ``evidence`` is ``None`` or inactive.
+    """
+    if evidence is None or not evidence.active:
         return list(findings)
-    return [
-        replace(f, severity="warning")
-        if f.drop_reason is None and f.evidence == "contradicts"
-        else f
-        for f in findings
-    ]
+    passing = [item for item in evidence.items if item.exit_code == 0]
+    present = {id(item): _present_header_names(item.output) for item in passing}
+    candidates = [item for item in passing if present[id(item)]]
+    if not candidates:
+        return list(findings)
+    global_ids = {id(item) for item in evidence.unit_items(tuple(pr_paths))[1]}
+    tokens = {id(item): _item_resources(item) for item in candidates}
+    probed = {id(item): _finding_resources(item.command) for item in candidates}
+    out: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None or heuristics.is_deterministic(f):
+            out.append(f)
+            continue
+        text = f"{f.title}\n{f.body}"
+        resources = _finding_resources(text)
+        own_ids = (
+            {id(item) for item in evidence.unit_items((f.file,))[0]} if not resources else set()
+        )
+        hit = None
+        for item in candidates:
+            if not any(_claims_header_missing(text, name) for name in present[id(item)]):
+                continue
+            if resources:
+                if not any(_resource_named(r, tokens[id(item)]) for r in resources):
+                    continue
+            elif probed[id(item)] or (id(item) not in own_ids and id(item) not in global_ids):
+                continue
+            hit = item
+            break
+        out.append(replace(f, drop_reason=f"{EVIDENCE_DROP_PREFIX}{hit.command}") if hit else f)
+    return out
 
 
 EXAMPLE_ECHO_PREFIX: str = "echoes the prompt's example: "

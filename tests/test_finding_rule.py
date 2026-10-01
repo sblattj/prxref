@@ -138,16 +138,14 @@ class TestFindingRuleField:
         assert names == [
             *BASE_FIELDS,
             "rule", "locations", "suggestion", "suggestion_end_line",
-            "previous_thread", "anchor_unverified", "evidence",
+            "previous_thread", "anchor_unverified",
             "id", "anchor_block", "id_reused_from",
         ]
         assert Finding("a.py", 1, "error", 0.9, "t", "b").rule is None
-        # Issue #73's previously-raised note trails everything but #69's
-        # evidence verdict, which is last.
+        # Issue #73's previously-raised note trails everything.
         assert Finding("a.py", 1, "error", 0.9, "t", "b").previous_thread is None
         # Issue #74's anchor-snap mark trails even that.
         assert Finding("a.py", 1, "error", 0.9, "t", "b").anchor_unverified is False
-        assert Finding("a.py", 1, "error", 0.9, "t", "b").evidence is None
         # Issue #71's stable-id fields trail everything: null until the
         # id pass stamps them.
         f = Finding("a.py", 1, "error", 0.9, "t", "b")

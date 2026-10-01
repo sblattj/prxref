@@ -228,6 +228,13 @@ process by the same code `prxref review` runs, as a replay with
   `PRXREF_TICKET_CONTEXT_FILE` and `PRXREF_SPEC_SOURCES` never reach a case.
 - **No threads.** The PR's existing discussion is hidden from the prompt and
   from the thread-dedup passes, as with `--no-threads`.
+- **The default-on features pinned off.** The CI wiring check
+  (`PRXREF_CI_WIRING`), the routing probe (`PRXREF_ROUTING_PROBE`) and
+  standards discovery (`PRXREF_CONTEXT_STANDARDS_GLOBS`) are on by default
+  for `prxref review`, and every case runs with them off, whatever the
+  environment or the config file says, so a baseline stays comparable
+  across releases and machines. `run.json`'s `config` records the pinned
+  values.
 - **A diff-file case** contacts no forge. It has no threads, and no file
   context unless it has a `repo_dir`, which serves its chunk context
   (dependency versions, definitions). A `git format-patch` file supplies the
@@ -341,7 +348,7 @@ prxref-eval/                        --out
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
 | `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
-| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads` |
+| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads`, `routing_probe`, `ci_wiring` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
 only under `prompts.prompt_templates`. `prompt_templates`, `sampling`,
@@ -350,7 +357,11 @@ order, whose record's verdict is not `Error`. They are `null` when there is
 none, and `review_rules`, `scoped_rules` and `prompt_templates` are `null`
 when their input is off.
 
-**No credential is ever written.** `config` is an allowlist of the twenty-three
+`config.ci_wiring`, `config.routing_probe` and `config.context_standards_globs`
+always read `off`, `off` and `[]`: every case is reviewed with those features
+pinned off, and `config` records the values that ran, not the environment's.
+
+**No credential is ever written.** `config` is an allowlist of the twenty-five
 settings above, and a record carries no credential. The traces do hold the
 prompts, and the prompts hold the diff, so treat a run directory like the
 code it reviewed.
@@ -728,8 +739,9 @@ Standard output is Markdown, in this order:
   other side.
 - `## Stable-id reuse` (#71): printed between `## Metrics` and
   `## Changed labels`, and only when at least one case both runs score
-  carries finding ids in its `record.json` — a `PRXREF_STABLE_IDS=on` run;
-  two runs without ids print nothing here, byte-identical to a build
+  carries finding ids in its `record.json` — every run since stable ids
+  became always-on, but not a record from before #71 or a summary-only
+  case; two runs without ids print nothing here, byte-identical to a build
   without the section. The table `| Case | A ids | B ids | Reuse |` holds
   one row per shared case with ids on at least one side. `A ids` / `B ids`
   count that side's active findings carrying an `id`; `Reuse` is the
@@ -897,5 +909,5 @@ model response, and those hold the code under review.
 prxref-eval/
 ```
 
-To run the repo's own three cases, see
+To run the repo's own five cases, see
 [`tests/evals/README.md`](../tests/evals/README.md).

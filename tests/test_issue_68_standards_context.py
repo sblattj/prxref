@@ -37,13 +37,14 @@ pinned here:
 """
 from __future__ import annotations
 
+import json
 import threading
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from prxref import config, orchestrator
+from prxref import cli, config, orchestrator
 from prxref.chunk_context import STANDARDS_HEADER
 from prxref.config import load_config
 from prxref.forges.base import PathListing
@@ -466,7 +467,7 @@ class TestTheReviewerSeesTheStandards:
         assert "max-age=63072000" in prompt
         assert "max-age=15552000" in prompt  # the diff's own value, beside the standard
         assert res["repo_context"]["standards_globs"] == list(STANDARD_GLOBS)
-        assert res["repo_context"]["standards_max_chars"] == 4000
+        assert res["repo_context"]["standards_max_chars"] == 6000
         rows = res["repo_context"]["units"]["chunks"]
         cited = [
             (e["path"], e["line"])
@@ -475,6 +476,18 @@ class TestTheReviewerSeesTheStandards:
         assert cited  # something was admitted
         assert (STANDARDS_DOC, 12) in cited
         assert {path for path, _line in cited} == {STANDARDS_DOC}
+
+    def test_the_built_in_globs_reach_a_dot_github_security_doc(self, tmp_path):
+        _write(tmp_path, ".github/SECURITY.md", WEB_SECURITY)
+        res, llm = _review(
+            _RepoForge(TWO_CHUNK_DIFF, tmp_path), context_standards_globs=BUILTIN_GLOBS,
+        )
+
+        prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
+        prompt = prompts["app/middleware.py"][0]
+        assert STANDARDS_HEADER in prompt
+        assert ".github/SECURITY.md:12: ## HSTS" in prompt
+        assert res["repo_context"]["standards_max_chars"] == 6000
 
     def test_an_unrelated_chunk_in_the_same_run_sees_no_standards_block(self, tmp_path):
         _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
@@ -546,3 +559,221 @@ class TestTheOffSentinel:
         cfg = load_config()
         assert cfg["context_standards_globs"] == []
         assert cfg["context_standards_max_chars"] == 2500
+
+
+class TestTheConfigFileTurnsStandardsOff:
+    """A ``.prxref.toml`` can switch discovery off with ``[]`` or ``"off"``."""
+
+    @pytest.mark.parametrize("literal", ["[]", '"off"'])
+    def test_an_empty_array_or_off_empties_the_glob_set(self, tmp_path, literal):
+        path = tmp_path / ".prxref.toml"
+        path.write_text(f"context_standards_globs = {literal}\n")
+
+        cfg = load_config(config_file=path)
+
+        assert cfg["context_standards_globs"] == []
+
+    def test_a_non_empty_array_still_replaces_the_set(self, tmp_path):
+        path = tmp_path / ".prxref.toml"
+        path.write_text('context_standards_globs = ["docs/x/**"]\n')
+
+        assert load_config(config_file=path)["context_standards_globs"] == ["docs/x/**"]
+
+    def test_any_other_string_is_still_a_config_error(self, tmp_path):
+        path = tmp_path / ".prxref.toml"
+        path.write_text('context_standards_globs = "docs/**"\n')
+
+        with pytest.raises(config.ConfigError, match="array of strings"):
+            load_config(config_file=path)
+
+
+class TestAZeroBudgetDisablesTheStandards:
+    def test_env_zero_loads_as_zero(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_MAX_CHARS", "0")
+
+        assert load_config()["context_standards_max_chars"] == 0
+
+    def test_a_negative_budget_is_still_a_config_error(self, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_MAX_CHARS", "-1")
+
+        with pytest.raises(config.ConfigError):
+            load_config()
+
+    def test_a_review_with_budget_zero_reads_no_standards_document(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(TWO_CHUNK_DIFF, tmp_path)
+        _, llm = _review(forge, context_standards_max_chars=0)
+
+        assert forge.content_calls[STANDARDS_DOC] == 0
+        for prompts in _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"]).values():
+            for prompt in prompts:
+                assert STANDARDS_HEADER not in prompt
+
+    def test_the_same_review_with_the_default_budget_reads_and_renders_it(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(TWO_CHUNK_DIFF, tmp_path)
+        _, llm = _review(forge)
+
+        assert forge.content_calls[STANDARDS_DOC] > 0
+        prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
+        assert STANDARDS_HEADER in prompts["app/middleware.py"][0]
+
+
+class TestStandardsRunWithoutRepoContext:
+    """OD2: standards discovery is on by default, decoupled from ``PRXREF_REPO_CONTEXT``.
+
+    Any reader and a non-empty glob set with a budget above 0 is enough; the
+    repository-context level only adds the other sources.
+    """
+
+    def _review(self, forge, **kwargs):
+        llm = _RecordingLLM()
+        kwargs.setdefault("max_files_per_chunk", 1)
+        kwargs.setdefault("context_standards_globs", STANDARD_GLOBS)
+        res = orchestrator.orchestrate_review(forge, REF, llm, post=False, **kwargs)
+        return res, llm
+
+    def test_the_default_repo_context_still_shows_the_standard(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        res, llm = self._review(_RepoForge(TWO_CHUNK_DIFF, tmp_path))
+
+        prompts = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])
+        prompt = prompts["app/middleware.py"][0]
+        assert STANDARDS_HEADER in prompt
+        assert f"{STANDARDS_DOC}:12: ## HSTS" in prompt
+        for other in prompts["tools/helper.py"]:
+            assert STANDARDS_HEADER not in other
+        record = res["repo_context"]
+        assert record["mode"] == "standards"
+        assert record["standards_globs"] == list(STANDARD_GLOBS)
+        kinds = {
+            e["kind"] for row in record["units"]["chunks"] for e in row["entries"]
+        }
+        assert kinds == {"standards"}
+
+    def test_the_diff_level_shows_the_standard_too(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        res, llm = self._review(_RepoForge(HSTS_DIFF, tmp_path), repo_context="diff")
+
+        (prompt,) = _worker_prompts(llm, ["app/middleware.py"])["app/middleware.py"]
+        assert f"{STANDARDS_DOC}:12: ## HSTS" in prompt
+        assert res["repo_context"]["mode"] == "diff"
+
+    def test_an_empty_glob_set_leaves_the_off_run_untouched(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(HSTS_DIFF, tmp_path)
+        res, llm = self._review(forge, context_standards_globs=())
+
+        assert forge.content_calls[STANDARDS_DOC] == 0
+        (prompt,) = _worker_prompts(llm, ["app/middleware.py"])["app/middleware.py"]
+        assert STANDARDS_HEADER not in prompt
+        assert res["repo_context"] is None
+
+    def test_a_zero_budget_leaves_the_off_run_untouched(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(HSTS_DIFF, tmp_path)
+        res, _ = self._review(forge, context_standards_max_chars=0)
+
+        assert forge.content_calls[STANDARDS_DOC] == 0
+        assert res["repo_context"] is None
+
+    def test_a_repo_without_standards_documents_records_nothing(self, tmp_path):
+        _write(tmp_path, "README.md", "# hello\n")
+        res, llm = self._review(_RepoForge(HSTS_DIFF, tmp_path))
+
+        assert res["repo_context"] is None
+        (prompt,) = _worker_prompts(llm, ["app/middleware.py"])["app/middleware.py"]
+        assert STANDARDS_HEADER not in prompt
+
+    def test_a_forge_without_a_reader_records_nothing(self):
+        llm = _RecordingLLM()
+        res = orchestrator.orchestrate_review(
+            FakeForge(diff=HSTS_DIFF), REF, llm, post=False,
+            context_standards_globs=STANDARD_GLOBS,
+        )
+
+        assert res["repo_context"] is None
+        assert all(STANDARDS_HEADER not in user for _s, user in llm.calls)
+
+    def test_the_default_config_reads_the_built_in_globs_at_repo_context_off(self):
+        cfg = load_config()
+
+        assert cfg["repo_context"] == "off"
+        assert cfg["context_standards_globs"] == BUILTIN_GLOBS
+        assert cfg["context_standards_max_chars"] > 0
+
+
+# ------------------------------------------------- the citation survives the gates
+
+
+CITING_FINDING = {
+    "file": "app/middleware.py", "line": 2, "severity": "error", "confidence": 0.9,
+    "title": "HSTS lifetime below the standard",
+    "body": (
+        f"max-age=15552000 contradicts {STANDARDS_DOC}:12 (## HSTS), which "
+        "requires max-age=63072000; the shorter lifetime is a security downgrade."
+    ),
+}
+
+
+class _FindingLLM(_RecordingLLM):
+    """Answers each chunk worker with the citing finding; the first ``timeouts`` raise a deadline error."""
+
+    def __init__(self, timeouts: int = 0):
+        super().__init__()
+        self.timeouts = timeouts
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        is_worker = "### Diff" in user
+        with self._lock:
+            self.calls.append((system, user))
+            timed_out = is_worker and self.timeouts > 0
+            if timed_out:
+                self.timeouts -= 1
+        if timed_out:
+            raise TimeoutError("fake-model: timeout after 60s")
+        findings = [CITING_FINDING] if is_worker else []
+        return InvokeResult(
+            text=json.dumps({"findings": findings, "escalations": []}),
+            input_tokens=10, output_tokens=5, model="fake-model", backend="fake", elapsed_ms=1,
+        )
+
+
+class TestTheCitationSurvivesTheGates:
+    def test_a_finding_citing_the_standard_reaches_the_comment_and_the_json_row(
+        self, tmp_path,
+    ):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        forge = _RepoForge(HSTS_DIFF, tmp_path)
+        res = orchestrator.orchestrate_review(
+            forge, REF, _FindingLLM(), post=True, repo_context="repo",
+            max_files_per_chunk=1, context_standards_globs=STANDARD_GLOBS,
+        )
+
+        citation = f"{STANDARDS_DOC}:12"
+        assert [f.title for f in res["findings_active"]] == [CITING_FINDING["title"]]
+        assert citation in res["findings_active"][0].body
+        (batch,) = forge.inline_batches
+        assert [c.path for c in batch] == ["app/middleware.py"]
+        assert citation in batch[0].body
+        rows = cli._build_json_result(res)["findings"]
+        assert [r["drop_reason"] for r in rows] == [None]
+        assert citation in rows[0]["body"]
+
+    def test_the_timeout_retry_drops_the_standards_block(self, tmp_path):
+        _write(tmp_path, STANDARDS_DOC, WEB_SECURITY)
+        llm = _FindingLLM(timeouts=1)
+        res = orchestrator.orchestrate_review(
+            _RepoForge(HSTS_DIFF, tmp_path), REF, llm, post=False,
+            repo_context="repo", max_files_per_chunk=1,
+            context_standards_globs=STANDARD_GLOBS,
+        )
+
+        workers = [user for _system, user in llm.calls if "### Diff" in user]
+        assert len(workers) == 2
+        first, retry = workers
+        assert STANDARDS_HEADER in first
+        assert STANDARDS_HEADER not in retry
+        assert res["chunks_failed"] == 0
+        (row,) = res["repo_context"]["units"]["chunks"]
+        assert row["retry_dropped"] is True

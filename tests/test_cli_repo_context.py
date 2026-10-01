@@ -127,6 +127,33 @@ def _repo_lines(lines: list[str]) -> list[str]:
 # --------------------------------------------------------------------------- _run_review
 
 
+class TestTheStandardsGlobsFlag:
+    """``--context-standards-globs`` (#68): ``''`` or ``off`` reads no standards."""
+
+    @pytest.mark.parametrize("value", ["", "off"])
+    def test_an_empty_or_off_value_turns_standards_off(self, recorder, value):
+        argv = ["review", "--diff-file", str(DIFF), "--context-standards-globs", value]
+        assert cli.main(argv) == 0
+
+        (kwargs,) = recorder
+        assert kwargs["context_standards_globs"] == []
+
+    def test_a_flag_beats_an_env_value(self, recorder, monkeypatch):
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_GLOBS", "docs/x/**")
+        argv = ["review", "--diff-file", str(DIFF), "--context-standards-globs", ""]
+        assert cli.main(argv) == 0
+
+        (kwargs,) = recorder
+        assert kwargs["context_standards_globs"] == []
+
+    def test_a_comma_list_replaces_the_built_in_set(self, recorder):
+        argv = ["review", "--diff-file", str(DIFF), "--context-standards-globs", "a/**, B.md"]
+        assert cli.main(argv) == 0
+
+        (kwargs,) = recorder
+        assert kwargs["context_standards_globs"] == ["a/**", "B.md"]
+
+
 class TestTheFourSettingsReachOrchestrate:
     def test_the_defaults_arrive_when_nothing_is_set(self, recorder):
         assert cli.main(["review", "--diff-file", str(DIFF)]) == 0
@@ -138,8 +165,8 @@ class TestTheFourSettingsReachOrchestrate:
         assert len(kwargs["context_contract_globs"]) == 8
         assert list(kwargs["context_exclude_globs"]) == []
         assert kwargs["context_standards_globs"] == config._DEFAULTS["context_standards_globs"]
-        assert len(kwargs["context_standards_globs"]) == 5
-        assert kwargs["context_standards_max_chars"] == 4000
+        assert len(kwargs["context_standards_globs"]) == 7
+        assert kwargs["context_standards_max_chars"] == 6000
         assert kwargs["repo_dir"] is None
 
     def test_the_environment_values_arrive(self, recorder, monkeypatch):
@@ -376,8 +403,9 @@ class TestEvalWiring:
         assert stub_llm.calls == 0
 
     def test_run_config_keys_end_with_the_six_settings_then_the_read_caps(self):
-        assert evals.RUN_CONFIG_KEYS[-8:] == SIX + READ_CAPS
-        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 8
+        assert evals.RUN_CONFIG_KEYS[-10:-2] == SIX + READ_CAPS
+        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 10
+        assert evals.RUN_CONFIG_KEYS[-2:] == ("routing_probe", "ci_wiring")
 
 
 class TestFixtureEvalEndToEnd:
@@ -404,10 +432,11 @@ class TestFixtureEvalEndToEnd:
         assert [entry for entry in entries if entry["kind"] == "contract"] != []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        assert list(run["config"])[-8:] == list(SIX + READ_CAPS)
+        assert list(run["config"])[-10:-2] == list(SIX + READ_CAPS)
         assert run["config"]["repo_context"] == "repo"
         assert run["config"]["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
-        assert run["config"]["context_standards_globs"] == config._DEFAULTS["context_standards_globs"]
+        # The eval harness pins standards discovery off (OD2), whatever the default.
+        assert run["config"]["context_standards_globs"] == []
         assert stub_llm.calls >= 2
 
     def test_control_off_records_null(self, tmp_path, stub_llm, capsys):

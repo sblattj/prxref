@@ -30,8 +30,8 @@ the chunks its ``applies_to:`` globs match, and the sweep their union;
 ``--context-file PATH`` names the ticket the PR implements
 (``PRXREF_TICKET_CONTEXT_FILE``), so each finding is marked in, out of, or
 of unknown ticket scope. Each flag wins over its variable, and
-``--rules-file ""`` / ``--scoped-rules ""`` / ``--context-file ""`` turn the
-variable off for one run. The rules and ticket files are read before any
+``--rules-file ""`` / ``--scoped-rules ""`` / ``--context-file ""`` /
+``--context-standards-globs ""`` turn the variable off for one run. The rules and ticket files are read before any
 network call, so an unusable one is a configuration error. The webhook
 daemon reads both kinds of rules file from its own environment, re-reading
 them on every webhook, and never reads a ticket-context file.
@@ -152,6 +152,7 @@ from prxref.forges.base import detect_forge
 from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
 from prxref.forges.repo_dir import RepoDir
 from prxref.llm import ConfigError
+from prxref.metadata_rules import MetadataRules
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
 from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir
 from prxref.rules import load_review_rules, load_scoped_rules
@@ -256,6 +257,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "team review rules (Markdown/text) added to every review prompt; "
             "overrides PRXREF_REVIEW_RULES, and '' turns it off for this run; "
             "read it from a trusted checkout, never from the PR under review"
+        ),
+    )
+    rev.add_argument(
+        "--metadata-rules",
+        default=None,
+        metavar="PATH",
+        help=(
+            "PR-metadata rules file (TOML: branch_patterns, commit_reference, "
+            "area_globs, max_areas_per_pr) checked without an LLM and reported "
+            "as summary notes; 'on' uses the flat PRXREF_* keys instead; "
+            "overrides PRXREF_METADATA_RULES, and '' or 'off' turns the checks "
+            "off for this run"
         ),
     )
     rev.add_argument(
@@ -381,8 +394,8 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("off", "on"),
         default=None,
         help=(
-            "turn the CI wiring check (#66) on for this run "
-            "(PRXREF_CI_WIRING does the same; off is the default): flag a "
+            "turn the CI wiring check (#66) on or off for this run "
+            "(PRXREF_CI_WIRING does the same; on is the default): flag a "
             "check the PR adds — a verify/smoke/check script or flag, a "
             "file that gains a shebang, a test file outside the runner's "
             "default include — that no CI configuration file invokes"
@@ -396,6 +409,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "comma-separated globs selecting the CI configuration files "
             "the CI wiring check reads (PRXREF_CI_WIRING_GLOBS; a set "
             "value replaces the built-in set)"
+        ),
+    )
+    rev.add_argument(
+        "--context-standards-globs",
+        default=None,
+        metavar="GLOBS",
+        help=(
+            "comma-separated globs selecting the repository's own standards "
+            "documents (PRXREF_CONTEXT_STANDARDS_GLOBS; a set value replaces "
+            "the built-in set, and '' or off reads no standards for this run)"
         ),
     )
     rev.add_argument(
@@ -661,7 +684,9 @@ def _print_summary(
     sweep when it failed) and a ``hint:`` when a failure was a deadline;
     ``chunks:`` when a chunk ran over the token budget or a file was placed
     past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
-    when the PR-size advisory fired; and ``replay:`` when the run was a
+    when the PR-size advisory fired; one ``pr metadata:`` line naming each
+    PR-metadata violation (#70; the checks are summary notes, never
+    findings); and ``replay:`` when the run was a
     replay, so a replay can never be read as a live review.
     The ``replay:`` line carries the stamp as ``key=value`` pairs, ending in
     ``description=<status>`` and, when a cutoff was chosen,
@@ -702,6 +727,11 @@ def _print_summary(
     size = record.get("size_advisory")
     if isinstance(size, dict) and size.get("message"):
         print(f"size advisory: {size['message']}", file=target)
+    metadata = record.get("metadata_rules")
+    violations = metadata.get("violations") if isinstance(metadata, dict) else None
+    for note in violations if isinstance(violations, list) else []:
+        if isinstance(note, dict) and note.get("title"):
+            print(f"pr metadata: {note['title']}", file=target)
     replay = record.get("replay")
     if isinstance(replay, dict):
         as_of = replay.get("as_of")
@@ -933,7 +963,7 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     (issue #74): ``true`` on a model finding whose quoted evidence the
     anchor-snap pass could not locate — no snippet parseable while
     file-level, a snippet the head file does not hold, or an ambiguous
-    multi-match — whose confidence the same pass lowered. ``false`` on
+    multi-match — with its confidence unchanged. ``false`` on
     every other row, and on a finding object without the attribute.
 
     ``id``, ``anchor_block`` and ``id_reused_from`` follow
@@ -992,7 +1022,8 @@ def _build_json_result(result: Any) -> dict:
     0.16's ``repo_context`` and 0.17's ``parse_retries`` are always emitted
     and are ``null`` when their feature is off (``rule_counts`` whenever the
     per-rule cap did not run, ``rule_scope_cleared`` whenever the loaded
-    rules files declare no section scope — 0.29's rule-applicability check
+    rules files declare no section scope and no label was cleared for its
+    claim category — 0.29's rule-applicability check
     (#75) — otherwise the count of rule labels it cleared, ``repo_context`` whenever
     ``PRXREF_REPO_CONTEXT`` is ``off``, ``parse_retries`` whenever
     ``PRXREF_LLM_PARSE_RETRIES`` is ``0``; otherwise it is the run's total
@@ -1014,9 +1045,10 @@ def _build_json_result(result: Any) -> dict:
     otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
     configured, the item count, how many chunk prompts matched items rode,
     and the per-unit character budget; never the evidence text), and so
-    is ``stable_ids`` (#71: ``null`` whenever ``PRXREF_STABLE_IDS`` is
-    off; otherwise ``{assigned, reused_from_verdict, reused_from_thread,
-    collisions}`` over every finding of the run), and so
+    is ``stable_ids`` (#71: ``null`` only on a summary-only or error
+    run, which exits before the id pass; otherwise ``{assigned,
+    reused_from_verdict, reused_from_thread, collisions}`` over every
+    finding of the run), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
@@ -1027,9 +1059,11 @@ def _build_json_result(result: Any) -> dict:
     file; otherwise ``{"path", "sha256", "keys"}``, see
     :func:`_config_file_stamp`), and so is
     ``metadata_rules`` (#70: ``null`` whenever ``PRXREF_METADATA_RULES`` is
-    ``off``; otherwise ``{branch_pattern, commit_reference, area_globs}``,
-    each ``pass``, ``fail`` or ``skipped: <reason>``, from
-    :func:`prxref.metadata_rules.run_metadata_checks`);
+    ``off``; otherwise ``{branch_pattern, commit_reference, area_globs,
+    violations}``, each check ``pass``, ``fail`` or ``skipped: <reason>``
+    from :func:`prxref.metadata_rules.run_metadata_checks`, and
+    ``violations`` one ``{check, title, detail}`` row per violation — the
+    violations are summary notes, never ``findings`` rows);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -1478,6 +1512,32 @@ def _path_loaders() -> PathLoaders:
     )
 
 
+def _metadata_rule_kwargs(cfg: dict[str, Any], loaded: MetadataRules | None) -> dict[str, Any]:
+    """The five PR-metadata arguments of ``orchestrate_review`` (#70).
+
+    ``loaded`` is the rules file :func:`load_path_inputs` read, or ``None``.
+    A rules file turns the checks on with its own four settings; otherwise
+    ``metadata_rules = "on"`` (the back-compat alias) runs them from the
+    flat config keys, and any other switch value (``off``, ``""``) runs
+    none. The orchestrator therefore only ever sees ``on`` or ``off``.
+    """
+    if loaded is not None:
+        return {
+            "metadata_rules": "on",
+            "branch_patterns": list(loaded.branch_patterns),
+            "commit_reference": loaded.commit_reference,
+            "area_globs": list(loaded.area_globs),
+            "max_areas_per_pr": loaded.max_areas_per_pr,
+        }
+    return {
+        "metadata_rules": "on" if cfg["metadata_rules"].strip() == "on" else "off",
+        "branch_patterns": cfg["branch_patterns"],
+        "commit_reference": cfg["commit_reference"],
+        "area_globs": cfg["area_globs"],
+        "max_areas_per_pr": cfg["max_areas_per_pr"],
+    }
+
+
 def _open_repo_dir(path: str | None) -> RepoDir | None:
     """Open ``--repo-dir`` as a :class:`~prxref.forges.repo_dir.RepoDir`, or ``None`` when it is not given.
 
@@ -1495,6 +1555,15 @@ def _open_repo_dir(path: str | None) -> RepoDir | None:
         return RepoDir(path)
     except (OSError, ValueError) as exc:
         raise ConfigError(f"--repo-dir: no such directory {path!r}") from exc
+
+
+def _standards_globs_arg(raw: str | None) -> list[str] | None:
+    """Parse ``--context-standards-globs``: unset is ``None``, ``''``/``off`` is ``[]``."""
+    if raw is None:
+        return None
+    if raw.strip() == "off":
+        return []
+    return [g.strip() for g in raw.split(",") if g.strip()]
 
 
 def _run_review(
@@ -1522,6 +1591,9 @@ def _run_review(
     ci_wiring: str | None = None,
     ci_wiring_globs: list[str] | None = None,
     evidence_files: list[str] | None = None,
+    context_standards_globs: list[str] | None = None,
+    routing_probe: str | None = None,
+    metadata_rules: str | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1570,6 +1642,9 @@ def _run_review(
         ci_wiring=ci_wiring,
         ci_wiring_globs=ci_wiring_globs,
         evidence_files=evidence_files,
+        context_standards_globs=context_standards_globs,
+        routing_probe=routing_probe,
+        metadata_rules=metadata_rules,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1583,6 +1658,8 @@ def _run_review(
             "ci_wiring": "--ci-wiring",
             "ci_wiring_globs": "--ci-wiring-globs",
             "evidence_files": "--evidence-file",
+            "context_standards_globs": "--context-standards-globs",
+            "metadata_rules": "--metadata-rules",
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -1627,6 +1704,11 @@ def _run_review(
         forge = make_forge(ref)
         if replay is not None:
             forge = _replay_forge(forge, ref, replay)
+    if not cfg["stable_ids"]:
+        logger.warning(
+            "PRXREF_STABLE_IDS (stable_ids) is deprecated and ignored: "
+            "stable finding ids are always on"
+        )
     incremental = cfg["incremental"]
     full_review_reason: str | None = None
     if incremental == "on" and full_review:
@@ -1691,11 +1773,7 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
-        metadata_rules=cfg["metadata_rules"],
-        branch_patterns=cfg["branch_patterns"],
-        commit_reference=cfg["commit_reference"],
-        area_globs=cfg["area_globs"],
-        max_areas_per_pr=cfg["max_areas_per_pr"],
+        **_metadata_rule_kwargs(cfg, inputs.metadata),
         replay=(
             replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))
             if replay is not None else None
@@ -1714,15 +1792,16 @@ def _run_review(
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
+        rule_scoping=cfg["rule_scoping"],
         suggestions=cfg["suggestions"],
+        routing_probe=cfg["routing_probe"],
         incremental=incremental,
         full_review=full_review_reason is not None,
         full_review_reason=full_review_reason,
-        ci_wiring=cfg["ci_wiring"],
+        ci_wiring=None if layers.get("ci_wiring") == "default" else cfg["ci_wiring"],
         ci_wiring_globs=cfg["ci_wiring_globs"],
         evidence=evidence,
-        evidence_max_chunk_chars=cfg["evidence_max_chunk_chars"],
-        stable_ids=cfg["stable_ids"],
+        evidence_max_chars=cfg["evidence_max_chars"],
         verdict_store=cfg["verdict_store"],
     )
     if isinstance(result, dict):
@@ -1982,6 +2061,8 @@ def _cmd_review(args: argparse.Namespace) -> int:
                 if args.ci_wiring_globs is not None else None
             ),
             evidence_files=args.evidence_file,
+            context_standards_globs=_standards_globs_arg(args.context_standards_globs),
+            metadata_rules=args.metadata_rules,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

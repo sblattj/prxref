@@ -32,8 +32,8 @@ Before asserting that something is absent, unsupported, undocumented, or contrad
 ## Matching rules
 
 A changed rule that decides which inputs match — a web-server `location` or
-`rewrite`, a router path pattern, a `.gitignore`-style glob, a firewall or
-allow-list entry, a regex validator — can silently capture inputs another rule
+`rewrite`, a router path pattern, a `.gitignore`-style glob, a regex
+validator — can silently capture inputs another rule
 used to handle (the SPA fallback, a broader route, a default). For each added
 or widened rule of that kind in the diff: enumerate one to three concrete
 inputs it newly matches that were previously handled elsewhere; check each
@@ -41,8 +41,7 @@ against what this PR and the context blocks define (route tables, path
 parameter formats, existing tests); report only inputs that plausibly occur
 here, and name one example input in the finding body. When the diff or a
 context block shows every capturable input is constrained (route parameters
-are UUIDs, a more specific rule already handles them), emit `outofscope` at
-confidence 0.6 stating the constraint instead of `warning` — or nothing.
+are UUIDs, a more specific rule already handles them), report nothing.
 
 ## Style
 

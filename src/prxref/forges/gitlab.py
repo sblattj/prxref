@@ -15,12 +15,14 @@ from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
+    CommitData,
     FeedReadError,
     InlineComment,
     PathListing,
     PRData,
     PRRef,
     Thread,
+    says_wont_fix,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -316,6 +318,38 @@ class ForgeImpl:
                 )
         return _render_diff_entries(diffs)
 
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the MR's commits, oldest first (issue #70).
+
+        Reads ``/merge_requests/{iid}/commits``, which needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. The listing is
+        walked with ``_iter_pages`` like every other GitLab collection here,
+        so a page that cannot be read, or a listing past the page budget,
+        raises ``FeedReadError`` rather than handing back part of the MR.
+        GitLab lists the commits newest first; they are reversed to the
+        oldest-first order the ``Forge`` contract names. Each entry keeps
+        the ``id`` as the sha, the first line of ``message`` (``title`` when
+        the message is absent) as the subject, and ``len(parent_ids)`` as
+        the parent count, which is 1 when GitLab sends no parent list.
+        """
+        url = f"{self._api_base(ref)}/merge_requests/{ref.number}/commits"
+        commits: list[CommitData] = []
+        for page in self._iter_pages(
+            ref, url, self._get_auth_headers(), what="MR commit list",
+        ):
+            for entry in page:
+                message = entry.get("message") or entry.get("title") or ""
+                parents = entry.get("parent_ids")
+                commits.append(CommitData(
+                    sha=entry.get("id") or "",
+                    subject=message.splitlines()[0] if message else "",
+                    parent_count=len(parents) if isinstance(parents, list) else 1,
+                ))
+        commits.reverse()
+        return commits
+
     def _iter_pages(
         self,
         ref: PRRef,
@@ -516,6 +550,10 @@ class ForgeImpl:
         The discussions endpoint takes no ordering parameters, so this walk
         gets plain page/per_page rather than the notes walk's explicit
         oldest-first order.
+
+        An explicit human "won't fix" in any note of a discussion
+        (:func:`~prxref.forges.base.says_wont_fix`, read from the full body)
+        marks every note of that discussion ``wont_fix`` (issue #73).
         """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
@@ -537,6 +575,10 @@ class ForgeImpl:
 
                     first_path: str | None = None
                     first_line: int | None = None
+                    disc_wont_fix = any(
+                        isinstance(note, dict) and says_wont_fix(note.get("body"))
+                        for note in notes
+                    )
 
                     for note in notes:
                         pos = note.get("position")
@@ -561,6 +603,7 @@ class ForgeImpl:
                                 resolved=bool(note_resolved),
                                 author=author,
                                 body_snippet=body[:200],
+                                wont_fix=disc_wont_fix,
                             )
                         )
         except FeedReadError as e:

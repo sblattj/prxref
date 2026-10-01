@@ -47,7 +47,12 @@ Each review template is split at its first `## Review Context` line:
 - Everything above that line is the **system** prompt, prxref's instructions
   to the model. It is sent as written, and a placeholder in it is not
   filled. When configured, the team rules block and the ticket-scope request
-  are appended after it.
+  are appended after it. One section is switchable: with
+  `PRXREF_ROUTING_PROBE=off`, the `## Matching rules` section of the worker
+  system prompt (its heading and everything up to the next `## ` heading) is
+  cut out, whether it comes from the packaged `worker.md` or from your
+  override. With the default `on` it is sent as written, and an override
+  without that section is unaffected either way.
 - The line itself and everything below it is the **user** prompt, the review
   input. Its placeholders are filled in one pass, so a PR title or a diff that
   contains `{diff}` or any other placeholder is never filled a second time.
@@ -60,7 +65,7 @@ Each review template is split at its first `## Review Context` line:
 | `{ticket_context}` | the fenced `### Ticket context` block followed by a blank line, or nothing without a ticket | both |
 | `{spec_digest}` | the spec-constraint digest, or `(no specs provided for this review)` | both |
 | `{diff}` | the chunk's diff | `worker.md` |
-| `{context_blocks}` | the summary of the PR's other files and the file context read around the chunk, or nothing | `worker.md` |
+| `{context_blocks}` | the summary of the PR's other files and the file context read around the chunk (with `PRXREF_ROUTING_PROBE=on`, also the `### Route tables outside this diff` block for a chunk that adds a web-server or static-host rule), or nothing | `worker.md` |
 | `{digest}` | the digest of the whole diff | `systemic.md` |
 | `{scope_example}` | a `"scope": "in"` field for the example finding while a ticket is configured, else nothing | both |
 | `{rule_example}` | a `"rule"` field for the example finding while finding grouping (`PRXREF_GROUP_FINDINGS`) is on, else nothing | both |
@@ -168,7 +173,10 @@ PRXREF_PROMPTS_DIR: prompt template 'prompts/summary.md' has no {findings} and n
 and at render time any finding in such a group is added under
 `**Other findings (N)**`, with a warning in the log. That block, followed by
 the inline accounting when the template has neither `{findings}` nor
-`{inline_accounting}`, goes just above the footer: the attribution, together
+`{inline_accounting}`, goes just above the footer. The `**PR metadata**`
+section (#70, present when the metadata checks, run through `PRXREF_METADATA_RULES` on or a rules file, found a violation or a configured check was skipped)
+goes there too, ahead of both, on every template — it has no slot. The
+footer is the attribution, together
 with a `---` rule directly over it if there is one. A template that dropped
 `{attribution}` gets them at the end of the body, with the attribution
 appended after them. The partial-review banner always comes last.

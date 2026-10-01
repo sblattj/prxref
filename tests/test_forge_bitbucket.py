@@ -21,7 +21,7 @@ import pytest
 import requests
 
 from prxref.forges import bitbucket
-from prxref.forges.base import FeedReadError, InlineComment, PRRef
+from prxref.forges.base import ATTRIBUTION_MARKER, FeedReadError, InlineComment, PRRef
 from prxref.forges.bitbucket import ForgeImpl, _make_retry_session
 
 MARKER = "<!-- prxref-summary -->"
@@ -269,6 +269,30 @@ def test_list_threads_reads_inline_and_top_level_comments():
     assert [t.path for t in threads] == ["src/app.py", None]
     assert [t.line for t in threads] == [12, None]
     assert [t.body_snippet for t in threads] == ["please fix", "looks fine"]
+
+
+_LONG_HUMAN_WONT_FIX = "Looks odd at first. " * 12 + "Won't fix: intentional."
+_LONG_PRXREF_BY_DESIGN = (
+    "By design. Drain duration should come from config. " + "y " * 150
+    + f"\n\n*{ATTRIBUTION_MARKER} · model=m*"
+)
+
+
+@pytest.mark.parametrize(("body", "wont_fix"), [
+    (_LONG_HUMAN_WONT_FIX, True),
+    (_LONG_PRXREF_BY_DESIGN, False),
+    ("please fix", False),
+], ids=["human-decline-past-the-cap", "prxref-body", "plain"])
+def test_list_threads_reads_wont_fix_from_the_full_body(body, wont_fix):
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = _page([{
+        "id": 1, "content": {"raw": body},
+        "inline": {"path": "src/app.py", "to": 12}, "user": {"nickname": "dev"},
+    }])
+
+    [thread] = ForgeImpl(session=session).list_threads(_ref())
+
+    assert thread.wont_fix is wont_fix
 
 
 def test_list_threads_pages_past_the_old_five_page_ceiling():

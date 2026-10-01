@@ -135,7 +135,7 @@ its `PRXREF_` name.
 | `ticket_context_file` | string | File holding the ticket this PR implements ([more](env-vars.md#llm--pipeline)). |
 | `ticket_context_max_chars` | integer | Characters of ticket text kept in the prompt ([more](env-vars.md#llm--pipeline)). |
 | `evidence_files` | array of strings | Execution evidence files to review against ([more](env-vars.md#llm--pipeline)). |
-| `evidence_max_chunk_chars` | integer | Characters of evidence text one review unit receives ([more](env-vars.md#llm--pipeline)). |
+| `evidence_max_chars` | integer | Characters of evidence text one review unit receives; the 0.30.0 name `evidence_max_chunk_chars` is still read as a deprecated alias, and setting both is an error ([more](env-vars.md#llm--pipeline)). |
 | `spec_sources` | array of strings | Local spec files and directories to review against; no URLs here ([more](env-vars.md#llm--pipeline)). |
 | `spec_max_chars` | integer | Raw characters kept per spec source ([more](env-vars.md#llm--pipeline)). |
 | `spec_digest_tokens` | integer | Token budget of the spec digest in worker prompts ([more](env-vars.md#llm--pipeline)). |
@@ -165,7 +165,7 @@ its `PRXREF_` name.
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
-| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at `repo`; replaces the built-in set — only `PRXREF_CONTEXT_STANDARDS_GLOBS=off` in the pipeline turns them off ([more](env-vars.md#llm--pipeline)). |
+| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at every `repo_context` level, on by default; replaces the built-in set; `[]` or `"off"` turns them off ([more](env-vars.md#llm--pipeline)). |
 | `context_standards_max_chars` | integer | Characters of standards-section text one chunk worker receives ([more](env-vars.md#llm--pipeline)). |
 | `chunk_context_lines` | integer | Context lines kept around each change in a chunk ([more](env-vars.md#llm--pipeline)). |
 
@@ -181,6 +181,7 @@ its `PRXREF_` name.
 | `max_inline_comments` | integer | Most inline comments posted per review ([more](env-vars.md#llm--pipeline)). |
 | `group_findings` | boolean | Fold findings that break one rule in one file into one comment ([more](env-vars.md#llm--pipeline)). |
 | `suggestions` | string | `on` asks for applicable code suggestions ([more](env-vars.md#llm--pipeline)). |
+| `routing_probe` | string | `off` drops the worker prompt's matching-rules section and its route-table reads ([more](env-vars.md#llm--pipeline)). |
 | `incremental` | string | `on` re-reviews only the files changed since the last reviewed head ([more](env-vars.md#llm--pipeline)). |
 
 ### Limits
@@ -207,23 +208,52 @@ its `PRXREF_` name.
 
 ### PR metadata rules
 
-Flat keys, not a `[metadata]` table — the file is flat, so a table is a configuration error.
+The rules live in a separate TOML file that `metadata_rules` names, not in a
+`[metadata]` table: `.prxref.toml` itself is flat, so a table there is a
+configuration error. The path is resolved against `.prxref.toml`'s directory
+and must stay inside the repository, like `review_rules`. The rules file holds
+the same four settings as the flat keys below, and the two pair lists may also
+be written as tables:
+
+```toml
+commit_reference = "ACME-[0-9]+"
+max_areas_per_pr = 2
+
+[branch_patterns]
+fix = "fix/.*"
+feature = "feature/.*"
+
+[area_globs]
+backend = ["src/**", "lib/**"]
+frontend = "web/**"
+```
+
+`branch_patterns = ["fix=fix/.*"]` and `area_globs = ["backend=src/**"]` (the
+flat keys' array form) are accepted too. A key the file leaves out keeps its
+default. The file is read and checked before any network call, by `review`,
+the webhook daemon and `prxref config check`; any other key, a regex that does
+not compile, an empty side of a pair, a negative cap, invalid TOML, a file
+over 64 KiB, or a missing file exits `2`. So does setting one of the four flat
+keys beside a rules file, because the file would silently replace it.
+`metadata_rules = "on"` is the back-compat form that reads the four flat keys
+instead.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `metadata_rules` | string | `on` runs the three deterministic PR-metadata checks below; `off` (the default) runs none ([more](env-vars.md#llm--pipeline)). |
+| `metadata_rules` | string | Path to the PR-metadata rules file above, inside the repository; `on` runs the three checks from the flat keys below instead; `off` (the default) runs none ([more](env-vars.md#llm--pipeline)). |
 | `branch_patterns` | array of strings | `type=regex` pairs: the source branch must match the PR type's pattern ([more](env-vars.md#llm--pipeline)). |
 | `commit_reference` | string | Regex every non-merge commit subject must contain ([more](env-vars.md#llm--pipeline)). |
 | `area_globs` | array of strings | `name=glob` pairs classifying diff paths into areas ([more](env-vars.md#llm--pipeline)). |
 | `max_areas_per_pr` | integer | Most distinct areas a PR may touch before the area check flags it ([more](env-vars.md#llm--pipeline)). |
-| `ci_wiring` | string | `on` flags a check the PR adds that no CI configuration file invokes; `off` (the default) reads nothing ([more](env-vars.md#llm--pipeline)). |
+| `ci_wiring` | string | `on` (the default) flags a check the PR adds that no CI configuration file invokes; `off` reads nothing ([more](env-vars.md#llm--pipeline)). |
 | `ci_wiring_globs` | array of strings | Globs selecting the CI configuration files the CI wiring check reads; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 
 ### Stable finding ids
 
 | Key | Type | Meaning |
 |---|---|---|
-| `stable_ids` | boolean | `true` stamps every finding with a content-derived id that survives reworded titles and anchor drift, and drops a finding the verdict store refuted in an earlier run; `false` (the default) keeps every `id` null ([more](env-vars.md#llm--pipeline)). |
+| `stable_ids` | boolean | **Deprecated and ignored.** Every finding always carries a content-derived id that survives reworded titles and anchor drift, and a finding the verdict store refuted in an earlier run is always dropped. The key is still accepted so an existing file keeps loading; `false` only logs a warning that it is ignored ([more](env-vars.md#llm--pipeline)). |
+| `rule_scoping` | string | `on` (the default) leaves a scoped rules section out of every chunk whose files it does not cover and clears a rule label whose cited section's scope does not cover the file, or whose cited rule names another kind of defect than the finding; `off` sends every section and keeps every label ([more](env-vars.md#llm--pipeline)). |
 | `verdict_store` | string | Path to the JSON verdict store `refuted` verdicts are read from, keyed by stable id; the review reads it and never writes it ([more](env-vars.md#llm--pipeline)). |
 
 ## Settings a repository file cannot set
@@ -271,7 +301,8 @@ instead, even when the value is empty.
 ## Paths
 
 The path keys (`review_rules`, each `scoped_rules` entry, `prompts_dir`,
-`ticket_context_file` and each `spec_sources` entry) are read **relative to
+`ticket_context_file`, each `spec_sources` entry, and `metadata_rules`
+whenever it is not `on` or `off`) are read **relative to
 the directory holding the config file**, not the working directory. So
 `review_rules = ".prxref/rules.md"` in a root `.prxref.toml` names the same
 file whichever directory prxref runs from, and a file named by
@@ -398,7 +429,7 @@ inside the repository ([Paths](#paths)).
 
 What the author **can** do is relax the review: lower the caps
 (`max_error_findings = 0`), raise `confidence_floor` to `1.0`, point
-`review_rules`, `scoped_rules` or `prompts_dir` at the PR's own copies,
+`review_rules`, `scoped_rules`, `prompts_dir` or `metadata_rules` at the PR's own copies,
 switch `post_mode` to `inline`, or pick a weaker model in `llm_models`. On an
 advisory lane that is the same trust you already extend to the PR's code. On
 a lane where the review gates the merge (`PRXREF_FAIL_ON` set to `error` or

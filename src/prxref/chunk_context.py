@@ -53,6 +53,44 @@ STANDARDS_GUIDANCE = (
     "a side."
 )
 
+ROUTES_HEADER = "### Route tables outside this diff"
+ROUTE_TABLE_CANDIDATES = (
+    "src/routes.tsx",
+    "src/routes.ts",
+    "src/routes.jsx",
+    "src/routes.js",
+    "src/router.tsx",
+    "src/router.ts",
+    "src/router.js",
+    "src/router/index.ts",
+    "src/router/index.js",
+    "app/routes.ts",
+    "src/app/app.routes.ts",
+    "src/app/app-routing.module.ts",
+    "config/routes.rb",
+    "routes/web.php",
+)
+MAX_ROUTE_FILES = 3
+MAX_ROUTE_LINES_PER_FILE = 40
+MAX_ROUTE_CHARS = 3000
+
+_SERVER_CONFIG_NAMES = frozenset({
+    "nginx.conf", ".htaccess", "_redirects", "caddyfile", "vercel.json",
+    "netlify.toml", "firebase.json", "staticwebapp.config.json",
+    "httpd.conf", "apache2.conf",
+})
+_SERVER_CONFIG_SUFFIXES = (".conf", ".nginx", ".htaccess")
+_ROUTING_RULE_RE = re.compile(
+    r"\b(?:location|rewrite|try_files|error_page|RewriteRule|RewriteCond|"
+    r"FallbackResource|LocationMatch|AliasMatch|ErrorDocument|redirects?|"
+    r"rewrites|routes|handle_path|handle|source|from)\b",
+    re.IGNORECASE,
+)
+_ROUTE_LINE_RE = re.compile(
+    r"""\bpath\b|['"`]/|\b(?:get|post|put|patch|delete|match|resources?|"""
+    r"""route|Route)\b\s*[\(:]?\s*['"`]""",
+)
+
 _JS_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
 
 _JS_KEYWORDS = frozenset({
@@ -499,6 +537,7 @@ def render_context_blocks(
     contract_lines: Sequence[str] = (),
     reader_lines: Sequence[str] = (),
     standards_lines: Sequence[str] = (),
+    route_lines: Sequence[str] = (),
 ) -> str:
     """Render the prompt blocks, omitting each when it has no lines.
 
@@ -511,7 +550,9 @@ def render_context_blocks(
     writes) under :data:`READER_HEADER`, and last the standards block,
     ``standards_lines`` (the repository's own standards documents) under
     :data:`STANDARDS_HEADER` behind one :data:`STANDARDS_GUIDANCE` line,
-    because that block carries its own how-to-cite rule. With the four
+    because that block carries its own how-to-cite rule. ``route_lines``
+    (:func:`route_table_lines`, the matching-rules probe's route tables)
+    render after everything else under :data:`ROUTES_HEADER`. With the five
     optional arguments empty, the output is exactly the two-block rendering
     repository context predates, with ``reader_lines`` empty it is exactly
     the rendering without a readers block, and so on. Returns the empty
@@ -530,7 +571,93 @@ def render_context_blocks(
         blocks.append(READER_HEADER + "\n\n" + "\n".join(reader_lines))
     if standards_lines:
         blocks.append(STANDARDS_HEADER + "\n\n" + STANDARDS_GUIDANCE + "\n\n" + "\n".join(standards_lines))
+    if route_lines:
+        blocks.append(ROUTES_HEADER + "\n\n" + "\n".join(route_lines))
     return "\n\n".join(blocks)
+
+
+def _is_server_config(path: str) -> bool:
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return name in _SERVER_CONFIG_NAMES or name.endswith(_SERVER_CONFIG_SUFFIXES)
+
+
+def has_routing_rule(files: Iterable[ChunkFile]) -> bool:
+    """Whether the chunk adds a web-server or static-host matching rule.
+
+    True when a file whose name marks a web-server or static-host config
+    (``nginx.conf``, any ``*.conf``, ``.htaccess``, ``_redirects``,
+    ``Caddyfile``, ``vercel.json``, ``netlify.toml``, ``firebase.json``,
+    ``staticwebapp.config.json``) has an added, non-comment line naming a
+    routing directive (``location``, ``rewrite``, ``try_files``,
+    ``RewriteRule``, ``rewrites``, ``redirects`` and the like). Any added
+    non-comment line of a ``_redirects`` file counts, since every line there
+    is a rule. This is the gate for :func:`route_table_lines`, so an ordinary
+    chunk costs no read.
+    """
+    for f in files:
+        if not _is_server_config(f.path):
+            continue
+        redirects = f.path.rsplit("/", 1)[-1] == "_redirects"
+        for text in f.added:
+            stripped = text.strip()
+            if not stripped or stripped.startswith(("#", "//")):
+                continue
+            if redirects or _ROUTING_RULE_RE.search(stripped):
+                return True
+    return False
+
+
+def route_table_lines(
+    read: Callable[[str], str | None],
+    exclude: Iterable[str] = (),
+    candidates: Sequence[str] = ROUTE_TABLE_CANDIDATES,
+) -> list[str]:
+    """The route-definition lines of the repository's route-table files; never raises.
+
+    Reads each of ``candidates`` (the conventional route-table paths,
+    :data:`ROUTE_TABLE_CANDIDATES`) through ``read`` at the PR head, skipping
+    any path in ``exclude`` (the PR's own diff files, which the prompt
+    already shows) and any file over :data:`MAX_FILE_BYTES`. From at most
+    :data:`MAX_ROUTE_FILES` files that exist, it keeps the lines that look
+    like a route definition (a ``path`` key, a quoted string starting with
+    ``/``, or an HTTP-verb or ``route`` call taking a string) as
+    ``path:line: text`` rows, at most :data:`MAX_ROUTE_LINES_PER_FILE` per
+    file and :data:`MAX_ROUTE_CHARS` characters in all, then one ``…`` row
+    counting what was omitted. A route table at any other path is not
+    fetched. A failing ``read`` is a missing file.
+    """
+    skip = set(exclude)
+    out: list[str] = []
+    used = 0
+    files_seen = 0
+    omitted = 0
+    for path in candidates:
+        if files_seen >= MAX_ROUTE_FILES:
+            break
+        if path in skip:
+            continue
+        try:
+            text = read(path)
+        except Exception:  # noqa: BLE001
+            text = None
+        if not isinstance(text, str) or len(text) > MAX_FILE_BYTES:
+            continue
+        files_seen += 1
+        kept = 0
+        for number, line in enumerate(text.splitlines(), start=1):
+            if not _ROUTE_LINE_RE.search(line):
+                continue
+            rendered = f"{path}:{number}: {line.rstrip()}"
+            if kept >= MAX_ROUTE_LINES_PER_FILE or used + len(rendered) > MAX_ROUTE_CHARS:
+                omitted += 1
+                continue
+            out.append(rendered)
+            used += len(rendered)
+            kept += 1
+    if omitted:
+        out.append(f"… {omitted} more route lines omitted")
+    return out
 
 
 def _sibling_entry(f: object) -> str:

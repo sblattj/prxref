@@ -719,8 +719,8 @@ class TestCliWiring:
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {
-    "main": "2b153b5cb7f81f8a1a32148fa49f28a24edd55ffe38b476fa55b1d1408df5848",
-    "override": "6f08787e6b66c5b5cdb2ff4c9648af843f9b8fdf167a1dba97d303ca0edff56c",
+    "main": "f47fd27bc00cc6438473cbb7d4cc4ab24cbcd80ee27458cb64a26415c44c6a92",
+    "override": "ab6a1d14b46cf52f6d1cef13a68d9e09e60fb80a40966ab710c69f49925ab6dc",
     "summary_only": "1539f1e036492cf3437e08b9263413c6cf9f1cb4f5378753dcc602fff62715a5",
 }
 
@@ -801,11 +801,15 @@ class _Recorder:
 
 
 class _ListHandler(logging.Handler):
+    """Collects log lines, minus the always-on #71 pass's own (``prxref.stable_ids``)."""
+
     def __init__(self) -> None:
         super().__init__(level=logging.INFO)
         self.lines: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        if record.name == "prxref.stable_ids":
+            return
         self.lines.append(f"{record.name} {record.levelname} {record.getMessage()}")
 
 
@@ -836,10 +840,19 @@ def _json_payload(res: dict) -> dict:
 
 
 def _trace_events(path: str) -> list[dict]:
+    """The trace minus clock fields and the always-on #71 ``stableids`` event.
+
+    The stable-id pass has no off switch since 0.30.1, so its one trace
+    event is projected away like the record keys a later feature added;
+    ``seq`` is renumbered so the remaining events read as the BASE run's.
+    """
     events = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             event = json.loads(line)
+            if event.get("node") == "stableids":
+                continue
+            event["seq"] = len(events) + (events[0]["seq"] if events else event["seq"])
             event.pop("t_ms", None)
             if isinstance(event.get("meta"), dict):
                 event["meta"].pop("elapsed_ms", None)
@@ -872,6 +885,7 @@ SCENARIOS = {
 
 def capture(name: str, **knobs) -> tuple[str, dict]:
     diff, extra = SCENARIOS[name]
+    knobs.setdefault("ci_wiring", "off")
     forge = FakeForge(diff=diff)
     llm = _Recorder(json.dumps({"findings": MODEL_FINDINGS}))
     handler = _ListHandler()

@@ -8,6 +8,244 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.30.1] — 2026-09-30
+
+An audit of 0.30.0 against its nine issues' acceptance criteria and the
+owner's design decisions found gaps in every one of them (#66, #67, #68,
+#69, #70, #71, #73, #74, #75); this release closes them. **Several
+defaults and behaviours change** — read the first section before
+upgrading. Two review inputs that 0.30.0 shipped off are now **on by
+default**: CI wiring (#66) and in-repo standards discovery (#68). The
+matching-rules probe (#67), always on in 0.30.0, gains an `off` switch
+and now also reads route tables by default. The eval harness pins all
+three off, so environment and `.prxref.toml` values no longer leak into
+eval runs. Stable finding ids are **always on** and their hash
+now stems words (#71). Execution evidence now **drops** a finding it
+contradicts instead of relabelling it (#69). PR metadata violations are
+**summary notes, not findings**, and can live in their own rules file
+(#70). `anchor_unverified` **no longer lowers confidence** (#74). The
+config schema grows from 92 to 94 keys (`PRXREF_ROUTING_PROBE`,
+`PRXREF_RULE_SCOPING`), one key is renamed with its old name kept as an
+alias, and one is deprecated. The worker prompt template changed again
+(#67), so prompt hashes move once more.
+
+### Added
+
+- **CI wiring follows runners and flags new targets (#66).** A CI step
+  that runs `make <target>` or `npm run`/`yarn`/`pnpm run <script>` now
+  counts as running a script that target's Makefile recipe or
+  `package.json` script names, one hop deep, following make prerequisites
+  within the root Makefile. A new Makefile target or `package.json`
+  script that is a check and that no CI job runs is itself a candidate.
+  `--spec` text now also drives the `spec`/`warning` severity switch, not
+  only `--context-file`.
+- **Route-table fetch for the matching-rules probe (#67).** With
+  `routing_probe` on and a file reader, a chunk that adds a web-server or
+  static-host rule also gets the conventional route-table files' route
+  lines as a context block, so the probe can check inputs against routes
+  the PR does not touch. A live eval pair covers the matching-rule failure
+  mode: `case-004-spa-dotted-route` (must flag) and
+  `case-005-spa-uuid-route` (must not). The eval harness pins the probe
+  off, so the pair measures the model without the `## Matching rules`
+  section rather than exercising it.
+- **Failing evidence raises findings (#69).** A failing evidence item
+  (non-zero exit) whose output names `path:line` in a file the PR changes
+  raises a deterministic warning there citing the command and exit code,
+  at most 10 per run, deduplicated against the model's findings. The
+  `$ cmd` plain-text evidence format is recognised (it no longer renders
+  as `$ $ cmd`). The summary's evidence note now lists each command with
+  its exit code and the findings evidence dropped.
+- **`commit_reference` works on every forge (#70).** GitLab, Bitbucket
+  Cloud, Bitbucket Server / Data Center and Azure DevOps gained commit
+  listing, so the check no longer skips with "no commit source" outside
+  GitHub and Gitea.
+- **A skipped metadata check is visible (#70).** The `PR metadata`
+  summary section lists each configured check that could not run with its
+  reason (`Skipped <check> check: <reason>`), and a metadata stage that
+  fails outright shows a `Skipped metadata check` line instead of looking
+  like a pass.
+- **Reworded findings match stored verdicts across runs (#71).** A
+  finding whose id misses the verdict store still matches an entry of the
+  same file and rule whose recorded title it restates, reuses that id and
+  takes its `refuted` drop. An unknown verdict label in the store logs a
+  WARNING naming the id and is ignored; labels are case-normalised.
+- **Won't-fix threads keep suppressing (#73).** An Azure DevOps thread
+  closed as `wontFix` or `byDesign`, or a thread on any forge whose text
+  is an explicit human "won't fix" decision, keeps suppressing duplicates
+  even when resolved or outdated. GitHub, GitLab and Azure DevOps find
+  the decision in any reply of the thread; Bitbucket Cloud, Bitbucket
+  Server and Gitea/Forgejo read it only from the comment the finding is
+  matched against. The summary's thread-dedup line now
+  reads "suppressed as duplicates of open or won't-fix threads", and the
+  summary and the `thread_dedup` run record name the thread each
+  suppressed finding matched.
+- **Unverified "Also at" sites are listed, not dropped (#74).** They move
+  to their own `Also at (unverified):` paragraph.
+- **Rule scope syntax (#75).** `Applies to:` lines are accepted alongside
+  `scope:`, and a section heading that names a language or artifact
+  (`## Java module boundaries`) scopes the section without a scope line.
+  A label whose cited rule names another kind of defect than the
+  finding's title (a Javadoc finding under "Remove fields never read") is
+  cleared, keeping the finding.
+
+### Changed
+
+- **CI wiring is on by default (#66).** `PRXREF_CI_WIRING` /
+  `ci_wiring` now defaults to `on`; set it to `off` for the 0.30.0
+  behaviour. Without a repository reader the "did not run" notice is
+  logged at INFO when the value came from the default, and at WARNING only
+  when `on` was set explicitly.
+- **The matching-rules probe has a switch, on by default, and reads
+  route tables (#67).** New key `PRXREF_ROUTING_PROBE` / `routing_probe`
+  (`on` | `off`, default `on`, file key, no CLI flag). `on` keeps the
+  worker prompt's `## Matching rules` section and, with a file reader,
+  reads the conventional route-table files for a chunk that adds a
+  web-server or static-host rule (see Added); `off` cuts the section out,
+  leaving the worker prompt byte for byte the template without it, and
+  reads nothing.
+- **Standards discovery is on by default and no longer needs
+  `PRXREF_REPO_CONTEXT=repo` (#68).** With a repository reader, standards
+  excerpts are planned at every `PRXREF_REPO_CONTEXT` level. The per-chunk
+  budget `PRXREF_CONTEXT_STANDARDS_MAX_CHARS` rises from 4000 to 6000, and
+  the built-in document set gains `.github/SECURITY.md` and
+  `.github/CONTRIBUTING.md`.
+- **The eval harness pins the three new defaults off (#66, #67, #68).**
+  `prxref eval run` forces `ci_wiring="off"`, `routing_probe="off"` and
+  `context_standards_globs=[]` for every case, whatever the environment or
+  `.prxref.toml` says, and records the pinned values in `run.json`.
+  Because the probe is pinned off, eval worker prompts no longer carry the
+  `## Matching rules` section that 0.30.0's eval runs did.
+- **Execution evidence drops contradicted findings (#69).** The 0.30.0
+  model-labelled downgrade is gone, along with the `Finding.evidence`
+  field and its `"evidence": "contradicts"` label. Instead a deterministic
+  pass drops a finding that claims a header is missing when an exit-0
+  evidence item shows that header as a `Name: value` line for the
+  resource the finding names, with drop reason
+  `contradicted by execution evidence: <cmd>`.
+- **PR metadata violations are summary notes, not findings (#70).** They
+  render in a `PR metadata` section of the posted summary and never enter
+  the finding list: they never post inline (0.30.0 posted them inline when
+  stable ids were on), never fall to a severity cap, and never change the
+  verdict or the exit code — `PRXREF_FAIL_ON=any` included.
+- **`metadata_rules` names a rules file (#70).** `PRXREF_METADATA_RULES` /
+  `--metadata-rules PATH` (a new flag) takes `off` (default), `on`, or the
+  path of a separate TOML rules file holding `branch_patterns`,
+  `commit_reference`, `area_globs` and `max_areas_per_pr`. The file is
+  loaded and validated before any network call; an unreadable, oversized
+  (64 KiB) or invalid file, or a flat key set beside it, exits 2. `on` is
+  the back-compat alias that reads the four flat keys as in 0.30.0. It
+  stays a `.prxref.toml` key, but a path set there must stay inside the
+  repository.
+- **Stable finding ids are always on (#71).** Every finding carries an
+  `id`, and `--format json` rows always carry `id`, `anchor_block` and
+  `id_reused_from`. `PRXREF_VERDICT_STORE` is read whenever it is set.
+  `PRXREF_STABLE_IDS` (and the `stable_ids` file key) is **deprecated and
+  ignored**: the environment variable accepts any value, the file key
+  must still be a boolean (any other type exits 2, as in 0.30.0), and a
+  non-empty value other than `1` logs one WARNING saying the knob is
+  ignored.
+- **The stable-id claim hash stems words (#71).** "derived" and "derive"
+  now hash alike, so a finding whose title contains inflected words gets
+  a different id than 0.30.0 gave it. Refuted verdicts recorded by 0.30.0
+  keep suppressing those findings: an entry without a recorded title also
+  matches the finding's 0.30.0 id.
+- **`anchor_unverified` leaves confidence unchanged (#74).** 0.30.0
+  subtracted 0.1, which pushed borderline findings under the quality
+  gate; the finding is now only marked. The anchor-snap window widens from
+  ±80 to ±100 lines.
+- **Rule scoping filters the rules each chunk sees (#75).** New key
+  `PRXREF_RULE_SCOPING` / `rule_scoping` (`on` | `off`, default `on`, file
+  key, no CLI flag). `on` leaves a scoped rules section out of every
+  chunk whose files it does not cover, instead of sending the whole rules
+  text with annotations; `off` restores the 0.30.0 behaviour of sending
+  everything and leaving labels as the model wrote them.
+- **The config schema grows from 92 to 94 keys.** New:
+  `PRXREF_ROUTING_PROBE` (#67) and `PRXREF_RULE_SCOPING` (#75).
+- **`PRXREF_EVIDENCE_MAX_CHUNK_CHARS` is renamed
+  `PRXREF_EVIDENCE_MAX_CHARS` (#69), default 8000 (was 4000).** It caps
+  the evidence text one review unit's prompt carries, truncation line
+  included. The old environment name is still read, and the 0.30.0
+  `.prxref.toml` key `evidence_max_chunk_chars` loads as a deprecated
+  alias of `evidence_max_chars`; a file that sets both names is a
+  configuration error.
+- **`PRXREF_CONTEXT_STANDARDS_MAX_CHARS=0` disables standards excerpts
+  (#68)** — no document is read and no block renders — instead of being a
+  configuration error. `--context-standards-globs` is a new flag:
+  `--context-standards-globs ""` (or `off`) turns standards off for one
+  run, and in `.prxref.toml` both `[]` and `"off"` turn them off. In the
+  environment a bare empty value still reads as unset.
+- **Worker prompt text (#67, #75).** The `## Matching rules` section no
+  longer covers firewall or allow-list entries, and when every capturable
+  input is constrained it now says "report nothing" instead of asking for
+  an outofscope note at confidence 0.6. This moves the packaged worker
+  prompt's hash again. Separately, per-chunk rule filtering (#75) changes
+  the rendered rules block a chunk receives, not the template.
+
+### Fixed
+
+- **CI wiring (#66).** A body-only edit to an existing script is no longer
+  flagged; a modified script counts only when it gains a check flag, and
+  is described as "changed", not "added". Literal CI-file globs that the
+  repository listing does not hold no longer eat the read budget, and the
+  searched list names only files actually read. A rule line that only
+  adds a prerequisite to a make target already defined elsewhere in the
+  root Makefile is no longer reported as a new unwired target; the head
+  Makefile that check needs is read only when the PR adds a check-shaped
+  make target. The docs now state that only file candidates ignore
+  `$(MAKE)` chains.
+- **Standards surfaces (#68).** The `PRXREF_CONTEXT_STANDARDS_GLOBS`
+  docstring and `docs/examples/prxref.toml` now say standards apply at
+  every `repo_context` level, that `[]` or `"off"` disables them, and use
+  the 6000 budget; internal 4000 keyword defaults now match the config
+  default.
+- **Evidence (#69).** A finding that says a header lacks a directive or
+  value (for example "Strict-Transport-Security lacks
+  includeSubDomains", "Missing Cache-Control (no-store)") is no longer
+  dropped when evidence shows the header is present. A per-header
+  vocabulary of directive tokens, directive nouns and `Name: value`
+  fragments decides this, not word order, so a plain missing-header
+  claim still drops whatever verb follows the name ("Missing
+  X-Frame-Options allows clickjacking"). A finding that names no resource is settled only by a probe
+  that also targets no specific resource. An evidence item with no exit
+  code has an unknown status: it shows as `exit: unknown` and never drops
+  or raises a finding. The evidence note also counts and lists findings
+  dropped for restating a failing check.
+- **Metadata docs (#70).** The docs describe when the `PR metadata`
+  section appears, including the `Skipped metadata check` line of a
+  metadata stage that fails, and list the commit endpoints for GitHub,
+  Gitea/Forgejo, Bitbucket Server and Azure DevOps.
+- **Thread handling (#73).** GitHub joins GraphQL thread state on the root
+  comment id instead of `(path, line)`, so two threads on one line no
+  longer swap their resolved flag and permalink. prxref no longer reads
+  its own resolved or outdated comment as a human "won't fix" when its
+  text contains "By design." or "Works as intended."; every forge now
+  reads won't-fix from the full comment body rather than a truncated
+  snippet that lost the prxref attribution. Detection is stricter: "By
+  design, X should …", "Works as intended, except …" and questions such
+  as "won't fix?" no longer count as a decline.
+- **Anchor snapping (#74).** A line-0 finding whose snippet sits outside
+  the window snaps to a unique whole-file match, or is marked
+  `anchor_unverified`, instead of posting at line 0. A fully qualified
+  snippet prefers the usage over an import line or Javadoc. Anchor snap
+  no longer moves a finding off a comment or docstring line when the
+  finding is about that comment (its title says comment/docstring, or its
+  title or body quotes the comment text); a body that only mentions a
+  comment in passing no longer pins the finding there.
+- **Rule applicability (#75).** The scope check keeps labels it cannot
+  map to a scoped section (unknown labels, rules in unscoped sections,
+  findings with no file), and maps labels to sections by rule-item lines
+  as well as headings, so valid attributions are no longer cleared. A
+  rules file's top-level title ("# Acme Java backend review rules") no
+  longer scopes the whole file to one language, and a heading naming
+  several languages ("## Python and TypeScript conventions") applies to
+  files in any of them instead of none; explicit `scope:` lines still
+  require every token to match. A `#` comment inside a fenced code block
+  (a shell sample, say) is no longer read as a heading, so it no longer
+  unseats the document title and hides the whole file from other
+  languages' files. A section that survives per-unit filtering always
+  keeps its `(applies to: ...)` annotation, whatever other sections that
+  unit left out.
+
 ## [0.30.0] — 2026-09-30
 
 Ten issues: five new review inputs and one new id scheme, and four
@@ -2868,7 +3106,9 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.30.1...HEAD
+[0.30.1]: https://github.com/sblattj/prxref/releases/tag/v0.30.1
+[0.30.0]: https://github.com/sblattj/prxref/releases/tag/v0.30.0
 [0.29.0]: https://github.com/sblattj/prxref/releases/tag/v0.29.0
 [0.28.0]: https://github.com/sblattj/prxref/releases/tag/v0.28.0
 [0.27.0]: https://github.com/sblattj/prxref/releases/tag/v0.27.0

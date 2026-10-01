@@ -12,6 +12,7 @@ forge.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,6 +48,42 @@ class InlineComment:
     start_line: int | None = None
 
 
+_WONT_FIX_RE = re.compile(
+    r"(?:^|(?<=[.!?;:]))[\W_]*"
+    r"(?:"
+    r"(?:won['\u2019]?t[\s-]*fix|will\s+not\s+fix|not\s+(?:going\s+to|gonna)\s+fix)"
+    r"[*_`]*(?=\s*(?:[.!:;,)\]\u2014\u2013-]|$))"
+    r"|(?:by\s+design|works?\s+as\s+(?:intended|designed)|working\s+as\s+(?:intended|designed))"
+    r"[*_`]*(?=\s*(?:[.!:;)\]\u2014\u2013-]|$))"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def says_wont_fix(text: object) -> bool:
+    """Whether a human comment explicitly declines the change (issue #73, OD5).
+
+    True when ``text`` states "won't fix" (also ``wontfix``, "will not fix",
+    "not going to fix", "by design", "working as intended") as a statement
+    of its own: at the start of the comment, of a line or of a sentence, and
+    followed by punctuation other than ``?`` or by the end of the line. A
+    comma ends the "won't fix" forms ("Wont fix, this is deliberate") but not
+    the "by design" / "works as intended" forms, which open a request or a
+    bug report as often as a decline ("By design, this timeout should be
+    configurable."). Prose that merely uses the words ("retrying won't fix
+    the timeout", "Won't fix the leak when …") does not count, nor does a
+    question ("won't fix?"), nor any body carrying :data:`ATTRIBUTION_MARKER`,
+    because a prxref comment is never a human's decision. ``text`` must be
+    the whole comment body: a truncated prxref body has lost its trailing
+    attribution. A non-string is ``False``.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    if ATTRIBUTION_MARKER in text:
+        return False
+    return _WONT_FIX_RE.search(text) is not None
+
+
 @dataclass
 class Thread:
     """An existing discussion thread on a PR (for dedup against re-review).
@@ -60,6 +97,17 @@ class Thread:
     a forge that cannot report either reports ``False``, which keeps the
     thread suppressible exactly as before the fields existed. ``url`` is
     the thread's permalink when the forge has one, else ``None``.
+    ``root_id`` is the id of the thread's root comment (a reply carries its
+    parent's), the key GitHub's two thread views are joined on, else ``None``.
+    ``wont_fix`` marks a thread closed as a deliberate decision not to
+    change the code: Azure DevOps ``wontFix`` / ``byDesign``, or an explicit
+    human "won't fix" (:func:`says_wont_fix`). The adapter sets it from the
+    full comment bodies it read (every reply of the thread where it reads
+    replies), never from ``body_snippet``: a snippet is truncated, so a
+    prxref comment's trailing attribution is cut off and its own prose could
+    pass for a human decision. Construction never infers it. It keeps
+    suppressing a duplicate even though it is resolved or outdated.
+    :attr:`lapsed` is the one predicate the gates share.
     """
 
     path: str | None
@@ -70,6 +118,13 @@ class Thread:
     start_line: int | None = None
     outdated: bool = False
     url: str | None = None
+    root_id: int | None = None
+    wont_fix: bool = False
+
+    @property
+    def lapsed(self) -> bool:
+        """True for a resolved or outdated thread that is not a won't-fix decision."""
+        return (self.resolved or self.outdated) and not self.wont_fix
 
 
 @dataclass

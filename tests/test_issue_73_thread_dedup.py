@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_orchestrator import (  # noqa: E402  (shared fixtures, read not guessed)
@@ -30,10 +32,12 @@ from test_orchestrator import (  # noqa: E402  (shared fixtures, read not guesse
 )
 
 from prxref import orchestrator  # noqa: E402
-from prxref.forges.base import Thread  # noqa: E402
+from prxref.forges.base import ATTRIBUTION_MARKER, Thread, says_wont_fix  # noqa: E402
+from prxref.formatter import format_inline_comment  # noqa: E402
 from prxref.orchestrator import orchestrate_review  # noqa: E402
 from prxref.quality import (  # noqa: E402
     apply_settled_thread_suppression,
+    apply_thread_dedup,
     is_duplicate_of_existing,
     previously_discussed_thread,
 )
@@ -61,7 +65,7 @@ THREAD_URL = "https://github.com/acme/api/pull/42/files#discussion_r123"
 
 def _thread(
     *, resolved=False, outdated=False, line=3, path="src/app.py", url=None,
-    author="alice",
+    author="alice", wont_fix=False,
 ):
     return Thread(
         path=path,
@@ -71,6 +75,7 @@ def _thread(
         author=author,
         body_snippet=THREAD_SNIPPET,
         url=url,
+        wont_fix=wont_fix,
     )
 
 
@@ -83,6 +88,22 @@ def _finding():
         title=FINDING["title"],
         body=FINDING["body"],
     )
+
+
+class TestWontFixThreadsStillSuppress:
+    def test_wont_fix_resolved_thread_still_dedupes(self):
+        assert is_duplicate_of_existing(_finding(), [_thread(resolved=True, wont_fix=True)])
+
+    def test_wont_fix_resolved_thread_still_settles(self):
+        out = apply_settled_thread_suppression(
+            [_finding()], [_thread(resolved=True, wont_fix=True)],
+        )
+        assert out[0].drop_reason is not None
+
+    def test_wont_fix_thread_gives_no_previously_raised_note(self):
+        assert previously_discussed_thread(
+            _finding(), [_thread(resolved=True, wont_fix=True)],
+        ) is None
 
 
 class TestGatesSkipClosedThreads:
@@ -181,7 +202,10 @@ class TestRunRecord:
         forge = FakeForge(diff=DIFF, threads=[_thread()])
         res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
-        assert res["thread_dedup"] == {
+        td = res["thread_dedup"]
+        assert {k: td[k] for k in (
+            "suppressed", "matched_resolved", "threads_read", "threads_resolved",
+        )} == {
             "suppressed": 1,
             "matched_resolved": 0,
             "threads_read": 1,
@@ -192,7 +216,10 @@ class TestRunRecord:
         forge = FakeForge(diff=DIFF, threads=[_thread(resolved=True, outdated=True)])
         res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
-        assert res["thread_dedup"] == {
+        td = res["thread_dedup"]
+        assert {k: td[k] for k in (
+            "suppressed", "matched_resolved", "threads_read", "threads_resolved",
+        )} == {
             "suppressed": 0,
             "matched_resolved": 1,
             "threads_read": 1,
@@ -212,7 +239,7 @@ class TestSummaryAccounting:
         res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
         assert (
-            "Thread dedup: 0 suppressed as duplicates of open threads; "
+            "Thread dedup: 0 suppressed as duplicates of open or won't-fix threads; "
             "1 matched resolved threads and are posted below."
         ) in forge.summaries[0]
         assert res["posted"] is True
@@ -222,7 +249,7 @@ class TestSummaryAccounting:
         orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
         assert (
-            "Thread dedup: 1 suppressed as duplicates of open threads; "
+            "Thread dedup: 1 suppressed as duplicates of open or won't-fix threads; "
             "0 matched resolved threads and are posted below."
         ) in forge.summaries[0]
 
@@ -234,10 +261,38 @@ class TestSummaryAccounting:
 
     def test_the_accounting_helpers_exact_shape(self):
         assert orchestrator._thread_dedup_accounting(2, 1) == (
-            "Thread dedup: 2 suppressed as duplicates of open threads; "
+            "Thread dedup: 2 suppressed as duplicates of open or won't-fix threads; "
             "1 matched resolved threads and are posted below."
         )
         assert orchestrator._thread_dedup_accounting(0, 0) == ""
+
+    def test_the_helper_lists_each_finding_with_its_thread(self):
+        detail = [{
+            "file": "a.py", "line": 3, "title": "T", "thread": "http://x/1",
+            "drop_reason": "duplicate of existing thread",
+        }]
+        out = orchestrator._thread_dedup_accounting(1, 0, detail, [])
+        assert out.splitlines()[1:] == ["Suppressed:", "- `a.py:3` — T — http://x/1"]
+
+
+class TestThreadNamedInRecordAndSummary:
+    def test_a_suppressed_duplicate_names_its_thread(self, contract_stubs):
+        forge = FakeForge(diff=DIFF, threads=[_thread(url=THREAD_URL)])
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
+
+        entry = res["thread_dedup"]["suppressed_detail"][0]
+        assert entry["thread"] == THREAD_URL
+        assert entry["drop_reason"] == "duplicate of existing thread"
+        assert f"`src/app.py:3` — Null deref — {THREAD_URL}" in forge.summaries[0]
+
+    def test_a_resolved_match_names_its_thread(self, contract_stubs):
+        forge = FakeForge(diff=DIFF, threads=[_thread(resolved=True, url=THREAD_URL)])
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
+
+        entry = res["thread_dedup"]["matched_resolved_detail"][0]
+        assert entry["thread"] == THREAD_URL
+        assert entry["file"] == "src/app.py"
+        assert res["thread_dedup"]["suppressed_detail"] == []
 
 
 class TestPreviouslyRaisedRendering:
@@ -288,7 +343,7 @@ class TestPreviouslyRaisedRendering:
         )
         bullets = "Null deref — Previously raised in thread by alice"
         accounting = (
-            "Thread dedup: 0 suppressed as duplicates of open threads; "
+            "Thread dedup: 0 suppressed as duplicates of open or won't-fix threads; "
             "1 matched resolved threads and are posted below."
         )
         assert bullets in summary
@@ -313,3 +368,113 @@ class TestNoteReferenceShapes:
     def test_a_thread_without_a_path_names_the_pr(self):
         t = _thread(resolved=True, path=None, line=None)
         assert orchestrator._thread_reference(t) == "thread by alice on the PR"
+
+
+WONT_FIX_SNIPPET = "Won't fix: intentional. " + THREAD_SNIPPET
+
+
+def _human_thread(snippet, *, resolved=True):
+    return Thread(
+        path="src/app.py", line=3, resolved=resolved, author="alice",
+        body_snippet=snippet, url=THREAD_URL, wont_fix=says_wont_fix(snippet),
+    )
+
+
+class TestExplicitHumanWontFix:
+    """OD5: an explicit human "won't fix" on a thread keeps suppressing (any forge)."""
+
+    @pytest.mark.parametrize("text", [
+        "This won't fix the race; a lock is needed.",
+        "Retrying won't fix the timeout.",
+        "Won't fix the leak when the pool is empty, so add a guard.",
+        "Designed by design-review committee",
+        "By design, this timeout should be configurable.",
+        "Works as intended, except when the pool is empty.",
+        "won't fix?",
+        "By design?",
+        "",
+        format_inline_comment(
+            _finding(), f"{ATTRIBUTION_MARKER} · model=m",
+        ).replace("Null deref", "Won't fix: intentional"),
+    ])
+    def test_prose_and_prxref_bodies_are_not_a_wont_fix(self, text):
+        assert says_wont_fix(text) is False
+
+    @pytest.mark.parametrize("text", [
+        "won't fix: intentional",
+        "Won't fix.",
+        "Wont fix, this is deliberate",
+        "wontfix",
+        "[wontfix]",
+        "**Won’t fix** — by design",
+        "Thanks for flagging. Won't fix: the fallback is deliberate.",
+        "Agreed it looks odd.\nWill not fix.",
+        "By design.",
+        "Working as intended",
+    ])
+    def test_an_explicit_human_wont_fix_is_detected(self, text):
+        assert says_wont_fix(text) is True
+
+    def test_a_non_string_body_is_not_a_wont_fix(self):
+        assert says_wont_fix(None) is False
+
+    def test_construction_never_reads_wont_fix_from_the_snippet(self):
+        bare = Thread(
+            path="src/app.py", line=3, resolved=True, author="alice",
+            body_snippet=WONT_FIX_SNIPPET,
+        )
+        assert bare.wont_fix is False
+        assert bare.lapsed is True
+        assert _human_thread(WONT_FIX_SNIPPET).wont_fix is True
+        assert _human_thread(THREAD_SNIPPET).wont_fix is False
+
+    @pytest.mark.parametrize("sentence", [
+        "By design, drain duration should come from config so operators can tune it.",
+        "By design: drain duration should come from config so operators can tune it.",
+        "Works as intended. Drain duration should come from config so operators can tune it.",
+    ])
+    def test_a_truncated_prxref_body_never_becomes_a_wont_fix(self, sentence):
+        f = Finding(
+            file="svc/drain.py", line=40, severity="warning", confidence=0.9,
+            title="Drain duration hardcoded", body=f"The value is fixed. {sentence}",
+        )
+        body = format_inline_comment(f, f"{ATTRIBUTION_MARKER} · model=x")
+        snippet = body[:120]
+        assert ATTRIBUTION_MARKER not in snippet
+        assert sentence[:20] in snippet
+        t = Thread(
+            path="svc/drain.py", line=12, resolved=True, outdated=True,
+            author="prxref", body_snippet=snippet,
+        )
+        assert (t.wont_fix, t.lapsed) == (False, True)
+        assert apply_thread_dedup([f], [t])[0].drop_reason is None
+
+    def test_a_resolved_wont_fix_thread_still_dedupes(self):
+        assert is_duplicate_of_existing(_finding(), [_human_thread(THREAD_SNIPPET)]) is False
+        assert is_duplicate_of_existing(_finding(), [_human_thread(WONT_FIX_SNIPPET)]) is True
+
+    def test_a_resolved_wont_fix_thread_still_settles(self):
+        control = apply_settled_thread_suppression([_finding()], [_human_thread(THREAD_SNIPPET)])
+        assert control[0].drop_reason is None
+        out = apply_settled_thread_suppression([_finding()], [_human_thread(WONT_FIX_SNIPPET)])
+        assert out[0].drop_reason == "settled in thread: alice"
+
+    def test_a_resolved_wont_fix_thread_is_not_a_previous_thread(self):
+        assert previously_discussed_thread(_finding(), [_human_thread(THREAD_SNIPPET)]) is not None
+        assert previously_discussed_thread(_finding(), [_human_thread(WONT_FIX_SNIPPET)]) is None
+
+    def test_end_to_end_a_resolved_wont_fix_thread_suppresses(self, contract_stubs):
+        control = orchestrate_review(
+            FakeForge(diff=DIFF, threads=[_human_thread(THREAD_SNIPPET)]),
+            REF, FakeLLM(findings_by_path=FINDINGS),
+        )
+        assert [f.title for f in control["findings_active"]] == ["Null deref"]
+
+        res = orchestrate_review(
+            FakeForge(diff=DIFF, threads=[_human_thread(WONT_FIX_SNIPPET)]),
+            REF, FakeLLM(findings_by_path=FINDINGS),
+        )
+        assert res["findings_active"] == []
+        dropped = res["findings_dropped"]
+        assert [f.drop_reason for f in dropped] == ["duplicate of existing thread"]
+        assert dropped[0].previous_thread is None

@@ -10,7 +10,7 @@ What is pinned here:
   of lines outside every hunk. A finding whose snippet the file does not
   hold, whose multi-match nothing breaks, or that sits file-level with no
   snippet at all keeps its line and is marked ``anchor_unverified`` with
-  its confidence lowered by :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT`.
+  its confidence untouched.
   No reader, an unreadable file, a dropped finding and a deterministic
   check's finding are untouched.
 - ``apply_location_verification``: each ``Also at:`` site of a grouped
@@ -29,10 +29,10 @@ from __future__ import annotations
 
 import pytest
 
+from prxref import quality
 from prxref.followup_merge import confirms
 from prxref.quality import (
     ANCHOR_SNAP_WINDOW,
-    ANCHOR_UNVERIFIED_CONFIDENCE_HIT,
     DEFAULT_LINE_TOLERANCE,
     _quoted_snippets,
     apply_anchor_snap,
@@ -107,25 +107,54 @@ class TestAnchorSnap:
 
     def test_the_window_is_centred_on_the_raw_model_line(self):
         head = _head_file(190)
-        # Aligned line 0, model line 120: |190 - 120| <= 80, so it moves.
+        # Aligned line 0, model line 120: |190 - 120| <= 100, so it moves.
         out = apply_anchor_snap(
             [_f(line=0)], read=_reader({APP: head}), model_lines=[120],
         )
         assert out[0].line == 190
-        # Model line 100: |190 - 100| = 90 > 80, so the window misses it.
         out = apply_anchor_snap(
-            [_f(line=0)], read=_reader({APP: head}), model_lines=[100],
+            [_f(line=0)], read=_reader({APP: head}), model_lines=[90],
         )
-        assert out[0].line == 0
+        assert out[0].line == 190
+        # Model line 89: |190 - 89| = 101 > 100, so the window misses it and
+        # the unique whole-file fallback anchors the file-level claim.
+        out = apply_anchor_snap(
+            [_f(line=0)], read=_reader({APP: head}), model_lines=[89],
+        )
+        assert out[0].line == 190
         assert out[0].anchor_unverified is False
 
-    def test_a_snippet_absent_from_the_head_file_marks_and_lowers(self):
+    def test_a_line0_claim_with_far_unique_snippet_is_anchored(self):
+        out = apply_anchor_snap(
+            [_f(line=0)], read=_reader({APP: _head_file(190)}), model_lines=[1],
+        )
+        assert out[0].line == 190
+        assert out[0].anchor_unverified is False
+        assert out[0].confidence == 0.8
+
+    def test_a_line0_claim_with_far_repeated_snippet_is_marked_unverified(self):
+        head = _head_file(190) + "itemIndex again\n"
+        out = apply_anchor_snap(
+            [_f(line=0)], read=_reader({APP: head}), model_lines=[1],
+        )
+        assert out[0].line == 0
+        assert out[0].anchor_unverified is True
+        assert out[0].confidence == 0.8
+
+    def test_a_positive_line_with_far_only_snippet_keeps_its_anchor(self):
+        out = apply_anchor_snap(
+            [_f(line=5)], read=_reader({APP: _head_file(190)}), model_lines=[5],
+        )
+        assert out[0].line == 5
+        assert out[0].anchor_unverified is False
+
+    def test_a_snippet_absent_from_the_head_file_marks_without_lowering(self):
         out = apply_anchor_snap(
             [_f()], read=_reader({APP: "nothing here\n"}), model_lines=[120],
         )
         assert out[0].line == 120
         assert out[0].anchor_unverified is True
-        assert out[0].confidence == pytest.approx(0.8 - ANCHOR_UNVERIFIED_CONFIDENCE_HIT)
+        assert out[0].confidence == 0.8
 
     def test_a_file_level_finding_with_no_snippet_is_marked(self):
         out = apply_anchor_snap(
@@ -135,7 +164,7 @@ class TestAnchorSnap:
         )
         assert out[0].line == 0
         assert out[0].anchor_unverified is True
-        assert out[0].confidence == pytest.approx(0.7)
+        assert out[0].confidence == 0.8
 
     def test_an_unbreakable_tie_keeps_the_line_and_marks_the_finding(self):
         head = "\n".join(
@@ -183,7 +212,7 @@ class TestAnchorSnap:
         assert out[0].anchor_unverified is False
 
     def test_a_snippet_present_only_far_outside_the_window_keeps_aligns_verdict(self):
-        head = _head_file(205)
+        head = _head_file(235, total=240)
         out = apply_anchor_snap(
             [_f()], read=_reader({APP: head}), model_lines=[120],
         )
@@ -223,9 +252,9 @@ class TestAnchorSnap:
         with pytest.raises(ValueError, match="2 entries for 1 findings"):
             apply_anchor_snap([_f()], read=_reader({APP: "x\n"}), model_lines=[1, 2])
 
-    def test_the_window_constant_is_the_documented_eighty(self):
-        assert ANCHOR_SNAP_WINDOW == 80
-        assert ANCHOR_UNVERIFIED_CONFIDENCE_HIT == 0.1
+    def test_the_window_constant_is_the_documented_hundred(self):
+        assert ANCHOR_SNAP_WINDOW == 100
+        assert not hasattr(quality, "ANCHOR_UNVERIFIED_CONFIDENCE_HIT")
         assert DEFAULT_LINE_TOLERANCE == 5
 
 
@@ -249,7 +278,23 @@ class TestLocationVerification:
         assert out[0].locations == ((APP, 12),)
         assert out[0].body == (
             "The loader calls `dataLoader` here.\n\nAlso at: `src/app.py:12`"
+            "\n\nAlso at (unverified): `src/app.py:300`"
         )
+
+    def test_a_second_run_over_the_result_changes_nothing(self):
+        once = apply_location_verification(
+            [self._rep([300, 12])], read=_reader({APP: self.HEAD}),
+        )
+        twice = apply_location_verification(once, read=_reader({APP: self.HEAD}))
+        assert twice[0] is once[0]
+        assert twice[0].body.count("Also at (unverified):") == 1
+
+    def test_strip_also_at_removes_both_paragraphs(self):
+        from prxref.quality import _strip_also_at
+
+        body = "Text.\n\nAlso at: `a.py:1`\n\nAlso at (unverified): `a.py:2`"
+        assert _strip_also_at(body) == "Text."
+        assert _strip_also_at("Text.\n\nAlso at (unverified): `a.py:2`") == "Text."
 
     def test_a_site_with_the_snippet_stays(self):
         assert self.HEAD.splitlines()[11] == "line 12  calls dataLoader here"
@@ -259,7 +304,10 @@ class TestLocationVerification:
             [self._rep([300])], read=_reader({APP: "unrelated content\n"}),
         )
         assert out[0].locations == ()
-        assert out[0].body == "The loader calls `dataLoader` here."
+        assert out[0].body == (
+            "The loader calls `dataLoader` here.\n\n"
+            "Also at (unverified): `src/app.py:300`"
+        )
 
     def test_a_shrunk_list_longer_than_five_gains_the_more_suffix(self):
         head = "\n".join(
@@ -275,6 +323,7 @@ class TestLocationVerification:
         assert out[0].body.endswith(
             "Also at: `src/app.py:12`, `src/app.py:22`, `src/app.py:32`, "
             "`src/app.py:42`, `src/app.py:52` (+2 more)"
+            "\n\nAlso at (unverified): `src/app.py:300`"
         )
 
     def test_an_unreadable_site_file_keeps_every_site(self):
@@ -460,4 +509,93 @@ class TestOrchestratorWiring:
         (active,) = res["findings_active"]
         assert active.line == 0
         assert active.anchor_unverified is True
-        assert active.confidence == pytest.approx(0.7)
+        assert active.confidence == 0.8
+
+
+class TestImportAndJavadocTiebreak:
+    @staticmethod
+    def _file(total: int, **at: str) -> str:
+        lines = [f"filler line {i}" for i in range(1, total + 1)]
+        for number, text in at.items():
+            lines[int(number[1:]) - 1] = text
+        return "\n".join(lines) + "\n"
+
+    @pytest.mark.parametrize("model_line", [1, 5])
+    def test_an_fqn_on_an_import_snaps_to_the_usage(self, model_line):
+        fqn = "com.acme.JsonProcessingException"
+        content = self._file(
+            60,
+            L1=f"import {fqn};",
+            L32=f"    throw new {fqn}(msg);",
+        )
+        finding = _f(
+            line=model_line,
+            title=f"`{fqn}` is thrown unchecked",
+            body=f"The code throws `{fqn}` without handling it.",
+        )
+        (out,) = apply_anchor_snap(
+            [finding], read=_reader({APP: content}), model_lines=[model_line]
+        )
+        assert out.line == 32
+        assert out.anchor_unverified is False
+
+    def test_a_javadoc_anchor_snaps_to_the_catch(self):
+        path = "src/Svc.java"
+        content = self._file(
+            100,
+            L10="     * Wraps catch (JsonProcessingException e) handling.",
+            L75="        } catch (JsonProcessingException e) {",
+        )
+        finding = _f(
+            file=path,
+            line=10,
+            title="`catch (JsonProcessingException` swallows the error",
+            body="The handler drops it.",
+        )
+        (out,) = apply_anchor_snap(
+            [finding], read=_reader({path: content}), model_lines=[10]
+        )
+        assert out.line == 75
+
+    def test_a_comment_only_match_still_anchors(self):
+        content = self._file(60, L20="    # TODO fix itemIndex handling")
+        finding = _f(line=40)
+        (out,) = apply_anchor_snap(
+            [finding], read=_reader({APP: content}), model_lines=[40]
+        )
+        assert out.line == 20
+
+
+def _comment_file() -> str:
+    lines = [f"filler {i}" for i in range(1, 101)]
+    lines[9] = "    # itemIndex is 1-based here"
+    lines[69] = "    x = items[itemIndex]"
+    return "\n".join(lines) + "\n"
+
+
+def _snap(title: str, body: str, line: int = 10) -> int:
+    f = Finding(
+        file="a.py", line=line, severity="warning", confidence=0.8,
+        title=title, body=body,
+    )
+    content = _comment_file()
+    return apply_anchor_snap([f], read=lambda p: content, model_lines=[line])[0].line
+
+
+def test_a_finding_about_the_comment_keeps_its_comment_anchor():
+    assert _snap("Comment says `itemIndex` is 1-based but it is 0-based", "Stale.") == 10
+
+
+def test_a_finding_quoting_the_comment_text_keeps_its_comment_anchor():
+    assert _snap("Wrong claim", "`itemIndex` is 1-based here is wrong") == 10
+
+
+def test_a_finding_about_code_still_moves_off_a_comment_line():
+    assert _snap("Unchecked `itemIndex` lookup", "Index may be out of range.") == 70
+
+
+def test_a_passing_comment_mention_in_the_body_still_moves_off_a_comment_line():
+    assert _snap(
+        "Unchecked `itemIndex` lookup",
+        "Index may be out of range; add a comment or a bounds check.",
+    ) == 70

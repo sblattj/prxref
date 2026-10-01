@@ -77,5 +77,6 @@ grouped chunk member is still dropped as `duplicate of chunk finding`.
 `settled in thread` is line-independent on purpose: `apply_line_align` has
 already demoted a file-level finding to line 0 by the time it runs, so a
 distance test could never fire. Only an **open, current** thread settles its
-subject (#73): a resolved or outdated thread never suppresses, and a finding
+subject (#73): a resolved or outdated thread never suppresses — unless it was
+closed as an explicit "won't fix" — and a finding
 that matches one is posted with a "Previously raised" note instead.

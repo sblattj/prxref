@@ -14,12 +14,14 @@ from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
+    CommitData,
     FeedReadError,
     InlineComment,
     PathListing,
     PRData,
     PRRef,
     Thread,
+    says_wont_fix,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -586,6 +588,7 @@ class ForgeImpl:
                             resolved=_is_resolved(comment),
                             author=author.get("name") or author.get("slug") or "",
                             body_snippet=(comment.get("text") or "")[:200],
+                            wont_fix=says_wont_fix(comment.get("text")),
                         )
                     )
         except FeedReadError as e:
@@ -720,6 +723,79 @@ class ForgeImpl:
             reason, page_number, where, len(paths),
         )
         return PathListing(paths=tuple(sorted(paths)), complete=False)
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        The per-PR listing ``/pull-requests/{id}/commits`` needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. It pages with
+        ``start``/``limit``/``isLastPage``/``nextPageStart`` like the
+        activity feed, and its newest-first order (git log order) is
+        assumed, so the collected entries are reversed. Each value keeps its
+        ``id`` as the sha, the first line of ``message`` as the subject, and
+        ``len(parents)`` as the parent count (a merge commit has two). The
+        shape mirrors the other Data Center listings and was not checked
+        against a live server. Any read that does not reach the end of
+        the listing — transport failure, non-OK status, unparseable body,
+        or the ``_MAX_PAGES`` budget running out — raises ``FeedReadError``
+        rather than returning a short list.
+        """
+        headers, auth = self._get_auth()
+        url = self._pr_url(ref, "/commits")
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        commits: list[CommitData] = []
+        start = 0
+        for _ in range(_MAX_PAGES):
+            try:
+                resp = self._session.get(
+                    url,
+                    params={"start": start, "limit": _PAGE_LIMIT},
+                    headers=headers,
+                    auth=auth,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                raise FeedReadError(
+                    f"commit listing for {where} could not be read at start={start}: {e}"
+                ) from e
+            if not resp.ok:
+                raise FeedReadError(
+                    f"commit listing for {where} returned HTTP {resp.status_code} "
+                    f"at start={start}"
+                )
+            try:
+                page = resp.json()
+            except ValueError as e:
+                raise FeedReadError(
+                    f"commit listing for {where} returned an unreadable body at "
+                    f"start={start}: {e}"
+                ) from e
+            values = page.get("values") if isinstance(page, dict) else None
+            if not isinstance(values, list):
+                raise FeedReadError(
+                    f"commit listing for {where} returned "
+                    f"{type(page).__name__} with no values list at start={start}"
+                )
+            for entry in values:
+                if not isinstance(entry, dict):
+                    continue
+                message = entry.get("message") or ""
+                commits.append(CommitData(
+                    sha=entry.get("id") or "",
+                    subject=message.splitlines()[0] if message else "",
+                    parent_count=len(entry.get("parents") or []),
+                ))
+            next_start = page.get("nextPageStart")
+            if page.get("isLastPage", True) or next_start is None:
+                commits.reverse()
+                return commits
+            start = next_start
+        raise FeedReadError(
+            f"commit listing for {where} outran the {_MAX_PAGES}-page budget "
+            f"({_MAX_PAGES * _PAGE_LIMIT} commits) without reaching the end"
+        )
 
     def prune_inline_comments(
         self, ref: PRRef, *, paths: Collection[str] | None = None,
