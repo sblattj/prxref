@@ -10,7 +10,7 @@ What is pinned here:
   of lines outside every hunk. A finding whose snippet the file does not
   hold, whose multi-match nothing breaks, or that sits file-level with no
   snippet at all keeps its line and is marked ``anchor_unverified`` with
-  its confidence lowered by :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT`.
+  its confidence untouched.
   No reader, an unreadable file, a dropped finding and a deterministic
   check's finding are untouched.
 - ``apply_location_verification``: each ``Also at:`` site of a grouped
@@ -29,10 +29,10 @@ from __future__ import annotations
 
 import pytest
 
+from prxref import quality
 from prxref.followup_merge import confirms
 from prxref.quality import (
     ANCHOR_SNAP_WINDOW,
-    ANCHOR_UNVERIFIED_CONFIDENCE_HIT,
     DEFAULT_LINE_TOLERANCE,
     _quoted_snippets,
     apply_anchor_snap,
@@ -107,25 +107,29 @@ class TestAnchorSnap:
 
     def test_the_window_is_centred_on_the_raw_model_line(self):
         head = _head_file(190)
-        # Aligned line 0, model line 120: |190 - 120| <= 80, so it moves.
+        # Aligned line 0, model line 120: |190 - 120| <= 100, so it moves.
         out = apply_anchor_snap(
             [_f(line=0)], read=_reader({APP: head}), model_lines=[120],
         )
         assert out[0].line == 190
-        # Model line 100: |190 - 100| = 90 > 80, so the window misses it.
         out = apply_anchor_snap(
-            [_f(line=0)], read=_reader({APP: head}), model_lines=[100],
+            [_f(line=0)], read=_reader({APP: head}), model_lines=[90],
+        )
+        assert out[0].line == 190
+        # Model line 89: |190 - 89| = 101 > 100, so the window misses it.
+        out = apply_anchor_snap(
+            [_f(line=0)], read=_reader({APP: head}), model_lines=[89],
         )
         assert out[0].line == 0
         assert out[0].anchor_unverified is False
 
-    def test_a_snippet_absent_from_the_head_file_marks_and_lowers(self):
+    def test_a_snippet_absent_from_the_head_file_marks_without_lowering(self):
         out = apply_anchor_snap(
             [_f()], read=_reader({APP: "nothing here\n"}), model_lines=[120],
         )
         assert out[0].line == 120
         assert out[0].anchor_unverified is True
-        assert out[0].confidence == pytest.approx(0.8 - ANCHOR_UNVERIFIED_CONFIDENCE_HIT)
+        assert out[0].confidence == 0.8
 
     def test_a_file_level_finding_with_no_snippet_is_marked(self):
         out = apply_anchor_snap(
@@ -135,7 +139,7 @@ class TestAnchorSnap:
         )
         assert out[0].line == 0
         assert out[0].anchor_unverified is True
-        assert out[0].confidence == pytest.approx(0.7)
+        assert out[0].confidence == 0.8
 
     def test_an_unbreakable_tie_keeps_the_line_and_marks_the_finding(self):
         head = "\n".join(
@@ -183,7 +187,7 @@ class TestAnchorSnap:
         assert out[0].anchor_unverified is False
 
     def test_a_snippet_present_only_far_outside_the_window_keeps_aligns_verdict(self):
-        head = _head_file(205)
+        head = _head_file(235, total=240)
         out = apply_anchor_snap(
             [_f()], read=_reader({APP: head}), model_lines=[120],
         )
@@ -223,9 +227,9 @@ class TestAnchorSnap:
         with pytest.raises(ValueError, match="2 entries for 1 findings"):
             apply_anchor_snap([_f()], read=_reader({APP: "x\n"}), model_lines=[1, 2])
 
-    def test_the_window_constant_is_the_documented_eighty(self):
-        assert ANCHOR_SNAP_WINDOW == 80
-        assert ANCHOR_UNVERIFIED_CONFIDENCE_HIT == 0.1
+    def test_the_window_constant_is_the_documented_hundred(self):
+        assert ANCHOR_SNAP_WINDOW == 100
+        assert not hasattr(quality, "ANCHOR_UNVERIFIED_CONFIDENCE_HIT")
         assert DEFAULT_LINE_TOLERANCE == 5
 
 
@@ -460,4 +464,4 @@ class TestOrchestratorWiring:
         (active,) = res["findings_active"]
         assert active.line == 0
         assert active.anchor_unverified is True
-        assert active.confidence == pytest.approx(0.7)
+        assert active.confidence == 0.8

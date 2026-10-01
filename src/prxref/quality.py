@@ -82,9 +82,8 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
    :data:`DEFAULT_LINE_TOLERANCE` from the match. A finding whose
    snippet the head file does not hold, whose multi-match it cannot
    break, or that sits file-level with no snippet at all is marked
-   ``anchor_unverified`` and loses
-   :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT` of confidence, so the gate
-   may drop it; an unreadable file, a dropped finding and a
+   ``anchor_unverified`` with its confidence
+   unchanged; an unreadable file, a dropped finding and a
    deterministic check's finding are untouched.
 8. ``apply_thread_dedup``: drop findings that duplicate an already-open
    and current thread on the PR (path + line-window + shared distinctive
@@ -246,13 +245,7 @@ DEFAULT_LINE_TOLERANCE: int = 5
 # the issue documents sit 14 to 70 lines past the nearest hunk — outside
 # every hunk, which is exactly why the diff-bounded passes cannot reach them
 # — so the window is a file-range scan, not a hunk-bounded one.
-ANCHOR_SNAP_WINDOW: int = 80
-
-# Confidence taken off a finding apply_anchor_snap marks ``anchor_unverified``
-# (issue #74). 0.1 is one gate step below the common 0.7/0.8 model
-# confidences: a finding whose evidence cannot be located is demoted, and one
-# that was already borderline dies at the quality gate naturally.
-ANCHOR_UNVERIFIED_CONFIDENCE_HIT: float = 0.1
+ANCHOR_SNAP_WINDOW: int = 100
 
 # A period that is not followed by whitespace is member access, a filename, or
 # a version — not a sentence break — so the hedge rules may span it.
@@ -989,14 +982,8 @@ def _nearest_snippet_match(
 
 
 def _mark_anchor_unverified(finding: Finding) -> Finding:
-    """Stamp ``anchor_unverified`` and lower confidence in one ``replace``."""
-    return replace(
-        finding,
-        anchor_unverified=True,
-        confidence=max(
-            0.0, float(finding.confidence or 0.0) - ANCHOR_UNVERIFIED_CONFIDENCE_HIT
-        ),
-    )
+    """Stamp ``anchor_unverified`` and leave the confidence untouched."""
+    return replace(finding, anchor_unverified=True)
 
 
 def apply_anchor_snap(
@@ -1030,9 +1017,7 @@ def apply_anchor_snap(
     matched line's hunk (when the diff supplies one) shares no evidence
     token with the claim, the anchor is NOT moved — the pass refuses to
     guess between siblings — and the finding is marked
-    ``anchor_unverified`` with its confidence lowered by
-    :data:`ANCHOR_UNVERIFIED_CONFIDENCE_HIT` (a sub-floor result then dies
-    at :func:`apply_quality_gate` naturally). The same mark-and-lower
+    ``anchor_unverified`` with its confidence unchanged. The same mark
     applies when the file reads but no snippet occurs anywhere in it, and
     when a finding sits file-level (line 0) with no snippet parseable at
     all: in each case the claim quotes code the head file cannot show.
