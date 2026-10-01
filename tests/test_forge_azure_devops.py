@@ -1128,6 +1128,18 @@ def test_list_threads_resolved_statuses(status):
     assert forge.list_threads(_ref())[0].resolved is True
 
 
+@pytest.mark.parametrize(
+    ("status", "wont_fix"),
+    [("fixed", False), ("closed", False), ("active", False), ("wontFix", True), ("byDesign", True)],
+)
+def test_list_threads_wont_fix_statuses(status, wont_fix):
+    forge, _ = _threads_forge({"value": [
+        {"id": 1, "status": status, "comments": [{"id": 1, "content": "x", "commentType": "text"}]},
+    ]})
+
+    assert forge.list_threads(_ref())[0].wont_fix is wont_fix
+
+
 def test_list_threads_root_skips_a_deleted_first_comment():
     forge, _ = _threads_forge({"value": [{"id": 1, "status": "active", "comments": [
         {"id": 1, "content": "", "commentType": "text", "isDeleted": True},

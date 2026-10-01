@@ -85,6 +85,7 @@ _INLINE_THREAD_STATUS = "active"
 _SUMMARY_THREAD_STATUS = "closed"
 _COMMENT_TYPE_TEXT = 1
 _RESOLVED_STATUSES = frozenset({"fixed", "wontfix", "closed", "bydesign"})
+_WONT_FIX_STATUSES = frozenset({"wontfix", "bydesign"})
 
 _ADO_URL_RE = re.compile(
     r"^(?P<scheme>https?)://(?P<host>[^/?#]+)"
@@ -759,6 +760,7 @@ class ForgeImpl:
                         path=(context.get("filePath") or "").lstrip("/") or None,
                         line=(context.get("rightFileStart") or {}).get("line"),
                         resolved=str(thread.get("status") or "").lower() in _RESOLVED_STATUSES,
+                        wont_fix=str(thread.get("status") or "").lower() in _WONT_FIX_STATUSES,
                         author=who.get("displayName") or who.get("uniqueName") or "",
                         body_snippet=(root.get("content") or "")[:200],
                     )

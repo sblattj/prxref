@@ -62,6 +62,10 @@ class Thread:
     the thread's permalink when the forge has one, else ``None``.
     ``root_id`` is the id of the thread's root comment (a reply carries its
     parent's), the key GitHub's two thread views are joined on, else ``None``.
+    ``wont_fix`` marks a thread closed as a deliberate decision not to
+    change the code (Azure DevOps ``wontFix`` / ``byDesign``): it keeps
+    suppressing a duplicate even though it is resolved. :attr:`lapsed` is
+    the one predicate the gates share.
     """
 
     path: str | None
@@ -73,6 +77,12 @@ class Thread:
     outdated: bool = False
     url: str | None = None
     root_id: int | None = None
+    wont_fix: bool = False
+
+    @property
+    def lapsed(self) -> bool:
+        """True for a resolved or outdated thread that is not a won't-fix decision."""
+        return (self.resolved or self.outdated) and not self.wont_fix
 
 
 @dataclass
