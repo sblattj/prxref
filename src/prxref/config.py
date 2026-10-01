@@ -556,7 +556,9 @@ LLM / pipeline:
                                 chunk whose files it does not cover, and
                                 clears the rule label of a finding whose
                                 cited section declares a scope that does
-                                not cover the file, keeping the finding;
+                                not cover the file, or whose cited rule
+                                names another kind of defect than the
+                                finding's title, keeping the finding;
                                 "off" sends every chunk the whole rules
                                 text, leaves every label as the model
                                 wrote it and the run record's

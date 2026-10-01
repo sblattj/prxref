@@ -126,6 +126,16 @@ class ReviewRules:
     applies_to: tuple[str, ...] | None = None
     sections: tuple[RuleSection, ...] = ()
 
+    @property
+    def index(self) -> tuple[RuleSection, ...]:
+        """Every rule section of the capped body, scoped or not (:func:`parse_rule_index`, #75).
+
+        Derived from ``body`` on each read, so a hand-built instance carries
+        it too; the orchestrator reads it for the claim-category half of the
+        applicability check, and :meth:`record` never does.
+        """
+        return parse_rule_index(self.body.text)
+
     def prompt_block(self, unit: str, paths: Sequence[str] | None = None) -> str:
         """The system-prompt block for one review unit (``"worker"`` or ``"sweep"``).
 
@@ -299,14 +309,16 @@ def split_front_matter(
 
 @dataclass(frozen=True)
 class RuleSection:
-    """One ATX-headed section of a rules body that declares a ``scope:`` line (#75).
+    """One ATX-headed section of a rules body, as the #75 applicability check reads it.
 
     ``name`` is the heading text with its whitespace collapsed, as written:
     the caller casefolds it when matching a finding's ``rule`` label against
     the section. ``scopes`` holds the ``scope:`` line's tokens, casefolded
     and split on commas and whitespace, in file order, duplicates dropped.
-    A section without a ``scope:`` line — or one whose ``scope:`` line names
-    no token — is not returned by :func:`parse_rule_sections` at all, so a
+    :func:`parse_rule_index` returns every section, with ``scopes`` ``()``
+    for an unscoped one. A section without a ``scope:`` line — or one whose
+    ``scope:`` line names no token — is not returned by
+    :func:`parse_rule_sections` at all, so a
     body with no such line parses to ``()`` and every rule-scope feature
     stays off. ``items`` holds the section's bullet and numbered rule lines
     (markup stripped, whitespace collapsed), so a label that names a rule
@@ -433,6 +445,76 @@ def parse_rule_sections(body: str) -> tuple[RuleSection, ...]:
                 items.append(text)
         sections.append(RuleSection(name=name, scopes=tokens, items=tuple(items)))
     return tuple(sections)
+
+
+def parse_rule_index(body: str) -> tuple[RuleSection, ...]:
+    """Every rule of ``body`` by section, scoped or not (#75): one :class:`RuleSection` per ATX heading.
+
+    The lookup table of the applicability check's claim-category half
+    (:func:`prxref.quality.apply_rule_category_check`), which needs every
+    rule a label can name, not only the scoped ones
+    :func:`parse_rule_sections` returns. Each ATX heading (one to four
+    ``#``) opens a section named by its whitespace-collapsed text; its
+    ``scopes`` are what :func:`parse_rule_sections` reads for it, ``()`` for
+    an unscoped section; its ``items`` are its bullet and numbered rule
+    lines (markup stripped, whitespace collapsed). Rule lines above the
+    first heading form one leading section named ``""``, so a rules file of
+    plain bullets with no heading is indexed too; a heading-less body with
+    no rule line, and the empty body, index to ``()``. Callers pass the
+    capped body the prompt shows.
+    """
+    lines = body.split("\n")
+    scopes = {index: tokens for index, _name, tokens in _scoped_sections(lines)}
+    sections: list[RuleSection] = []
+    name, scope, items = "", (), []
+    for index, line in enumerate(lines):
+        heading = _SECTION_RE.match(line)
+        if heading is None:
+            text = _item_text(line)
+            if text:
+                items.append(text)
+            continue
+        if name or items:
+            sections.append(RuleSection(name=name, scopes=scope, items=tuple(items)))
+        name, scope, items = " ".join(heading.group(1).split()), scopes.get(index, ()), []
+    if name or items:
+        sections.append(RuleSection(name=name, scopes=scope, items=tuple(items)))
+    return tuple(sections)
+
+
+_CLAIM_KIND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("docs", re.compile(
+        r"\b(?:javadocs?|jsdocs?|kdocs?|docstrings?|doc[ -]comments?|comments?|documentation)\b"
+    )),
+    ("unused", re.compile(
+        r"\b(?:unused|unread|never[ -](?:read|used|called)|dead[ -]code|unreachable)\b"
+    )),
+    ("style", re.compile(
+        r"\b(?:style|styling|naming|formatting|whitespace|indentation|camel ?case|"
+        r"snake_case|pascal ?case|kebab-case|lint|linting|line[ -]length)\b"
+    )),
+    ("errors", re.compile(
+        r"\b(?:exceptions?|retry|retries|retried|transient|error[ -]handling|catch|caught|"
+        r"swallow(?:s|ed)?)\b"
+    )),
+)
+
+
+def claim_kinds(text: str) -> frozenset[str]:
+    """The kinds of defect ``text`` names, from a small fixed vocabulary (#75).
+
+    The vocabulary of the applicability check's claim-category half, matched
+    as whole words, case-insensitively: ``docs`` (Javadoc, JSDoc, KDoc,
+    docstring, doc comment, comment, documentation), ``unused`` (unused,
+    unread, never read/used/called, dead code, unreachable), ``style``
+    (style, styling, naming, formatting, whitespace, indentation, camelCase,
+    snake_case, PascalCase, kebab-case, lint, linting, line length) and
+    ``errors`` (exception, retry, transient, error handling, catch, caught,
+    swallow). A text naming none of them returns the empty set, which the
+    check reads as "unknown kind" and never clears on.
+    """
+    folded = text.casefold()
+    return frozenset(kind for kind, pattern in _CLAIM_KIND_PATTERNS if pattern.search(folded))
 
 
 def _annotate_rule_scopes(text: str) -> str:
