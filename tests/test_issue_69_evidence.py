@@ -48,7 +48,7 @@ from prxref.evidence import (
 )
 from prxref.llm import ConfigError, InvokeResult
 from prxref.quality import apply_evidence_drops
-from prxref.triage import EVIDENCE_CONTRADICTS, Finding
+from prxref.triage import Finding
 from tests.test_orchestrator import REF, FakeForge, _added_file_diff, multi_chunk_diff
 
 SOURCES = ("--evidence-file", "PRXREF_EVIDENCE_FILES")
@@ -81,7 +81,7 @@ GLOBAL = {
 FINDING = {
     "file": "src/app.py", "line": 3, "severity": "error", "confidence": 0.9,
     "title": "Broken import", "body": "The import at line 3 does not resolve.",
-    "evidence": EVIDENCE_CONTRADICTS,
+    "evidence": "contradicts",
 }
 
 PROBE = {
@@ -478,10 +478,9 @@ class TestThroughTheRealReviewer:
         assert finding.severity == "error"
         assert finding.drop_reason is None
 
-    def test_without_evidence_the_label_is_never_read(self, tmp_path):
+    def test_without_evidence_the_finding_is_untouched(self, tmp_path):
         _forge, _llm, res = _run(None, findings=[dict(FINDING)])
         assert res["findings_active"][0].severity == "error"
-        assert res["findings_active"][0].evidence is None
 
     def test_an_empty_bundle_shows_nothing_and_reads_no_label(self, tmp_path):
         evidence = load_evidence(
@@ -846,3 +845,13 @@ class TestEvidenceDrops:
         findings = [_claim()]
         out = apply_evidence_drops(findings, evidence, pr_paths=PR_PATHS)
         assert out == findings
+
+
+def test_finding_has_no_evidence_field_and_label_is_ignored(tmp_path):
+    import dataclasses
+
+    assert "evidence" not in [f.name for f in dataclasses.fields(Finding)]
+    import prxref.triage as triage
+
+    assert not hasattr(triage, "normalize_evidence")
+    assert not hasattr(triage, "EVIDENCE_CONTRADICTS")
