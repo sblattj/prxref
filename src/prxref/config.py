@@ -552,12 +552,15 @@ LLM / pipeline:
                                 an unreadable or malformed one is a
                                 configuration error (exit 2)
   PRXREF_RULE_SCOPING           Rule scope check (#75): "on" (the default)
+                                leaves a scoped rules section out of every
+                                chunk whose files it does not cover, and
                                 clears the rule label of a finding whose
                                 cited section declares a scope that does
                                 not cover the file, keeping the finding;
-                                "off" leaves every label as the model wrote
-                                it and the run record's "rule_scope_cleared"
-                                null. Matched exactly; any other value is a
+                                "off" sends every chunk the whole rules
+                                text, leaves every label as the model
+                                wrote it and the run record's
+                                "rule_scope_cleared" null. Matched exactly; any other value is a
                                 configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the

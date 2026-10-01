@@ -223,9 +223,12 @@ Nothing about the rules is added to the posted comments.
 
 A rules body can say which part of the repository one of its sections is
 about. The declaration is a `scope:` line directly under an ATX heading
-(one to four `#`), and it does two things: the heading the model sees
-gains an `(applies to: …)` annotation, and a deterministic pass clears a
-finding's `rule` label when that section cannot cover the finding's file.
+(one to four `#`), and it does three things: a review unit none of whose
+files the section covers is not shown the section at all, the heading the
+units that do see it gains an `(applies to: …)` annotation, and a
+deterministic pass clears a finding's `rule` label when that section cannot
+cover the finding's file. `PRXREF_RULE_SCOPING=off` turns off the first and
+the last.
 
 ```markdown
 # Team rules
@@ -265,10 +268,36 @@ scope: openapi, docs
   file-global `scope` key is ignored like any other unknown front-matter
   key.
 
-**The annotation.** Pure text, nothing removed: a scoped section's heading
-gains ` (applies to: <token>, <token>)` with the tokens in file order, in
-every unit's `## Team review rules` block, so the model sees which
-sections cannot cover the file it is reading.
+**Per-unit filtering.** With `PRXREF_RULE_SCOPING=on` (the default), each
+chunk's `## Team review rules` block leaves out every scoped section that
+none of the chunk's files falls in: the heading and everything up to the
+next heading of the same or a higher level, so a `###` sub-section leaves
+with its `##` parent. A section is kept when at least one of the chunk's
+paths (a renamed file's old path included) is covered by every token of
+its scope — the same test the clearing pass applies to a finding's file —
+so a chunk of only `web/a.ts` is not offered a `java`-scoped section, and a
+chunk holding both a `.java` and a `.ts` file is offered both. Unscoped
+sections, text above the first heading, and a section scoped only by an
+unknown token are always kept. The systemic sweep is filtered by the union
+of every chunk's paths, so it loses only sections no file of the pull
+request falls in. The filter applies to the `PRXREF_REVIEW_RULES` body and
+to each selected `PRXREF_SCOPED_RULES` body alike (before the scoped-rules
+character cap counts them). When anything was left out, one line closes the
+block:
+
+```text
+[rules for other languages/file types left out: Java conventions]
+```
+
+and the unit's `chunk start` / `sweep start` trace event carries the
+left-out headings as `rules_left_out` (headings only, never rules text). A
+body with no scoped section, or `PRXREF_RULE_SCOPING=off`, sends every unit
+the whole body.
+
+**The annotation.** A kept scoped section's heading gains
+` (applies to: <token>, <token>)` with the tokens in file order, in the
+unit's `## Team review rules` block, so the model sees which scope a
+section it is shown carries.
 
 **The clearing pass.** Once any loaded section declares a scope, a
 finding's `rule` label is cleared only when it names a scoped section and
