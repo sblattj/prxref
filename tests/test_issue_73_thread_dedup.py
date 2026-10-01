@@ -198,7 +198,10 @@ class TestRunRecord:
         forge = FakeForge(diff=DIFF, threads=[_thread()])
         res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
-        assert res["thread_dedup"] == {
+        td = res["thread_dedup"]
+        assert {k: td[k] for k in (
+            "suppressed", "matched_resolved", "threads_read", "threads_resolved",
+        )} == {
             "suppressed": 1,
             "matched_resolved": 0,
             "threads_read": 1,
@@ -209,7 +212,10 @@ class TestRunRecord:
         forge = FakeForge(diff=DIFF, threads=[_thread(resolved=True, outdated=True)])
         res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
 
-        assert res["thread_dedup"] == {
+        td = res["thread_dedup"]
+        assert {k: td[k] for k in (
+            "suppressed", "matched_resolved", "threads_read", "threads_resolved",
+        )} == {
             "suppressed": 0,
             "matched_resolved": 1,
             "threads_read": 1,
@@ -255,6 +261,34 @@ class TestSummaryAccounting:
             "1 matched resolved threads and are posted below."
         )
         assert orchestrator._thread_dedup_accounting(0, 0) == ""
+
+    def test_the_helper_lists_each_finding_with_its_thread(self):
+        detail = [{
+            "file": "a.py", "line": 3, "title": "T", "thread": "http://x/1",
+            "drop_reason": "duplicate of existing thread",
+        }]
+        out = orchestrator._thread_dedup_accounting(1, 0, detail, [])
+        assert out.splitlines()[1:] == ["Suppressed:", "- `a.py:3` — T — http://x/1"]
+
+
+class TestThreadNamedInRecordAndSummary:
+    def test_a_suppressed_duplicate_names_its_thread(self, contract_stubs):
+        forge = FakeForge(diff=DIFF, threads=[_thread(url=THREAD_URL)])
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
+
+        entry = res["thread_dedup"]["suppressed_detail"][0]
+        assert entry["thread"] == THREAD_URL
+        assert entry["drop_reason"] == "duplicate of existing thread"
+        assert f"`src/app.py:3` — Null deref — {THREAD_URL}" in forge.summaries[0]
+
+    def test_a_resolved_match_names_its_thread(self, contract_stubs):
+        forge = FakeForge(diff=DIFF, threads=[_thread(resolved=True, url=THREAD_URL)])
+        res = orchestrate_review(forge, REF, FakeLLM(findings_by_path=FINDINGS))
+
+        entry = res["thread_dedup"]["matched_resolved_detail"][0]
+        assert entry["thread"] == THREAD_URL
+        assert entry["file"] == "src/app.py"
+        assert res["thread_dedup"]["suppressed_detail"] == []
 
 
 class TestPreviouslyRaisedRendering:
