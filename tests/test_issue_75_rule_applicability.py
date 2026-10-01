@@ -591,3 +591,57 @@ class TestAppliesToAndHeadingInference:
         )
         text = rules.prompt_block("worker")
         assert "## Java rules (applies to: java)\n- first" in text
+
+
+UNMARKED_BODY = (
+    "# Team rules\n"
+    "\n"
+    "## JVM module boundaries\n"
+    "\n"
+    "- Controllers never call Controllers; the service layer owns the call.\n"
+    "\n"
+    "## General style\n"
+    "\n"
+    "- Name every data limit.\n"
+)
+TS_TEST = "src/loader.test.ts"
+DESIGN_DOC = "docs/design.md"
+REPRO_DIFF = _added_file_diff(TS_TEST, 30) + _added_file_diff(DESIGN_DOC, 30)
+REPRO_RAW = [
+    {"file": TS_TEST, "line": 3, "severity": "warning", "confidence": 0.9,
+     "title": "Test reads a file from a sibling directory",
+     "body": "The data fixture is read from ../fixtures.", "rule": "JVM module boundaries"},
+    {"file": DESIGN_DOC, "line": 5, "severity": "warning", "confidence": 0.9,
+     "title": "Design doc cites ticket ABC-1234",
+     "body": "The data section mentions ticket ABC-1234.", "rule": "JVM module boundaries"},
+    {"file": DESIGN_DOC, "line": 11, "severity": "warning", "confidence": 0.9,
+     "title": "Unnamed limit in the design doc",
+     "body": "The data limit has no name.", "rule": "General style"},
+]
+
+
+class TestUnmarkedSectionsReproShape:
+    def test_heading_scopes_clear_both_wrong_labels_and_keep_every_finding(self):
+        rules = ReviewRules(
+            path="team-rules.md",
+            body=cap_text(UNMARKED_BODY.strip(), 24000),
+            severity_map={},
+            sections=parse_rule_sections(UNMARKED_BODY.strip()),
+        )
+        res = orchestrate_review(
+            FakeForge(diff=REPRO_DIFF), REF, _ScriptedLLM(chunk=REPRO_RAW),
+            post=False, max_workers=1, rules=rules,
+        )
+        assert res["rule_scope_cleared"] == 2
+        by_file = {(f.file, f.line): f for f in res["findings_active"]}
+        assert set(by_file) == {(TS_TEST, 3), (DESIGN_DOC, 5), (DESIGN_DOC, 11)}
+        assert by_file[(TS_TEST, 3)].rule is None
+        assert by_file[(DESIGN_DOC, 5)].rule is None
+        assert by_file[(DESIGN_DOC, 11)].rule == "General style"
+
+    def test_the_jvm_label_is_kept_on_a_jvm_file(self):
+        sections = parse_rule_sections(UNMARKED_BODY.strip())
+        out, cleared = apply_rule_scope_check(
+            [_f(3, file=FOO_JAVA, rule="JVM module boundaries")], sections=sections
+        )
+        assert cleared == 0 and out[0].rule == "JVM module boundaries"
