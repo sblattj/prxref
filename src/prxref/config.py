@@ -255,7 +255,8 @@ LLM / pipeline:
                                 e.g. "PROJ-[0-9]+". One summary note per
                                 offending commit. Needs the forge's
                                 commit listing (GitHub, GitLab, Bitbucket
-                                Cloud, Gitea); without one,
+                                Cloud, Bitbucket Server / Data Center,
+                                Gitea, Azure DevOps); without one,
                                 or on a --diff-file run, the check skips
                                 with "skipped: no commit source". Empty
                                 (default) skips the check.
