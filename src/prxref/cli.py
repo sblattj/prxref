@@ -30,8 +30,8 @@ the chunks its ``applies_to:`` globs match, and the sweep their union;
 ``--context-file PATH`` names the ticket the PR implements
 (``PRXREF_TICKET_CONTEXT_FILE``), so each finding is marked in, out of, or
 of unknown ticket scope. Each flag wins over its variable, and
-``--rules-file ""`` / ``--scoped-rules ""`` / ``--context-file ""`` turn the
-variable off for one run. The rules and ticket files are read before any
+``--rules-file ""`` / ``--scoped-rules ""`` / ``--context-file ""`` /
+``--context-standards-globs ""`` turn the variable off for one run. The rules and ticket files are read before any
 network call, so an unusable one is a configuration error. The webhook
 daemon reads both kinds of rules file from its own environment, re-reading
 them on every webhook, and never reads a ticket-context file.
@@ -396,6 +396,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "comma-separated globs selecting the CI configuration files "
             "the CI wiring check reads (PRXREF_CI_WIRING_GLOBS; a set "
             "value replaces the built-in set)"
+        ),
+    )
+    rev.add_argument(
+        "--context-standards-globs",
+        default=None,
+        metavar="GLOBS",
+        help=(
+            "comma-separated globs selecting the repository's own standards "
+            "documents (PRXREF_CONTEXT_STANDARDS_GLOBS; a set value replaces "
+            "the built-in set, and '' or off reads no standards for this run)"
         ),
     )
     rev.add_argument(
@@ -1506,6 +1516,15 @@ def _open_repo_dir(path: str | None) -> RepoDir | None:
         raise ConfigError(f"--repo-dir: no such directory {path!r}") from exc
 
 
+def _standards_globs_arg(raw: str | None) -> list[str] | None:
+    """Parse ``--context-standards-globs``: unset is ``None``, ``''``/``off`` is ``[]``."""
+    if raw is None:
+        return None
+    if raw.strip() == "off":
+        return []
+    return [g.strip() for g in raw.split(",") if g.strip()]
+
+
 def _run_review(
     url: str | None,
     *,
@@ -1531,6 +1550,7 @@ def _run_review(
     ci_wiring: str | None = None,
     ci_wiring_globs: list[str] | None = None,
     evidence_files: list[str] | None = None,
+    context_standards_globs: list[str] | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1579,6 +1599,7 @@ def _run_review(
         ci_wiring=ci_wiring,
         ci_wiring_globs=ci_wiring_globs,
         evidence_files=evidence_files,
+        context_standards_globs=context_standards_globs,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1592,6 +1613,7 @@ def _run_review(
             "ci_wiring": "--ci-wiring",
             "ci_wiring_globs": "--ci-wiring-globs",
             "evidence_files": "--evidence-file",
+            "context_standards_globs": "--context-standards-globs",
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -1993,6 +2015,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
                 if args.ci_wiring_globs is not None else None
             ),
             evidence_files=args.evidence_file,
+            context_standards_globs=_standards_globs_arg(args.context_standards_globs),
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
