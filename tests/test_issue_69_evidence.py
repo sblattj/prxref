@@ -551,6 +551,10 @@ class TestThroughTheRealReviewer:
             "; 1 finding(s) the evidence contradicts dropped" in summary
         ) is dropped
         assert "downgraded" not in summary
+        assert "`curl -sI /x` (exit 0)" in summary
+        assert ("Missing Cache-Control header" in summary) is dropped
+        if dropped:
+            assert "contradicted by `curl -sI /x`" in summary
 
     def test_no_note_without_evidence(self, tmp_path):
         forge, _llm, _res = _run(None, post=True)

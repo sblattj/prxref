@@ -268,8 +268,9 @@ never drops a finding. A deterministic finding and one that already has a
 the chunk/sweep boundary holds. When it drops anything, prxref logs `evidence:
 dropped N finding(s) the execution evidence contradicts` at INFO, the JSONL
 trace gets one `evidence drop` event with `findings: N`, and the summary's
-evidence note says how many were dropped. Without evidence the pass does not
-run.
+evidence note says how many were dropped, lists the supplied commands with
+their exit codes (at most 10), and names each dropped finding's title and the
+command that contradicted it. Without evidence the pass does not run.
 
 ### Failing evidence raises findings
 
