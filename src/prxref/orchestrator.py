@@ -119,15 +119,19 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
-   ``apply_rule_scope_check`` (#75, on its own guard: any loaded rules
-   file whose body declares at least one ATX section scope, whatever the
-   grouping and cap switches say; a ``rule`` label that names no scoped
-   section, or whose section's ``scope:`` tokens do not cover the
-   finding's path, is cleared to ``None`` and the finding kept, so it
-   groups and caps by title like any ruleless one; one INFO line and one
-   ``rulescope ok`` trace event count the cleared labels, and the run
-   record's ``rule_scope_cleared`` carries the count, ``None`` when the
-   check did not run) →
+   ``apply_rule_scope_check`` then ``apply_rule_category_check`` (#75,
+   with ``rule_scoping`` on, on their own guard whatever the grouping and
+   cap switches say: the scope half runs when any loaded rules file
+   declares at least one ATX section scope, and clears a ``rule`` label
+   whose scoped section's ``scope:`` tokens do not cover the finding's
+   path; the category half runs whenever a loaded rules file holds a
+   heading or a rule line, and clears a label whose rule names another
+   kind of defect than the finding's title. A label naming no rule is
+   kept, a cleared finding is kept and groups and caps by title like any
+   ruleless one; one ``rulescope ok`` trace event, an INFO line per half,
+   and the run record's ``rule_scope_cleared`` count the cleared labels of
+   both halves — ``None`` when the scope half did not run and the
+   category half cleared nothing) →
    ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
    in one file that break one rule, or that name no rule and share a
    normalized title, fold into one representative that lists
@@ -295,6 +299,7 @@ from .quality import (
     apply_quality_gate,
     apply_removal_claim_check,
     apply_rule_cap,
+    apply_rule_category_check,
     apply_rule_grouping,
     apply_rule_scope_check,
     apply_settled_thread_suppression,
@@ -2101,17 +2106,28 @@ def orchestrate_review(
     findings = apply_removal_claim_check(findings, files)
     findings = apply_hedge_gate(findings, spec_digest=injected)
     # Its own guard (#75), independent of grouping and the cap: any loaded
-    # rules file that declares a section scope turns the check on, so a
+    # rules file that declares a section scope (any rule at all, for the
+    # category half) turns the check on, so a
     # wrong label is cleared BEFORE either pass can key on it — including
     # when both are off and the label came from an override prompt.
     rule_sections = _rule_sections(rules, scoped_rules) if rule_scoping == "on" else ()
+    rule_index = _rule_index(rules, scoped_rules) if rule_scoping == "on" else ()
+    cleared_labels = category_cleared = 0
     if rule_sections:
         findings, cleared_labels = apply_rule_scope_check(findings, sections=rule_sections)
         logger.info(
             "rule scope: cleared %d rule label(s) whose scoped section does not cover the file", cleared_labels,
         )
-        tracer.event("rulescope", "ok", cleared=cleared_labels)
-        run_inputs["rule_scope_cleared"] = cleared_labels
+    if rule_index:
+        findings, category_cleared = apply_rule_category_check(findings, sections=rule_index)
+        if rule_sections or category_cleared:
+            logger.info(
+                "rule category: cleared %d rule label(s) whose rule names another kind of defect",
+                category_cleared,
+            )
+    if rule_sections or category_cleared:
+        tracer.event("rulescope", "ok", cleared=cleared_labels + category_cleared, category=category_cleared)
+        run_inputs["rule_scope_cleared"] = cleared_labels + category_cleared
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
@@ -2515,6 +2531,24 @@ def _rule_sections(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
     if scoped_rules is not None:
         for rules_file in getattr(scoped_rules, "files", ()) or ():
             sections += getattr(rules_file, "sections", ()) or ()
+    return sections
+
+
+def _rule_index(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
+    """Every rule section of the loaded rules files, scoped or not, always-on first (#75).
+
+    The claim-category twin of :func:`_rule_sections`, read duck-typed off
+    each file's ``index`` (:func:`prxref.rules.parse_rule_index`); an object
+    without the attribute reads as none. Empty unless at least one loaded
+    file holds a heading or a rule line, which is what guards the
+    :func:`quality.apply_rule_category_check` call.
+    """
+    sections: tuple[Any, ...] = ()
+    if rules is not None:
+        sections += getattr(rules, "index", ()) or ()
+    if scoped_rules is not None:
+        for rules_file in getattr(scoped_rules, "files", ()) or ():
+            sections += getattr(rules_file, "index", ()) or ()
     return sections
 
 

@@ -228,7 +228,7 @@ files the section covers is not shown the section at all, the heading the
 units that do see it gains an `(applies to: …)` annotation, and a
 deterministic pass clears a finding's `rule` label when that section cannot
 cover the finding's file. `PRXREF_RULE_SCOPING=off` turns off the first and
-the last.
+the last, and the claim-category half described below.
 
 ```markdown
 # Team rules
@@ -311,8 +311,28 @@ empty path. A cleared label becomes `null`;
 the finding itself is never dropped, so it rejoins the ruleless findings
 downstream: grouping keys it on its normalized title and the per-rule cap
 caps it by title. The run record and `--format json` carry the count as
-`rule_scope_cleared` (`null` when no loaded section declares a scope,
-`0` when the check ran and cleared nothing).
+`rule_scope_cleared` (`null` when no loaded section declares a scope and
+the claim-category half below cleared nothing, `0` when the check ran and
+cleared nothing).
+
+**The claim-category half.** With `PRXREF_RULE_SCOPING=on` the check also
+clears a label whose rule names another kind of defect than the finding,
+in any rules file, scoped or not. The label is looked up the same way, in
+every section (and in the rule lines above the first heading). The rule's
+kinds come from the matched heading or rule line and its section heading,
+the finding's from its title alone, over a fixed whole-word vocabulary:
+`docs` (Javadoc, JSDoc, KDoc, docstring, doc comment, comment,
+documentation), `unused` (unused, unread, never read/used/called, dead
+code, unreachable), `style` (style, naming, formatting, whitespace,
+indentation, camelCase and the other case names, lint, line length) and
+`errors` (exception, retry, transient, error handling, catch, swallow). A
+label is cleared when both sides name a kind and share none — a `Stale
+duplicate Javadoc` finding citing `- Remove fields never read` — or when
+the rule and its section heading name only `style`, the finding is an
+`error`, and its title names no kind (a correctness bug filed under
+`## Naming style`). A rule or a title that names no kind keeps its label,
+so writing the kind into a rule's own words ("never read", "Javadoc") is
+what lets the check judge it.
 
 **The token vocabulary.** A token covers a path by its basename,
 case-sensitively:
