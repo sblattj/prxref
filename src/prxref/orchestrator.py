@@ -282,6 +282,7 @@ from .prompt_templates import (
     uncovered_summary_groups,
 )
 from .quality import (
+    EVIDENCE_DROP_PREFIX,
     GROUPED_INTO_PREFIX,
     RULE_CAP_PREFIX,
     SUGGESTION_CLEAR_REASONS,
@@ -1990,16 +1991,18 @@ def orchestrate_review(
     # cap slot. Deterministic only — the model's label is never read — and
     # 1:1 and order-preserving, so sweep_start still marks the boundary.
     evidence_dropped = 0
+    evidence_settled: list[Finding] = []
     if evidence_active:
         settled = apply_evidence_drops(
             findings, evidence,
             pr_paths=[p for f in files for p in (f.path, f.old_path) if p],
         )
-        evidence_dropped = sum(
-            1
+        evidence_settled = [
+            after
             for before, after in zip(findings, settled, strict=True)
             if before.drop_reason is None and after.drop_reason is not None
-        )
+        ]
+        evidence_dropped = len(evidence_settled)
         if evidence_dropped:
             logger.info(
                 "evidence: dropped %d finding(s) the execution evidence contradicts",
@@ -2217,7 +2220,9 @@ def orchestrate_review(
         run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
     )
     incremental_note = _incremental_note(scope, len(files))
-    evidence_note = _evidence_note(run_inputs["evidence"], evidence_dropped)
+    evidence_note = _evidence_note(
+        run_inputs["evidence"], evidence_dropped, evidence, evidence_settled,
+    )
     posted = False
     inline_posted = 0
     post_failures: list[tuple[str, str]] = []
@@ -4733,17 +4738,37 @@ def _raise_evidence_failures(
     return raised
 
 
-def _evidence_note(record: Mapping[str, Any] | None, dropped: int) -> str:
+_EVIDENCE_NOTE_LISTED = 10
+_EVIDENCE_NOTE_CHARS = 120
+
+
+def _note_text(raw: str) -> str:
+    """One bounded line of ``raw`` safe to quote in a blockquote, backticks removed."""
+    text = " ".join(str(raw).replace("`", "'").split())
+    if len(text) > _EVIDENCE_NOTE_CHARS:
+        text = text[: _EVIDENCE_NOTE_CHARS - 1] + "…"
+    return text
+
+
+def _evidence_note(
+    record: Mapping[str, Any] | None,
+    dropped: int,
+    evidence: Any = None,
+    settled: Sequence[Finding] = (),
+) -> str:
     """Render the summary's execution-evidence note (#69), ``""`` when none was supplied.
 
-    One blockquote line says what was supplied (items, and the files they
-    came from) and how far the matched items reached (how many chunk
-    prompts), so a PR reader can tell an evidence-backed review from an
-    unevidenced one; a second clause, only when the evidence contradicted
-    any finding, says how many :func:`quality.apply_evidence_drops`
-    dropped. The note
-    rides ``{evidence_note}`` after ``{ticket_note}``, and carries its own
-    trailing newline, so an empty return leaves the summary byte-identical.
+    The first blockquote line says what was supplied (items, and the files
+    they came from) and how far the matched items reached (how many chunk
+    prompts); a clause, only when the evidence contradicted any finding,
+    says how many :func:`quality.apply_evidence_drops` dropped. When the
+    loaded ``evidence`` bundle is given, a second line lists its commands
+    with their exit codes, and each finding in ``settled`` (the ones
+    dropped) follows as its own line naming the title and the command
+    that contradicted it, so a reader sees which evidence settled which
+    claim. Both lists are capped. The note rides ``{evidence_note}`` after
+    ``{ticket_note}``, and carries its own trailing newline, so an empty
+    return leaves the summary byte-identical.
     """
     if record is None:
         return ""
@@ -4754,7 +4779,23 @@ def _evidence_note(record: Mapping[str, Any] | None, dropped: int) -> str:
     )
     if dropped:
         line += f"; {dropped} finding(s) the evidence contradicts dropped"
-    return line + "\n"
+    lines = [line]
+    items = list(getattr(evidence, "items", ()) or ())
+    if items:
+        shown = [
+            f"`{_note_text(item.command)}` (exit {item.exit_code})"
+            for item in items[:_EVIDENCE_NOTE_LISTED]
+        ]
+        more = len(items) - len(shown)
+        tail = f", and {more} more" if more > 0 else ""
+        lines.append(f"> Commands: {', '.join(shown)}{tail}")
+    for f in list(settled)[:_EVIDENCE_NOTE_LISTED]:
+        reason = (f.drop_reason or "").removeprefix(EVIDENCE_DROP_PREFIX)
+        lines.append(
+            f"> Dropped: {_note_text(f.title)} ({_note_text(f.file)}), "
+            f"contradicted by `{_note_text(reason)}`"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _log_safe_origin(origin: str) -> str:
