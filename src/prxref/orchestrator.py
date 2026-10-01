@@ -543,6 +543,7 @@ def orchestrate_review(
     scoped_rules: Any = None,
     scoped_rules_max_chars: int = 24000,
     group_findings: bool = False,
+    rule_scoping: str = "on",
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
     max_findings_per_rule: int = 2,
@@ -1118,6 +1119,8 @@ def orchestrate_review(
         raise ValueError(
             f"repo_context must be one of {repo_unit.MODES}, got {repo_context!r}"
         )
+    if rule_scoping not in ("on", "off"):
+        raise ValueError(f"rule_scoping must be 'on' or 'off', got {rule_scoping!r}")
     if context_followup not in FOLLOWUP_MODES:
         raise ValueError(
             f"context_followup must be one of {FOLLOWUP_MODES}, got {context_followup!r}"
@@ -1983,7 +1986,7 @@ def orchestrate_review(
     # rules file that declares a section scope turns the check on, so a
     # wrong label is cleared BEFORE either pass can key on it — including
     # when both are off and the label came from an override prompt.
-    rule_sections = _rule_sections(rules, scoped_rules)
+    rule_sections = _rule_sections(rules, scoped_rules) if rule_scoping == "on" else ()
     if rule_sections:
         findings, cleared_labels = apply_rule_scope_check(findings, sections=rule_sections)
         logger.info(

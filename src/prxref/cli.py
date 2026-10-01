@@ -1714,6 +1714,7 @@ def _run_review(
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
+        rule_scoping=cfg["rule_scoping"],
         suggestions=cfg["suggestions"],
         incremental=incremental,
         full_review=full_review_reason is not None,
