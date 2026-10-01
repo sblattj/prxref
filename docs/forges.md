@@ -305,7 +305,9 @@ Azure DevOps Services and Azure DevOps Server (on-prem): both speak REST
   - **Thread List:** `GET {base}/pullrequests/{number}/threads` returns every thread in
     one response. System threads (votes, pushes, status changes) and deleted threads
     are skipped. A thread counts as resolved when its status is `fixed`, `wontFix`,
-    `closed` or `byDesign`.
+    `closed` or `byDesign`. `wontFix` and `byDesign` also mark the thread won't-fix: a
+    deliberate decision to leave the code alone, so it keeps suppressing a duplicate
+    finding instead of being re-posted with a "Previously raised" note.
   - **Prune:** a stale prxref inline thread is removed by deleting its root comment,
     `DELETE {base}/pullrequests/{number}/threads/{thread}/comments/{comment}`, matched
     by the attribution marker. The summary thread and human replies are never touched.

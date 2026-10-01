@@ -61,7 +61,7 @@ THREAD_URL = "https://github.com/acme/api/pull/42/files#discussion_r123"
 
 def _thread(
     *, resolved=False, outdated=False, line=3, path="src/app.py", url=None,
-    author="alice",
+    author="alice", wont_fix=False,
 ):
     return Thread(
         path=path,
@@ -71,6 +71,7 @@ def _thread(
         author=author,
         body_snippet=THREAD_SNIPPET,
         url=url,
+        wont_fix=wont_fix,
     )
 
 
@@ -83,6 +84,22 @@ def _finding():
         title=FINDING["title"],
         body=FINDING["body"],
     )
+
+
+class TestWontFixThreadsStillSuppress:
+    def test_wont_fix_resolved_thread_still_dedupes(self):
+        assert is_duplicate_of_existing(_finding(), [_thread(resolved=True, wont_fix=True)])
+
+    def test_wont_fix_resolved_thread_still_settles(self):
+        out = apply_settled_thread_suppression(
+            [_finding()], [_thread(resolved=True, wont_fix=True)],
+        )
+        assert out[0].drop_reason is not None
+
+    def test_wont_fix_thread_gives_no_previously_raised_note(self):
+        assert previously_discussed_thread(
+            _finding(), [_thread(resolved=True, wont_fix=True)],
+        ) is None
 
 
 class TestGatesSkipClosedThreads:
