@@ -118,6 +118,14 @@ class Finding:
     validation, so a non-``None`` value is safe to render. Neither is part of
     any identity or dedup key. The new fields trail the old ones, so every
     positional construction keeps working.
+
+    ``previous_thread`` is set by the orchestrator's previously-raised note
+    (issue #73): on a finding that survived both thread gates but matches a
+    resolved or outdated thread, it carries the sentence ``"Previously
+    raised in <url or 'thread by <author> at <path>:<line>'>; still present
+    at <file>:<line>."`` and renders as a suffix on the posted inline body
+    and the summary bullet. ``None`` on every other finding; not part of any
+    identity or dedup key.
     """
 
     file: str
@@ -132,6 +140,7 @@ class Finding:
     locations: tuple[tuple[str, int], ...] = ()
     suggestion: str | None = None
     suggestion_end_line: int = 0
+    previous_thread: str | None = None
 
 
 @dataclass
