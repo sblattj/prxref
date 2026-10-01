@@ -266,7 +266,8 @@ that header present. A finding is dropped only when one item meets all of:
   hyphenated token. When the name comes first (`Cache-Control is not set`,
   `Cache-Control header missing`), only filler (`header`, `is`, ...) may sit
   between the two, and the keyword must end the clause or be followed by a
-  preposition (`missing from responses`), never by an object. So
+  preposition (`missing from responses`), never by an object or by `to`/`of`
+  (`not set to no-store` is a value claim). So
   "Strict-Transport-Security lacks includeSubDomains", "Cache-Control header
   without no-store", "Cache-Control is missing max-age" and "Missing
   includeSubDomains in Strict-Transport-Security" are all kept.

@@ -3180,7 +3180,7 @@ _EVIDENCE_SUBJECT_FILLER = frozenset({
     "were", "be", "been", "being", "still", "currently", "also", "entirely",
     "completely", "itself",
 })
-_EVIDENCE_AFTER_KEYWORD = _EVIDENCE_SCOPE_WORDS | frozenset({
+_EVIDENCE_AFTER_KEYWORD = (_EVIDENCE_SCOPE_WORDS - {"to", "of"}) | frozenset({
     "entirely", "completely", "altogether", "everywhere", "anywhere", "here",
     "there", "too", "and", "or", "so", "which", "because", "since", "as",
 })
@@ -3237,7 +3237,7 @@ def _claims_header_missing(text: str, name: str) -> bool:
       ...), and the keyword must end the clause or be followed by a
       preposition or a connective ("missing from responses"), never by an
       object ("lacks includeSubDomains", "without no-store", "is missing
-      max-age").
+      max-age") or by "to"/"of" ("not set to no-store" is a value claim).
     """
     if "-" not in name and not _EVIDENCE_HEADER_WORD_RE.search(text):
         return False
