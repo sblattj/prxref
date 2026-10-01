@@ -106,6 +106,7 @@ class CiCandidate:
 
     path: str
     reason: str
+    new: bool = True
 
 
 def _added_lines(file: FileDiff):
@@ -184,37 +185,56 @@ def _looks_like_test(path: str) -> bool:
 def candidate_checks(files: Sequence[FileDiff]) -> list[CiCandidate]:
     """The check-shaped files among ``files``.
 
-    A file counts when its status is not ``removed`` and its basename, or
-    any ``--flag`` on an added line, contains a :data:`CI_SUFFIX_HINT`
-    word, or when it gains a shebang as its new first line — plus a NEW
-    file whose name says test or spec but sits outside every default
-    include above. The result is sorted by path, so both the findings and
+    A file that is not ``removed`` counts when it is new (any status but
+    ``modified``) and its basename contains a :data:`CI_SUFFIX_HINT` word
+    or it gains a shebang as its first line, or when any ``--flag`` it
+    gains (on an added line, absent from the removed lines) contains such
+    a word — so a modified script counts only for a new flag, and a
+    body-only edit never does. A NEW file whose name says test or spec but
+    sits outside every default include counts too. The result is sorted by path, so both the findings and
     the run record are deterministic. Pure: reads only the parsed diff.
     """
-    candidates: dict[str, str] = {}
+    candidates: dict[str, tuple[str, bool]] = {}
     for file in files:
         if file.status == "removed":
             continue
         path = file.path
-        hint = _hint_in_tokens(_name_tokens(PurePosixPath(path).name))
-        if hint is not None:
-            candidates[path] = f"its name mentions {hint!r}"
-            continue
+        fresh = file.status != "modified"
+        if fresh:
+            hint = _hint_in_tokens(_name_tokens(PurePosixPath(path).name))
+            if hint is not None:
+                candidates[path] = (f"its name mentions {hint!r}", True)
+                continue
+        dropped = {
+            flag
+            for hunk in file.hunks
+            for ln in hunk.lines
+            if ln.kind == "-"
+            for flag in _FLAG_RE.findall(ln.text)
+        }
         flag_hint: str | None = None
         for _, text in _added_lines(file):
             for flag in _FLAG_RE.findall(text):
+                if flag in dropped:
+                    continue
                 flag_hint = flag_hint or _hint_in_tokens(_name_tokens(flag))
         if flag_hint is not None:
-            candidates[path] = f"it gains a --{flag_hint} flag"
+            candidates[path] = (f"it gains a --{flag_hint} flag", fresh)
             continue
-        if any(new_line == 1 and text.startswith("#!") for new_line, text in _added_lines(file)):
-            candidates[path] = "it gains a shebang line"
+        if fresh and any(
+            new_line == 1 and text.startswith("#!") for new_line, text in _added_lines(file)
+        ):
+            candidates[path] = ("it gains a shebang line", True)
             continue
         if file.status == "added" and _looks_like_test(path) and not default_include(path):
             candidates[path] = (
-                "it is a new test file outside the runner's default include"
+                "it is a new test file outside the runner's default include",
+                True,
             )
-    return [CiCandidate(path, reason) for path, reason in sorted(candidates.items())]
+    return [
+        CiCandidate(path, reason, fresh)
+        for path, (reason, fresh) in sorted(candidates.items())
+    ]
 
 
 def _literal_globs(globs: Sequence[str]) -> list[str]:
@@ -385,6 +405,7 @@ def ci_wiring_findings(
     )
     findings: list[Finding] = []
     for candidate in candidates:
+        verb = "added" if candidate.new else "changed"
         if any(invokes(text, ci_path, candidate) for ci_path, text in texts):
             continue
         findings.append(Finding(
@@ -392,9 +413,9 @@ def ci_wiring_findings(
             line=0,
             severity=severity,
             confidence=1.0,
-            title=f"`{candidate.path}` is added but no CI job runs it",
+            title=f"`{candidate.path}` is {verb} but no CI job runs it",
             body=(
-                f"This PR adds `{candidate.path}`, and {candidate.reason}, but no "
+                f"This PR {'adds' if candidate.new else 'changes'} `{candidate.path}`, and {candidate.reason}, but no "
                 f"CI configuration file the run could read invokes it, so the "
                 f"check runs only when someone remembers to run it locally. CI "
                 f"files searched:\n{searched}\nWire the check into CI (a workflow "
