@@ -540,8 +540,8 @@ LLM / pipeline:
                                 finding ids are always on. Any value is
                                 still accepted (never a configuration
                                 error) so an existing environment keeps
-                                working; a set value other than "1"
-                                (which reads as off) logs one WARNING
+                                working; a non-empty value other than
+                                "1" (which reads as off) logs one WARNING
                                 saying the knob is ignored. Every finding
                                 carries a content-derived id
                                 (<file>#<rule or norule>#<12-hex claim
