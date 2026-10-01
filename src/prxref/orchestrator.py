@@ -548,6 +548,8 @@ def orchestrate_review(
     repo_context_max_chars: int = 12000,
     context_contract_globs: Sequence[str] = (),
     context_exclude_globs: Sequence[str] = (),
+    context_standards_globs: Sequence[str] = (),
+    context_standards_max_chars: int = 4000,
     repo_dir: RepoDir | None = None,
     repo_context_max_reads: int = repo_reader.MAX_RUN_READS,
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
@@ -902,7 +904,15 @@ def orchestrate_review(
     config's default, which the CLI passes), and ``context_exclude_globs``
     (``PRXREF_CONTEXT_EXCLUDE_GLOBS``) adds to the exclude floor of
     :func:`prxref.repo_context.exclude_predicate`: an excluded path is
-    never read, listed or shown. ``repo_dir`` is a
+    never read, listed or shown. ``context_standards_globs``
+    (``PRXREF_CONTEXT_STANDARDS_GLOBS``, #68) selects the repository's own
+    standards documents the same way — ``()`` means none, the built-in set
+    is config's default — and ``context_standards_max_chars``
+    (``PRXREF_CONTEXT_STANDARDS_MAX_CHARS``, default 4000, the config
+    default restated) is the per-chunk budget of
+    :func:`prxref.repo_standards.standards_entries`. Standards sections are
+    read ONLY at ``"repo"`` with a reader, exactly like contract files, so
+    ``"off"`` and ``"diff"`` never read them. ``repo_dir`` is a
     :class:`prxref.forges.repo_dir.RepoDir` to read the repository from in
     place of the forge; this function does not validate it (``RepoDir``
     does, when it is built). ``repo_context_max_reads``
@@ -932,18 +942,22 @@ def orchestrate_review(
     on the paths outside the diff alone, and the entries do not depend on
     which chunk reads a shared diff file first. The context's definition
     lines extend the definitions block, its contract lines form a
-    ``### Contract excerpts`` block and its reader lines a last
-    ``### Code elsewhere that reads state this chunk writes`` block, on the
+    ``### Contract excerpts`` block, its reader lines a
+    ``### Code elsewhere that reads state this chunk writes`` block and its
+    standards lines (sections of the repository's own standards documents,
+    #68) a last ``### In-repo standards for this chunk`` block that carries
+    its own how-to-cite guidance, on the
     first attempt only: the timeout retry passes no unit, so it carries none
-    of the three. A build that raises gives that chunk no context
+    of the four. A build that raises gives that chunk no context
     and one WARNING naming the chunk; the review goes on. The dependency and
     same-file definition blocks keep their own reader in every mode, so a
     diff file can be fetched once by each reader.
 
     The ``repo_context`` key of every exit, when on, is ``{"mode",
     "max_chars", "max_reads", "max_chunk_reads", "contract_globs",
-    "exclude_globs", "reader", "listing", "reads", "read_cap_hit",
-    "chunk_read_cap_hit", "run_read_cap_hit", "units"}``, where
+    "exclude_globs", "standards_globs", "standards_max_chars", "reader",
+    "listing", "reads", "read_cap_hit", "chunk_read_cap_hit",
+    "run_read_cap_hit", "units"}``, where
     ``max_reads`` and ``max_chunk_reads`` are the two read caps. Until the
     chunk workers finish, ``reader`` and ``listing`` are ``None``, ``reads``
     is 0, the three cap flags are false and ``units`` is ``None``. After
@@ -1149,6 +1163,8 @@ def orchestrate_review(
             "max_chunk_reads": repo_context_max_chunk_reads,
             "contract_globs": list(context_contract_globs),
             "exclude_globs": list(context_exclude_globs),
+            "standards_globs": list(context_standards_globs),
+            "standards_max_chars": context_standards_max_chars,
             "reader": None,
             "listing": None,
             "reads": 0,
@@ -3045,18 +3061,20 @@ def _make_file_reader(
 def _context_blocks(
     chunk, reader, *, include_definitions: bool, unit: repo_unit.UnitContext | None = None,
 ) -> str:
-    """Render the chunk's dependency, definition, contract and reader blocks; never raises.
+    """Render the chunk's dependency, definition, contract, reader and standards blocks; never raises.
 
     ``unit`` is the chunk's repository context. Its definition lines follow
     the same-file definitions under one header, its contract lines form the
-    contracts block and its reader lines the last block; they render with no
+    contracts block, its reader lines the readers block and its standards
+    lines the last block; they render with no
     ``reader`` too, over empty dependency and same-file lists. ``None``, or a
     unit with no lines, is exactly the rendering without repository context.
     """
     extra = unit.definition_lines if unit is not None else ()
     contracts = unit.contract_lines if unit is not None else ()
     readers = unit.reader_lines if unit is not None else ()
-    if reader is None and not (extra or contracts or readers):
+    standards = unit.standards_lines if unit is not None else ()
+    if reader is None and not (extra or contracts or readers or standards):
         return ""
     deps: list[str] = []
     defs: list[str] = []
@@ -3070,12 +3088,13 @@ def _context_blocks(
             )
         except Exception as e:  # noqa: BLE001
             logger.debug("chunk context unavailable: %s", e)
-            if not (extra or contracts or readers):
+            if not (extra or contracts or readers or standards):
                 return ""
             deps, defs = [], []
     try:
         return chunk_context.render_context_blocks(
-            deps, defs, extra_def_lines=extra, contract_lines=contracts, reader_lines=readers,
+            deps, defs, extra_def_lines=extra, contract_lines=contracts,
+            reader_lines=readers, standards_lines=standards,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("chunk context unavailable: %s", e)
@@ -3088,9 +3107,9 @@ class _RepoPlan:
 
     ``reader`` is the run's one :class:`prxref.repo_reader.RepoReader`, or
     ``None``. ``diff_paths`` holds every PR diff file's path: a read of one
-    goes to the shared, uncapped ``reader.read``. The listing and contract
-    fields are the ``"repo"`` level's once-per-run inputs, and stay empty at
-    ``"diff"`` or without a reader.
+    goes to the shared, uncapped ``reader.read``. The listing, contract and
+    standards fields are the ``"repo"`` level's once-per-run inputs, and stay
+    empty at ``"diff"`` or without a reader.
     """
 
     mode: str
@@ -3102,6 +3121,9 @@ class _RepoPlan:
     listing_complete: bool = False
     contract_paths: tuple[str, ...] = ()
     contract_priority: tuple[str, ...] = ()
+    standards_paths: tuple[str, ...] = ()
+    standards_priority: tuple[str, ...] = ()
+    standards_max_chars: int = 4000
 
 
 def _plan_repo_context(
@@ -3116,7 +3138,8 @@ def _plan_repo_context(
     inputs. The reader reads
     ``repo_dir`` when it is given, else the forge at the PR's head sha. At
     ``"repo"`` with a reader, the listing is taken here, once, and the
-    contract files are selected here, once. At ``"repo"``, a missing reader
+    contract files and the standards files are selected here, once. At
+    ``"repo"``, a missing reader
     or a missing listing logs the run's one WARNING naming
     ``PRXREF_REPO_CONTEXT``.
     """
@@ -3146,6 +3169,7 @@ def _plan_repo_context(
             "outside the PR's own files",
         )
     globs = list(initial["contract_globs"])
+    standards_globs = list(initial["standards_globs"])
     return _RepoPlan(
         mode, reader, initial["max_chars"], exclude, diff_paths,
         listing_paths=frozenset(listing.paths) if listing is not None else None,
@@ -3155,6 +3179,12 @@ def _plan_repo_context(
             diff_paths=[f.path for f in files if f.status != "removed"],
         )),
         contract_priority=tuple(repo_contracts.literal_contract_paths(globs)),
+        standards_paths=tuple(repo_contracts.select_contract_files(
+            standards_globs, listing=listing.paths if listing is not None else None,
+            diff_paths=[f.path for f in files if f.status != "removed"],
+        )),
+        standards_priority=tuple(repo_contracts.literal_contract_paths(standards_globs)),
+        standards_max_chars=initial["standards_max_chars"],
     )
 
 
@@ -3189,6 +3219,8 @@ def _chunk_unit(
             mode=plan.mode, read=read, max_chars=plan.max_chars,
             listing_paths=plan.listing_paths, listing_complete=plan.listing_complete,
             contract_paths=plan.contract_paths, contract_priority=plan.contract_priority,
+            standards_paths=plan.standards_paths, standards_priority=plan.standards_priority,
+            standards_max_chars=plan.standards_max_chars,
             exclude=plan.exclude,
         )
     except Exception as e:  # noqa: BLE001 - context is never worth a failed review

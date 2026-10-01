@@ -1,6 +1,6 @@
 """One worker chunk's repository context: sources, order, budget and exclusion (#17).
 
-:func:`build_unit_context` combines the four repository-context sources for
+:func:`build_unit_context` combines the five repository-context sources for
 one chunk into the lines its prompt carries:
 
 1. :func:`prxref.repo_crosschunk.diff_definitions`: definitions from the PR's
@@ -8,11 +8,14 @@ one chunk into the lines its prompt carries:
    ``repo`` levels;
 2. :func:`prxref.repo_contracts.contract_entries`: contract excerpts
    (``contract``), at the ``repo`` level only;
-3. the resolver, :func:`prxref.repo_resolve.resolve_candidates` plus
+3. :func:`prxref.repo_standards.standards_entries`: sections of the
+   repository's own standards documents (``standard``, #68), at the ``repo``
+   level only;
+4. the resolver, :func:`prxref.repo_resolve.resolve_candidates` plus
    :func:`prxref.repo_context.find_definitions` over the candidate files
    (``import``, ``path-convention``, ``name-search``), at the ``repo`` level
    only;
-4. :func:`prxref.repo_readers.reader_entries`: excerpts of code outside the
+5. :func:`prxref.repo_readers.reader_entries`: excerpts of code outside the
    diff that reads shared state the chunk's added lines write
    (``shared-state``, #22), at the ``repo`` level with a file listing only.
 
@@ -48,6 +51,7 @@ from .repo_context import (
 from .repo_contracts import contract_entries
 from .repo_crosschunk import diff_definitions
 from .repo_resolve import resolve_candidates
+from .repo_standards import standards_entries
 
 MODES = ("off", "diff", "repo")
 
@@ -56,16 +60,18 @@ MODES = ("off", "diff", "repo")
 class UnitContext:
     """The repository context admitted into one worker chunk's prompt.
 
-    ``definition_lines``, ``contract_lines`` and ``reader_lines`` are the
-    rendered admitted entries of kind ``definition``, ``contract`` and
-    ``reader``, in admission order, ready for
-    :func:`prxref.chunk_context.render_context_blocks` as ``extra_def_lines``,
-    ``contract_lines`` and ``reader_lines``; when entries were left out, one
-    omitted line (a horizontal ellipsis, then ``N more context entries
-    omitted``) ends the list of the kind of the first entry left out.
+    ``definition_lines``, ``contract_lines``, ``reader_lines`` and
+    ``standards_lines`` are the rendered admitted entries of kind
+    ``definition``, ``contract``, ``reader`` and ``standards``, in admission
+    order, ready for :func:`prxref.chunk_context.render_context_blocks` as
+    ``extra_def_lines``, ``contract_lines``, ``reader_lines`` and
+    ``standards_lines``; when entries were left out, one omitted line (a
+    horizontal ellipsis, then ``N more context entries omitted``) ends the
+    list of the kind of the first entry left out.
     ``entries`` holds the admitted entries in admission order, and
-    ``omitted`` counts the entries the budget left out. ``reader_lines`` comes
-    last and defaults to empty, so a unit built without it is unchanged.
+    ``omitted`` counts the entries the budget left out. ``reader_lines`` and
+    ``standards_lines`` come last and default to empty, so a unit built
+    without them is unchanged.
     """
 
     definition_lines: tuple[str, ...]
@@ -73,6 +79,7 @@ class UnitContext:
     entries: tuple[ContextEntry, ...]
     omitted: int
     reader_lines: tuple[str, ...] = ()
+    standards_lines: tuple[str, ...] = ()
 
     def record(self) -> dict:
         """The run-record row for this chunk: ``{"entries": [...], "omitted": N}``."""
@@ -167,7 +174,7 @@ def _merge(entries: list[ContextEntry], exclude: Callable[[str], bool] | None) -
 
 
 def _block(kind: str) -> str:
-    return kind if kind in ("definition", "reader") else "contract"
+    return kind if kind in ("definition", "reader", "standards") else "contract"
 
 
 def _admit(entries: list[ContextEntry], max_chars: int) -> UnitContext:
@@ -180,7 +187,7 @@ def _admit(entries: list[ContextEntry], max_chars: int) -> UnitContext:
         admitted.append(entry)
         used += size
     omitted = len(entries) - len(admitted)
-    lines: dict[str, list[str]] = {"definition": [], "contract": [], "reader": []}
+    lines: dict[str, list[str]] = {"definition": [], "contract": [], "reader": [], "standards": []}
     for entry in admitted:
         lines[_block(entry.kind)].append(entry.rendered())
     if omitted:
@@ -192,6 +199,7 @@ def _admit(entries: list[ContextEntry], max_chars: int) -> UnitContext:
         tuple(admitted),
         omitted,
         tuple(lines["reader"]),
+        tuple(lines["standards"]),
     )
 
 
@@ -206,6 +214,9 @@ def build_unit_context(
     listing_complete: bool = False,
     contract_paths: Sequence[str] = (),
     contract_priority: Sequence[str] = (),
+    standards_paths: Sequence[str] = (),
+    standards_priority: Sequence[str] = (),
+    standards_max_chars: int = 4000,
     exclude: Callable[[str], bool] | None = None,
 ) -> UnitContext:
     """The repository context for one worker chunk at level ``mode``.
@@ -219,7 +230,11 @@ def build_unit_context(
     built once per run (or None), and ``listing_complete`` says it was not
     truncated. ``contract_paths`` and ``contract_priority`` are the run's
     :func:`prxref.repo_contracts.select_contract_files` and
-    :func:`prxref.repo_contracts.literal_contract_paths` results.
+    :func:`prxref.repo_contracts.literal_contract_paths` results;
+    ``standards_paths``, ``standards_priority`` and ``standards_max_chars``
+    are the same triple over the standards globs, ``max_chars`` the
+    per-chunk budget of :func:`prxref.repo_standards.standards_entries`
+    (the config default 4000 restated).
     ``exclude(path)`` true marks a path repository context must never read or
     show, normally :func:`prxref.repo_context.exclude_predicate`; an
     ``exclude`` that raises counts as true.
@@ -230,7 +245,9 @@ def build_unit_context(
     1. :func:`prxref.repo_crosschunk.diff_definitions` with the guarded
        reader, at both levels;
     2. at ``"repo"`` with a reader, :func:`prxref.repo_contracts.contract_entries`;
-    3. at ``"repo"`` with a reader, the resolver. For each chunk file that is
+    3. at ``"repo"`` with a reader, :func:`prxref.repo_standards.standards_entries`
+       with the standards triple;
+    4. at ``"repo"`` with a reader, the resolver. For each chunk file that is
        not removed and whose language has definition regexes, the names its
        added lines reference, less every symbol a definition entry at a
        non-excluded path has already found, go to
@@ -242,7 +259,7 @@ def build_unit_context(
        :func:`prxref.repo_context.find_definitions` over it gives a
        ``definition`` entry whose reason is that name's candidate reason
        there; its symbol then counts as found;
-    4. at ``"repo"`` with a reader and a ``listing_paths`` that is not None,
+    5. at ``"repo"`` with a reader and a ``listing_paths`` that is not None,
        :func:`prxref.repo_readers.reader_entries` over the chunk's files,
        with the same guarded reader, so it gets only the reads the chunk's
        cap has left after the resolver, every PR diff file's path as
@@ -276,6 +293,12 @@ def build_unit_context(
         }
         entries.extend(
             contract_entries(chunk, contract_paths=contract_paths, read=guarded, priority=contract_priority)
+        )
+        entries.extend(
+            standards_entries(
+                chunk, standards_paths=standards_paths, read=guarded,
+                priority=standards_priority, max_chars=standards_max_chars,
+            )
         )
         entries.extend(
             _resolver_entries(
