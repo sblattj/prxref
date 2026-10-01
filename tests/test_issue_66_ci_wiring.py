@@ -1087,3 +1087,40 @@ class TestTargetWiring:
             ticket=_ticket("Add regression checks."),
         )
         assert _ci_findings(res) == []
+
+
+class TestMakefileConfirmReadGate:
+    @staticmethod
+    def _diff(*rules: str):
+        return parse_unified_diff(_new_file_diff("Makefile", list(rules)))
+
+    def test_a_non_check_rule_reads_no_head_makefile(self):
+        reads: list[str] = []
+
+        def read(path):
+            reads.append(path)
+            return "build:\n"
+
+        [file] = self._diff("build:\n\tcc x")
+        assert ci_wiring._make_target_candidates(file, read) == []
+        assert reads == []
+
+    def test_a_check_shaped_target_still_reads_the_head_makefile(self):
+        reads: list[str] = []
+
+        def read(path):
+            reads.append(path)
+            return "verify:\n\t./v.sh\n"
+
+        [file] = self._diff("verify:\n\t./v.sh")
+        assert len(ci_wiring._make_target_candidates(file, read)) == 1
+        assert reads == ["Makefile"]
+
+    def test_a_known_check_target_reads_nothing(self):
+        reads: list[str] = []
+        files = parse_unified_diff(
+            "diff --git a/Makefile b/Makefile\n--- a/Makefile\n+++ b/Makefile\n"
+            "@@ -1,2 +1,3 @@\n verify:\n \t./v.sh\n+verify: extra\n"
+        )
+        assert ci_wiring._make_target_candidates(files[0], reads.append) == []
+        assert reads == []
