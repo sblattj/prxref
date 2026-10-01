@@ -366,6 +366,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="review every file even when PRXREF_INCREMENTAL=on",
     )
     rev.add_argument(
+        "--ci-wiring",
+        choices=("off", "on"),
+        default=None,
+        help=(
+            "turn the CI wiring check (#66) on for this run "
+            "(PRXREF_CI_WIRING does the same; off is the default): flag a "
+            "check the PR adds — a verify/smoke/check script or flag, a "
+            "file that gains a shebang, a test file outside the runner's "
+            "default include — that no CI configuration file invokes"
+        ),
+    )
+    rev.add_argument(
+        "--ci-wiring-globs",
+        default=None,
+        metavar="GLOBS",
+        help=(
+            "comma-separated globs selecting the CI configuration files "
+            "the CI wiring check reads (PRXREF_CI_WIRING_GLOBS; a set "
+            "value replaces the built-in set)"
+        ),
+    )
+    rev.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -938,8 +960,8 @@ def _build_json_result(result: Any) -> dict:
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
-    ``context_followup``, ``suggestions``, ``incremental``, ``degraded``,
-    ``config_file``, then ``sampling`` and ``replay`` when present.
+    ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
+    ``degraded``, ``config_file``, then ``sampling`` and ``replay`` when present.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -962,6 +984,11 @@ def _build_json_result(result: Any) -> dict:
     and so is ``incremental`` (#34: ``null`` whenever ``PRXREF_INCREMENTAL``
     is ``off``; otherwise ``{"mode", "reason",
     "since_sha", "files_total", "files_reviewed", "marker_sha"}``), and so
+    is ``ci_wiring`` (#66: ``null`` whenever ``PRXREF_CI_WIRING`` is
+    ``off``; otherwise ``{candidates, ci_files, picked_up_default,
+    triggered}`` from :func:`prxref.ci_wiring.ci_wiring_findings`, or
+    ``{"triggered": false, "reason": ...}`` when the run had no reader or
+    the stage failed), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
@@ -1020,6 +1047,7 @@ def _build_json_result(result: Any) -> dict:
         "context_followup": result.get("context_followup"),
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
+        "ci_wiring": result.get("ci_wiring"),
         "degraded": result.get("degraded"),
         "config_file": result.get("config_file"),
     }
@@ -1459,6 +1487,8 @@ def _run_review(
     repo_dir: str | None = None,
     full_review: bool = False,
     config_file: Path | None = None,
+    ci_wiring: str | None = None,
+    ci_wiring_globs: list[str] | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1503,6 +1533,8 @@ def _run_review(
         scoped_rules=scoped_rules,
         ticket_context_file=context_file,
         prompts_dir=prompts_dir,
+        ci_wiring=ci_wiring,
+        ci_wiring_globs=ci_wiring_globs,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1513,6 +1545,8 @@ def _run_review(
             "scoped_rules": "--scoped-rules",
             "ticket_context_file": "--context-file",
             "prompts_dir": "--prompts-dir",
+            "ci_wiring": "--ci-wiring",
+            "ci_wiring_globs": "--ci-wiring-globs",
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -1645,6 +1679,8 @@ def _run_review(
         incremental=incremental,
         full_review=full_review_reason is not None,
         full_review_reason=full_review_reason,
+        ci_wiring=cfg["ci_wiring"],
+        ci_wiring_globs=cfg["ci_wiring_globs"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
@@ -1891,6 +1927,11 @@ def _cmd_review(args: argparse.Namespace) -> int:
             repo_dir=args.repo_dir,
             full_review=args.full_review,
             config_file=config_file,
+            ci_wiring=args.ci_wiring,
+            ci_wiring_globs=(
+                [g.strip() for g in args.ci_wiring_globs.split(",") if g.strip()] or None
+                if args.ci_wiring_globs is not None else None
+            ),
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
