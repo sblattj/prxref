@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_orchestrator import (  # noqa: E402  (shared fixtures, read not guessed)
@@ -30,7 +32,8 @@ from test_orchestrator import (  # noqa: E402  (shared fixtures, read not guesse
 )
 
 from prxref import orchestrator  # noqa: E402
-from prxref.forges.base import Thread  # noqa: E402
+from prxref.forges.base import ATTRIBUTION_MARKER, Thread, says_wont_fix  # noqa: E402
+from prxref.formatter import format_inline_comment  # noqa: E402
 from prxref.orchestrator import orchestrate_review  # noqa: E402
 from prxref.quality import (  # noqa: E402
     apply_settled_thread_suppression,
@@ -330,3 +333,82 @@ class TestNoteReferenceShapes:
     def test_a_thread_without_a_path_names_the_pr(self):
         t = _thread(resolved=True, path=None, line=None)
         assert orchestrator._thread_reference(t) == "thread by alice on the PR"
+
+
+WONT_FIX_SNIPPET = "Won't fix: intentional. " + THREAD_SNIPPET
+
+
+def _human_thread(snippet, *, resolved=True):
+    return Thread(
+        path="src/app.py", line=3, resolved=resolved, author="alice",
+        body_snippet=snippet, url=THREAD_URL,
+    )
+
+
+class TestExplicitHumanWontFix:
+    """OD5: an explicit human "won't fix" on a thread keeps suppressing (any forge)."""
+
+    @pytest.mark.parametrize("text", [
+        "This won't fix the race; a lock is needed.",
+        "Retrying won't fix the timeout.",
+        "Won't fix the leak when the pool is empty, so add a guard.",
+        "Designed by design-review committee",
+        "",
+        format_inline_comment(
+            _finding(), f"{ATTRIBUTION_MARKER} · model=m",
+        ).replace("Null deref", "Won't fix: intentional"),
+    ])
+    def test_prose_and_prxref_bodies_are_not_a_wont_fix(self, text):
+        assert says_wont_fix(text) is False
+
+    @pytest.mark.parametrize("text", [
+        "won't fix: intentional",
+        "Won't fix.",
+        "Wont fix, this is deliberate",
+        "wontfix",
+        "[wontfix]",
+        "**Won’t fix** — by design",
+        "Thanks for flagging. Won't fix: the fallback is deliberate.",
+        "Agreed it looks odd.\nWill not fix.",
+        "By design.",
+        "Working as intended",
+    ])
+    def test_an_explicit_human_wont_fix_is_detected(self, text):
+        assert says_wont_fix(text) is True
+
+    def test_a_non_string_body_is_not_a_wont_fix(self):
+        assert says_wont_fix(None) is False
+
+    def test_the_thread_snippet_sets_wont_fix(self):
+        assert _human_thread(WONT_FIX_SNIPPET).wont_fix is True
+        assert _human_thread(THREAD_SNIPPET).wont_fix is False
+
+    def test_a_resolved_wont_fix_thread_still_dedupes(self):
+        assert is_duplicate_of_existing(_finding(), [_human_thread(THREAD_SNIPPET)]) is False
+        assert is_duplicate_of_existing(_finding(), [_human_thread(WONT_FIX_SNIPPET)]) is True
+
+    def test_a_resolved_wont_fix_thread_still_settles(self):
+        control = apply_settled_thread_suppression([_finding()], [_human_thread(THREAD_SNIPPET)])
+        assert control[0].drop_reason is None
+        out = apply_settled_thread_suppression([_finding()], [_human_thread(WONT_FIX_SNIPPET)])
+        assert out[0].drop_reason == "settled in thread: alice"
+
+    def test_a_resolved_wont_fix_thread_is_not_a_previous_thread(self):
+        assert previously_discussed_thread(_finding(), [_human_thread(THREAD_SNIPPET)]) is not None
+        assert previously_discussed_thread(_finding(), [_human_thread(WONT_FIX_SNIPPET)]) is None
+
+    def test_end_to_end_a_resolved_wont_fix_thread_suppresses(self, contract_stubs):
+        control = orchestrate_review(
+            FakeForge(diff=DIFF, threads=[_human_thread(THREAD_SNIPPET)]),
+            REF, FakeLLM(findings_by_path=FINDINGS),
+        )
+        assert [f.title for f in control["findings_active"]] == ["Null deref"]
+
+        res = orchestrate_review(
+            FakeForge(diff=DIFF, threads=[_human_thread(WONT_FIX_SNIPPET)]),
+            REF, FakeLLM(findings_by_path=FINDINGS),
+        )
+        assert res["findings_active"] == []
+        dropped = res["findings_dropped"]
+        assert [f.drop_reason for f in dropped] == ["duplicate of existing thread"]
+        assert dropped[0].previous_thread is None

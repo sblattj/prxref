@@ -21,6 +21,7 @@ from prxref.forges.base import (
     PRData,
     PRRef,
     Thread,
+    says_wont_fix,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -516,6 +517,10 @@ class ForgeImpl:
         The discussions endpoint takes no ordering parameters, so this walk
         gets plain page/per_page rather than the notes walk's explicit
         oldest-first order.
+
+        An explicit human "won't fix" in any note of a discussion
+        (:func:`~prxref.forges.base.says_wont_fix`, read from the full body)
+        marks every note of that discussion ``wont_fix`` (issue #73).
         """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
@@ -537,6 +542,10 @@ class ForgeImpl:
 
                     first_path: str | None = None
                     first_line: int | None = None
+                    disc_wont_fix = any(
+                        isinstance(note, dict) and says_wont_fix(note.get("body"))
+                        for note in notes
+                    )
 
                     for note in notes:
                         pos = note.get("position")
@@ -561,6 +570,7 @@ class ForgeImpl:
                                 resolved=bool(note_resolved),
                                 author=author,
                                 body_snippet=body[:200],
+                                wont_fix=disc_wont_fix,
                             )
                         )
         except FeedReadError as e:

@@ -88,13 +88,15 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
 8. ``apply_thread_dedup``: drop findings that duplicate an already-open
    and current thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``; a
-   resolved or outdated thread never matches (issue #73).
+   resolved or outdated thread never matches (issue #73) unless it is a
+   won't-fix decision (``Thread.wont_fix``: Azure ``wontFix`` /
+   ``byDesign`` or an explicit human "won't fix"), which keeps matching.
 9. ``apply_settled_thread_suppression``: drop findings that re-litigate a
    subject an existing open, current thread already argued out — same path
    plus shared distinctive tokens, with NO line test, because line alignment
    has already demoted a file-level finding to line 0 by this point;
-   resolved or outdated threads are skipped here too (issue #73)
-   (``settled in thread: <author>``).
+   resolved or outdated threads are skipped here too (issue #73), except
+   a won't-fix one (``settled in thread: <author>``).
 10. ``apply_stable_ids`` (in :mod:`prxref.stable_ids`, issue #71): opt-in
     via ``PRXREF_STABLE_IDS`` — off entirely by default, and then never
     called. When on, it stamps every finding with a content-derived
@@ -1211,9 +1213,11 @@ def is_duplicate_of_existing(
     end. A single-line thread is measured exactly as before.
 
     A ``resolved`` or ``outdated`` thread never matches (issue #73): only an
-    open, current thread suppresses a finding. A forge that cannot report
-    either state reports ``False``, which keeps the thread eligible exactly
-    as before the fields existed.
+    open, current thread suppresses a finding — or a won't-fix one
+    (``Thread.wont_fix``, an Azure ``wontFix`` / ``byDesign`` status or an
+    explicit human "won't fix"), which keeps suppressing whatever its state.
+    A forge that cannot report either state reports ``False``, which keeps
+    the thread eligible exactly as before the fields existed.
     """
     finding_tokens = _tokens(f"{finding.title} {finding.body}")
     if not finding_tokens:
@@ -1330,6 +1334,8 @@ def apply_settled_thread_suppression(
     one is skipped, because "resolved" says the reviewers closed the thread —
     often for an unrelated sub-issue while the code it flagged is unchanged —
     and re-posting the finding is then the honest output, not a re-litigation.
+    A won't-fix thread (``Thread.wont_fix``) is the exception and still
+    settles: the reviewers closed it as a decision to leave the code alone.
     A thread with no path — a general, unanchored PR comment, near-universal
     on Bitbucket Server — cannot be "same path" as any finding and is skipped
     rather than compared. Order-preserving, pure, and already-dropped findings
@@ -1375,7 +1381,8 @@ def previously_discussed_thread(
     """The resolved-or-outdated thread that already raised this finding's subject.
 
     The mirror of both suppression gates run against CLOSED threads only
-    (issue #73): a finding that survives :func:`apply_thread_dedup` and
+    (issue #73), skipping a won't-fix thread, which the gates still match:
+    a finding that survives :func:`apply_thread_dedup` and
     :func:`apply_settled_thread_suppression` matched no open, current thread,
     but it can still restate a subject a resolved or outdated thread raised —
     that fact is worth a previously-raised note on the posted finding, not a

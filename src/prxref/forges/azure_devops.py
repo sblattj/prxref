@@ -39,6 +39,7 @@ from prxref.forges.base import (
     PRData,
     PRRef,
     Thread,
+    says_wont_fix,
     with_summary_marker,
 )
 from prxref.retry_logging import LoggingRetry
@@ -739,12 +740,25 @@ class ForgeImpl:
             {},
         )
 
+    @staticmethod
+    def _says_wont_fix(thread: dict) -> bool:
+        """True when a live human comment in the thread explicitly declines the change."""
+        return any(
+            isinstance(c, dict)
+            and not c.get("isDeleted")
+            and c.get("commentType") != "system"
+            and says_wont_fix(c.get("content"))
+            for c in thread.get("comments") or []
+        )
+
     def list_threads(self, ref: PRRef) -> list[Thread]:
         """List existing discussion threads on the PR.
 
         System notices (votes, pushes, status changes) are skipped. A thread
         counts as resolved when its status is fixed, won't-fix, closed or
-        by-design. A feed that cannot be read is logged and yields what was
+        by-design, and as ``wont_fix`` when its status is won't-fix or
+        by-design or a human comment in it says "won't fix"
+        (:func:`~prxref.forges.base.says_wont_fix`, issue #73). A feed that cannot be read is logged and yields what was
         read, because these threads only feed best-effort dedup.
         """
         threads: list[Thread] = []
@@ -760,7 +774,10 @@ class ForgeImpl:
                         path=(context.get("filePath") or "").lstrip("/") or None,
                         line=(context.get("rightFileStart") or {}).get("line"),
                         resolved=str(thread.get("status") or "").lower() in _RESOLVED_STATUSES,
-                        wont_fix=str(thread.get("status") or "").lower() in _WONT_FIX_STATUSES,
+                        wont_fix=(
+                            str(thread.get("status") or "").lower() in _WONT_FIX_STATUSES
+                            or self._says_wont_fix(thread)
+                        ),
                         author=who.get("displayName") or who.get("uniqueName") or "",
                         body_snippet=(root.get("content") or "")[:200],
                     )
