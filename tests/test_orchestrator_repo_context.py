@@ -49,11 +49,14 @@ SPEC = "api/openapi/connectors.yaml"
 CHUNK_ORDER = [CONNECTOR_SERVICE, TRANSPORT_CONFIG, MIGRATION]
 EXCLUSIVITY = "exactly one of url or legacyUrl must be set"
 GLOBS = tuple(config._DEFAULTS["context_contract_globs"])
+STANDARDS_GLOBS = tuple(config._DEFAULTS["context_standards_globs"])
 MAX_CHARS = config._DEFAULTS["repo_context_max_chars"]
+STANDARDS_MAX_CHARS = config._DEFAULTS["context_standards_max_chars"]
 WARN_NAME = "PRXREF_REPO_CONTEXT"
 NO_FINDINGS = '{"findings": []}'
 INITIAL_KEYS = {
     "mode", "max_chars", "max_reads", "max_chunk_reads", "contract_globs", "exclude_globs",
+    "standards_globs", "standards_max_chars",
     "reader", "listing", "reads", "read_cap_hit", "chunk_read_cap_hit", "run_read_cap_hit", "units",
 }
 
@@ -177,6 +180,7 @@ def _keys(row: dict) -> list[tuple[str, int, str]]:
 def _expected_rows(
     mode: str, *, read: bool = True, listing: bool = True, globs=GLOBS, diff: str = DIFF,
     root: Path = REPO, max_files_per_chunk: int = 1, token_budget: int = DEFAULT_TOKEN_BUDGET,
+    standards_globs: tuple[str, ...] = (),
 ) -> list[dict]:
     """The units rows ``build_unit_context`` gives each chunk when called directly with a fresh reader."""
     files = parse_unified_diff(diff)
@@ -192,6 +196,14 @@ def _expected_rows(
             diff_paths=[f.path for f in files if f.status != "removed"],
         )
         priority = literal_contract_paths(list(globs))
+    standards_paths: list[str] = []
+    standards_priority: list[str] = []
+    if mode == "repo" and reader is not None and standards_globs:
+        standards_paths = select_contract_files(
+            list(standards_globs), listing=got.paths if got is not None else None,
+            diff_paths=[f.path for f in files if f.status != "removed"],
+        )
+        standards_priority = literal_contract_paths(list(standards_globs))
     rows = []
     for chunk in chunks:
         unit = build_unit_context(
@@ -200,6 +212,7 @@ def _expected_rows(
             listing_paths=frozenset(got.paths) if got is not None else None,
             listing_complete=got.complete if got is not None else False,
             contract_paths=contract_paths, contract_priority=priority, exclude=exclude,
+            standards_paths=standards_paths, standards_priority=standards_priority,
         )
         rows.append({**unit.record(), "retry_dropped": False})
     return rows
@@ -215,13 +228,16 @@ REPO_CONNECTOR_KEYS = [
 
 
 class TestTheParameters:
-    NEW = ["repo_context", "repo_context_max_chars", "context_contract_globs", "context_exclude_globs", "repo_dir"]
+    NEW = [
+        "repo_context", "repo_context_max_chars", "context_contract_globs", "context_exclude_globs",
+        "context_standards_globs", "context_standards_max_chars", "repo_dir",
+    ]
 
-    def test_the_five_kwargs_follow_max_findings_per_rule_keyword_only(self):
+    def test_the_seven_kwargs_follow_max_findings_per_rule_keyword_only(self):
         params = inspect.signature(orchestrator.orchestrate_review).parameters
         names = list(params)
         start = names.index("max_findings_per_rule") + 1
-        assert names[start:start + 5] == self.NEW
+        assert names[start:start + 7] == self.NEW
         for name in self.NEW:
             assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
 
@@ -231,6 +247,8 @@ class TestTheParameters:
         assert params["repo_context_max_chars"].default == 12000 == MAX_CHARS
         assert params["context_contract_globs"].default == ()
         assert params["context_exclude_globs"].default == ()
+        assert params["context_standards_globs"].default == ()
+        assert params["context_standards_max_chars"].default == 4000 == STANDARDS_MAX_CHARS
         assert params["repo_dir"].default is None
 
     @pytest.mark.parametrize("mode", ["bogus", "", "OFF", None])
@@ -473,6 +491,7 @@ class TestEarlyExits:
         return {
             "mode": mode, "max_chars": MAX_CHARS, "max_reads": 200, "max_chunk_reads": 16,
             "contract_globs": list(GLOBS), "exclude_globs": [],
+            "standards_globs": [], "standards_max_chars": STANDARDS_MAX_CHARS,
             "reader": None, "listing": None, "reads": 0, "read_cap_hit": False,
             "chunk_read_cap_hit": False, "run_read_cap_hit": False, "units": None,
         }

@@ -70,6 +70,8 @@ RUN_CONFIG_KEYS = (
     "repo_context_max_chars",
     "context_contract_globs",
     "context_exclude_globs",
+    "context_standards_globs",
+    "context_standards_max_chars",
     "repo_context_max_reads",
     "repo_context_max_chunk_reads",
 )

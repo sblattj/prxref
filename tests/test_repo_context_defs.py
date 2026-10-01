@@ -40,11 +40,12 @@ def _java_match(line: str) -> str | None:
 class TestVocabulary:
     def test_reasons_order_is_the_admission_rank(self):
         assert REASONS == (
-            "cross-chunk", "contract", "diff-file", "import", "path-convention", "name-search", "shared-state",
+            "cross-chunk", "contract", "standard", "diff-file", "import", "path-convention",
+            "name-search", "shared-state",
         )
 
     def test_kinds(self):
-        assert KINDS == ("definition", "contract", "reader")
+        assert KINDS == ("definition", "contract", "standards", "reader")
 
 
 class TestLanguageOf:

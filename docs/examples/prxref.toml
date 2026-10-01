@@ -44,6 +44,14 @@ repo_context_max_chars = 12000
 chunk_context_lines = 5
 context_exclude_globs = ["**/fixtures/**", "**/*.snap"]
 
+# In-repo standards (#68): the repository's own standards documents whose
+# sections ride chunk prompts at repo_context = "repo". This REPLACES the
+# built-in set (empty/unset keeps it); the exact value off, set only through
+# the environment, turns them off.
+context_standards_globs = ["docs/standards/**", "docs/adr/**", "SECURITY.md"]
+# Standards characters one chunk worker receives.
+context_standards_max_chars = 4000
+
 # --- Comment policy ----------------------------------------------------------
 
 # summary+inline | summary | inline
