@@ -515,12 +515,16 @@ class TestCliWiring:
 # posted as second comments and now drop as "duplicate of chunk finding". Only
 # those three findings moved: the record and JSON rows, the three inline
 # comments, the summary's counts and list, and the post and run trace counts.
+# "rules", "scoped" and "rules_grouping" were re-derived again for issue
+# #67's "Matching rules" section in worker.md: the worker prompt system
+# hashes (and the unit-file hashes that embed them) are the only movers;
+# "rules_summary_only" renders no prompt.
 # ---------------------------------------------------------------------------
 
 RULES_GOLDEN = {
-    "rules": "029d065d6734661346e48bad7acd3c1b9b282350406c957cc27d434ed1324a27",
-    "scoped": "65406082cb53caa153bce81ffeecd1e4437935ff12e908bc67dd17293a501c23",
-    "rules_grouping": "72733b90eb69c7edc14a8a3393245f44eade9c5f392b506b286461ace6d7dd30",
+    "rules": "148a3b6651f40d6c59f8dc48e7539176a0acb131b5da125f4cb7ede5877694cd",
+    "scoped": "a1cb60afc41f127a81d76c7d3c455b991ffe71a4ed0008caa4dcb69b7c97de81",
+    "rules_grouping": "4d79e198da63c8c39a8ff8c000e9e25cc890e855d3ea738b5682aac6824db33e",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 
