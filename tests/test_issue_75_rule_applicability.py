@@ -34,6 +34,7 @@ from prxref.orchestrator import orchestrate_review
 from prxref.quality import (
     GROUPED_INTO_PREFIX,
     apply_rule_cap,
+    apply_rule_category_check,
     apply_rule_grouping,
     apply_rule_scope_check,
     rule_cap_counts,
@@ -46,9 +47,11 @@ from prxref.rules import (
     RuleSection,
     ScopedBlock,
     ScopedRules,
+    claim_kinds,
     filter_rule_sections,
     load_review_rules,
     load_scoped_rules,
+    parse_rule_index,
     parse_rule_sections,
     scope_token_covers,
 )
@@ -448,7 +451,7 @@ class TestOrchestratorWiring:
         events = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
         matches = [e for e in events if e.get("node") == "rulescope"]
         assert [(e["node"], e["phase"], e["meta"]) for e in matches] == [
-            ("rulescope", "ok", {"cleared": 2}),
+            ("rulescope", "ok", {"cleared": 2, "category": 0}),
         ]
 
     def test_the_check_runs_on_its_own_guard_with_grouping_and_cap_off(self):
@@ -815,3 +818,194 @@ class TestPerUnitSectionFilteringInTheRun:
         (system,) = self._worker_systems(llm)
         assert JAVA_RULE_TEXT not in system and "py only rule" not in system
         assert "shared rule" in system and TS_RULE_TEXT in system
+
+
+# F16 (#75): the claim-category half of the applicability check. A cited
+# rule whose own text names one kind of defect cannot cover a finding whose
+# title names a different kind, whatever the file's language.
+CATEGORY_BODY = (
+    "- Keep every public method under forty lines.\n"
+    "\n"
+    "## Fields\n"
+    "\n"
+    "- Remove fields never read.\n"
+    "\n"
+    "## Naming style\n"
+    "\n"
+    "- Prefer full words in identifiers.\n"
+    "\n"
+    "## Java module boundaries\n"
+    "\n"
+    "scope: java\n"
+    "\n"
+    "- Controllers never call Controllers.\n"
+)
+CATEGORY_INDEX = parse_rule_index(CATEGORY_BODY)
+
+
+def _category(findings, index=CATEGORY_INDEX):
+    return apply_rule_category_check(findings, sections=index)
+
+
+class TestParseRuleIndex:
+    def test_every_section_is_indexed_with_its_scope_or_none(self):
+        assert [(s.name, s.scopes) for s in CATEGORY_INDEX] == [
+            ("", ()),
+            ("Fields", ()),
+            ("Naming style", ()),
+            ("Java module boundaries", ("java",)),
+        ]
+
+    def test_items_before_the_first_heading_form_a_nameless_section(self):
+        assert CATEGORY_INDEX[0].items == ("Keep every public method under forty lines.",)
+        assert parse_rule_index("## Only\n\n- one.\n")[0].name == "Only"
+
+    def test_a_body_without_headings_or_items_indexes_nothing(self):
+        assert parse_rule_index("") == ()
+        assert parse_rule_index("Plain prose with no rule lines.\n") == ()
+
+    def test_parse_rule_sections_is_unchanged(self):
+        assert [s.name for s in parse_rule_sections(CATEGORY_BODY)] == ["Java module boundaries"]
+
+    def test_review_rules_index_reads_the_capped_body(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "rules.md").write_text(CATEGORY_BODY, encoding="utf-8")
+        rules = load_review_rules("rules.md", max_chars=24000, source="--rules-file")
+        assert rules.index == CATEGORY_INDEX
+        short = load_review_rules("rules.md", max_chars=60, source="--rules-file")
+        assert [s.name for s in short.index] == ["", "Fields"]
+
+
+class TestClaimKinds:
+    @pytest.mark.parametrize(("text", "kinds"), [
+        ("Stale duplicate Javadoc", {"docs"}),
+        ("Remove fields never read", {"unused"}),
+        ("Dead code after the return", {"unused"}),
+        ("Misleading variable naming", {"style"}),
+        ("Retry transient failures with backoff", {"errors"}),
+        ("Unused field keeps a stale Javadoc", {"docs", "unused"}),
+        ("Null dereference when the cache is empty", set()),
+        ("Commented-out block left behind", set()),
+    ])
+    def test_the_vocabulary(self, text, kinds):
+        assert claim_kinds(text) == frozenset(kinds)
+
+
+class TestApplyRuleCategoryCheck:
+    def test_a_javadoc_finding_under_a_never_read_rule_is_cleared(self):
+        finding = Finding(
+            file=FOO_JAVA, line=3, severity="warning", confidence=0.9,
+            title="Stale duplicate Javadoc", body="The Javadoc repeats the one above.",
+            rule="Remove fields never read",
+        )
+        out, cleared = _category([finding])
+        assert cleared == 1
+        assert out[0].rule is None and out[0].drop_reason is None
+        assert out[0].title == finding.title
+
+    def test_an_overlapping_kind_keeps_the_label(self):
+        out, cleared = _category([_f(3, title="Unused field keeps a stale Javadoc",
+                                     rule="Remove fields never read")])
+        assert cleared == 0 and out[0].rule == "Remove fields never read"
+
+    def test_a_title_naming_no_kind_keeps_the_label(self):
+        findings = [_f(3, title="Null dereference when the cache is empty",
+                       rule="Remove fields never read")]
+        out, cleared = _category(findings)
+        assert cleared == 0 and out[0] is findings[0]
+
+    def test_an_unknown_label_is_kept_whatever_its_wording(self):
+        out, cleared = _category([_f(3, title="Stale duplicate Javadoc", rule="Remove unused imports")])
+        assert cleared == 0 and out[0].rule == "Remove unused imports"
+
+    def test_a_rule_naming_no_kind_keeps_the_label(self):
+        out, cleared = _category([_f(3, title="Stale duplicate Javadoc",
+                                     rule="Keep every public method under forty lines")])
+        assert cleared == 0
+
+    def test_a_label_naming_the_heading_reads_the_heading(self):
+        out, cleared = _category([_f(3, title="Stale duplicate Javadoc", rule="Fields")])
+        assert cleared == 0
+        out, cleared = _category([_f(3, title="Stale duplicate Javadoc", rule="Naming style")])
+        assert cleared == 1 and out[0].rule is None
+
+    def test_an_error_with_a_plain_title_under_a_style_section_is_cleared(self):
+        out, cleared = _category([_f(3, severity="error", title="Null dereference when the cache is empty",
+                                     rule="Prefer full words in identifiers")])
+        assert cleared == 1 and out[0].rule is None
+
+    def test_the_style_guard_needs_error_severity(self):
+        out, cleared = _category([_f(3, severity="warning", title="Null dereference when the cache is empty",
+                                     rule="Prefer full words in identifiers")])
+        assert cleared == 0
+
+    def test_a_style_word_in_the_title_keeps_an_error(self):
+        out, cleared = _category([_f(3, severity="error", title="Misleading variable naming",
+                                     rule="Prefer full words in identifiers")])
+        assert cleared == 0
+
+    def test_ruleless_dropped_and_untitled_findings_pass_through(self):
+        ruleless = _f(3, title="Stale duplicate Javadoc")
+        dropped = _f(4, title="Stale duplicate Javadoc", rule="Remove fields never read",
+                     drop_reason='hedged: "if"')
+        untitled = Finding(file=APP_TS, line=5, severity="error", confidence=0.9, title=None,
+                           body="b", rule="Prefer full words in identifiers")
+        out, cleared = _category([ruleless, dropped, untitled])
+        assert cleared == 0 and out[0] is ruleless and out[1] is dropped and out[2] is untitled
+
+    def test_empty_sections_clear_nothing(self):
+        findings = [_f(3, title="Stale duplicate Javadoc", rule="Remove fields never read")]
+        out, cleared = _category(findings, index=())
+        assert cleared == 0 and out[0] is findings[0]
+
+
+CATEGORY_RAW = [
+    {"file": APP_TS, "line": 3, "severity": "warning", "confidence": 0.9,
+     "title": "Stale duplicate Javadoc", "body": "The Javadoc repeats the one above.",
+     "rule": "Remove fields never read"},
+    {"file": APP_TS, "line": 9, "severity": "warning", "confidence": 0.9,
+     "title": "Unused field keeps a stale Javadoc", "body": "The field is never read.",
+     "rule": "Remove fields never read"},
+]
+
+
+class TestCategoryCheckInTheRun:
+    def _run(self, body, chunk, trace=None, **kw):
+        rules = ReviewRules(
+            path="team-rules.md", body=cap_text(body.strip(), 24000), severity_map={},
+            sections=parse_rule_sections(body.strip()),
+        )
+        res = orchestrate_review(
+            FakeForge(diff=ONE_TS_DIFF), REF, _ScriptedLLM(chunk=chunk), post=False,
+            max_workers=1, rules=rules, trace_file=str(trace) if trace else None, **kw,
+        )
+        return res
+
+    def test_a_scopeless_rules_file_clears_a_kind_mismatch(self, tmp_path):
+        body = CATEGORY_BODY.split("## Java")[0]
+        trace = tmp_path / "run.jsonl"
+        res = self._run(body, CATEGORY_RAW, trace=trace)
+        assert res["rule_scope_cleared"] == 1
+        rules = {f.title: f.rule for f in [*res["findings_active"], *res["findings_dropped"]]}
+        assert rules == {
+            "Stale duplicate Javadoc": None,
+            "Unused field keeps a stale Javadoc": "Remove fields never read",
+        }
+        events = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
+        assert [e["meta"] for e in events if e.get("node") == "rulescope"] == [
+            {"cleared": 1, "category": 1},
+        ]
+
+    def test_a_scoped_file_counts_both_halves(self):
+        res = self._run(CATEGORY_BODY, [
+            *CATEGORY_RAW,
+            {"file": APP_TS, "line": 15, "severity": "warning", "confidence": 0.9,
+             "title": "Controller calls a controller", "body": "b",
+             "rule": "Controllers never call Controllers"},
+        ])
+        assert res["rule_scope_cleared"] == 2
+
+    def test_rule_scoping_off_keeps_the_mismatched_label(self):
+        res = self._run(CATEGORY_BODY.split("## Java")[0], CATEGORY_RAW, rule_scoping="off")
+        assert res["rule_scope_cleared"] is None
+        assert "Remove fields never read" in [f.rule for f in res["findings_active"]]

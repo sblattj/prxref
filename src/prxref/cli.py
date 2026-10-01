@@ -1009,7 +1009,8 @@ def _build_json_result(result: Any) -> dict:
     0.16's ``repo_context`` and 0.17's ``parse_retries`` are always emitted
     and are ``null`` when their feature is off (``rule_counts`` whenever the
     per-rule cap did not run, ``rule_scope_cleared`` whenever the loaded
-    rules files declare no section scope — 0.29's rule-applicability check
+    rules files declare no section scope and no label was cleared for its
+    claim category — 0.29's rule-applicability check
     (#75) — otherwise the count of rule labels it cleared, ``repo_context`` whenever
     ``PRXREF_REPO_CONTEXT`` is ``off``, ``parse_retries`` whenever
     ``PRXREF_LLM_PARSE_RETRIES`` is ``0``; otherwise it is the run's total
