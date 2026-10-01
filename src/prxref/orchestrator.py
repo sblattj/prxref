@@ -64,7 +64,12 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    IS compared by that tier against any other chunk-side finding sharing
    its file and line — a chunk worker's own restatement of the same toggle
    included — and only the higher-ranked one of the two (severity, then
-   confidence, then content) survives, same as any other same-side pair:
+   confidence, then content) survives, same as any other same-side pair.
+   The opt-in PR-metadata findings (#70, ``metadata_rules``) join that
+   same splice with the same chunk-side standing and the same
+   deterministic exemption, computed before any worker runs; they are
+   summary-only, so the inline batch is selected from the findings that
+   are not them (by object identity, never by a reserved rule name):
 
    ``apply_severity_map`` (only when the team review rules declare a
    severity map: a team word such as ``blocker`` becomes the prxref tier it
@@ -200,6 +205,7 @@ from . import (
 from .ci_fallback import DEGRADED_SUMMARY_KEY
 from .forges.base import (
     ATTRIBUTION_MARKER,
+    CommitData,
     Forge,
     InlineComment,
     PRData,
@@ -217,6 +223,7 @@ from .markers import (
     out_of_ticket_marker,
     severity_marker,
 )
+from .metadata_rules import run_metadata_checks
 from .prompt_templates import (
     CONTEXT_MARKER,
     REVIEW_TEMPLATES,
@@ -508,6 +515,11 @@ def orchestrate_review(
     incremental: str = "off",
     full_review: bool = False,
     full_review_reason: str | None = None,
+    metadata_rules: str = "off",
+    branch_patterns: Sequence[str] = (),
+    commit_reference: str = "",
+    area_globs: Sequence[str] = (),
+    max_areas_per_pr: int = 2,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -652,6 +664,28 @@ def orchestrate_review(
     threshold is set the advisory's stats ride the result under
     ``size_advisory``, and a triggered advisory is prepended to every posted
     summary. It never touches the verdict.
+
+    ``metadata_rules`` (issue #70) turns on the deterministic PR-metadata
+    checks: ``branch_patterns`` (``type=regex``; the PR's type from its
+    labels, else its title's conventional-commit prefix, must own a pattern
+    the source branch fully matches), ``commit_reference`` (a regex every
+    non-merge commit subject must contain; needs the forge's optional
+    ``get_commits``, without which the check reports itself skipped) and
+    ``area_globs`` with ``max_areas_per_pr`` (the diff's paths may not
+    spread over more named areas than that). All three are pure, computed
+    before any worker runs and making no LLM call of their own; each
+    violation is a ``warning`` / ``outofscope`` finding with confidence 1.0,
+    folded in beside the heuristics findings at the chunk/sweep boundary
+    and SUMMARY-ONLY — the inline batch is selected from the findings that
+    are not them, by object identity threaded from the check, never by a
+    reserved rule name a model finding could match. With
+    ``metadata_rules`` off (the default) nothing runs, no
+    ``metadata_rules`` key is stamped on the run record, and the run is
+    byte-identical to one without the feature; on, the record carries
+    ``{branch_pattern, commit_reference, area_globs}`` each
+    ``"pass"``/``"fail"``/``"skipped: <reason>"``, echoed by one
+    ``metadata_rules ok`` trace event. None of it touches the verdict or
+    the exit code.
 
     ``replay`` is the evaluation-replay stamp built by the CLI
     (``{base_sha, head_sha, threads, diff_file, description, as_of,
@@ -1107,6 +1141,35 @@ def orchestrate_review(
         run_inputs["size_advisory"] = None
     size_advisory_line = _size_advisory_line(run_inputs["size_advisory"])
 
+    # Deterministic PR-metadata checks (#70), computed here — before any
+    # worker dispatch — so the no-LLM guarantee is structural: nothing below
+    # can schedule a model call on their behalf. Opt-in: with
+    # metadata_rules off (the default) this block runs nothing, stamps no
+    # run-record key and changes no byte of the review.
+    metadata_findings: list[Finding] = []
+    if metadata_rules == "on":
+        commits, commit_skip = (
+            _fetch_pr_commits(forge, ref, pr) if commit_reference else (None, "")
+        )
+        try:
+            metadata_findings, stamp = run_metadata_checks(
+                pr, files, commits,
+                branch_patterns=branch_patterns, commit_reference=commit_reference,
+                area_globs=area_globs, max_areas_per_pr=max_areas_per_pr,
+                commit_skip_reason=commit_skip or "no commit source",
+            )
+            run_inputs["metadata_rules"] = stamp
+            tracer.event("metadata_rules", "ok", **stamp)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("metadata rules failed (continuing without them): %s", e)
+            metadata_findings = []
+            run_inputs["metadata_rules"] = {
+                "checks": f"skipped: metadata stage failed: {e.__class__.__name__}"
+            }
+            tracer.event(
+                "metadata_rules", "fail", reason=f"{e.__class__.__name__}: {e}"
+            )
+
     try:
         with tracer.span("build_chunks") as sp:
             plan = plan_chunks(
@@ -1141,7 +1204,7 @@ def orchestrate_review(
         # needs an added, non-binary line, so it rarely fires on this path.
         release_shape = heuristics.release_shape_findings(files)
         toggle_findings = heuristics.toggle_pinned_off_findings(files)
-        deterministic_findings = release_shape + toggle_findings
+        deterministic_findings = release_shape + toggle_findings + metadata_findings
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
             **_cost_meta(run_inputs),
@@ -1152,6 +1215,7 @@ def orchestrate_review(
             post_mode=post_mode, post_verdict=post_verdict, tracer=tracer,
             sampling=sampling, release_shape_findings=release_shape,
             toggle_findings=toggle_findings,
+            metadata_findings=metadata_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
             max_outofscope_findings=max_outofscope_findings,
@@ -1478,7 +1542,12 @@ def orchestrate_review(
     # finding" and keep the model's restatement instead.
     release_shape = heuristics.release_shape_findings(files)
     toggle_findings = heuristics.toggle_pinned_off_findings(files)
-    deterministic_findings = release_shape + toggle_findings
+    # Metadata findings (#70) join the same splice with the same
+    # chunk-side standing; they are file-level (line 0) like
+    # release_shape, so the reworded-dedup tier never compares them, and
+    # severity consistency exempts them through the shared deterministic
+    # body suffix.
+    deterministic_findings = release_shape + toggle_findings + metadata_findings
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
     )
@@ -1675,9 +1744,21 @@ def orchestrate_review(
     # inline batch rides on it; an inline-mode run has no summary to gate on.
     inline_attempted = 0
     inline_failed = False
-    if post_inline_wanted and findings_active and (posted or not post_summary_wanted):
+    # Metadata findings are summary-only by design (#70): they report on the
+    # PR as a whole, not on a line, so the inline batch is selected from the
+    # findings that are not them. The exclusion is an explicit identity set
+    # threaded from the check that produced the findings — never a reserved
+    # rule or title a model finding could accidentally match. The quality
+    # passes above replace() a finding only when they change it, and none of
+    # them changes one of these (file-level, deterministic-suffixed,
+    # confidence 1.0); the worst case of a future pass that did is one
+    # summary finding also posted inline — fail-open, never a silent loss.
+    # With the feature off the set is empty and this is exactly findings_active.
+    metadata_only = {id(f) for f in metadata_findings}
+    inline_pool = [f for f in findings_active if id(f) not in metadata_only]
+    if post_inline_wanted and inline_pool and (posted or not post_summary_wanted):
         ordered = sorted(
-            findings_active,
+            inline_pool,
             key=lambda f: (
                 _SEVERITY_RANK.get(f.severity, 3),
                 _SCOPE_RANK.get(f.scope, 0),
@@ -1704,10 +1785,12 @@ def orchestrate_review(
     # some of them without an anchor the summary has to say so — otherwise it
     # promises a per-finding comment the PR never received. The counts only
     # exist after posting, so the disclosure rides a second post_summary call,
-    # which the forges already implement as an update-in-place.
+    # which the forges already implement as an update-in-place. Both sides
+    # count the inline-eligible pool (#70: metadata findings are summary-only
+    # by design, so they are neither promised nor accounted as missing).
     if (
         post_summary_wanted and posted and post_inline_wanted
-        and len(findings_active) > inline_posted
+        and len(inline_pool) > inline_posted
     ):
         refreshed = _render_summary(
             pr, files, verdict, findings_active, model,
@@ -1722,7 +1805,7 @@ def orchestrate_review(
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
-                len(findings_active), inline_attempted, inline_posted,
+                len(inline_pool), inline_attempted, inline_posted,
                 failed=inline_failed, cap=max_inline_comments,
             ),
             incremental_note=incremental_note,
@@ -2444,6 +2527,33 @@ def _inline_accounting(
 
 
 HEARTBEAT_SECONDS = 30.0
+
+
+def _fetch_pr_commits(
+    forge: Forge, ref: PRRef, pr: PRData,
+) -> tuple[Sequence[CommitData] | None, str]:
+    """The PR's commit list for the metadata rules, or why none came back.
+
+    ``get_commits`` is an optional Forge method resolved with
+    ``getattr``, like ``get_summary``: a forge without it — and every
+    ``--diff-file`` run, whose local forge has no commits to list — gets
+    ``(None, "no commit source")`` and the commit-reference check reports
+    itself skipped rather than failed. Both PR shas are handed over as
+    ``get_pr`` read them; a forge that needs no range ignores them. The
+    call is best-effort like the thread listing: a transport failure is
+    logged and also degrades to a skip with the reason, because the
+    metadata checks are advisory and must never fail a review.
+    """
+    getter = getattr(forge, "get_commits", None)
+    head = getattr(pr, "source_sha", "") or ""
+    base = getattr(pr, "target_sha", "") or ""
+    if getter is None or not head or not base:
+        return None, "no commit source"
+    try:
+        return list(getter(ref, base_sha=base, head_sha=head)), ""
+    except Exception as e:  # noqa: BLE001
+        logger.warning("get_commits failed (best-effort): %s", e)
+        return None, f"commit source failed: {e.__class__.__name__}"
 
 
 def _make_file_reader(
@@ -3869,6 +3979,7 @@ def _summary_only_run(
     tracer: Tracer | None = None, sampling: dict | None = None,
     release_shape_findings: list[Finding] | None = None,
     toggle_findings: list[Finding] | None = None,
+    metadata_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
@@ -3885,7 +3996,17 @@ def _summary_only_run(
     computed over the full file list — are put through the same location
     and quality passes a chunk-sourced finding gets
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
-    they reach ``findings_active`` / ``verdict`` / the summary. No
+    they reach ``findings_active`` / ``verdict`` / the summary. The
+    PR-metadata findings (#70, ``metadata_findings``) join them the same
+    way; no inline batch is ever posted from this exit, so their
+    summary-only contract needs no enforcement here. Location validation
+    runs only when the diff holds files: a metadata finding about a branch
+    name exists even on an empty diff, where it anchors on ``""`` and
+    there is no diff path set to validate against — the deterministic
+    producers are trusted with their own anchors, exactly as they are on
+    the empty-diff path that predates them (both heuristics yield ``[]``
+    with no files, so the guard changes nothing when the feature is off).
+    No
     :func:`apply_line_align` call here: both heuristics already anchor on a
     real diff line and there is no worker-supplied anchor to re-corroborate.
     An empty diff still yields ``release_shape_findings=[]`` and
@@ -3912,9 +4033,13 @@ def _summary_only_run(
     degraded: dict | None = None
     summary: str | None = None
 
-    findings = list(release_shape_findings or []) + list(toggle_findings or [])
+    findings = (
+        list(release_shape_findings or []) + list(toggle_findings or [])
+        + list(metadata_findings or [])
+    )
     if findings:
-        findings = apply_location_validation(findings, [f.path for f in files])
+        if files:
+            findings = apply_location_validation(findings, [f.path for f in files])
         findings = apply_quality_gate(
             findings, confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,

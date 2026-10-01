@@ -212,6 +212,50 @@ LLM / pipeline:
                                 to the built-in lock-file and generated-file
                                 detection, never replacing it. Empty
                                 (default) adds nothing.
+  PRXREF_METADATA_RULES         Opt-in deterministic PR-metadata checks
+                                (#70): "off" (default) runs none, keeps
+                                every prompt, finding and run-record key
+                                byte-identical, and stamps nothing;
+                                "on" runs the three checks below. Each is
+                                configured by its own key and skips itself
+                                (recorded in the run record's
+                                ``metadata_rules`` stamp, never a finding)
+                                when unconfigured or when the PR offers
+                                nothing to check. Violations are
+                                deterministic warning/outofscope findings,
+                                summary-only, and never change the verdict
+                                or the exit code.
+  PRXREF_BRANCH_PATTERNS        Branch-name check: "type=regex" entries
+                                mapping a PR type to the fullmatch pattern
+                                its source branch must satisfy (matched
+                                with re.fullmatch, so ^/$ anchors in a team
+                                pattern are harmless). The PR's type comes
+                                from its labels first, else the
+                                conventional-commit prefix of its title
+                                ("fix: ..." -> fix); a PR whose type is
+                                unknown, or whose type has no entry here,
+                                is skipped, not a violation. Empty
+                                (default) skips the check.
+  PRXREF_COMMIT_REFERENCE       Commit-subject check: a regex every
+                                non-merge commit subject (first line of the
+                                message) of the PR must CONTAIN (re.search),
+                                e.g. "PROJ-[0-9]+". One outofscope finding
+                                per offending commit. Needs the forge's
+                                commit listing (GitHub, Gitea); without one,
+                                or on a --diff-file run, the check skips
+                                with "skipped: no commit source". Empty
+                                (default) skips the check.
+  PRXREF_AREA_GLOBS             Area check: "name=glob" entries classifying
+                                diff paths into named areas (a path belongs
+                                to every area whose glob matches it; globs
+                                match like scoped-rules applies_to, ``**/``
+                                matches zero directories). A path matching
+                                no area is ignored. More distinct areas
+                                than PRXREF_MAX_AREAS_PER_PR makes one
+                                file-level warning listing the areas.
+                                Empty (default) skips the check.
+  PRXREF_MAX_AREAS_PER_PR       Most distinct areas a PR may touch before
+                                the area check flags it; >= 0 (default 2).
   PRXREF_SPEC_SOURCES           Spec/ticket sources to review against, as
                                  comma- or whitespace-separated web URLs and
                                  local file/dir paths; the repeatable
@@ -458,8 +502,9 @@ Webhooks:
                                   webhooks (default off; insecure)
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
-PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS
-and PRXREF_CONTEXT_EXCLUDE_GLOBS) split on any run of commas and/or
+PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS,
+PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS and PRXREF_AREA_GLOBS)
+split on any run of commas and/or
 whitespace, so no item can contain either; a glob that must match a
 literal space writes it as ``?``.
 
@@ -621,6 +666,16 @@ _DEFAULTS: dict[str, object] = {
         "**/migrations/**",
     ],
     "context_exclude_globs": [],
+    # PR-metadata rules (#70): the single opt-in switch plus one key per
+    # check. Flat, like every other key — the config file is a flat TOML
+    # document, so a [metadata] table would be rejected by the reader.
+    # Empty / "off" defaults keep every check off and the run record free
+    # of the metadata_rules key.
+    "metadata_rules": "off",
+    "branch_patterns": [],
+    "commit_reference": "",
+    "area_globs": [],
+    "max_areas_per_pr": 2,
     "jira_base_url": "",
     "jira_email": "",
     "jira_api_token": "",
@@ -653,6 +708,7 @@ _INT_KEYS = frozenset({
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
+    "max_areas_per_pr",
 })
 _FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
 _BOOL_KEYS = frozenset({
@@ -661,6 +717,7 @@ _BOOL_KEYS = frozenset({
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
+    "branch_patterns", "area_globs",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -675,6 +732,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "suggestions": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
+    "metadata_rules": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
@@ -765,6 +823,7 @@ _RANGES: dict[str, _Range] = {
     "repo_context_max_chars": _Range(0),
     "repo_context_max_reads": _Range(0),
     "repo_context_max_chunk_reads": _Range(0),
+    "max_areas_per_pr": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
@@ -803,6 +862,8 @@ FILE_KEYS = frozenset({
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "incremental",
     "context_contract_globs", "context_exclude_globs",
+    "metadata_rules", "branch_patterns", "commit_reference",
+    "area_globs", "max_areas_per_pr",
 })
 
 _ENV_ONLY_REASONS: dict[str, str] = {
@@ -1214,6 +1275,58 @@ def _check_bullet_separator(cfg: dict[str, object], sources: dict[str, str]) -> 
         )
 
 
+def _check_metadata_rules(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Validate the PR-metadata rule keys (#70); every entry must parse.
+
+    Same doctrine as :func:`_check_choices`: it runs after environment AND
+    overrides, and a failure is a ``ConfigError`` (exit 2) naming whichever
+    input supplied the value — a bad pattern is a usage error before any
+    review, never a mid-review crash. ``branch_patterns`` entries must be
+    ``TYPE=REGEX`` with both sides non-empty and a regex that compiles;
+    ``area_globs`` entries must be ``NAME=GLOB`` with both sides non-empty
+    (the glob itself is checked where it is matched); a non-empty
+    ``commit_reference`` must compile. The values are left exactly as
+    given, so the config dict keeps the operator's strings and the checks
+    compile them once more at use time — a third copy of the pattern never
+    exists.
+    """
+    pairs: list[tuple[str, str]] = [
+        ("branch_patterns", "TYPE=REGEX"), ("area_globs", "NAME=GLOB"),
+    ]
+    for key, shape in pairs:
+        value = cfg[key]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"{sources[key]}: must be a list of strings, got {value!r}")
+        for entry in value:
+            name, _, pattern = entry.partition("=")
+            if not name.strip() or not pattern.strip():
+                raise ConfigError(
+                    f"{sources[key]}: entry {entry!r} must be {shape} "
+                    f"with both sides non-empty"
+                )
+            if key != "branch_patterns":
+                continue
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ConfigError(
+                    f"{sources[key]}: entry {entry!r} regex does not "
+                    f"compile: {exc}"
+                ) from exc
+    reference = cfg["commit_reference"]
+    if reference:
+        if not isinstance(reference, str):
+            raise ConfigError(
+                f"{sources['commit_reference']}: must be a string, got {reference!r}"
+            )
+        try:
+            re.compile(reference)
+        except re.error as exc:
+            raise ConfigError(
+                f"{sources['commit_reference']}: regex does not compile: {exc}"
+            ) from exc
+
+
 def load_config(
     *,
     config_file: Path | None = None,
@@ -1323,6 +1436,7 @@ def load_config_with_sources(
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)
+    _check_metadata_rules(cfg, sources)
     return cfg, layers
 
 
