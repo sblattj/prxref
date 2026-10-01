@@ -138,7 +138,10 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
      between ``apply_hedge_gate`` and the grouping/cap passes so a wrong
      label never keys them, and is skipped entirely (the run record's
      ``rule_scope_cleared`` stays ``null``) when no loaded section declares
-     a scope.
+     a scope. Its claim-category half, ``apply_rule_category_check``, runs
+     right after on every section of the loaded rules, scoped or not, and
+     clears a label whose rule names another kind of defect than the
+     finding's title (``rules.claim_kinds``), keeping it on any ambiguity.
 15. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
@@ -2392,6 +2395,90 @@ def apply_rule_scope_check(
         )
         out.append(replace(finding, rule=None) if misses else finding)
         cleared += 1 if misses else 0
+    return out, cleared
+
+
+def _category_mismatch(finding: Finding, label: str, keyed: Sequence[tuple[tuple[str, ...], RuleSection]]) -> bool:
+    """True when the rule ``label`` names is of a different claim kind than ``finding`` (#75)."""
+    from .rules import claim_kinds
+
+    rule_kinds: set[str] = set()
+    style_headings = True
+    mapped = False
+    for keys, section in keyed:
+        hits = [key for key in keys if _label_names(label, key)]
+        if not hits:
+            continue
+        mapped = True
+        section_kinds = claim_kinds(section.name)
+        style_headings = style_headings and section_kinds == {"style"}
+        rule_kinds |= section_kinds
+        for key in hits:
+            rule_kinds |= claim_kinds(key)
+    if not mapped:
+        return False
+    finding_kinds = claim_kinds(finding.title)
+    if rule_kinds and finding_kinds:
+        return not rule_kinds & finding_kinds
+    severity = finding.severity.strip().lower() if isinstance(finding.severity, str) else ""
+    return not finding_kinds and style_headings and rule_kinds == {"style"} and severity == "error"
+
+
+def apply_rule_category_check(
+    findings: Sequence[Finding], *, sections: Sequence[RuleSection]
+) -> tuple[list[Finding], int]:
+    """Clear ``rule`` on a finding whose cited rule names another kind of defect (#75).
+
+    The claim-category half of the applicability check, beside the path half
+    in :func:`apply_rule_scope_check`. ``sections`` is every rule section of
+    the loaded rules files, scoped or not, as
+    :func:`prxref.rules.parse_rule_index` returns them. A finding's ``rule``
+    label maps to a rule the same way the path half maps it: both
+    whitespace-collapsed and casefolded, the label equals a section's
+    heading text or one of its rule lines, or is their leading words. A
+    label that maps to nothing is kept (an unknown name is never judged).
+
+    The rule's kinds are :func:`prxref.rules.claim_kinds` of every mapped
+    heading and rule line plus each mapped section's heading; the finding's
+    kinds are those of its title alone. The label is cleared to ``None`` on
+    positive evidence only, either of:
+
+    - both sides name a kind and share none, for example a ``Stale
+      duplicate Javadoc`` finding (``docs``) citing ``Remove fields never
+      read`` (``unused``);
+    - every mapped section's heading, and the rule as a whole, names only
+      the ``style`` kind, the finding's severity is ``error`` and its title
+      names no kind: a
+      correctness defect is not covered by a style or naming rule.
+
+    Every other label is kept, including any whose rule or title names no
+    kind, so an ambiguous case never loses its label. The finding itself is
+    never dropped, and a cleared one rejoins the ruleless paths downstream
+    (grouped and capped by normalized title). Pure and order-preserving:
+    already-dropped, ruleless and untitled findings pass through as the same
+    objects, and only ``rule`` moves. Returns the findings and how many
+    labels were cleared; empty ``sections`` clears nothing.
+    """
+    keyed = tuple(
+        (tuple(" ".join(key.split()).casefold() for key in (section.name, *section.items)), section)
+        for section in sections
+    )
+    if not keyed:
+        return list(findings), 0
+    out: list[Finding] = []
+    cleared = 0
+    for finding in findings:
+        if (
+            finding.drop_reason is not None
+            or not isinstance(finding.rule, str) or not finding.rule
+            or not isinstance(finding.title, str) or not finding.title.strip()
+        ):
+            out.append(finding)
+            continue
+        label = " ".join(finding.rule.split()).casefold()
+        clear = bool(label) and _category_mismatch(finding, label, keyed)
+        out.append(replace(finding, rule=None) if clear else finding)
+        cleared += 1 if clear else 0
     return out, cleared
 
 
