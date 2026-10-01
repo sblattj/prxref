@@ -8,7 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
-## [0.29.0] — 2026-09-30
+## [0.30.0] — 2026-09-30
 
 Ten issues: five new review inputs and one new id scheme, and four
 fidelity fixes. A review can now be shown execution evidence — the command
@@ -21,7 +21,10 @@ longer read as `Approved` (#72), resolved or outdated threads no longer
 silence a finding that is still present (#73), findings that quote code
 snap to the line it actually sits on (#74), and a finding no longer needs
 a rule (#75). The worker prompt also gained a `## Matching rules` section
-(#67), so prompts that probe added or widened matching rules. The config
+(#67), so prompts that probe added or widened matching rules. 0.29.0
+shipped hours into this run carrying the first half of #72 — the
+partial-run names, the `failed_chunks` key and the 120 s deadline — so
+this release completes that fix rather than repeating it. The config
 schema grows from 78 to 92 keys, and the worker prompt's text changed
 (#67, #75): prompt hashes move once, everywhere, even with every new key
 off.
@@ -152,14 +155,20 @@ off.
   `Previously raised in <thread>; still present at <file>:<line>.`, the
   summary line counts the suppressions, and the run record gains a
   `thread_dedup` stamp.
-- **A partial review is no longer `Approved` (#72).** A failed chunk sets
-  `degraded` with its index and files, the verdict becomes `Incomplete` —
-  the ladder is now `Error` → `Request-Changes` → `Incomplete` →
-  `Approved` — and the coverage line prints `NOT reviewed:` naming the
-  files of every failed unit. Under `PRXREF_FAIL_ON=error` or `any`, an
-  `Incomplete` review exits `1`, because a gate must not read a broken run
-  as green. A chunk that times out now says so:
-  `[chunk i/N] timed out after <t>s; increase --timeout`.
+- **A partial review is no longer `Approved` (#72, completing the 0.29.0
+  fix).** 0.29.0 named what a partial review skipped — the
+  `failed_chunks` entries, the `not reviewed:` line, the `hint:` on a
+  deadline — and raised the flat model deadline to 120 s, but a partial
+  run still ended `Approved`. Now a failed chunk sets `degraded` with its
+  index and files, and the verdict becomes `Incomplete` — the ladder is
+  `Error` → `Request-Changes` → `Incomplete` → `Approved`. Under
+  `PRXREF_FAIL_ON=error` or `any` an `Incomplete` review exits `1`,
+  because a gate must not read a broken run as green. A chunk that times
+  out now says so: `[chunk i/N] timed out after <t>s; increase
+  --timeout`, and while the deadline is left at its 120 s default the
+  `openai-compat` family scales it up with the prompt
+  (`PRXREF_LLM_TIMEOUT_PER_1K`, a new key) — scaling only ever extends
+  the deadline above 120 s, never below it.
 - **Anchor snapping (#74).** A finding that quotes a token or snippet of
   the head file snaps to the line that text actually sits on, within
   ±80 lines of its claimed line. A finding whose quoted evidence cannot
@@ -179,6 +188,23 @@ off.
   `openapi`/`specs`, and `comments` (every path); an unknown token is
   inert and covers every path, because an unknown word must not silently
   suppress rules. The run record gains `rule_scope_cleared`.
+
+## [0.29.0] — 2026-09-30
+
+A partial review names what it did not review (#72). A run where some
+review units fail still completes, and its record now carries
+`failed_chunks`: one `{unit, kind, files, error}` per failed unit, in
+review order (`kind` is `chunk` with that chunk's files, or `sweep` with
+none). `--format json` gains the key after `chunks_failed` (`[]` when
+every unit completed), and the text summary prints `not reviewed:` with
+the files after the `coverage:` line, plus a `hint:` naming `--timeout`
+when a failure was a model deadline. The verdict and the `degraded` key
+keep their meaning: `degraded` still reports post failures only.
+
+The `PRXREF_LLM_TIMEOUT` default rises from 45 to 120 seconds. Reasoning
+models routinely take 50 s or more on a large chunk over HTTP, so the old
+default dropped normal chunks on every run; a lower deadline stays one
+environment variable or `--timeout` away.
 
 ## [0.28.0] — 2026-09-29
 

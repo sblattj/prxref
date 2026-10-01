@@ -472,6 +472,7 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
         assert payload.pop("stable_ids") is None  # #71: null when PRXREF_STABLE_IDS is off
         assert payload.pop("metadata_rules") is None  # #70: null when PRXREF_METADATA_RULES is off
+        assert payload.pop("failed_chunks") == []
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]

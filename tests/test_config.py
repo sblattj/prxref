@@ -37,7 +37,7 @@ class TestLoadConfigDefaults:
         assert cfg["max_error_findings"] == DEFAULT_MAX_ERRORS
         assert cfg["max_chunks"] == 8
         assert cfg["llm_max_tokens"] == 4096
-        assert cfg["llm_timeout"] == 45.0
+        assert cfg["llm_timeout"] == 120.0
         assert cfg["llm_temperature"] == ""
         assert cfg["llm_seed"] is None
         assert cfg["bitbucket_token"] == ""
@@ -112,7 +112,7 @@ class TestLoadConfigEnv:
             load_config()
 
     @pytest.mark.parametrize("name,key,expected", [
-        ("PRXREF_LLM_TIMEOUT", "llm_timeout", 45.0),
+        ("PRXREF_LLM_TIMEOUT", "llm_timeout", 120.0),
         ("PRXREF_LLM_MAX_TOKENS", "llm_max_tokens", 4096),
         ("PRXREF_LLM_TEMPERATURE", "llm_temperature", ""),
         ("PRXREF_MAX_CHUNKS", "max_chunks", 8),
@@ -130,7 +130,7 @@ class TestLLMBudgetKnobs:
     def test_defaults_equal_todays_hardcoded_values(self):
         cfg = load_config()
         assert cfg["llm_max_tokens"] == reviewer.MAX_TOKENS == 4096
-        assert cfg["llm_timeout"] == llm_backends.DEFAULT_TIMEOUT == 45.0
+        assert cfg["llm_timeout"] == llm_backends.DEFAULT_TIMEOUT == 120.0
         assert cfg["llm_temperature"] == ""
 
     def test_env_coercions(self, monkeypatch):

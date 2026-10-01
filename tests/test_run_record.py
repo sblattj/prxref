@@ -47,7 +47,7 @@ BASE_KEYS = {
     "verdict", "findings_active", "findings_dropped", "chunk_count",
     "chunks_reviewed", "chunks_failed", "elapsed_ms", "input_tokens",
     "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
-    "output_tokens", "posted", "sampling",
+    "output_tokens", "posted", "sampling", "failed_chunks",
 }
 RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
@@ -293,11 +293,11 @@ class TestRunRecordHelper:
         result = {"verdict": "Approved", "cost_usd": 1.5}
         out = orchestrator._run_record(result, {"cost_usd": 0.0, "size_advisory": None})
         assert out is result
-        assert out == {"verdict": "Approved", "cost_usd": 1.5, "size_advisory": None}
+        assert out == {"verdict": "Approved", "cost_usd": 1.5, "size_advisory": None, "failed_chunks": None}
 
     def test_replay_none_is_never_written(self):
         out = orchestrator._run_record({}, {"replay": None, "review_rules": None})
-        assert out == {"review_rules": None}
+        assert out == {"review_rules": None, "failed_chunks": None}
 
     def test_replay_is_written_as_a_copy(self):
         stamp = dict(REPLAY)

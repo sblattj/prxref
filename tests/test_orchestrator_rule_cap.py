@@ -623,14 +623,15 @@ class TestOffPathMatchesBase:
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
-            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded", *CHUNK_KEYS,
+            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "failed_chunks", *CHUNK_KEYS,
         }
         assert res["rule_counts"] is None
         assert res["rule_scope_cleared"] is None  # no section scope: #75's check never ran
         assert res["repo_context"] is None
         payload = list(cli._build_json_result(res))
         at = A81_JSON_KEYS.index("chunks_failed") + 1
-        assert payload == [*A81_JSON_KEYS[:at], *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
+        assert payload == [*A81_JSON_KEYS[:at], "failed_chunks", *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
                            "rule_scope_cleared",
                            "repo_context", "parse_retries", "context_followup", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",

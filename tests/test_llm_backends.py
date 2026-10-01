@@ -390,8 +390,8 @@ class TestBudgetKnobsFromConfig:
         monkeypatch.setenv("PRXREF_LLM_BASE_URL", "https://llm.test/v1")
         monkeypatch.setenv("PRXREF_LLM_MODELS", "a")
 
-    def test_timeout_defaults_to_45(self):
-        assert create_llm_client().default_timeout == 45.0
+    def test_timeout_defaults_to_120(self):
+        assert create_llm_client().default_timeout == 120.0
 
     def test_timeout_from_env_reaches_session_post(self, monkeypatch):
         monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "12.5")
@@ -601,7 +601,7 @@ class TestLiteLLMClient:
     def test_default_timeout_used_when_unset(self, monkeypatch):
         client, captured = self._installed(monkeypatch)
         client.invoke("sys", "usr")
-        assert captured[0]["timeout"] == 45.0
+        assert captured[0]["timeout"] == 120.0
 
     def test_temperature_omitted_when_unset(self, monkeypatch):
         client, captured = self._installed(monkeypatch)

@@ -216,9 +216,13 @@ class TestNoFileInvariant:
     def test_json(self, capsys):
         assert _review("--format", "json") == 0
         expected = BASE_JSON.replace(
+            '"chunks_failed": 0,',
+            '"chunks_failed": 0, "failed_chunks": null,',
+        ).replace(
             '"incremental": null, "degraded": null}',
             '"incremental": null, "ci_wiring": null, "evidence": null, '
-            '"stable_ids": null, "degraded": null, "metadata_rules": null, "config_file": null}',
+            '"stable_ids": null, "degraded": null, "metadata_rules": null, '
+            '"config_file": null}',
         )
         assert capsys.readouterr().out == expected
 

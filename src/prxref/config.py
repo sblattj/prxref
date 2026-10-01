@@ -26,13 +26,15 @@ LLM / pipeline:
   PRXREF_LLM_TIMEOUT            Wall-clock deadline for one model's review
                                 call, in seconds; the chain then tries the
                                 next model, so a run can exceed it. Must be
-                                greater than 0 (default 45.0)
+                                greater than 0 (default 120.0)
   PRXREF_LLM_TIMEOUT_PER_1K     Deadline scaling (issue #72), openai-compat
                                 only: seconds of per-request deadline per 1k
                                 estimated input tokens, applied only while
-                                PRXREF_LLM_TIMEOUT is at its default (45.0);
-                                an explicit timeout — flag, variable or
-                                config file — disables scaling entirely.
+                                PRXREF_LLM_TIMEOUT is at its default (120.0)
+                                — scaling extends the deadline above that
+                                floor, never below it. An explicit timeout —
+                                flag, variable or config file — disables
+                                scaling entirely.
                                 Must be greater than 0 (default 1.6)
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
                                 >= 0, no upper bound (provider-specific).
@@ -702,7 +704,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_models": [],
     "llm_reasoning_effort": "",
     "llm_max_tokens": 4096,
-    "llm_timeout": 45.0,
+    "llm_timeout": 120.0,
     # Deadline-scaling coefficient (issue #72): seconds of per-request
     # deadline per 1k estimated input tokens, applied by the openai-compat
     # client ONLY while llm_timeout is at its default. An explicit timeout
