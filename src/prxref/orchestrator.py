@@ -149,13 +149,17 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
-   iff any active error-severity finding survives;
-   else ``"Approved"``. A partial failure keeps the verdict but the summary
-   declares reduced coverage AND itemizes each failed chunk with the files
-   it took unreviewed plus its reason (capped, redacted, inside the same
-   blockquote) — a partial review reads as a successful one, so a failure
-   left only in the logs reaches nobody, and a file list left out of it
-   leaves the operator guessing which files went unreviewed.
+   iff any active error-severity finding survives; else ``"Incomplete"``
+   when any review unit failed (issue #72: a partial review used to read
+   as ``"Approved"`` because the failed chunk simply contributed no
+   findings); else ``"Approved"``. A partial failure also degrades the
+   run record (``degraded.cause == "partial"``, one ``chunks`` row per
+   failed unit) and the summary declares reduced coverage AND itemizes
+   each failed chunk with the files it took unreviewed plus its reason
+   (capped, redacted, inside the same blockquote) — a partial review
+   reads as a successful one, so a failure left only in the logs reaches
+   nobody, and a file list left out of it leaves the operator guessing
+   which files went unreviewed.
 8. Post: summary rendered from ``reviewer.load_prompt("summary")``, or from
    the operator's ``summary.md`` override when ``prompts`` carries one, with
    placeholders ``{verdict} {title} {file_count} {error_count}
@@ -1514,14 +1518,24 @@ def orchestrate_review(
     # outcome for i < len(chunks): the zip pairs each failed review with the
     # files it took down, which the partial banner names (issue #31). The
     # systemic sweep is results[-1] and names itself in its reason, so it is
-    # not zipped against a chunk here.
-    failed_chunks = [
-        (r["error"], [f.path for f in chunk])
-        for chunk, r in zip(chunks, results, strict=False)
-        if r["error"]
-    ]
+    # not zipped against a chunk here. The rows mirror the pairs for the
+    # #72 degraded record, with each unit's 1-based worker index and, for
+    # the sweep, its results-list slot and an empty file list.
+    failed_chunks: list[tuple[str, list[str]]] = []
+    failed_chunk_rows: list[dict[str, object]] = []
+    for i, (chunk, r) in enumerate(zip(chunks, results, strict=False), start=1):
+        if not r["error"]:
+            continue
+        chunk_files = [f.path for f in chunk]
+        failed_chunks.append((r["error"], chunk_files))
+        failed_chunk_rows.append(
+            {"index": i, "files": chunk_files, "error": r["error"]}
+        )
     if results[-1]["error"]:
         failed_chunks.append((results[-1]["error"], []))
+        failed_chunk_rows.append({
+            "index": len(chunks) + 1, "files": [], "error": results[-1]["error"],
+        })
 
     # Two deterministic, non-LLM findings folded in before the quality passes
     # so each flows through them like a model finding, except that
@@ -1715,9 +1729,17 @@ def orchestrate_review(
     if suggestions == "on":
         run_inputs["suggestions"] = _suggestion_record(findings_active, cleared_suggestions)
 
+    # Issue #72: a partial review is no longer "Approved". The failed units
+    # contributed no findings, so the old expression read a review that did
+    # not happen as one that found nothing. Precedence: an active
+    # error-severity finding still wins over incompleteness (a real defect
+    # beats a coverage gap), and the total-failure "Error" verdict left at
+    # the all-failed exit above can never be shadowed from here.
     verdict = (
         "Request-Changes"
         if any(f.severity == "error" for f in findings_active)
+        else "Incomplete"
+        if chunks_failed
         else "Approved"
     )
 
@@ -1848,7 +1870,7 @@ def orchestrate_review(
             logger.error("summary re-post with inline accounting failed: %s", e)
             post_failures.append(("summary", post_failure_cause(e)))
 
-    degraded = _degraded_record(post_failures)
+    degraded = _degraded_record(post_failures, failed_chunk_rows)
     if degraded is not None and fallback_summary is None:
         fallback_summary = _render_summary(
             pr, files, verdict, findings_active, model,
@@ -1888,6 +1910,9 @@ def orchestrate_review(
         "chunk_count": len(chunks) + 1,
         "chunks_reviewed": chunks_reviewed,
         "chunks_failed": chunks_failed,
+        # Only on a partial run, like "degraded": a clean record must keep
+        # the key set the golden tests pin (#72).
+        **({"failed_chunks": failed_chunks} if failed_chunks else {}),
         "elapsed_ms": elapsed_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -2213,21 +2238,43 @@ def post_failure_cause(exc: BaseException) -> str:
     return "permission" if status in PERMISSION_STATUSES else "error"
 
 
-def _degraded_record(failures: Sequence[tuple[str, str]]) -> dict | None:
-    """The run record's ``degraded`` value from ``(post, cause)`` failures.
+def _degraded_record(
+    failures: Sequence[tuple[str, str]],
+    failed_chunk_rows: Sequence[Mapping[str, object]] = (),
+) -> dict | None:
+    """The run record's ``degraded`` value from failed posts and failed chunks.
 
     ``None`` when nothing failed. ``failed`` keeps each post kind once, in
-    the order it first failed; ``cause`` is ``"permission"`` when any failure
-    was. ``fallback`` and ``annotations`` start empty for the CLI to fill.
+    the order it first failed, after ``"chunk"`` when any review unit
+    failed (the chunk fails before any post is attempted). ``cause`` is
+    ``"permission"`` when any post failure was (a blocked write outranks
+    everything: it is the one the operator must act on), else ``"partial"``
+    when a chunk failed (issue #72: the review only partially happened),
+    else ``"error"``. ``fallback`` and ``annotations`` start empty for the
+    CLI to fill. ``chunks`` carries one ``{"index", "files", "error"}`` row
+    per failed review unit, and appears only when at least one did, so the
+    #48 post-failure shape is unchanged.
     """
-    if not failures:
+    if not failures and not failed_chunk_rows:
         return None
     failed: list[str] = []
+    if failed_chunk_rows:
+        failed.append("chunk")
     for kind, _ in failures:
         if kind not in failed:
             failed.append(kind)
-    cause = "permission" if any(c == "permission" for _, c in failures) else "error"
-    return {"cause": cause, "failed": failed, "fallback": [], "annotations": 0}
+    if any(c == "permission" for _, c in failures):
+        cause = "permission"
+    elif failed_chunk_rows:
+        cause = "partial"
+    else:
+        cause = "error"
+    record: dict[str, object] = {
+        "cause": cause, "failed": failed, "fallback": [], "annotations": 0,
+    }
+    if failed_chunk_rows:
+        record["chunks"] = [dict(row) for row in failed_chunk_rows]
+    return record
 
 
 def _with_degraded(result: dict, degraded: dict | None, summary: str | None) -> dict:
@@ -3430,6 +3477,16 @@ def _run_worker(
             followup_records[index - 1] = row
 
     error = res["error"]
+    if error and _is_timeout_error(error):
+        # Issue #72: the backend's timeout vocabulary names the model and
+        # the exception class, neither of which tells an operator what to
+        # do. The rewrite names the chunk and the wait, and points at the
+        # lever that exists (--timeout, or leaving it alone so the prompt-
+        # scaled deadline applies).
+        error = (
+            f"[chunk {index}/{total}] timed out after "
+            f"{res.get('elapsed_ms', 0) / 1000:.0f}s; increase --timeout"
+        )
     if error:
         logger.error("[chunk %d/%d] worker reported error: %s", index, total, error)
         tracer.event(

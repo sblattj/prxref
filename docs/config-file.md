@@ -146,6 +146,7 @@ its `PRXREF_` name.
 | `llm_reasoning_effort` | string | Reasoning effort sent to reasoning models ([more](env-vars.md#llm--pipeline)). |
 | `llm_max_tokens` | integer | Completion-token budget of each worker call ([more](env-vars.md#llm--pipeline)). |
 | `llm_timeout` | number | Per-model deadline in seconds ([more](env-vars.md#llm--pipeline)). |
+| `llm_timeout_per_1k` | number | Deadline-scaling coefficient, seconds per 1k estimated input tokens, `openai-compat` only and applied only while `llm_timeout` is at its default ([more](env-vars.md#llm--pipeline)). |
 | `llm_temperature` | number or string | Sampling temperature ([more](env-vars.md#llm--pipeline)). |
 | `llm_seed` | integer or "off" | Sampling seed, or `"off"` to send none ([more](env-vars.md#llm--pipeline)). |
 | `llm_cli_concurrency` | integer | CLI processes one `claude-cli` / `kiro-cli` client runs at once ([more](env-vars.md#llm--pipeline)). |

@@ -27,6 +27,13 @@ LLM / pipeline:
                                 call, in seconds; the chain then tries the
                                 next model, so a run can exceed it. Must be
                                 greater than 0 (default 45.0)
+  PRXREF_LLM_TIMEOUT_PER_1K     Deadline scaling (issue #72), openai-compat
+                                only: seconds of per-request deadline per 1k
+                                estimated input tokens, applied only while
+                                PRXREF_LLM_TIMEOUT is at its default (45.0);
+                                an explicit timeout — flag, variable or
+                                config file — disables scaling entirely.
+                                Must be greater than 0 (default 1.6)
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
                                 >= 0, no upper bound (provider-specific).
                                 Unset or empty sends the built-in default
@@ -145,10 +152,13 @@ LLM / pipeline:
                                 also exits 1: it crashes, or it ends with
                                 verdict "Error" (the forge could not be
                                 read, the diff could not be parsed or
-                                chunked, or every chunk review failed).
-                                An empty PR diff is not a failure
-                                (verdict "Approved", exit 0). The webhook
-                                daemon has no exit code and is unaffected.
+                                chunked, or every chunk review failed) or
+                                verdict "Incomplete" (some chunk reviews
+                                failed, so the review only partially
+                                happened). An empty PR diff is not a
+                                failure (verdict "Approved", exit 0). The
+                                webhook daemon has no exit code and is
+                                unaffected.
   PRXREF_POST_MODE              What gets posted to the forge:
                                 "summary+inline" (default) | "summary" |
                                 "inline". Any other value is a
@@ -424,9 +434,9 @@ LLM / pipeline:
                                 logging commands are skipped so stdout stays
                                 one JSON document. "off" emits nothing. Either
                                 way the run record's "degraded" says which
-                                posts failed and why; the exit code never
-                                changes. Matched exactly; any other value is a
-                                configuration error
+                                posts or chunks failed and why; the exit
+                                code never changes. Matched exactly; any
+                                other value is a configuration error
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -581,6 +591,12 @@ _DEFAULTS: dict[str, object] = {
     "llm_reasoning_effort": "",
     "llm_max_tokens": 4096,
     "llm_timeout": 45.0,
+    # Deadline-scaling coefficient (issue #72): seconds of per-request
+    # deadline per 1k estimated input tokens, applied by the openai-compat
+    # client ONLY while llm_timeout is at its default. An explicit timeout
+    # (flag, variable or file) disables scaling entirely. Must be > 0; tune
+    # upward for slow endpoints, downward for fast ones.
+    "llm_timeout_per_1k": 1.6,
     "llm_temperature": "",
     # ``None`` is the declared unset: no seed is configured, so the factory
     # falls back to its once-per-process seed. Unlike ``llm_temperature``
@@ -710,7 +726,9 @@ _INT_KEYS = frozenset({
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "max_areas_per_pr",
 })
-_FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
+_FLOAT_KEYS = frozenset({
+    "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
+})
 _BOOL_KEYS = frozenset({
     "allow_unsigned", "dry_run", "post_verdict", "post_cost", "group_findings",
 })
@@ -800,6 +818,7 @@ class _Range(NamedTuple):
 _RANGES: dict[str, _Range] = {
     "llm_max_tokens": _Range(0),
     "llm_timeout": _Range(0),
+    "llm_timeout_per_1k": _Range(0),
     "chunk_token_budget": _Range(0),
     "max_workers": _Range(0),
     "max_inline_comments": _Range(0),
@@ -846,6 +865,7 @@ CONFIG_DOCS_URL = "https://github.com/sblattj/prxref/blob/main/docs/config-file.
 #: :data:`ENV_ONLY_KEYS`, so a new key must be classified before it loads.
 FILE_KEYS = frozenset({
     "llm_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
+    "llm_timeout_per_1k",
     "llm_temperature", "llm_seed", "llm_cli_concurrency", "llm_parse_retries",
     "confidence_floor", "max_error_findings", "max_warning_findings",
     "max_outofscope_findings", "max_findings_per_rule", "group_findings",
