@@ -651,3 +651,29 @@ class TestCli:
             assert SENTINEL not in user
             assert HEADING not in user
         assert "Execution evidence" not in rig.forge.summaries[0]
+
+
+def test_dollar_prefixed_blocks_strip_the_prompt(tmp_path):
+    from prxref.evidence import _parse_text_items
+
+    text = "$ nginx -t\nexit: 0\nok\n\n$ curl -sI /f\nexit: 1\nHTTP/1.1 404\n"
+    items = _parse_text_items(text)
+    assert [i.command for i in items] == ["nginx -t", "curl -sI /f"]
+    assert [i.exit_code for i in items] == [0, 1]
+    assert all("$ $" not in i.render() for i in items)
+
+
+def test_dollar_line_opens_an_item_without_a_blank_line():
+    from prxref.evidence import _parse_text_items
+
+    items = _parse_text_items("$ a\nout a\n$ b\nexit: 2\n")
+    assert [i.command for i in items] == ["a", "b"]
+    assert items[0].output == "out a"
+    assert items[1].exit_code == 2
+
+
+def test_bare_first_line_still_works():
+    from prxref.evidence import _parse_text_items
+
+    items = _parse_text_items("nginx -t\nexit: 0\n")
+    assert [i.command for i in items] == ["nginx -t"]
