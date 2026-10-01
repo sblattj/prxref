@@ -228,7 +228,7 @@ files the section covers is not shown the section at all, the heading the
 units that do see it gains an `(applies to: …)` annotation, and a
 deterministic pass clears a finding's `rule` label when that section cannot
 cover the finding's file. `PRXREF_RULE_SCOPING=off` turns off the first and
-the last.
+the last, and the claim-category half described below.
 
 ```markdown
 # Team rules
