@@ -324,7 +324,7 @@ class TestStates:
 
 class TestAcceptanceCriteria:
     def test_the_eval_tickets_are_present(self):
-        assert len(EVAL_TICKETS) == 3
+        assert len(EVAL_TICKETS) == 5
 
     @pytest.mark.parametrize("path", EVAL_TICKETS, ids=lambda p: p.parent.name)
     def test_every_eval_ticket_has_them(self, path):
