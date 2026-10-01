@@ -103,6 +103,15 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
+   ``apply_rule_scope_check`` (#75, on its own guard: any loaded rules
+   file whose body declares at least one ATX section scope, whatever the
+   grouping and cap switches say; a ``rule`` label that names no scoped
+   section, or whose section's ``scope:`` tokens do not cover the
+   finding's path, is cleared to ``None`` and the finding kept, so it
+   groups and caps by title like any ruleless one; one INFO line and one
+   ``rulescope ok`` trace event count the cleared labels, and the run
+   record's ``rule_scope_cleared`` carries the count, ``None`` when the
+   check did not run) →
    ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
    in one file that break one rule, or that name no rule and share a
    normalized title, fold into one representative that lists
@@ -145,7 +154,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    keys that :func:`_run_record` stamps on every exit (``cost_usd``,
    ``cost_estimated``, ``review_rules``, ``ticket_context``,
    ``spec_grounding``, ``size_advisory``, ``prompt_templates``,
-   ``scoped_rules``, ``rule_counts``, ``repo_context``; ``replay`` on replays only, and
+   ``scoped_rules``, ``rule_counts``, ``rule_scope_cleared``,
+   ``repo_context``; ``replay`` on replays only, and
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
@@ -253,6 +263,7 @@ from .quality import (
     apply_removal_claim_check,
     apply_rule_cap,
     apply_rule_grouping,
+    apply_rule_scope_check,
     apply_settled_thread_suppression,
     apply_severity_consistency,
     apply_severity_map,
@@ -1017,6 +1028,7 @@ def orchestrate_review(
         "prompt_templates": None,
         "scoped_rules": None,
         "rule_counts": None,
+        "rule_scope_cleared": None,
         "repo_context": None,
         "parse_retries": (
             0 if isinstance(llm_parse_retries, int) and llm_parse_retries >= 1 else None
@@ -1664,6 +1676,18 @@ def orchestrate_review(
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
     findings = apply_hedge_gate(findings, spec_digest=injected)
+    # Its own guard (#75), independent of grouping and the cap: any loaded
+    # rules file that declares a section scope turns the check on, so a
+    # wrong label is cleared BEFORE either pass can key on it — including
+    # when both are off and the label came from an override prompt.
+    rule_sections = _rule_sections(rules, scoped_rules)
+    if rule_sections:
+        findings, cleared_labels = apply_rule_scope_check(findings, sections=rule_sections)
+        logger.info(
+            "rule scope: cleared %d rule label(s) that no section covers", cleared_labels,
+        )
+        tracer.event("rulescope", "ok", cleared=cleared_labels)
+        run_inputs["rule_scope_cleared"] = cleared_labels
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
@@ -2028,6 +2052,27 @@ def _example_titles(prompt_context: PromptContext) -> tuple[str, ...]:
         except (OSError, ValueError) as e:
             logger.warning("example echo check: cannot read packaged %s.md (continuing without it): %s", name, e)
     return prompt_example_titles(*texts)
+
+
+def _rule_sections(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
+    """Every scoped section of the loaded rules files, always-on first (#75).
+
+    ``rules`` is the always-on ``PRXREF_REVIEW_RULES`` file and
+    ``scoped_rules`` the path-scoped files, either possibly ``None``; the
+    sections are read duck-typed off ``sections``, and an object without
+    the attribute — a hand-constructed double or a pre-#75 stand-in —
+    reads as none, so the applicability check never fires on it. The
+    result is what guards the :func:`quality.apply_rule_scope_check` call:
+    empty (check skipped, ``rule_scope_cleared`` stays ``None``) unless at
+    least one loaded file declares a ``scope:`` line under an ATX heading.
+    """
+    sections: tuple[Any, ...] = ()
+    if rules is not None:
+        sections += getattr(rules, "sections", ()) or ()
+    if scoped_rules is not None:
+        for rules_file in getattr(scoped_rules, "files", ()) or ():
+            sections += getattr(rules_file, "sections", ()) or ()
+    return sections
 
 
 def _group_findings(
