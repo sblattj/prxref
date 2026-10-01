@@ -224,7 +224,7 @@ Flat keys, not a `[metadata]` table — the file is flat, so a table is a config
 
 | Key | Type | Meaning |
 |---|---|---|
-| `stable_ids` | boolean | `true` stamps every finding with a content-derived id that survives reworded titles and anchor drift, and drops a finding the verdict store refuted in an earlier run; `false` (the default) keeps every `id` null ([more](env-vars.md#llm--pipeline)). |
+| `stable_ids` | boolean | `true` (the default) stamps every finding with a content-derived id that survives reworded titles and anchor drift, and drops a finding the verdict store refuted in an earlier run; `true` is the default; `false` keeps every `id` null ([more](env-vars.md#llm--pipeline)). |
 | `rule_scoping` | string | `on` (the default) clears a rule label whose cited section's scope does not cover the file; `off` keeps every label ([more](env-vars.md#llm--pipeline)). |
 | `verdict_store` | string | Path to the JSON verdict store `refuted` verdicts are read from, keyed by stable id; the review reads it and never writes it ([more](env-vars.md#llm--pipeline)). |
 
