@@ -17,13 +17,20 @@ Two formats parse, tried in order:
   ``"evidence"`` array. Each entry is ``{"command": str,
   "exit_code": int, "output": str, "files": [str, ...]}`` with
   ``exit_code``, ``output`` and ``files`` optional; an entry without a
-  usable ``command`` is a configuration error, not a silent skip.
+  usable ``command`` is a configuration error, not a silent skip. An
+  entry without ``exit_code`` (or with ``null``) has an UNKNOWN exit
+  status.
 - **Plain text** — the lenient fallback for a file that is not JSON:
   blank-line-separated blocks (a ``$ cmd`` line also opens an item), each
   block's first line the command with any ``$ `` prompt stripped, an
-  ``exit: N`` (or ``exit=N``) line anywhere after it the exit code, and
-  the remaining lines the output. A whitespace-only file loads as an
-  empty bundle, like an empty ticket-context file.
+  ``exit: N`` (or ``exit=N``) line anywhere after it the exit code (a
+  block without one has an UNKNOWN exit status), and the remaining lines
+  the output. A whitespace-only file loads as an empty bundle, like an
+  empty ticket-context file.
+
+An item whose exit status is unknown still rides the prompts, shown as
+``exit: unknown``, but settles nothing deterministically: it neither drops
+a finding nor raises one.
 
 :class:`EvidenceBundle` is the loaded result the orchestrator
 duck-types, like the rules and ticket objects: it reads ``active``,
@@ -51,8 +58,10 @@ something the evidence contradicts and may cite it. Behind the model,
 code can check: a finding claiming a header missing is dropped as
 ``contradicted by execution evidence: <cmd>`` when an exit-0 item's
 output holds that header as a filled ``Name: value`` field line, for the
-resource the finding names (or, naming none, an item that reaches the
-finding's file). Nothing is downgraded, and the model's own verdict on a
+resource the finding names (or, naming none, an item that probes no
+specific resource and reaches the finding's file). A claim that a
+directive or value of a present header is missing is not contradicted.
+Nothing is downgraded, and the model's own verdict on a
 contradiction is never what drops a finding.
 
 The other direction is :func:`failure_findings`: an item with a non-zero
@@ -136,11 +145,11 @@ class EvidenceItem:
     ``files`` are the paths the caller says the item concerns, normalised;
     ``paths`` (the property) adds the path-shaped tokens parsed out of the
     command and the output, and is what relevance matching reads.
-    ``truncated`` says the output was cut at :data:`MAX_ITEM_CHARS`.
+    ``exit_code`` is ``None`` when the caller gave no exit status.
     """
 
     command: str
-    exit_code: int
+    exit_code: int | None
     output: str
     files: tuple[str, ...] = ()
 
@@ -159,9 +168,11 @@ class EvidenceItem:
 
         The command as a shell line, the exit code on its own line, then
         the (trimmed) output — all inside a :func:`fence` the text cannot
-        close, so one item can never swallow the next or the diff.
+        close, so one item can never swallow the next or the diff. An
+        unknown exit status renders as ``exit: unknown``.
         """
-        body = f"$ {self.command}\nexit: {self.exit_code}"
+        exit_code = "unknown" if self.exit_code is None else self.exit_code
+        body = f"$ {self.command}\nexit: {exit_code}"
         if self.output:
             body = f"{body}\n{self.output}"
         return fence(body)
@@ -287,8 +298,10 @@ def _path_matches(item_path: str, unit_path: str) -> bool:
     return item_path == unit_path or unit_path.endswith("/" + item_path)
 
 
-def _as_exit_code(raw: Any, source: str, label: str) -> int:
-    if isinstance(raw, bool) or raw is None:
+def _as_exit_code(raw: Any, source: str, label: str) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
         return 0
     if isinstance(raw, int):
         return raw
@@ -321,7 +334,7 @@ def _parse_json_items(text: str, *, source: str, path: str) -> list[EvidenceItem
     A top-level array, or an object whose ``"evidence"`` holds one. Each
     entry needs a usable ``command`` string; ``exit_code`` (aliases
     ``exitCode``), ``output`` (alias ``stdout``) and ``files`` are optional
-    with the defaults 0, ``""`` and ``()``.
+    with the defaults ``None`` (an unknown exit status), ``""`` and ``()``.
     """
     data = json.loads(text)
     entries = data.get("evidence") if isinstance(data, dict) else data
@@ -358,8 +371,9 @@ def _parse_text_items(text: str) -> list[EvidenceItem]:
     Each block's first line is the command, with an optional leading
     ``$ `` prompt stripped; a ``$ `` line also opens a new item without
     a blank line before it. A later ``exit: N`` (or
-    ``exit=N``) line supplies the exit code and leaves the output; every
-    other line is the output. A file with no block yields no item.
+    ``exit=N``) line supplies the exit code and leaves the output (a block
+    without one has an unknown exit code, ``None``); every other line is
+    the output. A file with no block yields no item.
     """
     items: list[EvidenceItem] = []
     blocks: list[list[str]] = []
@@ -378,7 +392,7 @@ def _parse_text_items(text: str) -> list[EvidenceItem]:
         command = lines[0].strip()
         if command.startswith("$ "):
             command = command[2:].strip()
-        exit_code = 0
+        exit_code: int | None = None
         output: list[str] = []
         for ln in lines[1:]:
             match = _EXIT_LINE_RE.match(ln.strip())
@@ -513,7 +527,7 @@ def _failures(evidence, pr_paths) -> tuple[list[_Failure], int]:
     seen: set[tuple[str, int]] = set()
     left_out = 0
     for item in evidence.items:
-        if item.exit_code == 0:
+        if item.exit_code is None or item.exit_code == 0:
             continue
         for raw in item.output.splitlines():
             diagnostic = raw.strip()
@@ -563,7 +577,8 @@ def failure_findings(evidence, pr_paths) -> list[Finding]:
 
     ``evidence`` is the loaded :class:`EvidenceBundle` (``None`` or an
     inactive bundle raises nothing) and ``pr_paths`` the PR's changed file
-    paths. An item with a non-zero exit code is read line by line; a line
+    paths. An item with a non-zero exit code is read line by line (an
+    unknown one, ``None``, is skipped like a passing one); a line
     whose first position token (``path:line``, ``path:line:col`` or
     ``path(line,col)``, a trailing colon allowed) names exactly one PR path
     — equal, a path-segment suffix of it, or an absolute path ending in it

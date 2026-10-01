@@ -250,7 +250,12 @@ from . import (
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
 from .ci_wiring import ci_wiring_findings, mentions_ci_work
-from .evidence import drop_restated_failures, failure_findings, failures_left_out
+from .evidence import (
+    RESTATED_DROP_PREFIX,
+    drop_restated_failures,
+    failure_findings,
+    failures_left_out,
+)
 from .forges.base import (
     ATTRIBUTION_MARKER,
     CommitData,
@@ -1905,18 +1910,18 @@ def orchestrate_review(
     # findings and never join it (OD8). Failing execution evidence (#69,
     # OD11) joins it too, after a model finding that restates one of its
     # positions is dropped, so the PR gets one comment per failure.
-    evidence_restated = 0
+    evidence_restated: list[Finding] = []
     evidence_findings: list[Finding] = []
     if evidence_active:
         restated = drop_restated_failures(findings, evidence, _new_paths(files))
-        evidence_restated = sum(
-            1
+        evidence_restated = [
+            after
             for before, after in zip(findings, restated, strict=True)
             if before.drop_reason is None and after.drop_reason is not None
-        )
+        ]
         findings = restated
         evidence_findings = _raise_evidence_failures(
-            evidence, files, tracer=tracer, restated=evidence_restated,
+            evidence, files, tracer=tracer, restated=len(evidence_restated),
         )
     deterministic_findings = (
         release_shape + toggle_findings + ci_findings + evidence_findings
@@ -2224,6 +2229,7 @@ def orchestrate_review(
     incremental_note = _incremental_note(scope, len(files))
     evidence_note = _evidence_note(
         run_inputs["evidence"], evidence_dropped, evidence, evidence_settled,
+        restated=evidence_restated,
     )
     posted = False
     inline_posted = 0
@@ -4789,18 +4795,23 @@ def _evidence_note(
     dropped: int,
     evidence: Any = None,
     settled: Sequence[Finding] = (),
+    *,
+    restated: Sequence[Finding] = (),
 ) -> str:
     """Render the summary's execution-evidence note (#69), ``""`` when none was supplied.
 
     The first blockquote line says what was supplied (items, and the files
     they came from) and how far the matched items reached (how many chunk
     prompts); a clause, only when the evidence contradicted any finding,
-    says how many :func:`quality.apply_evidence_drops` dropped. When the
-    loaded ``evidence`` bundle is given, a second line lists its commands
-    with their exit codes, and each finding in ``settled`` (the ones
-    dropped) follows as its own line naming the title and the command
-    that contradicted it, so a reader sees which evidence settled which
-    claim. Both lists are capped. The note rides ``{evidence_note}`` after
+    says how many :func:`quality.apply_evidence_drops` dropped, and
+    another, only when any model finding restated a failing check, how
+    many :func:`prxref.evidence.drop_restated_failures` dropped
+    (``restated``). When the loaded ``evidence`` bundle is given, a second
+    line lists its commands with their exit codes (``unknown`` when none
+    was given), and each finding in ``settled`` follows as its own line
+    naming the title and the command that contradicted it, then each in
+    ``restated`` naming the failing command it restates, so a reader sees
+    which evidence settled which claim. Both lists are capped. The note rides ``{evidence_note}`` after
     ``{ticket_note}``, and carries its own trailing newline, so an empty
     return leaves the summary byte-identical.
     """
@@ -4813,21 +4824,27 @@ def _evidence_note(
     )
     if dropped:
         line += f"; {dropped} finding(s) the evidence contradicts dropped"
+    if restated:
+        line += f"; {len(restated)} finding(s) restating a failing check dropped"
     lines = [line]
     items = list(getattr(evidence, "items", ()) or ())
     if items:
         shown = [
-            f"`{_note_text(item.command)}` (exit {item.exit_code})"
+            f"`{_note_text(item.command)}` "
+            f"(exit {'unknown' if item.exit_code is None else item.exit_code})"
             for item in items[:_EVIDENCE_NOTE_LISTED]
         ]
         more = len(items) - len(shown)
         tail = f", and {more} more" if more > 0 else ""
         lines.append(f"> Commands: {', '.join(shown)}{tail}")
-    for f in list(settled)[:_EVIDENCE_NOTE_LISTED]:
-        reason = (f.drop_reason or "").removeprefix(EVIDENCE_DROP_PREFIX)
+    dropped_lines = [
+        (f, "contradicted by", EVIDENCE_DROP_PREFIX) for f in settled
+    ] + [(f, "restates", RESTATED_DROP_PREFIX) for f in restated]
+    for f, verb, prefix in dropped_lines[:_EVIDENCE_NOTE_LISTED]:
+        reason = (f.drop_reason or "").removeprefix(prefix)
         lines.append(
             f"> Dropped: {_note_text(f.title)} ({_note_text(f.file)}), "
-            f"contradicted by `{_note_text(reason)}`"
+            f"{verb} `{_note_text(reason)}`"
         )
     return "\n".join(lines) + "\n"
 
