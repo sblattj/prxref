@@ -490,3 +490,57 @@ class TestOrchestratorWiring:
         assert active.line == 0
         assert active.anchor_unverified is True
         assert active.confidence == 0.8
+
+
+class TestImportAndJavadocTiebreak:
+    @staticmethod
+    def _file(total: int, **at: str) -> str:
+        lines = [f"filler line {i}" for i in range(1, total + 1)]
+        for number, text in at.items():
+            lines[int(number[1:]) - 1] = text
+        return "\n".join(lines) + "\n"
+
+    @pytest.mark.parametrize("model_line", [1, 5])
+    def test_an_fqn_on_an_import_snaps_to_the_usage(self, model_line):
+        fqn = "com.acme.JsonProcessingException"
+        content = self._file(
+            60,
+            L1=f"import {fqn};",
+            L32=f"    throw new {fqn}(msg);",
+        )
+        finding = _f(
+            line=model_line,
+            title=f"`{fqn}` is thrown unchecked",
+            body=f"The code throws `{fqn}` without handling it.",
+        )
+        (out,) = apply_anchor_snap(
+            [finding], read=_reader({APP: content}), model_lines=[model_line]
+        )
+        assert out.line == 32
+        assert out.anchor_unverified is False
+
+    def test_a_javadoc_anchor_snaps_to_the_catch(self):
+        path = "src/Svc.java"
+        content = self._file(
+            100,
+            L10="     * Wraps catch (JsonProcessingException e) handling.",
+            L75="        } catch (JsonProcessingException e) {",
+        )
+        finding = _f(
+            file=path,
+            line=10,
+            title="`catch (JsonProcessingException` swallows the error",
+            body="The handler drops it.",
+        )
+        (out,) = apply_anchor_snap(
+            [finding], read=_reader({path: content}), model_lines=[10]
+        )
+        assert out.line == 75
+
+    def test_a_comment_only_match_still_anchors(self):
+        content = self._file(60, L20="    # TODO fix itemIndex handling")
+        finding = _f(line=40)
+        (out,) = apply_anchor_snap(
+            [finding], read=_reader({APP: content}), model_lines=[40]
+        )
+        assert out.line == 20
