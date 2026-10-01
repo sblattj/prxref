@@ -570,8 +570,9 @@ LLM / pipeline:
   PRXREF_CONTEXT_STANDARDS_MAX_CHARS
                                  In-repo standards (#68): per-chunk character
                                  budget for the standards sections admitted
-                                 into one worker prompt. Must be greater
-                                 than 0 (default 6000)
+                                 into one worker prompt. 0 disables the
+                                 excerpts: no standards document is read
+                                 and no block renders (default 6000)
 
 Spec sources / Jira:
   PRXREF_JIRA_BASE_URL          Jira base URL (scheme://host plus any
@@ -1018,7 +1019,7 @@ _RANGES: dict[str, _Range] = {
     "repo_context_max_chunk_reads": _Range(0),
     "max_areas_per_pr": _Range(0, low_inclusive=True),
     "evidence_max_chunk_chars": _Range(0),
-    "context_standards_max_chars": _Range(0),
+    "context_standards_max_chars": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
