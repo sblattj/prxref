@@ -123,8 +123,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    with ``rule_scoping`` on, on their own guard whatever the grouping and
    cap switches say: the scope half runs when any loaded rules file
    declares at least one ATX section scope, and clears a ``rule`` label
-   whose scoped section's ``scope:`` tokens do not cover the finding's
-   path; the category half runs whenever a loaded rules file holds a
+   whose scoped section's scope (a ``scope:`` line, or the language nouns
+   its heading names) does not cover the finding's path; the category half runs whenever a loaded rules file holds a
    heading or a rule line, and clears a label whose rule names another
    kind of defect than the finding's title. A label naming no rule is
    kept, a cleared finding is kept and groups and caps by title like any
@@ -2537,7 +2537,8 @@ def _rule_sections(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
     reads as none, so the applicability check never fires on it. The
     result is what guards the :func:`quality.apply_rule_scope_check` call:
     empty (check skipped, ``rule_scope_cleared`` stays ``None``) unless at
-    least one loaded file declares a ``scope:`` line under an ATX heading.
+    least one loaded file has a scoped ATX section: a ``scope:`` line under
+    the heading, or a heading naming a language or artifact noun.
     """
     sections: tuple[Any, ...] = ()
     if rules is not None:
