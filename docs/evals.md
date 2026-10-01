@@ -341,7 +341,7 @@ prxref-eval/                        --out
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
 | `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
-| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `repo_context_max_reads`, `repo_context_max_chunk_reads` |
+| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
 only under `prompts.prompt_templates`. `prompt_templates`, `sampling`,
@@ -350,7 +350,7 @@ order, whose record's verdict is not `Error`. They are `null` when there is
 none, and `review_rules`, `scoped_rules` and `prompt_templates` are `null`
 when their input is off.
 
-**No credential is ever written.** `config` is an allowlist of the twenty-one
+**No credential is ever written.** `config` is an allowlist of the twenty-three
 settings above, and a record carries no credential. The traces do hold the
 prompts, and the prompts hold the diff, so treat a run directory like the
 code it reviewed.
@@ -726,6 +726,18 @@ Standard output is Markdown, in this order:
   `Severity agreement`, `Chunks failed`, `Elapsed`, `Review cost` and
   `Judge cost`. A severity or category only one run has reads `n/a` on the
   other side.
+- `## Stable-id reuse` (#71): printed between `## Metrics` and
+  `## Changed labels`, and only when at least one case both runs score
+  carries finding ids in its `record.json` — a `PRXREF_STABLE_IDS=on` run;
+  two runs without ids print nothing here, byte-identical to a build
+  without the section. The table `| Case | A ids | B ids | Reuse |` holds
+  one row per shared case with ids on at least one side. `A ids` / `B ids`
+  count that side's active findings carrying an `id`; `Reuse` is the
+  fraction of B's active finding ids that A already held
+  (`stable_id_reuse`), rendered as a percentage, so `100%` means B
+  re-raised exactly A's findings and `0%` means the two share none. A side
+  with no ids reads `n/a`, and so does its reuse: a missing side is not
+  zero reuse, it is nothing to measure.
 - `## Changed labels`: a table `| Case | Label | Location | A | B |` of every
   label in both runs whose grade changed, sorted by case and label id. A
   cell reads `full (1)`, `partial (0.5)`, `none (0)` or `judge_error`. When

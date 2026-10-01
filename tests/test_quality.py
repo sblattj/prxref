@@ -1371,10 +1371,19 @@ class TestSettledThreadSuppression:
         out = apply_settled_thread_suppression([self._finding()], [thread])
         assert out[0].drop_reason is None
 
-    def test_a_resolved_thread_still_settles_its_own_subject(self):
+    def test_a_resolved_thread_no_longer_settles_its_own_subject(self):
+        # Issue #73 reversed the old rule: "a resolved thread is still a
+        # decision" let a thread closed for an unrelated sub-issue suppress
+        # the finding forever while the code it flagged stayed unchanged.
+        # Only an open, current thread settles now.
         thread = Thread(**{**self.SETTLED.__dict__, "resolved": True})
         out = apply_settled_thread_suppression([self._finding()], [thread])
-        assert out[0].drop_reason == "settled in thread: bob"
+        assert out[0].drop_reason is None
+
+    def test_an_outdated_thread_no_longer_settles_its_own_subject(self):
+        thread = Thread(**{**self.SETTLED.__dict__, "outdated": True})
+        out = apply_settled_thread_suppression([self._finding()], [thread])
+        assert out[0].drop_reason is None
 
     def test_an_already_dropped_finding_keeps_its_first_reason(self):
         dropped = self._finding(drop_reason="duplicate of existing thread")

@@ -97,7 +97,9 @@ when the completed review carries an active error-severity finding; ``any``
 exits 1 on any active finding; and under either value a review that does not
 complete also exits 1 — it crashes, or it ends with verdict ``Error`` (the
 forge could not be read, the diff could not be parsed or chunked, or every
-chunk review failed) — because a gate that silently passes on a broken run is
+chunk review failed) or verdict ``Incomplete`` (some chunk reviews failed,
+so the review only partially happened; issue #72) — because a gate that
+silently passes on a broken run is
 worse than none. An empty PR diff is not a failure: it is reviewed as
 ``Approved`` and exits 0. An unrecognized PR URL still exits 0 under every
 value — nothing was reviewed, so there is no outcome to gate on. The webhook
@@ -236,6 +238,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--evidence-file",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "execution evidence (a command, its exit code and output) a CI "
+            "step, agent or script produced; repeatable; replaces "
+            "PRXREF_EVIDENCE_FILES, and '' turns it off for this run"
+        ),
+    )
+    rev.add_argument(
         "--rules-file",
         default=None,
         metavar="PATH",
@@ -362,6 +375,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--full-review",
         action="store_true",
         help="review every file even when PRXREF_INCREMENTAL=on",
+    )
+    rev.add_argument(
+        "--ci-wiring",
+        choices=("off", "on"),
+        default=None,
+        help=(
+            "turn the CI wiring check (#66) on for this run "
+            "(PRXREF_CI_WIRING does the same; off is the default): flag a "
+            "check the PR adds — a verify/smoke/check script or flag, a "
+            "file that gains a shebang, a test file outside the runner's "
+            "default include — that no CI configuration file invokes"
+        ),
+    )
+    rev.add_argument(
+        "--ci-wiring-globs",
+        default=None,
+        metavar="GLOBS",
+        help=(
+            "comma-separated globs selecting the CI configuration files "
+            "the CI wiring check reads (PRXREF_CI_WIRING_GLOBS; a set "
+            "value replaces the built-in set)"
+        ),
     )
     rev.add_argument(
         "-v",
@@ -637,7 +672,8 @@ def _print_summary(
     each in load order, then ``cap=<per-unit cap>``), ``prompts:`` (the
     directory, then ``<name>=<sha256 prefix>`` for each overridden template
     in name order), ``ticket:`` (with the active findings' scope counts),
-    ``spec:``, and ``repo context:`` (the repository-context level, reader,
+    ``spec:``, ``evidence:`` (the evidence files and items, #69) and
+    ``repo context:`` (the repository-context level, reader,
     listing, read count, read cap and entry totals; see
     :func:`_repo_context_line`). ``result`` may be partial, or not a dict at
     all; a missing or ``None`` record prints nothing, so ``repo context:``
@@ -719,6 +755,14 @@ def _print_summary(
         print(
             f"spec: {_dash(spec.get('ok'))}/{_dash(spec.get('sources'))} source(s) ok, "
             f"{_dash(spec.get('constraints'))} constraint(s)",
+            file=target,
+        )
+    evidence = record.get("evidence")
+    if isinstance(evidence, dict):
+        files = evidence.get("files")
+        files = files if isinstance(files, list) else []
+        print(
+            f"evidence: {len(files)} file(s), {_dash(evidence.get('items'))} item(s)",
             file=target,
         )
     repo = record.get("repo_context")
@@ -884,6 +928,21 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     still carries its own ``rule``). A finding object without ``rule`` or
     ``locations`` reports ``null`` for it, and one without ``suggestion``
     reports ``null`` and ``0``.
+
+    ``anchor_unverified`` follows ``locations`` and is always present
+    (issue #74): ``true`` on a model finding whose quoted evidence the
+    anchor-snap pass could not locate — no snippet parseable while
+    file-level, a snippet the head file does not hold, or an ambiguous
+    multi-match — whose confidence the same pass lowered. ``false`` on
+    every other row, and on a finding object without the attribute.
+
+    ``id``, ``anchor_block`` and ``id_reused_from`` follow
+    ``anchor_unverified`` and are always present (issue #71): the
+    finding's stable id, its enclosing anchor block, and where a reused
+    id came from. All three are ``null`` on every row of a run with
+    stable ids off, and on a finding object without the attribute; a
+    finding whose id a loaded verdict store holds refuted still carries
+    its id on the dropped row.
     """
     locations = getattr(f, "locations", None) or ()
     suggestion = getattr(f, "suggestion", None)
@@ -897,6 +956,10 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "suggestion": suggestion,
         "suggestion_end_line": getattr(f, "suggestion_end_line", 0) if suggestion is not None else 0,
         "locations": [{"file": path, "line": line} for path, line in locations] or None,
+        "anchor_unverified": bool(getattr(f, "anchor_unverified", False)),
+        "id": getattr(f, "id", None) or None,
+        "anchor_block": getattr(f, "anchor_block", None) or None,
+        "id_reused_from": getattr(f, "id_reused_from", None) or None,
         "title": f.title,
         "body": f.body,
         "drop_reason": drop_reason,
@@ -907,16 +970,19 @@ def _build_json_result(result: Any) -> dict:
     """Build the single JSON payload for ``--format json``.
 
     Key order: ``verdict``, ``findings``, ``chunk_count``, ``chunks_reviewed``,
-    ``chunks_failed``, ``chunks_over_budget``, ``largest_chunk_tokens``,
+    ``chunks_failed``, ``failed_chunks`` (a partial run only, see below),
+    ``chunks_over_budget``, ``largest_chunk_tokens``,
     ``overflow_files``, ``chunk_token_budget``, ``elapsed_ms``,
     ``input_tokens``, ``output_tokens``,
     ``cost_usd``, ``cost_estimated``, ``posted``, ``review_rules``,
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
-    ``repo_context``, ``parse_retries``, ``context_followup``,
-    ``suggestions``, ``incremental``, ``degraded``, ``config_file``,
-    ``failed_chunks`` (issue #72), then ``sampling`` and ``replay`` when
-    present.
+    ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
+    ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
+    ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
+    ``config_file``, then ``sampling`` and ``replay`` when present.
+    ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
+    ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
     Tolerates an error-shaped or partial result (a dict missing keys, as an
     incomplete or failed run may return): every always-present key defaults
@@ -925,7 +991,9 @@ def _build_json_result(result: Any) -> dict:
     0.15's ``prompt_templates``, ``scoped_rules`` and ``rule_counts``,
     0.16's ``repo_context`` and 0.17's ``parse_retries`` are always emitted
     and are ``null`` when their feature is off (``rule_counts`` whenever the
-    per-rule cap did not run, ``repo_context`` whenever
+    per-rule cap did not run, ``rule_scope_cleared`` whenever the loaded
+    rules files declare no section scope — 0.29's rule-applicability check
+    (#75) — otherwise the count of rule labels it cleared, ``repo_context`` whenever
     ``PRXREF_REPO_CONTEXT`` is ``off``, ``parse_retries`` whenever
     ``PRXREF_LLM_PARSE_RETRIES`` is ``0``; otherwise it is the run's total
     of parse retries over every chunk and the sweep, ``0`` when none ran),
@@ -937,12 +1005,31 @@ def _build_json_result(result: Any) -> dict:
     and so is ``incremental`` (#34: ``null`` whenever ``PRXREF_INCREMENTAL``
     is ``off``; otherwise ``{"mode", "reason",
     "since_sha", "files_total", "files_reviewed", "marker_sha"}``), and so
+    is ``ci_wiring`` (#66: ``null`` whenever ``PRXREF_CI_WIRING`` is
+    ``off``; otherwise ``{candidates, ci_files, picked_up_default,
+    triggered}`` from :func:`prxref.ci_wiring.ci_wiring_findings`, or
+    ``{"triggered": false, "reason": ...}`` when the run had no reader or
+    the stage failed), and so is
+    ``evidence`` (#69: ``null`` whenever no evidence file is configured;
+    otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
+    configured, the item count, how many chunk prompts matched items rode,
+    and the per-unit character budget; never the evidence text), and so
+    is ``stable_ids`` (#71: ``null`` whenever ``PRXREF_STABLE_IDS`` is
+    off; otherwise ``{assigned, reused_from_verdict, reused_from_thread,
+    collisions}`` over every finding of the run), and so
     is ``degraded`` (#48: ``null`` when every attempted post succeeded or
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
-    "annotations"}``, see :func:`_emit_fallback`), and so is
+    "annotations"}`` and, when a review unit failed, a ``chunks`` list of
+    ``{"index", "files", "error"}`` rows — ``cause`` is ``"partial"``
+    there unless a blocked write makes it ``"permission"`` — see
+    :func:`_emit_fallback`), and so is
     ``config_file`` (#38: ``null`` when the run read no repository config
     file; otherwise ``{"path", "sha256", "keys"}``, see
-    :func:`_config_file_stamp`);
+    :func:`_config_file_stamp`), and so is
+    ``metadata_rules`` (#70: ``null`` whenever ``PRXREF_METADATA_RULES`` is
+    ``off``; otherwise ``{branch_pattern, commit_reference, area_globs}``,
+    each ``pass``, ``fail`` or ``skipped: <reason>``, from
+    :func:`prxref.metadata_rules.run_metadata_checks`);
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
@@ -965,6 +1052,7 @@ def _build_json_result(result: Any) -> dict:
         "chunk_count": result.get("chunk_count"),
         "chunks_reviewed": result.get("chunks_reviewed"),
         "chunks_failed": result.get("chunks_failed"),
+        "failed_chunks": result.get("failed_chunks"),
         "chunks_over_budget": result.get("chunks_over_budget"),
         "largest_chunk_tokens": result.get("largest_chunk_tokens"),
         "overflow_files": result.get("overflow_files"),
@@ -982,14 +1070,18 @@ def _build_json_result(result: Any) -> dict:
         "prompt_templates": result.get("prompt_templates"),
         "scoped_rules": result.get("scoped_rules"),
         "rule_counts": result.get("rule_counts"),
+        "rule_scope_cleared": result.get("rule_scope_cleared"),
         "repo_context": result.get("repo_context"),
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
+        "ci_wiring": result.get("ci_wiring"),
+        "evidence": result.get("evidence"),
+        "stable_ids": result.get("stable_ids"),
         "degraded": result.get("degraded"),
+        "metadata_rules": result.get("metadata_rules"),
         "config_file": result.get("config_file"),
-        "failed_chunks": result.get("failed_chunks"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1427,6 +1519,9 @@ def _run_review(
     repo_dir: str | None = None,
     full_review: bool = False,
     config_file: Path | None = None,
+    ci_wiring: str | None = None,
+    ci_wiring_globs: list[str] | None = None,
+    evidence_files: list[str] | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1449,7 +1544,8 @@ def _run_review(
         if ref is None:
             return None
     # --max-chunks, --timeout, --spec, --rules-file, --scoped-rules,
-    # --context-file and --prompts-dir arrive as load_config overrides (None is
+    # --context-file, --prompts-dir and --evidence-file arrive as
+    # load_config overrides (None is
     # ignored, "" is not), so each flag rides exactly the path its environment
     # variable does: --max-chunks and --timeout are range-checked on the same
     # pass as PRXREF_MAX_CHUNKS and PRXREF_LLM_TIMEOUT, --spec and
@@ -1471,6 +1567,9 @@ def _run_review(
         scoped_rules=scoped_rules,
         ticket_context_file=context_file,
         prompts_dir=prompts_dir,
+        ci_wiring=ci_wiring,
+        ci_wiring_globs=ci_wiring_globs,
+        evidence_files=evidence_files,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1481,6 +1580,9 @@ def _run_review(
             "scoped_rules": "--scoped-rules",
             "ticket_context_file": "--context-file",
             "prompts_dir": "--prompts-dir",
+            "ci_wiring": "--ci-wiring",
+            "ci_wiring_globs": "--ci-wiring-globs",
+            "evidence_files": "--evidence-file",
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -1496,6 +1598,7 @@ def _run_review(
     # fails exactly where this would.
     inputs = load_path_inputs(cfg, layers, config_file=config_file, loaders=_path_loaders())
     rules, scoped, ticket, prompts = inputs.rules, inputs.scoped, inputs.ticket, inputs.prompts
+    evidence = inputs.evidence
     repo = _open_repo_dir(repo_dir)
     # PRXREF_DRY_RUN is the standing "never write to the forge" switch and
     # --no-post is the per-invocation one; either alone suppresses posting, so
@@ -1535,6 +1638,12 @@ def _run_review(
             "because a gate's verdict must see the whole PR", cfg["fail_on"],
         )
         full_review_reason = f"PRXREF_FAIL_ON={cfg['fail_on']}"
+    # Not a config key: a hint this caller adds for the LLM factory, which
+    # the layers know here and the resolved cfg cannot express on its own
+    # (it always carries an llm_timeout value, so default and explicit are
+    # indistinguishable inside the factory). Only a default timeout keeps
+    # the prompt-scaled deadline (issue #72).
+    cfg["LLM_TIMEOUT_IS_DEFAULT"] = layers.get("llm_timeout") == "default"
     llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
     orchestrate = importlib.import_module("prxref.orchestrator").orchestrate_review
     result = orchestrate(
@@ -1582,6 +1691,11 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
+        metadata_rules=cfg["metadata_rules"],
+        branch_patterns=cfg["branch_patterns"],
+        commit_reference=cfg["commit_reference"],
+        area_globs=cfg["area_globs"],
+        max_areas_per_pr=cfg["max_areas_per_pr"],
         replay=(
             replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))
             if replay is not None else None
@@ -1595,6 +1709,8 @@ def _run_review(
         repo_context_max_chunk_reads=cfg["repo_context_max_chunk_reads"],
         context_contract_globs=cfg["context_contract_globs"],
         context_exclude_globs=cfg["context_exclude_globs"],
+        context_standards_globs=cfg["context_standards_globs"],
+        context_standards_max_chars=cfg["context_standards_max_chars"],
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
@@ -1602,6 +1718,12 @@ def _run_review(
         incremental=incremental,
         full_review=full_review_reason is not None,
         full_review_reason=full_review_reason,
+        ci_wiring=cfg["ci_wiring"],
+        ci_wiring_globs=cfg["ci_wiring_globs"],
+        evidence=evidence,
+        evidence_max_chunk_chars=cfg["evidence_max_chunk_chars"],
+        stable_ids=cfg["stable_ids"],
+        verdict_store=cfg["verdict_store"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
@@ -1658,16 +1780,22 @@ def _webhook_handler(url: str, *, config_file: Path | None = None) -> None:
     observe the daemon against a real repo without writing to it.
 
     ``context_file=""`` blanks ``PRXREF_TICKET_CONTEXT_FILE`` for every
-    webhook: one static ticket file cannot describe every PR the daemon sees,
-    so its findings always carry scope ``unknown``. The team rules file, the
-    ``PRXREF_SCOPED_RULES`` files and the ``PRXREF_PROMPTS_DIR`` templates
-    still come from the daemon's environment, re-read on every webhook. The
+    webhook, and ``evidence_files=[""]`` blanks
+    ``PRXREF_EVIDENCE_FILES`` the same way: one static ticket or evidence
+    file cannot describe every PR the daemon sees, so its findings always
+    carry scope ``unknown`` and no unit's prompt carries evidence. The
+    team rules file, the ``PRXREF_SCOPED_RULES`` files and the
+    ``PRXREF_PROMPTS_DIR`` templates still come from the daemon's
+    environment, re-read on every webhook. The
     daemon passes no replay flag, so it never replays. ``config_file`` is
     the file ``serve --config`` or ``PRXREF_CONFIG_FILE`` named, re-read on
     every webhook, or ``None`` for none.
     """
     try:
-        _run_review(url, post=True, context_file="", config_file=config_file)
+        _run_review(
+            url, post=True, context_file="", evidence_files=[""],
+            config_file=config_file,
+        )
     except Exception:
         logger.exception("webhook review failed for %s", url)
 
@@ -1676,11 +1804,12 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     """The exit code a returned review result earns under the ``fail_on`` policy.
 
     ``never`` is always 0. Under ``error`` and ``any``, a result with verdict
-    ``Error`` exits 1 whatever its findings: the orchestrator returns one
-    instead of raising when the forge could not be read, the diff could not be
-    parsed or chunked, or every chunk review failed, so it is a review that did
-    not complete — the same outcome as the crash ``_cmd_review`` gates, and one
-    a gating lane must not read as green.
+    ``Error`` or ``Incomplete`` exits 1 whatever its findings: the
+    orchestrator returns ``Error`` instead of raising when the forge could
+    not be read, the diff could not be parsed or chunked, or every chunk
+    review failed, and ``Incomplete`` when some did (issue #72) — both are
+    reviews that did not complete, the same outcome as the crash
+    ``_cmd_review`` gates, and one a gating lane must not read as green.
 
     Otherwise severity is compared exactly as the verdict is built in the
     orchestrator (``Request-Changes`` iff an active finding has severity
@@ -1693,10 +1822,10 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     """
     if fail_on == "never":
         return 0, None
-    if isinstance(result, dict) and result.get("verdict") == "Error":
+    if isinstance(result, dict) and result.get("verdict") in ("Error", "Incomplete"):
         return 1, (
             f"PRXREF_FAIL_ON={fail_on}: review did not complete "
-            "(verdict Error); exiting 1"
+            f"(verdict {result.get('verdict')}); exiting 1"
         )
     findings = result.get("findings_active") if isinstance(result, dict) else None
     if not isinstance(findings, list):
@@ -1720,7 +1849,9 @@ def _emit_fallback(
     """Emit a degraded review through the CI it runs under (issue #48).
 
     Does nothing unless ``result["degraded"]`` is a dict, i.e. a post
-    failed. The CI is :func:`prxref.ci_fallback.detect_ci` of ``environ``
+    failed or a review unit did (#72: the partial-review banner rides the
+    same summary key). The CI is :func:`prxref.ci_fallback.detect_ci` of
+    ``environ``
     (``os.environ`` by default), and only the active findings are emitted:
 
     - GitHub Actions: the annotation lines on stdout (``github-annotations``,
@@ -1845,6 +1976,12 @@ def _cmd_review(args: argparse.Namespace) -> int:
             repo_dir=args.repo_dir,
             full_review=args.full_review,
             config_file=config_file,
+            ci_wiring=args.ci_wiring,
+            ci_wiring_globs=(
+                [g.strip() for g in args.ci_wiring_globs.split(",") if g.strip()] or None
+                if args.ci_wiring_globs is not None else None
+            ),
+            evidence_files=args.evidence_file,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

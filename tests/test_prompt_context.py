@@ -145,6 +145,7 @@ class TestPromptContext:
     def test_the_field_set_is_the_contract(self):
         assert [f.name for f in dataclasses.fields(PromptContext)] == [
             "rules_worker", "rules_sweep", "ticket_scope", "ticket_context",
+            "evidence_block",
             "spec_digest",
             "worker_template", "systemic_template",
             "rule_request", "suggestion_request",
@@ -166,6 +167,7 @@ class TestUnsetRunIsByteStable:
     @staticmethod
     def _old_user(name: str, values: list[tuple[str, str]]) -> str:
         template = load_prompt(name).replace("{ticket_context}", "", 1)
+        template = template.replace("{evidence_block}", "", 1)
         template = template.replace("{scope_example}", "", 1)
         template = template.replace("{rule_example}", "", 1)
         template = template.replace("{suggestion_example}", "", 1)
@@ -206,11 +208,12 @@ class TestUnsetRunIsByteStable:
         assert "{ticket_context}" not in user
         assert "Repo: r\n\n### Spec constraints\n\n" in user
 
-    def test_both_templates_carry_the_ticket_slot_before_the_spec_block(self):
+    def test_both_templates_carry_the_ticket_and_evidence_slots_before_the_spec_block(self):
         for name in ("worker.md", "systemic.md"):
             template = load_prompt(name)
             assert template.count("{ticket_context}") == 1
-            assert "Repo: {repo_hint}\n\n{ticket_context}### Spec constraints" in template
+            assert template.count("{evidence_block}") == 1
+            assert "Repo: {repo_hint}\n\n{ticket_context}{evidence_block}### Spec constraints" in template
 
 
 class TestSystemHalf:

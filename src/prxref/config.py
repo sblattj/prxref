@@ -27,6 +27,15 @@ LLM / pipeline:
                                 call, in seconds; the chain then tries the
                                 next model, so a run can exceed it. Must be
                                 greater than 0 (default 120.0)
+  PRXREF_LLM_TIMEOUT_PER_1K     Deadline scaling (issue #72), openai-compat
+                                only: seconds of per-request deadline per 1k
+                                estimated input tokens, applied only while
+                                PRXREF_LLM_TIMEOUT is at its default (120.0)
+                                — scaling extends the deadline above that
+                                floor, never below it. An explicit timeout —
+                                flag, variable or config file — disables
+                                scaling entirely.
+                                Must be greater than 0 (default 1.6)
   PRXREF_LLM_TEMPERATURE        Sampling temperature, e.g. "0.2"; finite and
                                 >= 0, no upper bound (provider-specific).
                                 Unset or empty sends the built-in default
@@ -145,10 +154,13 @@ LLM / pipeline:
                                 also exits 1: it crashes, or it ends with
                                 verdict "Error" (the forge could not be
                                 read, the diff could not be parsed or
-                                chunked, or every chunk review failed).
-                                An empty PR diff is not a failure
-                                (verdict "Approved", exit 0). The webhook
-                                daemon has no exit code and is unaffected.
+                                chunked, or every chunk review failed) or
+                                verdict "Incomplete" (some chunk reviews
+                                failed, so the review only partially
+                                happened). An empty PR diff is not a
+                                failure (verdict "Approved", exit 0). The
+                                webhook daemon has no exit code and is
+                                unaffected.
   PRXREF_POST_MODE              What gets posted to the forge:
                                 "summary+inline" (default) | "summary" |
                                 "inline". Any other value is a
@@ -212,6 +224,50 @@ LLM / pipeline:
                                 to the built-in lock-file and generated-file
                                 detection, never replacing it. Empty
                                 (default) adds nothing.
+  PRXREF_METADATA_RULES         Opt-in deterministic PR-metadata checks
+                                (#70): "off" (default) runs none, keeps
+                                every prompt, finding and run-record key
+                                byte-identical, and stamps nothing;
+                                "on" runs the three checks below. Each is
+                                configured by its own key and skips itself
+                                (recorded in the run record's
+                                ``metadata_rules`` stamp, never a finding)
+                                when unconfigured or when the PR offers
+                                nothing to check. Violations are
+                                deterministic warning/outofscope findings,
+                                summary-only, and never change the verdict
+                                or the exit code.
+  PRXREF_BRANCH_PATTERNS        Branch-name check: "type=regex" entries
+                                mapping a PR type to the fullmatch pattern
+                                its source branch must satisfy (matched
+                                with re.fullmatch, so ^/$ anchors in a team
+                                pattern are harmless). The PR's type comes
+                                from its labels first, else the
+                                conventional-commit prefix of its title
+                                ("fix: ..." -> fix); a PR whose type is
+                                unknown, or whose type has no entry here,
+                                is skipped, not a violation. Empty
+                                (default) skips the check.
+  PRXREF_COMMIT_REFERENCE       Commit-subject check: a regex every
+                                non-merge commit subject (first line of the
+                                message) of the PR must CONTAIN (re.search),
+                                e.g. "PROJ-[0-9]+". One outofscope finding
+                                per offending commit. Needs the forge's
+                                commit listing (GitHub, Gitea); without one,
+                                or on a --diff-file run, the check skips
+                                with "skipped: no commit source". Empty
+                                (default) skips the check.
+  PRXREF_AREA_GLOBS             Area check: "name=glob" entries classifying
+                                diff paths into named areas (a path belongs
+                                to every area whose glob matches it; globs
+                                match like scoped-rules applies_to, ``**/``
+                                matches zero directories). A path matching
+                                no area is ignored. More distinct areas
+                                than PRXREF_MAX_AREAS_PER_PR makes one
+                                file-level warning listing the areas.
+                                Empty (default) skips the check.
+  PRXREF_MAX_AREAS_PER_PR       Most distinct areas a PR may touch before
+                                the area check flags it; >= 0 (default 2).
   PRXREF_SPEC_SOURCES           Spec/ticket sources to review against, as
                                  comma- or whitespace-separated web URLs and
                                  local file/dir paths; the repeatable
@@ -279,6 +335,33 @@ LLM / pipeline:
                                 Characters of ticket text kept in the
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
+  PRXREF_EVIDENCE_FILES         Execution evidence (#69): paths to files of
+                                commands the caller ran (a CI step, an
+                                agent, a script) — nginx -t, helm lint, the
+                                test suite, HTTP probes. Each file is JSON
+                                (a top-level array, or an object holding an
+                                "evidence" array of {command, exit_code,
+                                output, files}) or plain text (blank-line-
+                                separated blocks, the first line the
+                                command, an exit: N line the exit code).
+                                Items whose paths match a chunk ride that
+                                chunk's prompt; the rest ride every prompt,
+                                the whole-PR sweep's included, and a worker
+                                must not report a finding the evidence
+                                contradicts. A missing, unreadable or
+                                non-UTF-8 file, or JSON of the wrong shape,
+                                is a configuration error. Comma- or
+                                whitespace-separated; the repeatable
+                                ``--evidence-file PATH`` flag replaces this
+                                list for one run. Empty (the default) = no
+                                evidence
+  PRXREF_EVIDENCE_MAX_CHUNK_CHARS
+                                Execution evidence (#69): characters of
+                                evidence text one review unit's prompt may
+                                carry; a unit's matched items go in ahead of
+                                the global ones and items that no longer fit
+                                are left out whole behind one truncation
+                                line; positive int (default 4000)
   PRXREF_REPO_CONTEXT           Repository context (0.16.0): "off" (default) |
                                 "diff" | "repo". "off" adds no repository
                                 context entry, read, trace event or log line;
@@ -336,6 +419,37 @@ LLM / pipeline:
                                 budget (see PRXREF_LLM_MAX_TOKENS) when that is
                                 left unset; an explicit budget is respected as
                                 given
+  PRXREF_CI_WIRING              CI wiring (#66): "off" (the default) reads
+                                nothing, changes no byte of the review and
+                                stamps ci_wiring=null on the run record.
+                                "on" flags a check-shaped file the PR adds
+                                (a script whose name or a --flag it gains
+                                says verify/smoke/check, a file that gains
+                                a shebang, a new test file outside the
+                                runner's default include) that no CI
+                                configuration file invokes: one finding per
+                                unwired check, "spec" when the ticket
+                                mentions regression checks, CI, pipelines
+                                or automated tests ("warning" otherwise),
+                                listing the CI files searched. Needs the
+                                forge's head-sha file reads or --repo-dir;
+                                without a reader the run logs one WARNING
+                                naming PRXREF_CI_WIRING and records why.
+                                Matched exactly; any other value is a
+                                configuration error. Never changes the
+                                verdict or the exit code
+  PRXREF_CI_WIRING_GLOBS        CI wiring (#66): globs (matched like
+                                PRXREF_SIZE_IGNORE_GLOBS) selecting the CI
+                                configuration files the check reads. A set
+                                value REPLACES the built-in set below
+                                rather than adding to it, and an empty
+                                value reads as unset (the built-in set
+                                stays); at most 12 CI files are read per
+                                run. Built-in set:
+                                .github/workflows/*.y*ml, .gitlab-ci.yml,
+                                azure-pipelines.yml, .circleci/config.yml,
+                                Jenkinsfile, bitbucket-pipelines.yml,
+                                .drone.yml, cloudbuild.yaml, .travis.yml
   PRXREF_INCREMENTAL            Incremental re-review on push (#34): "off"
                                 (the default) reviews every file on every run
                                 and writes no marker. "on" stamps each summary
@@ -380,9 +494,40 @@ LLM / pipeline:
                                 logging commands are skipped so stdout stays
                                 one JSON document. "off" emits nothing. Either
                                 way the run record's "degraded" says which
-                                posts failed and why; the exit code never
-                                changes. Matched exactly; any other value is a
-                                configuration error
+                                posts or chunks failed and why; the exit
+                                code never changes. Matched exactly; any
+                                other value is a configuration error
+  PRXREF_STABLE_IDS             Stable finding ids (#71): "0" (the
+                                default) leaves every prompt, call, post
+                                and finding as before — the id pass never
+                                runs, every finding's "id",
+                                "anchor_block" and "id_reused_from" are
+                                null, and the run record's "stable_ids"
+                                is null. "1" stamps every finding with a
+                                content-derived id
+                                (<file>#<rule or norule>#<12-hex claim
+                                hash>) that survives reworded titles and
+                                anchor drift, plus the anchor block (the
+                                enclosing function, YAML key or manifest
+                                key — metadata the id excludes) and an
+                                id_reused_from label saying where a
+                                reused id came from ("run", "verdict" or
+                                "thread"). Literal "1" only, like
+                                PRXREF_GROUP_FINDINGS
+  PRXREF_VERDICT_STORE          Stable finding ids (#71): path to the JSON
+                                verdict store earlier runs' verdicts are
+                                read from, keyed by stable id. Read only
+                                when PRXREF_STABLE_IDS is "1"; a finding
+                                whose id the store holds as "refuted" is
+                                dropped with drop_reason "refuted in
+                                earlier run (<id>)". Unset (the default)
+                                = no persistence; ids are still stamped
+                                but nothing from an earlier run can
+                                match. The review never writes the
+                                store; recording a verdict is a caller's
+                                decision. A missing file reads as empty;
+                                an unreadable or malformed one is a
+                                configuration error (exit 2)
   PRXREF_CONTEXT_CONTRACT_GLOBS Repository context (0.16.0): globs (matched
                                 like PRXREF_SIZE_IGNORE_GLOBS) selecting the
                                 contract files — OpenAPI, JSON Schema,
@@ -404,6 +549,28 @@ LLM / pipeline:
                                 **/expected.json, **/cases.json, **/case.json,
                                 **/prxref-eval/**, **/.env*, **/*.pem,
                                 **/*.key. Empty (the default) adds nothing
+  PRXREF_CONTEXT_STANDARDS_GLOBS
+                                 In-repo standards (#68): globs (matched like
+                                 PRXREF_SIZE_IGNORE_GLOBS) selecting the
+                                 repository's own standards documents - the
+                                 security standard, the ADRs, CONTRIBUTING -
+                                 whose matching sections are excerpted under
+                                 PRXREF_REPO_CONTEXT="repo" only, ranked by
+                                 what the chunk's own changes name and capped
+                                 by PRXREF_CONTEXT_STANDARDS_MAX_CHARS. A set
+                                 value REPLACES the built-in set below rather
+                                 than adding to it; a bare empty value reads
+                                 as unset (the house rule), so the built-in
+                                 set stays - the exact value "off" (lowercase,
+                                 the PRXREF_LLM_SEED precedent) is the one way
+                                 to turn standards excerpts off on their own.
+                                 Built-in set: docs/standards/**, docs/adr/**,
+                                 STANDARDS*.md, SECURITY.md, CONTRIBUTING.md
+  PRXREF_CONTEXT_STANDARDS_MAX_CHARS
+                                 In-repo standards (#68): per-chunk character
+                                 budget for the standards sections admitted
+                                 into one worker prompt. Must be greater
+                                 than 0 (default 4000)
 
 Spec sources / Jira:
   PRXREF_JIRA_BASE_URL          Jira base URL (scheme://host plus any
@@ -458,8 +625,10 @@ Webhooks:
                                   webhooks (default off; insecure)
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
-PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS
-and PRXREF_CONTEXT_EXCLUDE_GLOBS) split on any run of commas and/or
+PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS,
+PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS, PRXREF_AREA_GLOBS,
+PRXREF_CI_WIRING_GLOBS and PRXREF_CONTEXT_STANDARDS_GLOBS) split on any run
+of commas and/or
 whitespace, so no item can contain either; a glob that must match a
 literal space writes it as ``?``.
 
@@ -536,6 +705,12 @@ _DEFAULTS: dict[str, object] = {
     "llm_reasoning_effort": "",
     "llm_max_tokens": 4096,
     "llm_timeout": 120.0,
+    # Deadline-scaling coefficient (issue #72): seconds of per-request
+    # deadline per 1k estimated input tokens, applied by the openai-compat
+    # client ONLY while llm_timeout is at its default. An explicit timeout
+    # (flag, variable or file) disables scaling entirely. Must be > 0; tune
+    # upward for slow endpoints, downward for fast ones.
+    "llm_timeout_per_1k": 1.6,
     "llm_temperature": "",
     # ``None`` is the declared unset: no seed is configured, so the factory
     # falls back to its once-per-process seed. Unlike ``llm_temperature``
@@ -595,6 +770,13 @@ _DEFAULTS: dict[str, object] = {
     "prompts_dir": None,
     "ticket_context_file": "",
     "ticket_context_max_chars": 6000,
+    # Execution evidence (#69): caller-run command results as review
+    # context. The list mirrors spec_sources/scoped_rules (paths from the
+    # environment or the repeatable --evidence-file flag, which replaces
+    # it); the int is the per-unit prompt budget the orchestrator trims
+    # blocks to.
+    "evidence_files": [],
+    "evidence_max_chunk_chars": 4000,
     "repo_context": "off",
     "repo_context_max_chars": 12000,
     "repo_context_max_reads": 200,
@@ -621,6 +803,55 @@ _DEFAULTS: dict[str, object] = {
         "**/migrations/**",
     ],
     "context_exclude_globs": [],
+    # In-repo standards documents (#68): sections of the repository's own
+    # rules offered to each chunk worker at the ``repo`` level, like the
+    # contract globs above. The default is non-empty and
+    # replace-not-append, with the same house rule that a bare empty value
+    # reads as unset; the exact value ``off``
+    # (``PRXREF_CONTEXT_STANDARDS_GLOBS=off``) is the one way to turn the
+    # feature off on its own, the ``llm_seed`` precedent.
+    "context_standards_globs": [
+        "docs/standards/**",
+        "docs/adr/**",
+        "STANDARDS*.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+    ],
+    "context_standards_max_chars": 4000,
+    # CI wiring (#66): the opt-in switch plus the CI-file globs. The globs
+    # default is non-empty and replace-not-append like
+    # ``context_contract_globs`` above; the list restates
+    # ``ci_wiring.DEFAULT_CI_GLOBS`` (config stays a leaf module), pinned
+    # together by tests/test_issue_66_ci_wiring.py.
+    "ci_wiring": "off",
+    "ci_wiring_globs": [
+        ".github/workflows/*.y*ml",
+        ".gitlab-ci.yml",
+        "azure-pipelines.yml",
+        ".circleci/config.yml",
+        "Jenkinsfile",
+        "bitbucket-pipelines.yml",
+        ".drone.yml",
+        "cloudbuild.yaml",
+        ".travis.yml",
+    ],
+    # PR-metadata rules (#70): the single opt-in switch plus one key per
+    # check. Flat, like every other key — the config file is a flat TOML
+    # document, so a [metadata] table would be rejected by the reader.
+    # Empty / "off" defaults keep every check off and the run record free
+    # of the metadata_rules key.
+    "metadata_rules": "off",
+    # Stable finding ids (#71): the opt-in switch plus the persisted
+    # verdict store's path. Off (the default) the id pass never runs and
+    # every finding keeps a null ``id``; the store is read only when the
+    # switch is on and a path is set (None = no persistence, in-run
+    # reuse only), and the pipeline never writes it.
+    "stable_ids": False,
+    "verdict_store": None,
+    "branch_patterns": [],
+    "commit_reference": "",
+    "area_globs": [],
+    "max_areas_per_pr": 2,
     "jira_base_url": "",
     "jira_email": "",
     "jira_api_token": "",
@@ -653,14 +884,21 @@ _INT_KEYS = frozenset({
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
+    "max_areas_per_pr", "evidence_max_chunk_chars",
+    "context_standards_max_chars",
 })
-_FLOAT_KEYS = frozenset({"confidence_floor", "llm_timeout", "dedup_similarity"})
+_FLOAT_KEYS = frozenset({
+    "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
+})
 _BOOL_KEYS = frozenset({
     "allow_unsigned", "dry_run", "post_verdict", "post_cost", "group_findings",
+    "stable_ids",
 })
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
+    "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
+    "context_standards_globs",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -675,12 +913,21 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "suggestions": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
+    "metadata_rules": frozenset({"off", "on"}),
+    "ci_wiring": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
 # (lowercase), like every _CHOICE_KEYS value; restated from
 # prxref.llm_backends.SEED_OFF, because config stays a leaf module.
 _SEED_OFF = "off"
+
+# ``context_standards_globs``'s one non-glob value (#68): read no standards
+# document at all. Matched exactly (lowercase) like ``llm_seed``'s sentinel,
+# because the normal list coercion would read ``off`` as a one-glob list. A
+# bare empty value keeps the house rule instead: it reads as unset, so the
+# built-in set stays.
+_STANDARDS_GLOBS_OFF = "off"
 
 # The posting-behaviour vocabulary, validated rather than trusted. Restated in
 # prxref.orchestrator (config stays a leaf module); pinned together by
@@ -742,6 +989,7 @@ class _Range(NamedTuple):
 _RANGES: dict[str, _Range] = {
     "llm_max_tokens": _Range(0),
     "llm_timeout": _Range(0),
+    "llm_timeout_per_1k": _Range(0),
     "chunk_token_budget": _Range(0),
     "max_workers": _Range(0),
     "max_inline_comments": _Range(0),
@@ -765,6 +1013,9 @@ _RANGES: dict[str, _Range] = {
     "repo_context_max_chars": _Range(0),
     "repo_context_max_reads": _Range(0),
     "repo_context_max_chunk_reads": _Range(0),
+    "max_areas_per_pr": _Range(0, low_inclusive=True),
+    "evidence_max_chunk_chars": _Range(0),
+    "context_standards_max_chars": _Range(0),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
 }
@@ -787,6 +1038,7 @@ CONFIG_DOCS_URL = "https://github.com/sblattj/prxref/blob/main/docs/config-file.
 #: :data:`ENV_ONLY_KEYS`, so a new key must be classified before it loads.
 FILE_KEYS = frozenset({
     "llm_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
+    "llm_timeout_per_1k",
     "llm_temperature", "llm_seed", "llm_cli_concurrency", "llm_parse_retries",
     "confidence_floor", "max_error_findings", "max_warning_findings",
     "max_outofscope_findings", "max_findings_per_rule", "group_findings",
@@ -799,10 +1051,16 @@ FILE_KEYS = frozenset({
     "review_rules", "review_rules_max_chars",
     "scoped_rules", "scoped_rules_max_chars", "prompts_dir",
     "ticket_context_file", "ticket_context_max_chars",
+    "evidence_files", "evidence_max_chunk_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "incremental",
     "context_contract_globs", "context_exclude_globs",
+    "context_standards_globs", "context_standards_max_chars",
+    "metadata_rules", "branch_patterns", "commit_reference",
+    "area_globs", "max_areas_per_pr",
+    "ci_wiring", "ci_wiring_globs",
+    "stable_ids", "verdict_store",
 })
 
 _ENV_ONLY_REASONS: dict[str, str] = {
@@ -846,7 +1104,7 @@ ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 
 _FILE_PATH_KEYS = frozenset({
     "review_rules", "scoped_rules", "prompts_dir", "ticket_context_file",
-    "spec_sources",
+    "spec_sources", "evidence_files", "verdict_store",
 })
 
 
@@ -1069,6 +1327,8 @@ def _coerce_env(key: str, raw: str, source: str) -> object:
     try:
         if key == "llm_seed" and raw.strip() == _SEED_OFF:
             return _SEED_OFF
+        if key == "context_standards_globs" and raw.strip() == _STANDARDS_GLOBS_OFF:
+            return []
         if key in _INT_KEYS:
             return int(raw.strip())
         if key in _FLOAT_KEYS:
@@ -1214,6 +1474,58 @@ def _check_bullet_separator(cfg: dict[str, object], sources: dict[str, str]) -> 
         )
 
 
+def _check_metadata_rules(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Validate the PR-metadata rule keys (#70); every entry must parse.
+
+    Same doctrine as :func:`_check_choices`: it runs after environment AND
+    overrides, and a failure is a ``ConfigError`` (exit 2) naming whichever
+    input supplied the value — a bad pattern is a usage error before any
+    review, never a mid-review crash. ``branch_patterns`` entries must be
+    ``TYPE=REGEX`` with both sides non-empty and a regex that compiles;
+    ``area_globs`` entries must be ``NAME=GLOB`` with both sides non-empty
+    (the glob itself is checked where it is matched); a non-empty
+    ``commit_reference`` must compile. The values are left exactly as
+    given, so the config dict keeps the operator's strings and the checks
+    compile them once more at use time — a third copy of the pattern never
+    exists.
+    """
+    pairs: list[tuple[str, str]] = [
+        ("branch_patterns", "TYPE=REGEX"), ("area_globs", "NAME=GLOB"),
+    ]
+    for key, shape in pairs:
+        value = cfg[key]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"{sources[key]}: must be a list of strings, got {value!r}")
+        for entry in value:
+            name, _, pattern = entry.partition("=")
+            if not name.strip() or not pattern.strip():
+                raise ConfigError(
+                    f"{sources[key]}: entry {entry!r} must be {shape} "
+                    f"with both sides non-empty"
+                )
+            if key != "branch_patterns":
+                continue
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ConfigError(
+                    f"{sources[key]}: entry {entry!r} regex does not "
+                    f"compile: {exc}"
+                ) from exc
+    reference = cfg["commit_reference"]
+    if reference:
+        if not isinstance(reference, str):
+            raise ConfigError(
+                f"{sources['commit_reference']}: must be a string, got {reference!r}"
+            )
+        try:
+            re.compile(reference)
+        except re.error as exc:
+            raise ConfigError(
+                f"{sources['commit_reference']}: regex does not compile: {exc}"
+            ) from exc
+
+
 def load_config(
     *,
     config_file: Path | None = None,
@@ -1323,6 +1635,7 @@ def load_config_with_sources(
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)
+    _check_metadata_rules(cfg, sources)
     return cfg, layers
 
 

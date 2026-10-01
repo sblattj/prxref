@@ -134,6 +134,8 @@ its `PRXREF_` name.
 | `prompts_dir` | string | Directory of replacement prompt templates ([more](env-vars.md#llm--pipeline)). |
 | `ticket_context_file` | string | File holding the ticket this PR implements ([more](env-vars.md#llm--pipeline)). |
 | `ticket_context_max_chars` | integer | Characters of ticket text kept in the prompt ([more](env-vars.md#llm--pipeline)). |
+| `evidence_files` | array of strings | Execution evidence files to review against ([more](env-vars.md#llm--pipeline)). |
+| `evidence_max_chunk_chars` | integer | Characters of evidence text one review unit receives ([more](env-vars.md#llm--pipeline)). |
 | `spec_sources` | array of strings | Local spec files and directories to review against; no URLs here ([more](env-vars.md#llm--pipeline)). |
 | `spec_max_chars` | integer | Raw characters kept per spec source ([more](env-vars.md#llm--pipeline)). |
 | `spec_digest_tokens` | integer | Token budget of the spec digest in worker prompts ([more](env-vars.md#llm--pipeline)). |
@@ -146,6 +148,7 @@ its `PRXREF_` name.
 | `llm_reasoning_effort` | string | Reasoning effort sent to reasoning models ([more](env-vars.md#llm--pipeline)). |
 | `llm_max_tokens` | integer | Completion-token budget of each worker call ([more](env-vars.md#llm--pipeline)). |
 | `llm_timeout` | number | Per-model deadline in seconds ([more](env-vars.md#llm--pipeline)). |
+| `llm_timeout_per_1k` | number | Deadline-scaling coefficient, seconds per 1k estimated input tokens, `openai-compat` only and applied only while `llm_timeout` is at its default ([more](env-vars.md#llm--pipeline)). |
 | `llm_temperature` | number or string | Sampling temperature ([more](env-vars.md#llm--pipeline)). |
 | `llm_seed` | integer or "off" | Sampling seed, or `"off"` to send none ([more](env-vars.md#llm--pipeline)). |
 | `llm_cli_concurrency` | integer | CLI processes one `claude-cli` / `kiro-cli` client runs at once ([more](env-vars.md#llm--pipeline)). |
@@ -162,6 +165,8 @@ its `PRXREF_` name.
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
+| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at `repo`; replaces the built-in set — only `PRXREF_CONTEXT_STANDARDS_GLOBS=off` in the pipeline turns them off ([more](env-vars.md#llm--pipeline)). |
+| `context_standards_max_chars` | integer | Characters of standards-section text one chunk worker receives ([more](env-vars.md#llm--pipeline)). |
 | `chunk_context_lines` | integer | Context lines kept around each change in a chunk ([more](env-vars.md#llm--pipeline)). |
 
 ### Comment policy
@@ -199,6 +204,27 @@ its `PRXREF_` name.
 | `size_warn_lines` | integer | Changed-line threshold for the PR size advisory ([more](env-vars.md#llm--pipeline)). |
 | `size_warn_files` | integer | Changed-file threshold for the PR size advisory ([more](env-vars.md#llm--pipeline)). |
 | `size_ignore_globs` | array of strings | Extra globs left out of both size counts ([more](env-vars.md#llm--pipeline)). |
+
+### PR metadata rules
+
+Flat keys, not a `[metadata]` table — the file is flat, so a table is a configuration error.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `metadata_rules` | string | `on` runs the three deterministic PR-metadata checks below; `off` (the default) runs none ([more](env-vars.md#llm--pipeline)). |
+| `branch_patterns` | array of strings | `type=regex` pairs: the source branch must match the PR type's pattern ([more](env-vars.md#llm--pipeline)). |
+| `commit_reference` | string | Regex every non-merge commit subject must contain ([more](env-vars.md#llm--pipeline)). |
+| `area_globs` | array of strings | `name=glob` pairs classifying diff paths into areas ([more](env-vars.md#llm--pipeline)). |
+| `max_areas_per_pr` | integer | Most distinct areas a PR may touch before the area check flags it ([more](env-vars.md#llm--pipeline)). |
+| `ci_wiring` | string | `on` flags a check the PR adds that no CI configuration file invokes; `off` (the default) reads nothing ([more](env-vars.md#llm--pipeline)). |
+| `ci_wiring_globs` | array of strings | Globs selecting the CI configuration files the CI wiring check reads; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
+
+### Stable finding ids
+
+| Key | Type | Meaning |
+|---|---|---|
+| `stable_ids` | boolean | `true` stamps every finding with a content-derived id that survives reworded titles and anchor drift, and drops a finding the verdict store refuted in an earlier run; `false` (the default) keeps every `id` null ([more](env-vars.md#llm--pipeline)). |
+| `verdict_store` | string | Path to the JSON verdict store `refuted` verdicts are read from, keyed by stable id; the review reads it and never writes it ([more](env-vars.md#llm--pipeline)). |
 
 ## Settings a repository file cannot set
 

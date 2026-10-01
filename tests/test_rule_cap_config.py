@@ -34,7 +34,8 @@ EVALS_MD = (REPO_ROOT / "docs" / "evals.md").read_text(encoding="utf-8")
 NUMBER_WORDS = {
     10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
     15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen",
-    19: "nineteen", 20: "twenty", 21: "twenty-one",
+    19: "nineteen", 20: "twenty", 21: "twenty-one", 22: "twenty-two",
+    23: "twenty-three",
 }
 
 
@@ -185,7 +186,8 @@ class TestQualityDoc:
     def test_the_rule_cap_runs_after_grouping_and_before_the_gate(self):
         names = [name for _, name in _pass_table()]
         assert names.index("apply_rule_cap") == names.index("apply_rule_grouping") + 1
-        assert names.index("apply_quality_gate") == names.index("apply_rule_cap") + 1
+        assert names.index("apply_location_verification") == names.index("apply_rule_cap") + 1
+        assert names.index("apply_quality_gate") == names.index("apply_location_verification") + 1
 
     def test_the_drop_reason_row_follows_grouped_into(self):
         section = _section(QUALITY_MD, "## Drop reasons")

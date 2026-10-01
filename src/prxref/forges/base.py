@@ -54,7 +54,12 @@ class Thread:
     ``line`` is the thread's anchor line: the last line of a multi-line
     thread. ``start_line`` is the first line of a multi-line thread, and
     ``None`` for a single-line or file-level thread or on a forge that does
-    not report one.
+    not report one. ``resolved`` and ``outdated`` gate the dedup passes
+    (issue #73): a thread the reviewers closed, or one whose anchor no
+    longer matches the current diff, no longer suppresses a finding —
+    a forge that cannot report either reports ``False``, which keeps the
+    thread suppressible exactly as before the fields existed. ``url`` is
+    the thread's permalink when the forge has one, else ``None``.
     """
 
     path: str | None
@@ -63,6 +68,8 @@ class Thread:
     author: str
     body_snippet: str
     start_line: int | None = None
+    outdated: bool = False
+    url: str | None = None
 
 
 @dataclass
@@ -77,6 +84,20 @@ class PRData:
     source_sha: str
     target_sha: str
     raw: dict  # forge-native payload, for forge-specific needs
+
+
+@dataclass(frozen=True)
+class CommitData:
+    """One commit of a PR, from ``get_commits`` (issue #70).
+
+    ``subject`` is the first line of the commit message; ``parent_count`` is
+    the number of parents the forge reports (a merge commit has more than
+    one), so a caller can exempt merges without re-reading the payload.
+    """
+
+    sha: str
+    subject: str
+    parent_count: int = 1
 
 
 def _require_aware(value: datetime, name: str) -> None:
@@ -329,6 +350,23 @@ class Forge(Protocol):
         at ``MAX_LISTING_PAGES`` pages, is returned with ``complete=False``.
         Returns ``None`` when no listing can be fetched at all; this method
         never raises.
+        """
+        ...
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        Optional: callers resolve it with ``getattr(forge, "get_commits",
+        None)``, so a Forge without it is still valid, and not every forge
+        implements it (the commit-reference metadata check then reports
+        itself skipped). ``base_sha``/``head_sha`` are the PR's target/source
+        commits as the caller read them from ``get_pr``; a forge whose commit
+        listing needs no range (GitHub's per-PR endpoint) ignores them, and
+        one that needs a range (Gitea's compare) fetches the PR itself when
+        either is empty. Raises on transport or HTTP failure like
+        ``get_diff``; an empty commit list is returned as ``[]``.
         """
         ...
 

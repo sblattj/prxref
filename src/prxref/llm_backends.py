@@ -65,6 +65,18 @@ DEFAULT_BASE_URL = ""
 DEFAULT_API_KEY = ""
 DEFAULT_MODELS = ""
 DEFAULT_TIMEOUT = 120.0
+# Deadline scaling (issue #72): with the timeout left at its default the
+# openai-compat client sizes each request's deadline from the prompt instead
+# of holding one fixed value a large chunk cannot fit inside. The floor is
+# the configured default — 0.29.0 raised it from 45 s to 120 s flat — so
+# scaling only ever EXTENDS a deadline the earlier releases would have
+# granted: within the chunk budget the scaled value stays below the floor,
+# while the sweep or a packed overflow chunk can run far larger. The
+# calibration point: a 22k-token prompt answered in ~55s; prefill and decode
+# both grow with the input.
+SCALED_DEADLINE_BASE_S = 20.0
+SCALED_DEADLINE_CAP_S = 900.0
+DEFAULT_TIMEOUT_PER_1K = 1.6
 # Sent, not just a fallback: temperature 0 is the reproducibility default —
 # identical diff, same model, same verdict — and it only works if the field
 # actually reaches the wire. Resolved by create_llm_client when the operator
@@ -103,6 +115,36 @@ _UNAVAILABLE_PHRASES = (
 
 class LLMError(Exception):
     """Every model in the fallback chain failed; the message carries per-model reasons."""
+
+
+def scaled_deadline(input_tokens: int, per_1k: float = DEFAULT_TIMEOUT_PER_1K) -> float:
+    """The prompt-scaled deadline for one request, in seconds (issue #72).
+
+    ``min(SCALED_DEADLINE_CAP_S, SCALED_DEADLINE_BASE_S + per_1k * tokens /
+    1000)``: a fixed base plus a per-1k-input-token term, because prefill and
+    decode both grow with the prompt, and the calibration point (22k tokens
+    answered in ~55s at 1.6s/1k) sits on that line. The cap keeps a
+    pathological prompt from asking for an hour; 900s is longer than any
+    useful review answer.
+    """
+    return min(
+        SCALED_DEADLINE_CAP_S,
+        SCALED_DEADLINE_BASE_S + per_1k * input_tokens / 1000.0,
+    )
+
+
+def _estimate_prompt_tokens(system: str, user: str) -> int:
+    """The pre-request input-token estimate the deadline scales on.
+
+    Usage is only REPORTED by the endpoint, after the request has already run
+    under whatever deadline was picked, so the only token count visible
+    before the wire is the prompt itself. Roughly four characters per token
+    is the standard English-and-code approximation, and an estimate is all
+    the deadline needs: the applied deadline never drops below the
+    configured default, so over-estimating costs a little patience and
+    under-estimating costs nothing until the prompt is large.
+    """
+    return (len(system) + len(user)) // 4
 
 
 def _looks_permanently_unavailable(text: str) -> bool:
@@ -231,6 +273,7 @@ class OpenAICompatClient(LLMClient):
         reasoning_effort: str | None = None,
         temperature: float | None = None,
         seed: int | None = None,
+        timeout_per_1k: float | None = None,
     ):
         if not models:
             raise ValueError("models must be a non-empty list")
@@ -242,6 +285,11 @@ class OpenAICompatClient(LLMClient):
         self.reasoning_effort = reasoning_effort or None
         self.temperature = temperature
         self.seed = seed
+        # None (the default, and what the factory passes whenever an explicit
+        # PRXREF_LLM_TIMEOUT or --timeout was given) disables deadline
+        # scaling: an operator who set a deadline has replaced the model of
+        # latency, and silently re-scaling it would override them.
+        self.timeout_per_1k = timeout_per_1k
         # Run-lifetime memory of models a 4xx body named as permanently gone
         # (deprovisioned, renamed, never enabled) so a chunk fan-out backed by
         # one shared client stops re-trying and re-logging a dead model on
@@ -308,7 +356,20 @@ class OpenAICompatClient(LLMClient):
         timeout_s: float | None = None,
     ) -> InvokeResult:
         """POST /chat/completions per model until one answers untruncated; fast-fail the rest."""
-        request_timeout = self.default_timeout if timeout_s is None else timeout_s
+        if timeout_s is not None:
+            request_timeout = timeout_s
+        elif self.timeout_per_1k is not None:
+            # Issue #72: the deadline scales with the prompt, never below the
+            # configured default — scaling is what buys a large chunk room,
+            # so a small one must not pay for it by losing deadline it had.
+            request_timeout = max(
+                self.default_timeout,
+                scaled_deadline(
+                    _estimate_prompt_tokens(system, user), self.timeout_per_1k,
+                ),
+            )
+        else:
+            request_timeout = self.default_timeout
         payload: dict = {
             "messages": [
                 {"role": "system", "content": system},
@@ -700,8 +761,9 @@ def create_llm_client(
     """Build the configured client from ``cfg`` overrides then PRXREF_LLM_* env.
 
     ``cfg`` keys (LLM_BACKEND, LLM_BASE_URL, LLM_API_KEY, LLM_MODELS,
-    LLM_REASONING_EFFORT, LLM_TIMEOUT, LLM_TEMPERATURE, LLM_SEED,
-    LLM_CLI_PATH, LLM_CLI_CONCURRENCY, in either case) win over env; env
+    LLM_REASONING_EFFORT, LLM_TIMEOUT, LLM_TIMEOUT_PER_1K, LLM_TEMPERATURE,
+    LLM_SEED, LLM_CLI_PATH, LLM_CLI_CONCURRENCY, in either case) win over
+    env; env
     never includes provider credentials. PRXREF_LLM_BACKEND is read
     case-insensitively and selects ``openai-compat`` (the default, with
     ``ferry`` and ``http`` as aliases), ``litellm``, ``claude-cli`` or
@@ -725,7 +787,23 @@ def create_llm_client(
     claude-cli as its effort setting; empty omits it, and kiro-cli ignores
     it.
     PRXREF_LLM_TIMEOUT (seconds, default 120.0, must be > 0) becomes the
-    client's ``default_timeout``. PRXREF_LLM_TEMPERATURE is parsed to a
+    client's ``default_timeout``. While it is left at that default the
+    openai-compat client also scales each request's deadline from the
+    prompt (issue #72): ``max(120, min(900, 20 + per_1k * estimated_input_
+    tokens / 1000))``, with the estimate taken from the prompt text because
+    usage is only reported after the request — scaling only extends, never
+    shrinks, the deadline. PRXREF_LLM_TIMEOUT_PER_1K
+    (float, must be > 0, default 1.6) tunes the per-1k coefficient for slow
+    endpoints; it applies to the openai-compat family only. An explicit
+    PRXREF_LLM_TIMEOUT or ``--timeout`` disables scaling entirely: the value
+    is then used as-is for every request. A cfg that was resolved through
+    :func:`prxref.config.load_config` always carries an llm_timeout value,
+    so the CLI — the one caller that knows which layer supplied it — passes
+    the boolean key ``LLM_TIMEOUT_IS_DEFAULT`` (or lowercase) alongside the
+    resolved settings; without it the factory infers "default" as "no
+    PRXREF_LLM_TIMEOUT in the environment and the resolved value equals
+    the default". PRXREF_LLM_TEMPERATURE is
+    parsed to a
     float (finite, >= 0 — no upper bound, since the maximum is
     provider-specific); an unset or empty value resolves to
     ``DEFAULT_TEMPERATURE`` (0.0), which IS sent — temperature 0 keeps
@@ -801,6 +879,31 @@ def create_llm_client(
     )
     if timeout is None:
         timeout = DEFAULT_TIMEOUT
+    # The CLI — the caller whose cfg came from load_config — says which
+    # layer supplied the deadline; every other caller falls back to the
+    # inference below, where the environment is the only source that can
+    # still bypass cfg and a resolved value equal to the default is the
+    # default for every purpose that remains distinguishable.
+    layer_flag = None
+    for flag_key in ("LLM_TIMEOUT_IS_DEFAULT", "llm_timeout_is_default"):
+        flag = (cfg or {}).get(flag_key)
+        if isinstance(flag, bool):
+            layer_flag = flag
+            break
+    timeout_is_default = layer_flag if layer_flag is not None else (
+        not (os.environ.get("PRXREF_LLM_TIMEOUT") or "").strip()
+        and timeout == DEFAULT_TIMEOUT
+    )
+    # Read (and validated) even for the backends that will not apply it, so a
+    # malformed value still exits 2 rather than degrading the review.
+    timeout_per_1k = _float_setting(
+        _get("LLM_TIMEOUT_PER_1K", "PRXREF_LLM_TIMEOUT_PER_1K"),
+        "PRXREF_LLM_TIMEOUT_PER_1K",
+        minimum=0.0,
+        exclusive=True,
+    )
+    if timeout_per_1k is None:
+        timeout_per_1k = DEFAULT_TIMEOUT_PER_1K
     temperature = _float_setting(
         _get("LLM_TEMPERATURE", "PRXREF_LLM_TEMPERATURE"),
         "PRXREF_LLM_TEMPERATURE",
@@ -825,6 +928,7 @@ def create_llm_client(
             reasoning_effort=_get("LLM_REASONING_EFFORT", "PRXREF_LLM_REASONING_EFFORT"),
             temperature=temperature,
             seed=seed,
+            timeout_per_1k=timeout_per_1k if timeout_is_default else None,
         )
     if base_url.strip():
         logger.info(

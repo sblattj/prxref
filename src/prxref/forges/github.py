@@ -19,6 +19,7 @@ from ._diff_render import render_diff_entries
 from .base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
+    CommitData,
     DescriptionVersion,
     FeedReadError,
     InlineComment,
@@ -650,6 +651,16 @@ class ForgeImpl:
         that were read successfully. The shortfall is logged rather than
         swallowed — an under-read here shows up as findings re-posted on a
         re-review, with nothing in the output to explain why.
+
+        A REST review comment carries ``line`` only while it still anchors
+        the CURRENT diff; GitHub nulls it (and ``position``) once the comment
+        is outdated and keeps the old value in ``original_line``. Such a
+        comment is read as ``outdated=True, line=None`` (issue #73) rather
+        than re-anchored at its original line, which laundered an outdated
+        thread into a current-looking one. Resolution, outdatedness and the
+        permalink are then patched from a best-effort GraphQL second read,
+        :meth:`_patch_thread_states`, because the REST feed cannot express
+        any of the three.
         """
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
         headers = self._headers(ref.host)
@@ -659,7 +670,12 @@ class ForgeImpl:
             for data in self._iter_pages(ref, url, headers, what="comment feed"):
                 for item in data:
                     path = item.get("path")
-                    line = item.get("line") or item.get("original_line") or item.get("position")
+                    line = item.get("line")
+                    outdated = not (
+                        isinstance(line, int) and not isinstance(line, bool) and line > 0
+                    )
+                    if outdated:
+                        line = None
                     start_line = item.get("start_line")
                     if not (
                         isinstance(start_line, int)
@@ -680,6 +696,7 @@ class ForgeImpl:
                             author=author,
                             body_snippet=snippet,
                             start_line=start_line,
+                            outdated=outdated,
                         )
                     )
         except FeedReadError as e:
@@ -689,7 +706,164 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, len(threads), e,
             )
 
+        self._patch_thread_states(ref, threads)
         return threads
+
+    _REVIEW_THREADS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: $pageSize, after: $after) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          isResolved
+          isOutdated
+          url
+          comments(first: 1) {
+            nodes {
+              path
+              line
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+    def _patch_thread_states(self, ref: PRRef, threads: list[Thread]) -> None:
+        """Patch ``resolved`` / ``outdated`` / ``url`` from GraphQL, best-effort.
+
+        The REST review-comment feed cannot express any of the three: it has
+        no resolution field at all, only the GraphQL ``reviewThreads``
+        connection knows ``isResolved`` and ``isOutdated``, and only it has
+        the thread permalink. This second read pages through
+        ``reviewThreads`` and patches each REST thread whose ``(path, line)``
+        matches a thread's first comment — the same join GitHub itself makes
+        between the two views of one thread, ``line`` being null in both for
+        an outdated comment.
+
+        Failure-tolerant by contract: no token, a transport failure, a
+        non-OK status, a GraphQL ``errors`` array or an unreadable body logs
+        one DEBUG line and leaves the REST threads exactly as they were, so
+        resolution stays unreported (``False``, suppressible — today's
+        behaviour) rather than costing the review anything. A page budget
+        overrun stops the patch the same way, with the threads read so far
+        already applied.
+        """
+        if not threads:
+            return
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        headers = self._headers(ref.host)
+        if "Authorization" not in headers:
+            logger.debug(
+                "review-thread states for %s were not read: no token for GraphQL",
+                where,
+            )
+            return
+
+        by_anchor: dict[tuple[object, object], dict[str, Any]] = {}
+        cursor: str | None = None
+        for _ in range(_MAX_PAGES):
+            try:
+                resp = self.session.post(
+                    self._graphql_url(ref),
+                    json={
+                        "query": self._REVIEW_THREADS_QUERY,
+                        "variables": {
+                            "owner": ref.owner,
+                            "repo": ref.repo,
+                            "number": ref.number,
+                            "pageSize": _PAGE_SIZE,
+                            "after": cursor,
+                        },
+                    },
+                    headers=headers,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                logger.debug(
+                    "review-thread states for %s could not be read: %s", where, e,
+                )
+                return
+            if not resp.ok:
+                logger.debug(
+                    "review-thread states for %s returned HTTP %s: %s",
+                    where, resp.status_code, _response_detail(resp),
+                )
+                return
+            try:
+                body = resp.json()
+            except ValueError as e:
+                logger.debug(
+                    "review-thread states for %s returned an unreadable body: %s",
+                    where, e,
+                )
+                return
+            if not isinstance(body, dict) or body.get("errors"):
+                logger.debug(
+                    "review-thread states for %s returned GraphQL errors: %s",
+                    where, _response_detail(resp),
+                )
+                return
+            connection = (
+                ((body.get("data") or {}).get("repository") or {})
+                .get("pullRequest") or {}
+            ).get("reviewThreads")
+            if not isinstance(connection, dict):
+                logger.debug(
+                    "review-thread states for %s returned no reviewThreads", where,
+                )
+                return
+            for node in connection.get("nodes") or ():
+                if not isinstance(node, dict):
+                    continue
+                comments = node.get("comments") or {}
+                first = next(
+                    (c for c in comments.get("nodes") or () if isinstance(c, dict)),
+                    None,
+                )
+                if first is None:
+                    continue
+                by_anchor[(first.get("path"), first.get("line"))] = node
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                logger.debug(
+                    "review-thread states for %s reported more pages but no "
+                    "endCursor; stopping the patch read",
+                    where,
+                )
+                return
+        else:
+            logger.debug(
+                "review-thread states for %s hit the page budget; threads past "
+                "the last page keep their REST state",
+                where,
+            )
+
+        patched = 0
+        for t in threads:
+            node = by_anchor.get((t.path, t.line))
+            if node is None:
+                continue
+            t.resolved = bool(node.get("isResolved"))
+            t.outdated = t.outdated or bool(node.get("isOutdated"))
+            url = node.get("url")
+            if isinstance(url, str) and url:
+                t.url = url
+            patched += 1
+        logger.debug(
+            "review-thread states for %s: %d of %d REST thread(s) matched a "
+            "GraphQL reviewThread",
+            where, patched, len(threads),
+        )
 
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
         """Return the text of ``path`` at commit ``sha``, best-effort.
@@ -784,6 +958,39 @@ class ForgeImpl:
             and isinstance(entry.get("path"), str) and entry["path"]
         }
         return PathListing(paths=tuple(sorted(paths)), complete=not bool(body.get("truncated")))
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        The per-PR commit listing ``/pulls/{n}/commits`` needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. Paged with the
+        same walker the comment feeds use (``FeedReadError`` when the walk
+        cannot reach the end). Each item keeps the ``sha``, the first line
+        of ``commit.message`` as the subject, and ``len(parents)`` — a
+        squash-merged PR lists one commit, a merge commit more than one
+        parent, which is all the metadata checks need.
+        """
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+            f"/pulls/{ref.number}/commits"
+        )
+        headers = self._headers(ref.host)
+        commits: list[CommitData] = []
+        for page in self._iter_pages(ref, url, headers, what="commit listing"):
+            for entry in page:
+                commit = entry.get("commit")
+                message = (
+                    commit.get("message") if isinstance(commit, dict) else None
+                ) or ""
+                subject = message.splitlines()[0] if message else ""
+                commits.append(CommitData(
+                    sha=entry.get("sha") or "",
+                    subject=subject,
+                    parent_count=len(entry.get("parents") or []),
+                ))
+        return commits
 
     def prune_inline_comments(
         self, ref: PRRef, *, paths: Collection[str] | None = None,

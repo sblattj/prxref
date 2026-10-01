@@ -27,6 +27,11 @@ included, because the "Other files changed in this PR" digest quotes
 TransportConfig's hunk. So the definitions evidence is keyed on the
 ``TransportConfig.java:11: `` row inside the definitions block, never on the
 bare string.
+
+Issue #67 re-recorded the seven worker SYSTEM texts in the golden (its
+version, forge reads, counts and user texts are still 0.15.0's): each is the
+earlier text with exactly the "Matching rules" section inserted above
+"## Style" in worker.md, and every sweep prompt is byte-identical.
 """
 from __future__ import annotations
 
@@ -225,6 +230,7 @@ class TestTheRecordAndTheTraceCarryTheReasons:
         assert {key: value for key, value in record.items() if key != "units"} == {
             "mode": "repo", "max_chars": 12000, "max_reads": 200, "max_chunk_reads": 16,
             "contract_globs": list(GLOBS), "exclude_globs": [],
+            "standards_globs": [], "standards_max_chars": 4000,
             "reader": "forge", "listing": {"paths": 6, "complete": True}, "reads": 5, "read_cap_hit": False,
             "chunk_read_cap_hit": False, "run_read_cap_hit": False,
         }

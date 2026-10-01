@@ -29,13 +29,16 @@ REPO = FIXTURE / "repo"
 DIFF = FIXTURE / "pr.diff"
 CASE_ID = "issue17-repo-context"
 FOUR = ("repo_context", "repo_context_max_chars", "context_contract_globs", "context_exclude_globs")
+STANDARDS = ("context_standards_globs", "context_standards_max_chars")
 READ_CAPS = ("repo_context_max_reads", "repo_context_max_chunk_reads")
+SIX = FOUR + STANDARDS
 
 ENTRY = {"path": "api/openapi/connectors.yaml", "line": 6, "symbol": "IdempotencyKey",
          "kind": "contract", "reason": "contract", "chars": 120}
 SAMPLE = {
     "mode": "repo", "max_chars": 12000, "max_reads": 200, "max_chunk_reads": 16,
     "contract_globs": ["**/openapi/**"], "exclude_globs": [],
+    "standards_globs": ["docs/standards/**"], "standards_max_chars": 4000,
     "reader": "repo-dir", "listing": {"paths": 9, "complete": True}, "reads": 4,
     "read_cap_hit": False, "chunk_read_cap_hit": False, "run_read_cap_hit": False, "units": None,
 }
@@ -134,6 +137,9 @@ class TestTheFourSettingsReachOrchestrate:
         assert kwargs["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
         assert len(kwargs["context_contract_globs"]) == 8
         assert list(kwargs["context_exclude_globs"]) == []
+        assert kwargs["context_standards_globs"] == config._DEFAULTS["context_standards_globs"]
+        assert len(kwargs["context_standards_globs"]) == 5
+        assert kwargs["context_standards_max_chars"] == 4000
         assert kwargs["repo_dir"] is None
 
     def test_the_environment_values_arrive(self, recorder, monkeypatch):
@@ -141,15 +147,19 @@ class TestTheFourSettingsReachOrchestrate:
         monkeypatch.setenv("PRXREF_REPO_CONTEXT_MAX_CHARS", "5000")
         monkeypatch.setenv("PRXREF_CONTEXT_CONTRACT_GLOBS", "**/api/*.yaml,**/schema/**")
         monkeypatch.setenv("PRXREF_CONTEXT_EXCLUDE_GLOBS", "vendor/**")
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_GLOBS", "docs/standards/**,SECURITY.md")
+        monkeypatch.setenv("PRXREF_CONTEXT_STANDARDS_MAX_CHARS", "2500")
 
         assert cli.main(["review", "--diff-file", str(DIFF)]) == 0
 
         (kwargs,) = recorder
-        assert {key: kwargs[key] for key in FOUR} == {
+        assert {key: kwargs[key] for key in SIX} == {
             "repo_context": "repo",
             "repo_context_max_chars": 5000,
             "context_contract_globs": ["**/api/*.yaml", "**/schema/**"],
             "context_exclude_globs": ["vendor/**"],
+            "context_standards_globs": ["docs/standards/**", "SECURITY.md"],
+            "context_standards_max_chars": 2500,
         }
 
     def test_a_bad_level_exits_2_naming_the_variable_before_orchestrate(self, recorder, monkeypatch, capsys):
@@ -239,10 +249,10 @@ class TestJsonKey:
     def test_repo_context_rides_right_after_rule_counts(self):
         keys = list(cli._build_json_result({"verdict": "Approved", "repo_context": SAMPLE,
                                             "sampling": {"seed": 1}, "replay": {}}))
-        assert keys.index("repo_context") == keys.index("rule_counts") + 1
+        assert keys.index("repo_context") == keys.index("rule_scope_cleared") + 1
         assert keys[keys.index("repo_context") + 1:] == [
-            "parse_retries", "context_followup", "suggestions", "incremental", "degraded", "config_file",
-            "failed_chunks", "sampling", "replay",
+            "parse_retries", "context_followup", "suggestions", "incremental", "ci_wiring",
+            "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "sampling", "replay",
         ]
 
     @pytest.mark.parametrize("result", [{}, None, {"verdict": "Approved"}, {"repo_context": None}])
@@ -365,9 +375,9 @@ class TestEvalWiring:
         }
         assert stub_llm.calls == 0
 
-    def test_run_config_keys_end_with_the_four_settings_then_the_read_caps(self):
-        assert evals.RUN_CONFIG_KEYS[-6:] == FOUR + READ_CAPS
-        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 6
+    def test_run_config_keys_end_with_the_six_settings_then_the_read_caps(self):
+        assert evals.RUN_CONFIG_KEYS[-8:] == SIX + READ_CAPS
+        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 8
 
 
 class TestFixtureEvalEndToEnd:
@@ -394,9 +404,10 @@ class TestFixtureEvalEndToEnd:
         assert [entry for entry in entries if entry["kind"] == "contract"] != []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        assert list(run["config"])[-6:] == list(FOUR + READ_CAPS)
+        assert list(run["config"])[-8:] == list(SIX + READ_CAPS)
         assert run["config"]["repo_context"] == "repo"
         assert run["config"]["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
+        assert run["config"]["context_standards_globs"] == config._DEFAULTS["context_standards_globs"]
         assert stub_llm.calls >= 2
 
     def test_control_off_records_null(self, tmp_path, stub_llm, capsys):
