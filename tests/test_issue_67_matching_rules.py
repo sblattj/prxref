@@ -1,7 +1,7 @@
 """Issue #67 — the worker prompt must probe the matching rules of changed
 input-matching constructs (web-server ``location``/``rewrite``, router path
-patterns, globs, allow-lists, validators) for inputs they newly capture, and
-downgrade to an ``outofscope``/0.6 constraint note when the diff or a context
+patterns, globs, validators) for inputs they newly capture, and
+report nothing when the diff or a context
 block shows every capturable input is constrained.
 
 Self-contained, modeled on tests/test_issue_07_containment_boundary.py: it
@@ -211,25 +211,6 @@ MATCHING_FINDING_JSON = json.dumps({
     "escalations": [],
 })
 
-CONSTRAINED_NOTE_JSON = json.dumps({
-    "findings": [
-        {
-            "file": "conf/nginx.conf",
-            "line": RULE_LINE,
-            "severity": "outofscope",
-            "confidence": 0.6,
-            "title": "Static-asset 404 rule captures no plausible input here",
-            "body": (
-                "Every capturable input is constrained: the route table "
-                "documents :version as a UUID, so no dotted input plausibly "
-                "occurs here — stating the constraint instead of a warning."
-            ),
-        }
-    ],
-    "escalations": [],
-})
-
-
 # ---------------------------------------------------------------------------
 # Acceptance 1 (Test B): the warning survives end to end with the example
 # input in the body — the downgrade clause is content-driven, so a plain
@@ -267,26 +248,31 @@ def test_matching_warning_survives_with_the_example_input_in_the_body():
 # ---------------------------------------------------------------------------
 
 
-def test_constrained_capture_reports_outofscope_note_and_no_warning():
+def test_constrained_capture_reports_nothing_on_the_rule_line():
     forge = _FakeForge(
         pr=_make_pr(), diff=SPA_FALLBACK_DIFF.replace("{routes_line}", UUID_VERSION_LINE)
     )
-    llm = _VerbatimLLM(CONSTRAINED_NOTE_JSON)
+    llm = _VerbatimLLM(json.dumps({"findings": [], "escalations": []}))
 
     result = orchestrate_review(forge, REF, llm, post=False)
 
-    findings = result["findings_active"]
-    assert findings, (
-        "the outofscope constraint note must survive the quality gates — "
-        "its 0.6 confidence sits exactly at the default floor"
-    )
-    severities = {f.severity for f in findings}
-    assert "warning" not in severities, (
-        f"no warning may be reported once every capturable input is "
-        f"constrained; active findings were: {findings}"
-    )
-    notes = [f for f in findings if f.severity == "outofscope"]
-    assert notes, f"the constraint note must keep severity outofscope; got {severities}"
+    on_rule = [
+        f
+        for f in result["findings_active"]
+        if f.file == "conf/nginx.conf" and f.line == RULE_LINE
+    ]
+    assert not on_rule, f"a constrained capture must post nothing; got {on_rule}"
+
+
+def test_matching_rules_section_reports_nothing_and_excludes_firewall_lists():
+    text = load_prompt("worker.md")
+    section = text.partition("## Matching rules")[2].partition("## Style")[0]
+    assert section
+    lowered = section.lower()
+    assert "firewall" not in lowered
+    assert "allow-list" not in lowered
+    assert "report nothing" in lowered
+    assert "outofscope" not in lowered
 
 
 # ---------------------------------------------------------------------------
