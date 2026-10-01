@@ -174,7 +174,7 @@ and at render time any finding in such a group is added under
 `**Other findings (N)**`, with a warning in the log. That block, followed by
 the inline accounting when the template has neither `{findings}` nor
 `{inline_accounting}`, goes just above the footer. The `**PR metadata**`
-section (#70, present only when `PRXREF_METADATA_RULES` found a violation)
+section (#70, present when the metadata checks, run through `PRXREF_METADATA_RULES` on or a rules file, found a violation or a configured check was skipped)
 goes there too, ahead of both, on every template — it has no slot. The
 footer is the attribution, together
 with a `---` rule directly over it if there is one. A template that dropped
