@@ -247,8 +247,11 @@ that header present. A finding is dropped only when one item meets all of:
 - **A missing claim about that header.** The finding's title or body names
   the header as a whole token with a missing keyword (`missing`, `absent`,
   `lacks`, `without`, `no`, `not set`, `does not send`, ...) within a few
-  words of it, and the name is hyphenated (`Cache-Control`) or the text says
-  "header". `no-cache` is not a missing keyword, and a claim about the
+  words of it in the same clause (clauses split at `.`, `;`, `,`, a line
+  break and `but`/`while`/`although`), with no other hyphenated header name
+  between the two, and the name is hyphenated (`Cache-Control`) or the text
+  says "header". "Cache-Control is set but X-Frame-Options is missing" claims
+  nothing about `Cache-Control`. `no-cache` is not a missing keyword, and a claim about the
   header's value (`max-age is too short`) is not a missing claim.
 - **The same resource.** When the finding names a URL path (`/fonts/x.otf`), a
   URL or a glob (`*.otf`), the item's command or output must name it, or for
