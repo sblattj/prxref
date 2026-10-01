@@ -1795,7 +1795,7 @@ def _run_review(
         ci_wiring=None if layers.get("ci_wiring") == "default" else cfg["ci_wiring"],
         ci_wiring_globs=cfg["ci_wiring_globs"],
         evidence=evidence,
-        evidence_max_chunk_chars=cfg["evidence_max_chunk_chars"],
+        evidence_max_chars=cfg["evidence_max_chars"],
         stable_ids=cfg["stable_ids"],
         verdict_store=cfg["verdict_store"],
     )
