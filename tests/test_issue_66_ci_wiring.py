@@ -491,3 +491,63 @@ class TestTheReaderGate:
         )
         assert wired["findings_active"] == []
         assert wired["ci_wiring"]["ci_files"] == sorted([WORKFLOW_PATH, *LITERAL_CI_PATHS])
+
+
+def _modified_diff(path: str, removed: list[str], added: list[str], ctx: bool = True) -> str:
+    body = "\n".join([f"-{x}" for x in removed] + [f"+{x}" for x in added])
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        f"@@ -1,{len(removed) + ctx} +1,{len(added) + ctx} @@\n"
+        f"{' context' + chr(10) if ctx else ''}"
+        f"{body}\n"
+    )
+
+
+class TestModifiedCandidates:
+    def test_a_body_only_edit_to_a_check_named_script_is_no_candidate(self):
+        files = parse_unified_diff(_modified_diff(
+            "scripts/check_env.sh", ["echo old"], ["echo new"],
+        ))
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_a_modified_file_gaining_a_shebang_is_no_candidate(self):
+        files = parse_unified_diff(_modified_diff(
+            "tools/migrate", ["x = 1"], ["#!/usr/bin/env python3"], ctx=False,
+        ))
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_a_modified_script_gaining_a_flag_is_a_changed_candidate(self):
+        files = parse_unified_diff(_modified_diff(
+            "scripts/build.py", ["p.add_argument('--fast')"],
+            ["p.add_argument('--fast')", "p.add_argument('--verify')"],
+        ))
+        [candidate] = ci_wiring.candidate_checks(files)
+        assert candidate.path == "scripts/build.py"
+        assert "--verify" in candidate.reason
+        findings, _ = ci_wiring.ci_wiring_findings(
+            files, listing=None, read=lambda p: "run: make build\n" if p == "Jenkinsfile" else None,
+            ticket_text=None, globs=[],
+        )
+        [finding] = findings
+        assert "changed" in finding.title
+        assert "added" not in finding.title
+        assert "This PR changes" in finding.body
+
+    def test_a_flag_already_present_in_removed_lines_is_not_gained(self):
+        files = parse_unified_diff(_modified_diff(
+            "scripts/build.py", ["p.add_argument('--verify')"],
+            ["p.add_argument('--verify', help='x')"],
+        ))
+        assert ci_wiring.candidate_checks(files) == []
+
+    def test_an_added_candidate_keeps_the_added_wording(self):
+        files = parse_unified_diff(VERIFY_DIFF)
+        findings, _ = ci_wiring.ci_wiring_findings(
+            files, listing=None, read=lambda p: "run: make\n" if p == "Jenkinsfile" else None,
+            ticket_text=None, globs=[],
+        )
+        [finding] = findings
+        assert "is added but" in finding.title
+        assert "This PR adds" in finding.body
