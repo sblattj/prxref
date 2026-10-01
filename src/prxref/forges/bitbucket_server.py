@@ -729,12 +729,13 @@ class ForgeImpl:
 
         The per-PR listing ``/pull-requests/{id}/commits`` needs no range, so
         ``base_sha``/``head_sha`` are accepted and ignored. It pages with
-        ``start``/``limit`` like the activity feed and lists newest first,
-        so the collected entries are reversed. Each value keeps its ``id``
-        as the sha, the first line of ``message`` as the subject, and
+        ``start``/``limit``/``isLastPage``/``nextPageStart`` like the
+        activity feed, and its newest-first order (git log order) is
+        assumed, so the collected entries are reversed. Each value keeps its
+        ``id`` as the sha, the first line of ``message`` as the subject, and
         ``len(parents)`` as the parent count (a merge commit has two). The
-        endpoint shape comes from the Bitbucket Server REST documentation
-        and was not probed live. Any read that does not reach the end of
+        shape mirrors the other Data Center listings and was not checked
+        against a live server. Any read that does not reach the end of
         the listing — transport failure, non-OK status, unparseable body,
         or the ``_MAX_PAGES`` budget running out — raises ``FeedReadError``
         rather than returning a short list.
