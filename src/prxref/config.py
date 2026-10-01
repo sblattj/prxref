@@ -360,13 +360,15 @@ LLM / pipeline:
                                 ``--evidence-file PATH`` flag replaces this
                                 list for one run. Empty (the default) = no
                                 evidence
-  PRXREF_EVIDENCE_MAX_CHUNK_CHARS
+  PRXREF_EVIDENCE_MAX_CHARS
                                 Execution evidence (#69): characters of
                                 evidence text one review unit's prompt may
                                 carry; a unit's matched items go in ahead of
                                 the global ones and items that no longer fit
                                 are left out whole behind one truncation
-                                line; positive int (default 4000)
+                                line; positive int (default 8000; the
+                                old name PRXREF_EVIDENCE_MAX_CHUNK_CHARS is
+                                still read)
   PRXREF_REPO_CONTEXT           Repository context (0.16.0): "off" (default) |
                                 "diff" | "repo". "off" adds no repository
                                 context entry, read, trace event or log line;
@@ -815,7 +817,7 @@ _DEFAULTS: dict[str, object] = {
     # it); the int is the per-unit prompt budget the orchestrator trims
     # blocks to.
     "evidence_files": [],
-    "evidence_max_chunk_chars": 4000,
+    "evidence_max_chars": 8000,
     "repo_context": "off",
     "repo_context_max_chars": 12000,
     "repo_context_max_reads": 200,
@@ -926,7 +928,7 @@ _INT_KEYS = frozenset({
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
-    "max_areas_per_pr", "evidence_max_chunk_chars",
+    "max_areas_per_pr", "evidence_max_chars",
     "context_standards_max_chars",
 })
 _FLOAT_KEYS = frozenset({
@@ -1059,7 +1061,7 @@ _RANGES: dict[str, _Range] = {
     "repo_context_max_reads": _Range(0),
     "repo_context_max_chunk_reads": _Range(0),
     "max_areas_per_pr": _Range(0, low_inclusive=True),
-    "evidence_max_chunk_chars": _Range(0),
+    "evidence_max_chars": _Range(0),
     "context_standards_max_chars": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
@@ -1067,6 +1069,7 @@ _RANGES: dict[str, _Range] = {
 
 _LEGACY_ENV_ALIASES: dict[str, str] = {
     "max_error_findings": _ENV_PREFIX + "MAX_ERRORS",
+    "evidence_max_chars": _ENV_PREFIX + "EVIDENCE_MAX_CHUNK_CHARS",
 }
 
 #: The repository config file auto-discovered in the working directory (#38).
@@ -1096,7 +1099,7 @@ FILE_KEYS = frozenset({
     "review_rules", "review_rules_max_chars",
     "scoped_rules", "scoped_rules_max_chars", "prompts_dir",
     "ticket_context_file", "ticket_context_max_chars",
-    "evidence_files", "evidence_max_chunk_chars",
+    "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "routing_probe", "incremental",

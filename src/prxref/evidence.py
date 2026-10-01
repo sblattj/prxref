@@ -40,7 +40,7 @@ them; the sweep never carries another chunk's matched items
 (:meth:`EvidenceBundle.global_block` builds its block against every
 chunk's paths at once). Per unit,
 matched items go in ahead of global ones until
-``PRXREF_EVIDENCE_MAX_CHUNK_CHARS`` is spent; items that no longer fit
+``PRXREF_EVIDENCE_MAX_CHARS`` is spent; items that no longer fit
 are left out whole — never cut mid-fence — behind one truncation line
 naming the variable.
 
@@ -78,11 +78,11 @@ from .triage import Finding
 
 #: Characters kept from one evidence file, before parsing. The cap bounds
 #: memory and the record, never the prompts: those are bounded per unit by
-#: ``PRXREF_EVIDENCE_MAX_CHUNK_CHARS``.
+#: ``PRXREF_EVIDENCE_MAX_CHARS``.
 MAX_FILE_CHARS = 120_000
 
 #: Characters of one item's output kept when it is parsed, with a visible
-#: marker when it cut anything. The default unit budget of 4000 characters
+#: marker when it cut anything. The default unit budget of 8000 characters
 #: therefore fits a command plus its trimmed output with room to spare.
 MAX_ITEM_CHARS = 2_000
 
@@ -105,7 +105,7 @@ _ITEM_TRUNCATION_LINE = "[evidence output truncated: only the first {max_chars} 
 #: knob that would fit them (#69). Public because the prompt text is a
 #: contract the tests pin.
 LEFT_OUT_LINE = (
-    "[evidence truncated: {count} item(s) left out; raise PRXREF_EVIDENCE_MAX_CHUNK_CHARS]"
+    "[evidence truncated: {count} item(s) left out; raise PRXREF_EVIDENCE_MAX_CHARS]"
 )
 
 _URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -255,12 +255,15 @@ def _render_items(ordered: list[EvidenceItem], max_chars: int) -> str:
             break
         kept.append(part)
         used += 2 + len(part)
-    if not kept:
-        return ""
-    block = "\n\n".join([head, *kept])
-    if left_out:
-        block += "\n" + LEFT_OUT_LINE.format(count=left_out)
-    return block
+    while kept:
+        block = "\n\n".join([head, *kept])
+        if left_out:
+            block += "\n" + LEFT_OUT_LINE.format(count=left_out)
+        if len(block) <= max_chars:
+            return block
+        kept.pop()
+        left_out += 1
+    return ""
 
 
 def _normalise_path(raw: str) -> str:
