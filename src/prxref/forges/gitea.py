@@ -35,6 +35,7 @@ from .base import (
     ATTRIBUTION_MARKER,
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
+    CommitData,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -293,6 +294,52 @@ class ForgeImpl:
         if len(content) > _MAX_COMPARE_BLOB_BYTES or b"\x00" in content[:8000]:
             return None
         return content
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        The API has no per-PR commit listing, so one read of the same
+        compare endpoint ``get_compare_diff`` uses supplies them:
+        ``/compare/{base}...{head}`` answers a ``commits`` array in
+        oldest-first order. Either sha left empty is filled by re-reading
+        the PR (one extra request, so the caller that already holds
+        ``get_pr``'s answer pays nothing). Unlike ``get_compare_diff`` the
+        merge base is not derived here — only the commit entries
+        themselves are read — so a partial listing is returned as-is. Each
+        entry keeps the ``sha``, the first line of the nested
+        ``commit.message`` as the subject, and ``len(parents)``.
+        """
+        base, head = base_sha, head_sha
+        if not base or not head:
+            pr = self.get_pr(ref)
+            base, head = pr.target_sha, pr.source_sha
+        resp = self.session.get(
+            f"{self._repo_url(ref)}/compare/{base}...{head}",
+            headers=self._headers(), timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        commits = body.get("commits") if isinstance(body, dict) else None
+        if not isinstance(commits, list):
+            raise ValueError(
+                f"Gitea compare for {self._where(ref)} returned "
+                f"{type(body).__name__}, not an object with a commits list"
+            )
+        result: list[CommitData] = []
+        for entry in commits:
+            if not isinstance(entry, dict):
+                continue
+            commit = entry.get("commit")
+            message = commit.get("message") if isinstance(commit, dict) else None
+            subject = message.splitlines()[0] if message else ""
+            result.append(CommitData(
+                sha=entry.get("sha") or "",
+                subject=subject,
+                parent_count=len(entry.get("parents") or []),
+            ))
+        return result
 
     def _get_json(self, ref: PRRef, url: str, *, what: str, params: dict | None = None) -> Any:
         """GET one JSON document, raising ``FeedReadError`` on any failure."""

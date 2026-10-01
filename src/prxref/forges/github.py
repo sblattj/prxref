@@ -19,6 +19,7 @@ from ._diff_render import render_diff_entries
 from .base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
+    CommitData,
     DescriptionVersion,
     FeedReadError,
     InlineComment,
@@ -957,6 +958,39 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
             and isinstance(entry.get("path"), str) and entry["path"]
         }
         return PathListing(paths=tuple(sorted(paths)), complete=not bool(body.get("truncated")))
+
+    def get_commits(
+        self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
+    ) -> list[CommitData]:
+        """Return the PR's commits, oldest first (issue #70).
+
+        The per-PR commit listing ``/pulls/{n}/commits`` needs no range, so
+        ``base_sha``/``head_sha`` are accepted and ignored. Paged with the
+        same walker the comment feeds use (``FeedReadError`` when the walk
+        cannot reach the end). Each item keeps the ``sha``, the first line
+        of ``commit.message`` as the subject, and ``len(parents)`` — a
+        squash-merged PR lists one commit, a merge commit more than one
+        parent, which is all the metadata checks need.
+        """
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+            f"/pulls/{ref.number}/commits"
+        )
+        headers = self._headers(ref.host)
+        commits: list[CommitData] = []
+        for page in self._iter_pages(ref, url, headers, what="commit listing"):
+            for entry in page:
+                commit = entry.get("commit")
+                message = (
+                    commit.get("message") if isinstance(commit, dict) else None
+                ) or ""
+                subject = message.splitlines()[0] if message else ""
+                commits.append(CommitData(
+                    sha=entry.get("sha") or "",
+                    subject=subject,
+                    parent_count=len(entry.get("parents") or []),
+                ))
+        return commits
 
     def prune_inline_comments(
         self, ref: PRRef, *, paths: Collection[str] | None = None,

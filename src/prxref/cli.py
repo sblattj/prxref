@@ -1569,6 +1569,11 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
+        metadata_rules=cfg["metadata_rules"],
+        branch_patterns=cfg["branch_patterns"],
+        commit_reference=cfg["commit_reference"],
+        area_globs=cfg["area_globs"],
+        max_areas_per_pr=cfg["max_areas_per_pr"],
         replay=(
             replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))
             if replay is not None else None

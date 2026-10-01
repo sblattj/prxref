@@ -200,6 +200,18 @@ its `PRXREF_` name.
 | `size_warn_files` | integer | Changed-file threshold for the PR size advisory ([more](env-vars.md#llm--pipeline)). |
 | `size_ignore_globs` | array of strings | Extra globs left out of both size counts ([more](env-vars.md#llm--pipeline)). |
 
+### PR metadata rules
+
+Flat keys, not a `[metadata]` table — the file is flat, so a table is a configuration error.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `metadata_rules` | string | `on` runs the three deterministic PR-metadata checks below; `off` (the default) runs none ([more](env-vars.md#llm--pipeline)). |
+| `branch_patterns` | array of strings | `type=regex` pairs: the source branch must match the PR type's pattern ([more](env-vars.md#llm--pipeline)). |
+| `commit_reference` | string | Regex every non-merge commit subject must contain ([more](env-vars.md#llm--pipeline)). |
+| `area_globs` | array of strings | `name=glob` pairs classifying diff paths into areas ([more](env-vars.md#llm--pipeline)). |
+| `max_areas_per_pr` | integer | Most distinct areas a PR may touch before the area check flags it ([more](env-vars.md#llm--pipeline)). |
+
 ## Settings a repository file cannot set
 
 Whoever can change the repository controls this file, and on a pull request
