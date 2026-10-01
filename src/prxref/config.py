@@ -539,13 +539,14 @@ LLM / pipeline:
                                 posts or chunks failed and why; the exit
                                 code never changes. Matched exactly; any
                                 other value is a configuration error
-  PRXREF_STABLE_IDS             Stable finding ids (#71): "0" opts out and leaves every prompt, call, post
-                                and finding as before — the id pass never
-                                runs, every finding's "id",
-                                "anchor_block" and "id_reused_from" are
-                                null, and the run record's "stable_ids"
-                                is null. "1" (the default) stamps every finding with a
-                                content-derived id
+  PRXREF_STABLE_IDS             Deprecated and ignored (#71): stable
+                                finding ids are always on. Any value is
+                                still accepted (never a configuration
+                                error) so an existing environment keeps
+                                working; a non-empty value other than
+                                "1" (which reads as off) logs one WARNING
+                                saying the knob is ignored. Every finding
+                                carries a content-derived id
                                 (<file>#<rule or norule>#<12-hex claim
                                 hash>) that survives reworded titles and
                                 anchor drift, plus the anchor block (the
@@ -553,18 +554,20 @@ LLM / pipeline:
                                 key — metadata the id excludes) and an
                                 id_reused_from label saying where a
                                 reused id came from ("run", "verdict" or
-                                "thread"). On by default; only the
-                                literal "1" keeps it on once set
+                                "thread")
   PRXREF_VERDICT_STORE          Stable finding ids (#71): path to the JSON
                                 verdict store earlier runs' verdicts are
                                 read from, keyed by stable id. Read
-                                unless PRXREF_STABLE_IDS is "0"; a finding
+                                whenever set; a finding
                                 whose id the store holds as "refuted" is
                                 dropped with drop_reason "refuted in
                                 earlier run (<id>)"; so is a reworded
                                 duplicate of the same file and rule
                                 whose title restates the entry's
-                                recorded title. Unset (the default)
+                                recorded title, and a finding whose
+                                0.30.0 id (the claim hash before it
+                                stemmed words) an entry without a title
+                                is keyed by. Unset (the default)
                                 = no persistence; ids are still stamped
                                 but nothing from an earlier run can
                                 match. The review never writes the

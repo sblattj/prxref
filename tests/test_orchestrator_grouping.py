@@ -801,11 +801,15 @@ class _Recorder:
 
 
 class _ListHandler(logging.Handler):
+    """Collects log lines, minus the always-on #71 pass's own (``prxref.stable_ids``)."""
+
     def __init__(self) -> None:
         super().__init__(level=logging.INFO)
         self.lines: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        if record.name == "prxref.stable_ids":
+            return
         self.lines.append(f"{record.name} {record.levelname} {record.getMessage()}")
 
 
@@ -836,10 +840,19 @@ def _json_payload(res: dict) -> dict:
 
 
 def _trace_events(path: str) -> list[dict]:
+    """The trace minus clock fields and the always-on #71 ``stableids`` event.
+
+    The stable-id pass has no off switch since 0.30.1, so its one trace
+    event is projected away like the record keys a later feature added;
+    ``seq`` is renumbered so the remaining events read as the BASE run's.
+    """
     events = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             event = json.loads(line)
+            if event.get("node") == "stableids":
+                continue
+            event["seq"] = len(events) + (events[0]["seq"] if events else event["seq"])
             event.pop("t_ms", None)
             if isinstance(event.get("meta"), dict):
                 event["meta"].pop("elapsed_ms", None)
@@ -886,7 +899,7 @@ def capture(name: str, **knobs) -> tuple[str, dict]:
             trace_dir = os.path.join(tmp, "units")
             res = orchestrator.orchestrate_review(
                 forge, REF, llm, post=True, max_workers=1,
-                trace_file=trace_file, trace_dir=trace_dir, stable_ids=False, **extra(), **knobs,
+                trace_file=trace_file, trace_dir=trace_dir, **extra(), **knobs,
             )
             payload = {
                 "prompts": [[_sha(s), _sha(u)] for s, u in sorted(llm.prompts)],
