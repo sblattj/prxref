@@ -73,8 +73,9 @@ silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
 
 The CI wiring check (#66, on by default; `--ci-wiring off` or
-`PRXREF_CI_WIRING=off` turns it off) flags a verification script, shebang
-or test the PR adds that no CI configuration file invokes. Two more
+`PRXREF_CI_WIRING=off` turns it off) flags a verification script, shebang,
+test, or `make`/`npm` check target the PR adds that no CI configuration
+file invokes. Two more
 deterministic checks are opt-in: the PR metadata rules (#70,
 `metadata_rules = ".prxref/metadata.toml"` naming a separate TOML rules
 file with `branch_patterns`, `commit_reference` and `area_globs`; see
@@ -411,7 +412,7 @@ A run reviews every file on a first review, when the forge cannot read its summa
 - `--repo-dir PATH` — a local checkout of the repository at the PR head. With `PRXREF_REPO_CONTEXT=repo`, repository context reads and lists files there instead of calling the forge (at `diff` it only reads there), so a `--diff-file` review gets repository context with no network. At any `PRXREF_REPO_CONTEXT` level, `off` included, a review with no forge file reader (`--diff-file` without `--pr-url`) also reads its chunk context there: the dependency versions and the same-file definitions a forge review gets. With `--pr-url` the forge still serves chunk context. It is not a replay flag: on its own it neither turns posting off nor adds a `replay` stamp. A path that is not an existing directory exits `2` before any network call, even while `PRXREF_REPO_CONTEXT` is `off`. See [Repository Context](#repository-context).
 - `--trace-dir DIR` — write each review unit's exact prompt halves, raw model response, and metadata to `DIR` (`chunk0.system.md`, `chunk0.user.md`, `chunk0.response.json`, `chunk0.meta.json`, and so on for each chunk and for the whole-PR `sweep`). `PRXREF_TRACE_DIR` does the same for every run; the flag wins when both are set. The files number chunks from 0, while the JSONL trace's `chunk` events (`PRXREF_TRACE_FILE`) number them from 1 in `index`, so the event with `index` N pairs with `chunk{N-1}.*`.
 - `--full-review` — review every file even when `PRXREF_INCREMENTAL=on`; the run still records the head it reviewed, so the following push is incremental again. See [Incremental Re-review](#incremental-re-review).
-- `--ci-wiring {off,on}` — turn the CI wiring check (#66) on or off for this run (`PRXREF_CI_WIRING` does the same; `on` is the default): flag a check the PR adds — a verify/smoke/check script or flag, a file that gains a shebang, a test file outside the runner's default include — that no CI configuration file invokes. Needs the forge's head-sha file reads or `--repo-dir`.
+- `--ci-wiring {off,on}` — turn the CI wiring check (#66) on or off for this run (`PRXREF_CI_WIRING` does the same; `on` is the default): flag a check the PR adds — a verify/smoke/check script or flag, a file that gains a shebang, a test file outside the runner's default include, a verify/smoke/check/test target added to the root Makefile or `package.json` `scripts` — that no CI configuration file invokes. Needs the forge's head-sha file reads or `--repo-dir`.
 - `--ci-wiring-globs GLOBS` — comma-separated globs selecting the CI configuration files the CI wiring check reads (`PRXREF_CI_WIRING_GLOBS`; a set value replaces the built-in set).
 - `--context-standards-globs GLOBS` — comma-separated globs selecting the repository's own standards documents (`PRXREF_CONTEXT_STANDARDS_GLOBS`; a set value replaces the built-in set, and `''` or `off` reads no standards for this run).
 - `--config PATH` — the [repository config file](docs/config-file.md) to read for this run, instead of `.prxref.toml` in the working directory. It wins over `PRXREF_CONFIG_FILE`, and `--config off` reads none. Paths inside the file resolve against the file's directory. A file that does not exist exits `2` with `configuration error: --config: config file not found: PATH`, and a file that fails its checks exits `2` naming the file and the key, both before any network call.
