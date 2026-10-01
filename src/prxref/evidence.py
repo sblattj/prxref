@@ -46,11 +46,14 @@ naming the variable.
 
 The evidence itself is fenced (:func:`prxref.ticket.fence`) and labelled
 data, not instructions, under a rule the worker must not report
-something the evidence contradicts and may cite it; a finding that
-concedes a contradiction is labelled ``"contradicts"`` and
-:func:`prxref.quality.apply_evidence_verdicts` downgrades it to
-``warning`` — relabelled, never dropped, so a mislabel cannot lose a
-real finding outright.
+something the evidence contradicts and may cite it. Behind the model,
+:func:`prxref.quality.apply_evidence_drops` enforces the one contradiction
+code can check: a finding claiming a header missing is dropped as
+``contradicted by execution evidence: <cmd>`` when an exit-0 item's
+output holds that header as a filled ``Name: value`` field line, for the
+resource the finding names (or, naming none, an item that reaches the
+finding's file). Nothing is downgraded, and the model's own verdict on a
+contradiction is never what drops a finding.
 """
 from __future__ import annotations
 

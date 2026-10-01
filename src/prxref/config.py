@@ -348,8 +348,12 @@ LLM / pipeline:
                                 chunk's prompt; the rest ride every prompt,
                                 the whole-PR sweep's included, and a worker
                                 must not report a finding the evidence
-                                contradicts. A missing, unreadable or
-                                non-UTF-8 file, or JSON of the wrong shape,
+                                contradicts. A finding claiming a header
+                                is missing is dropped when an exit-0 item
+                                shows that header as a Name: value line
+                                for the resource it names. A missing,
+                                unreadable or non-UTF-8 file, or JSON of
+                                the wrong shape,
                                 is a configuration error. Comma- or
                                 whitespace-separated; the repeatable
                                 ``--evidence-file PATH`` flag replaces this

@@ -228,6 +228,46 @@ reports a defect nobody found. `apply_example_echo_check` (pass 1) drops it.
 - If the packaged `systemic.md` cannot be read, the run logs a WARNING and
   checks against the worker's example alone.
 
+## Execution evidence (#69)
+
+With execution evidence loaded (`--evidence-file` / `PRXREF_EVIDENCE_FILES`,
+see [docs/env-vars.md](env-vars.md)), `apply_evidence_drops` runs right after
+the example echo check and before every other pass, over chunk and sweep
+findings alike. It drops the one contradiction code can check without the
+model: a finding that claims a header is missing when an evidence item shows
+that header present. A finding is dropped only when one item meets all of:
+
+- **Exit code 0.** A failing run, or one with any other exit code, settles
+  nothing, so the finding stays.
+- **A filled header field line.** The item's output holds a `Name: value`
+  line (curl's `< ` response marker allowed, CRLF captures too) with a
+  non-empty value. The name is matched case-insensitively; a name that only
+  appears in prose (`no Cache-Control set`) or an empty `Name:` field is not
+  presence.
+- **A missing claim about that header.** The finding's title or body names
+  the header as a whole token with a missing keyword (`missing`, `absent`,
+  `lacks`, `without`, `no`, `not set`, `does not send`, ...) within a few
+  words of it, and the name is hyphenated (`Cache-Control`) or the text says
+  "header". `no-cache` is not a missing keyword, and a claim about the
+  header's value (`max-age is too short`) is not a missing claim.
+- **The same resource.** When the finding names a URL path (`/fonts/x.otf`), a
+  URL or a glob (`*.otf`), the item's command or output must name it, or for
+  a glob a path it covers. Repository file paths are not resources. When the
+  finding names none, the item must reach the finding: its paths match the
+  finding's file, or they match no path of the PR (a global item every chunk
+  prompt carries).
+
+The finding gains `drop_reason` `contradicted by execution evidence: <cmd>`,
+naming the item's command, and keeps its severity and confidence. Nothing is
+relabelled or downgraded, and the model's own verdict on a contradiction
+never drops a finding. A deterministic finding and one that already has a
+`drop_reason` are left alone. The pass keeps the list's length and order, so
+the chunk/sweep boundary holds. When it drops anything, prxref logs `evidence:
+dropped N finding(s) the execution evidence contradicts` at INFO, the JSONL
+trace gets one `evidence drop` event with `findings: N`, and the summary's
+evidence note says how many were dropped. Without evidence the pass does not
+run.
+
 ## Ticket scope
 
 With a ticket context configured (`--context-file` / `PRXREF_TICKET_CONTEXT_FILE`,
@@ -396,6 +436,7 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 | --- | --- | --- |
 | `not confirmed by context follow-up (confidence <x> below floor <y>)` | `merge_followup` (context follow-up) | Only with `PRXREF_CONTEXT_FOLLOWUP=on` at `PRXREF_REPO_CONTEXT=repo` (#22). The chunk worker's finding was below `PRXREF_CONFIDENCE_FLOOR`, a definition it names was looked up and sent to the model once more, and no finding of that re-run confirmed it: none in the same file at or above the floor that sits within 5 lines of it, has the same normalized title, or names a looked-up symbol. The reason is set in the chunk worker, before every pass on this page, and `apply_quality_gate` keeps it instead of writing its own `confidence <x> below floor <y>`. A confirmed finding is replaced by the re-run's finding, which then runs every pass; the re-run's other findings are discarded, never posted, and counted in the run record's `context_followup`. |
 | `echoes the prompt's example: "<title>"` | `apply_example_echo_check` | The finding's title, normalized, is the title of the example finding in the worker or sweep template the run used. `<title>` is the example's title as the template writes it. |
+| `contradicted by execution evidence: <cmd>` | `apply_evidence_drops` | Only with execution evidence loaded (#69). The finding claims a header is missing, and the exit-0 item `<cmd>` shows that header as a filled `Name: value` line for the resource the finding names. See [Execution evidence](#execution-evidence-69). |
 | `malformed location: '<file>'` | `apply_location_validation` | The finding names a path the diff never touches — empty, non-path, or invented. |
 | `anchor mismatch: claims <pkg> but line <n> is <key>` | `apply_manifest_claim_check` | A manifest/lockfile finding names one dependency but is anchored on a different entry. |
 | `section mismatch: claims <section> but <pkg> is under <actual>` | `apply_manifest_claim_check` | A manifest/lockfile finding calls an entry a runtime dependency when it lives under `devDependencies`, or the reverse. |

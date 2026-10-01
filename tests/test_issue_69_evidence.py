@@ -17,10 +17,13 @@ duck-types like the ticket. What is pinned here:
 - the two prompt halves through the REAL reviewer: the fenced items and
   the trust paragraph ride the user prompt of every unit that saw
   evidence, beside the ticket context and ahead of the spec constraints;
-- the verdict label: a finding the model marks ``"contradicts"`` — read
-  only on units whose prompt carried evidence — is RELABELLED ``warning``
-  and never dropped, and a failing item reaches the prompts so the model
-  can raise a finding citing it;
+- the deterministic drop (OD11): a finding that claims a header missing
+  is DROPPED as ``contradicted by execution evidence: <cmd>`` when an
+  exit-0 item shows that header as a filled header field line for the
+  resource the finding names (or, naming none, an item that reaches the
+  finding); the model's ``"contradicts"`` label alone changes nothing,
+  and a failing item reaches the prompts so the model can raise a finding
+  citing it;
 - the record: in the result, the JSON and the trace, never the evidence
   text, plus the summary's evidence note.
 """
@@ -44,7 +47,8 @@ from prxref.evidence import (
     load_evidence,
 )
 from prxref.llm import ConfigError, InvokeResult
-from prxref.triage import EVIDENCE_CONTRADICTS
+from prxref.quality import apply_evidence_drops
+from prxref.triage import EVIDENCE_CONTRADICTS, Finding
 from tests.test_orchestrator import REF, FakeForge, _added_file_diff, multi_chunk_diff
 
 SOURCES = ("--evidence-file", "PRXREF_EVIDENCE_FILES")
@@ -78,6 +82,17 @@ FINDING = {
     "file": "src/app.py", "line": 3, "severity": "error", "confidence": 0.9,
     "title": "Broken import", "body": "The import at line 3 does not resolve.",
     "evidence": EVIDENCE_CONTRADICTS,
+}
+
+PROBE = {
+    "command": "curl -sI /x",
+    "exit_code": 0,
+    "output": "HTTP/1.1 200 OK\nCache-Control: public, max-age=31536000, immutable",
+}
+HEADER_CLAIM = {
+    "file": "src/app.py", "line": 3, "severity": "error", "confidence": 0.9,
+    "title": "Missing Cache-Control header",
+    "body": "Responses are served without a Cache-Control header.",
 }
 
 HEADING = "### Execution evidence"
@@ -440,13 +455,27 @@ class TestThroughTheRealReviewer:
             assert SENTINEL in user
         assert res["evidence"]["matched_chunks"] == 0
 
-    def test_a_contradicted_finding_is_relabelled_never_dropped(self, tmp_path):
+    def test_a_contradicted_header_claim_is_dropped_not_relabelled(self, tmp_path):
+        evidence = self._active(tmp_path, [PROBE])
+        _forge, _llm, res = _run(evidence, findings=[dict(HEADER_CLAIM)])
+        assert res["findings_active"] == []
+        dropped = res["findings_dropped"]
+        assert len(dropped) == 1
+        assert dropped[0].drop_reason == f"contradicted by execution evidence: {PROBE['command']}"
+        assert dropped[0].severity == "error"
+
+    def test_a_failing_probe_keeps_the_header_claim(self, tmp_path):
+        evidence = self._active(tmp_path, [dict(PROBE, exit_code=1)])
+        _forge, _llm, res = _run(evidence, findings=[dict(HEADER_CLAIM)])
+        assert [f.title for f in res["findings_active"]] == [HEADER_CLAIM["title"]]
+        assert res["findings_dropped"] == []
+
+    def test_the_model_label_alone_neither_drops_nor_downgrades(self, tmp_path):
         _forge, _llm, res = _run(self._active(tmp_path), findings=[dict(FINDING)])
         assert len(res["findings_active"]) == 1
         finding = res["findings_active"][0]
-        assert finding.severity == "warning"
+        assert finding.severity == "error"
         assert finding.drop_reason is None
-        assert finding.evidence == EVIDENCE_CONTRADICTS
 
     def test_without_evidence_the_label_is_never_read(self, tmp_path):
         _forge, _llm, res = _run(None, findings=[dict(FINDING)])
@@ -491,35 +520,37 @@ class TestThroughTheRealReviewer:
         assert ok_events[0]["meta"] == res["evidence"]
         assert SENTINEL not in trace.read_text(encoding="utf-8")
 
-    def test_a_downgrade_is_counted_in_the_trace(self, tmp_path):
-        evidence = self._active(tmp_path)
+    def test_a_drop_is_counted_in_the_trace(self, tmp_path):
+        evidence = self._active(tmp_path, [PROBE])
         trace = tmp_path / "run.jsonl"
-        _forge, _llm, res = _run(evidence, findings=[dict(FINDING)], trace_file=str(trace))
+        _forge, _llm, res = _run(
+            evidence, findings=[dict(HEADER_CLAIM)], trace_file=str(trace),
+        )
         events = [
             json.loads(line) for line in
             trace.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
-        downgrades = [
-            e for e in events if e["node"] == "evidence" and e["phase"] == "downgrade"
-        ]
-        assert len(downgrades) == 1
-        assert downgrades[0]["meta"] == {"findings": 1}
-        assert res["findings_active"][0].severity == "warning"
+        drops = [e for e in events if e["node"] == "evidence" and e["phase"] == "drop"]
+        assert len(drops) == 1
+        assert drops[0]["meta"] == {"findings": 1}
+        assert not [e for e in events if e["phase"] == "downgrade"]
+        assert res["findings_active"] == []
 
-    @pytest.mark.parametrize("downgraded", [False, True])
-    def test_the_posted_summary_carries_the_note(self, tmp_path, downgraded):
-        evidence = self._active(tmp_path)
-        findings = [dict(FINDING)] if downgraded else []
+    @pytest.mark.parametrize("dropped", [False, True])
+    def test_the_posted_summary_carries_the_note(self, tmp_path, dropped):
+        evidence = self._active(tmp_path, [PROBE])
+        findings = [dict(HEADER_CLAIM)] if dropped else []
         forge, _llm, _res = _run(
             evidence, findings=findings, post=True,
         )
         assert len(forge.summaries) == 1
         summary = forge.summaries[0]
-        expected = NOTE.format(items=1, files=1, chunks=1)
+        expected = NOTE.format(items=1, files=1, chunks=0)
         assert expected in summary
         assert (
-            "; 1 contradicted finding(s) downgraded to warning" in summary
-        ) is downgraded
+            "; 1 finding(s) the evidence contradicts dropped" in summary
+        ) is dropped
+        assert "downgraded" not in summary
 
     def test_no_note_without_evidence(self, tmp_path):
         forge, _llm, _res = _run(None, post=True)
@@ -568,7 +599,7 @@ class TestCli:
         assert out["evidence"] == {
             "files": [str(path)], "items": 1, "matched_chunks": 1, "max_chars": 4000,
         }
-        assert [f["severity"] for f in out["findings"]] == ["warning"]
+        assert [f["severity"] for f in out["findings"]] == ["error"]
         assert SENTINEL not in json.dumps(out)
         assert len(rig.llm.prompts) == 2
         # The item matched the one chunk, so the worker carries it and the
@@ -677,3 +708,116 @@ def test_bare_first_line_still_works():
 
     items = _parse_text_items("nginx -t\nexit: 0\n")
     assert [i.command for i in items] == ["nginx -t"]
+
+
+def _bundle(*entries: dict) -> EvidenceBundle:
+    return EvidenceBundle(
+        items=tuple(
+            EvidenceItem(
+                command=e["command"], exit_code=e.get("exit_code", 0),
+                output=e.get("output", ""), files=tuple(e.get("files", ())),
+            )
+            for e in entries
+        ),
+        files=("run.json",),
+    )
+
+
+def _claim(**overrides) -> Finding:
+    return Finding(**{**HEADER_CLAIM, **overrides})
+
+
+PR_PATHS = ("src/app.py", "src/other.py")
+DROP = f"contradicted by execution evidence: {PROBE['command']}"
+
+
+class TestEvidenceDrops:
+    """``apply_evidence_drops``: the deterministic acceptance-1 drop (OD11)."""
+
+    def _apply(self, findings, *entries, pr_paths=PR_PATHS):
+        return apply_evidence_drops(findings, _bundle(*entries), pr_paths=pr_paths)
+
+    def test_an_exit_0_header_line_drops_a_missing_header_claim(self):
+        (out,) = self._apply([_claim()], PROBE)
+        assert out.drop_reason == DROP
+        assert out.severity == "error"
+
+    def test_a_failing_probe_keeps_the_claim(self):
+        (out,) = self._apply([_claim()], dict(PROBE, exit_code=1))
+        assert out.drop_reason is None
+
+    def test_a_different_header_keeps_the_claim(self):
+        (out,) = self._apply(
+            [_claim()], dict(PROBE, output="HTTP/1.1 200 OK\nContent-Type: text/html"),
+        )
+        assert out.drop_reason is None
+
+    @pytest.mark.parametrize("title,body", [
+        ("Cache-Control max-age is too short",
+         "The Cache-Control header sets max-age=60 for hashed assets."),
+        ("Cache-Control is no-cache on hashed assets",
+         "A no-store or no-cache Cache-Control header defeats the CDN."),
+    ])
+    def test_a_claim_that_does_not_say_missing_is_kept(self, title, body):
+        (out,) = self._apply([_claim(title=title, body=body)], PROBE)
+        assert out.drop_reason is None
+
+    @pytest.mark.parametrize("output", [
+        "warning: no Cache-Control set",
+        "HTTP/1.1 200 OK\nX-Note: Cache-Control is absent",
+        "HTTP/1.1 200 OK\nCache-Control:",
+    ])
+    def test_a_name_outside_a_filled_header_field_is_not_presence(self, output):
+        (out,) = self._apply([_claim()], dict(PROBE, output=output))
+        assert out.drop_reason is None
+
+    @pytest.mark.parametrize("output", [
+        "HTTP/2 200\ncache-control: no-store",
+        "HTTP/1.1 200 OK\r\nCache-Control: max-age=60\r\n",
+        "> HEAD /x HTTP/1.1\n< HTTP/1.1 200 OK\n< Cache-Control: max-age=60",
+    ])
+    def test_header_lines_match_case_insensitively_in_any_capture(self, output):
+        (out,) = self._apply([_claim()], dict(PROBE, output=output))
+        assert out.drop_reason == DROP
+
+    def test_a_named_resource_must_be_the_probed_one(self):
+        claim = _claim(body="`/fonts/x.otf` is served without a Cache-Control header.")
+        hit = dict(PROBE, command="curl -sI https://cdn.example.com/fonts/x.otf")
+        miss = dict(PROBE, command="curl -sI https://cdn.example.com/index.html")
+        assert self._apply([claim], hit)[0].drop_reason == (
+            f"contradicted by execution evidence: {hit['command']}"
+        )
+        assert self._apply([claim], miss)[0].drop_reason is None
+
+    def test_a_named_glob_must_cover_the_probed_resource(self):
+        claim = _claim(body="Responses for `*.otf` lack a Cache-Control header.")
+        hit = dict(PROBE, command="curl -sI https://cdn.example.com/fonts/a.otf")
+        miss = dict(PROBE, command="curl -sI https://cdn.example.com/index.html")
+        assert self._apply([claim], hit)[0].drop_reason is not None
+        assert self._apply([claim], miss)[0].drop_reason is None
+
+    def test_without_a_named_resource_the_item_must_reach_the_finding(self):
+        elsewhere = dict(PROBE, files=["src/other.py"])
+        own = dict(PROBE, files=["src/app.py"])
+        assert self._apply([_claim()], elsewhere)[0].drop_reason is None
+        assert self._apply([_claim()], own)[0].drop_reason is not None
+
+    def test_deterministic_and_dropped_findings_are_left_alone(self):
+        deterministic = _claim(body="No Cache-Control header (deterministic check, no model)")
+        dropped = _claim(drop_reason="hedged: \"might\"")
+        out = self._apply([deterministic, dropped], PROBE)
+        assert out[0].drop_reason is None
+        assert out[1].drop_reason == "hedged: \"might\""
+
+    def test_one_to_one_and_order_preserving(self):
+        keep = _claim(title="Unbounded retry loop", body="The loop never backs off.")
+        findings = [keep, _claim(), keep]
+        out = self._apply(findings, PROBE)
+        assert [f.drop_reason for f in out] == [None, DROP, None]
+        assert out[0] is keep and out[2] is keep
+
+    @pytest.mark.parametrize("evidence", [None, EvidenceBundle()])
+    def test_no_evidence_is_identity(self, evidence):
+        findings = [_claim()]
+        out = apply_evidence_drops(findings, evidence, pr_paths=PR_PATHS)
+        assert out == findings
