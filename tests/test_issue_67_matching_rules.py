@@ -10,12 +10,15 @@ fixtures. The sweep digest cannot see nginx ``location`` rules
 (src/prxref/systemic.py ``_DIGEST_PATTERNS`` has no matching class), so only
 the chunk worker — which sees the full diff text — can carry this rule; the
 tests pin placement, plumbing and the two acceptance behaviours through a
-fake LLM. The live-model half (a real model enumerating the captured inputs)
-belongs to the eval harness and is out of scope here.
+fake LLM. The fake LLM is prompt-sensitive: it answers with the canned finding only
+when the rendered prompt carries the Matching rules section. The live-model
+half (a real model enumerating the captured inputs) belongs to the eval
+harness.
 """
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from prxref.forges.base import PRData, PRRef
 from prxref.llm import InvokeResult
@@ -58,19 +61,26 @@ class _CapturingLLM:
         )
 
 
-class _VerbatimLLM:
-    """Returns the SAME text for every invoke() call — worker chunk call
-    and systemic-sweep call alike — matching FakeLLM's string-mode contract
-    in tests/test_orchestrator.py."""
+class _SectionAwareLLM:
+    """Returns the canned text only for a call whose system or user text carries
+    the ``## Matching rules`` section, and an empty findings response for every
+    other call, so the test fails when the section stops reaching the model."""
+
+    EMPTY = '{"findings":[],"escalations":[]}'
 
     def __init__(self, text: str):
         self.text = text
+        self.prompted_with_section = 0
         self.calls = 0
 
     def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
         self.calls += 1
+        seen = "## Matching rules" in (system + "\n" + user)
+        if seen:
+            self.prompted_with_section += 1
         return InvokeResult(
-            text=self.text, input_tokens=10, output_tokens=5,
+            text=self.text if seen else self.EMPTY,
+            input_tokens=10, output_tokens=5,
             model="matching-test-model", backend="fake", elapsed_ms=1,
         )
 
@@ -163,28 +173,16 @@ def test_worker_prompt_states_the_matching_rules_rule():
 # dotted versions (acceptance 1) vs. a UUID constraint (acceptance 2).
 # ---------------------------------------------------------------------------
 
-SPA_FALLBACK_DIFF = (
-    "diff --git a/conf/nginx.conf b/conf/nginx.conf\n"
-    "--- a/conf/nginx.conf\n"
-    "+++ b/conf/nginx.conf\n"
-    "@@ -1,4 +1,5 @@\n"
-    " server {\n"
-    "   root /var/www/app;\n"
-    "   try_files $uri /index.html;\n"
-    "+  location ~* \\.[^/]+$ { return 404; }\n"
-    " }\n"
-    "diff --git a/docs/routes.md b/docs/routes.md\n"
-    "--- a/docs/routes.md\n"
-    "+++ b/docs/routes.md\n"
-    "@@ -1,3 +1,4 @@\n"
-    " # API routes\n"
-    "+{routes_line}\n"
-    " GET /health\n"
-    " GET /users/:id\n"
-)
+FIXTURES = Path(__file__).parent / "fixtures" / "issue_67"
+SPA_DOTTED_DIFF = (FIXTURES / "spa_dotted.diff").read_text(encoding="utf-8")
+SPA_UUID_DIFF = (FIXTURES / "spa_uuid.diff").read_text(encoding="utf-8")
 
-DOTTED_VERSION_LINE = "GET /items/:version    # :version is dotted, e.g. /items/v1.2"
-UUID_VERSION_LINE = "GET /items/:version    # :version is a UUID"
+
+def test_fixture_diffs_parse_into_the_rule_and_the_route_table():
+    for diff in (SPA_DOTTED_DIFF, SPA_UUID_DIFF):
+        files = parse_unified_diff(diff)
+        assert {f.path for f in files} == {"conf/nginx.conf", "docs/routes.md"}
+
 
 # The added rule line's new-file position: hunk ``@@ -1,4 +1,5 @@`` — three
 # context lines, the added ``location`` rule at new line 4, the closing brace.
@@ -220,12 +218,13 @@ MATCHING_FINDING_JSON = json.dumps({
 
 def test_matching_warning_survives_with_the_example_input_in_the_body():
     forge = _FakeForge(
-        pr=_make_pr(), diff=SPA_FALLBACK_DIFF.replace("{routes_line}", DOTTED_VERSION_LINE)
+        pr=_make_pr(), diff=SPA_DOTTED_DIFF
     )
-    llm = _VerbatimLLM(MATCHING_FINDING_JSON)
+    llm = _SectionAwareLLM(MATCHING_FINDING_JSON)
 
     result = orchestrate_review(forge, REF, llm, post=False)
 
+    assert llm.prompted_with_section >= 1
     findings = result["findings_active"]
     matches = [f for f in findings if "/items/v1.2" in f.body]
     assert matches, (
@@ -241,6 +240,22 @@ def test_matching_warning_survives_with_the_example_input_in_the_body():
     assert finding.line == RULE_LINE
 
 
+def test_matching_warning_is_absent_when_the_prompt_lacks_the_section(tmp_path):
+    d = tmp_path / "prompts"
+    d.mkdir()
+    (d / "worker.md").write_bytes(
+        _packaged_worker_without_matching_rules().encode("utf-8")
+    )
+    loaded = load_prompt_templates(d, source="PRXREF_PROMPTS_DIR")
+    forge = _FakeForge(pr=_make_pr(), diff=SPA_DOTTED_DIFF)
+    llm = _SectionAwareLLM(MATCHING_FINDING_JSON)
+
+    result = orchestrate_review(forge, REF, llm, post=False, prompts=loaded)
+
+    assert llm.prompted_with_section == 0
+    assert not [f for f in result["findings_active"] if "/items/v1.2" in f.body]
+
+
 # ---------------------------------------------------------------------------
 # Acceptance 2 (Test C): when the route parameter is documented as a UUID,
 # the model's outofscope/0.6 constraint note is legal, survives the default
@@ -250,12 +265,13 @@ def test_matching_warning_survives_with_the_example_input_in_the_body():
 
 def test_constrained_capture_reports_nothing_on_the_rule_line():
     forge = _FakeForge(
-        pr=_make_pr(), diff=SPA_FALLBACK_DIFF.replace("{routes_line}", UUID_VERSION_LINE)
+        pr=_make_pr(), diff=SPA_UUID_DIFF
     )
-    llm = _VerbatimLLM(json.dumps({"findings": [], "escalations": []}))
+    llm = _SectionAwareLLM(json.dumps({"findings": [], "escalations": []}))
 
     result = orchestrate_review(forge, REF, llm, post=False)
 
+    assert llm.prompted_with_section >= 1
     on_rule = [
         f
         for f in result["findings_active"]
