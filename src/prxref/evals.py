@@ -74,7 +74,14 @@ RUN_CONFIG_KEYS = (
     "context_standards_max_chars",
     "repo_context_max_reads",
     "repo_context_max_chunk_reads",
+    "routing_probe",
+    "ci_wiring",
 )
+EVAL_PINS: Mapping[str, Any] = {
+    "ci_wiring": "off",
+    "routing_probe": "off",
+    "context_standards_globs": [],
+}
 SCORE_VERSION = 1
 SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "scoped_rules", "config")
 JUDGE_METHOD = "judge"
@@ -123,7 +130,13 @@ def eval_run(
     Each case is reviewed in process by ``run_review`` with ``post=False``
     and ``no_threads=True``, so nothing is ever posted. ``context_file`` is
     ``""`` and ``spec_sources`` is ``[]`` unless the case sets them, so the
-    environment's ticket and spec inputs cannot leak into a case.
+    environment's ticket and spec inputs cannot leak into a case. The
+    default-on features that would move a baseline are pinned off for every
+    case by :data:`EVAL_PINS` (OD2): ``ci_wiring="off"``,
+    ``routing_probe="off"`` and ``context_standards_globs=[]`` reach
+    ``run_review`` as overrides, and the same values are the ``load_config``
+    overrides ``run.json``'s ``config`` is read from, so it records what
+    ran whatever the environment or the config file says.
     ``repo_dir`` is the case's ``repo_dir``, as ``review --repo-dir`` takes
     it, or ``None``. ``args.rules_file``, ``args.scoped_rules`` and ``args.prompts_dir`` are
     passed to every case as given, as ``review --rules-file``,
@@ -197,6 +210,7 @@ def eval_run(
         review_rules=args.rules_file,
         scoped_rules=args.scoped_rules,
         prompts_dir=args.prompts_dir,
+        **_pins(),
         source_labels={
             "review_rules": "--rules-file",
             "scoped_rules": "--scoped-rules",
@@ -268,6 +282,7 @@ def _run_case(
             repo_dir=case.repo_dir,
             config_file=config_file,
             evidence_files=[],
+            **_pins(),
         )
         if result is None:
             raise RuntimeError(f"unrecognized PR URL {case.pr_url!r}")
@@ -280,6 +295,11 @@ def _run_case(
         return f"{case.id}: failed: {error}"
     count = _active_count(record)
     return f"{case.id}: {record.get('verdict')} ({count} active finding{'' if count == 1 else 's'})"
+
+
+def _pins() -> dict[str, Any]:
+    """A fresh copy of :data:`EVAL_PINS`, so no caller can mutate the shared lists."""
+    return {key: list(value) if isinstance(value, list) else value for key, value in EVAL_PINS.items()}
 
 
 def _active_count(record: Any) -> int:

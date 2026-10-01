@@ -165,7 +165,7 @@ its `PRXREF_` name.
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
-| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at `repo`; replaces the built-in set; `[]` or `"off"` turns them off ([more](env-vars.md#llm--pipeline)). |
+| `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at every `repo_context` level, on by default; replaces the built-in set; `[]` or `"off"` turns them off ([more](env-vars.md#llm--pipeline)). |
 | `context_standards_max_chars` | integer | Characters of standards-section text one chunk worker receives ([more](env-vars.md#llm--pipeline)). |
 | `chunk_context_lines` | integer | Context lines kept around each change in a chunk ([more](env-vars.md#llm--pipeline)). |
 
@@ -217,7 +217,7 @@ Flat keys, not a `[metadata]` table — the file is flat, so a table is a config
 | `commit_reference` | string | Regex every non-merge commit subject must contain ([more](env-vars.md#llm--pipeline)). |
 | `area_globs` | array of strings | `name=glob` pairs classifying diff paths into areas ([more](env-vars.md#llm--pipeline)). |
 | `max_areas_per_pr` | integer | Most distinct areas a PR may touch before the area check flags it ([more](env-vars.md#llm--pipeline)). |
-| `ci_wiring` | string | `on` flags a check the PR adds that no CI configuration file invokes; `off` (the default) reads nothing ([more](env-vars.md#llm--pipeline)). |
+| `ci_wiring` | string | `on` (the default) flags a check the PR adds that no CI configuration file invokes; `off` reads nothing ([more](env-vars.md#llm--pipeline)). |
 | `ci_wiring_globs` | array of strings | Globs selecting the CI configuration files the CI wiring check reads; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 
 ### Stable finding ids

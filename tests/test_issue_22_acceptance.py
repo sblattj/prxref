@@ -166,7 +166,9 @@ class TestNoReadersBelowRepo:
         assert "diff --git a/tests/conftest.py " in _progress_prompt(prompts)
         assert [p for p in prompts if READER_HEADER in p] == []
         if level == "off":
-            assert payload["repo_context"] is None
+            # Standards discovery is on by default and independent of the level (#68, OD2).
+            assert payload["repo_context"]["mode"] == "standards"
+            assert {row[3] for row in _entries(payload)} <= {"standards"}
         else:
             assert _reader_rows(payload) == []
 
