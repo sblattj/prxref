@@ -994,15 +994,15 @@ def _finding_is_about_comment(finding: Finding, line: str, snippets: Sequence[st
 
     True when ``line`` is a comment or docstring line (not an import)
     that holds one of the finding's quoted ``snippets``, and the title
-    or body either says comment/docstring or quotes the comment's own
-    text.
+    says comment/docstring or the title or body quotes the comment's own
+    text. A body that only mentions a comment in passing does not count.
     """
     if _IMPORT_LINE_RE.match(line) or not _is_non_usage_line(line):
         return False
     if not any(snippet in line for snippet in snippets):
         return False
     text = f"{finding.title or ''} {finding.body or ''}"
-    if _COMMENT_SUBJECT_RE.search(text):
+    if _COMMENT_SUBJECT_RE.search(finding.title or ""):
         return True
     prose = re.sub(r"^\s*(?:/\*+|\*+/?|//+|#+)\s*", "", line).strip().lower()
     return len(prose) >= 12 and prose in text.replace("`", "").lower()
