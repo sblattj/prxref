@@ -29,6 +29,12 @@ changed from ``8e0aa4c7...`` to ``92ed30e3...``; every other value is still
 the 0.17.0 recording. ``test_the_29_delta_is_exactly_one_definition_line``
 pins that delta: the prompt holds the line, and with the line removed it
 hashes to the 0.17.0 value again.
+
+Both worker request shas (and the #29 pair with them) were re-recorded again
+for issue #67's "Matching rules" section in worker.md: stripping that one
+section from each worker system message reproduces the previous recording
+(``575f52b8...`` and ``92ed30e3...``) byte for byte. The sweep request sha is
+still the 0.17.0 recording.
 """
 from __future__ import annotations
 
@@ -64,16 +70,21 @@ SWEEP_CONTENT = json.dumps({"findings": []})
 # Recorded at 43ec560 with PRXREF_REPO_CONTEXT=repo, PRXREF_CONTEXT_FOLLOWUP
 # unset, over tests/fixtures/issue22/pr.patch against the route below.
 EXPECTED_REQUEST_COUNT = 3
-PRE_29_SHA = "8e0aa4c77130ee263f3b3d05746d9c0d1976ce29501ec42fa6fd2c702e64e9a8"
-POST_29_SHA = "92ed30e38adf8f9ec7886bb1ed2ac63605c753903522c2b105272bbbd634bd7b"
+PRE_29_SHA = "fb4c02e61c303d5abf4a5b434850848c79e839a76d65f420524750ce3992dd84"
+POST_29_SHA = "1d558d0313e2c3c603958f8137a43924da82502c71763e59b8e813128a11659c"
 ISSUE_29_LINE = "assistant/engine.py:12: class Step:\n"
 EXPECTED_MESSAGE_SHAS = [
+    # The sweep request: still the 0.17.0 recording.
     "058306f7b8a3cf8f8e744a6393745bd31c124805790530e0e00314afdac7b1aa",
-    "575f52b819508bf9d596f44d9226f8ba7e0ee4724f7bf926572d81b4ce20847a",
+    # Both worker request shas were re-recorded at the issue #67 worker.md
+    # "Matching rules" section (was 575f52b8... and, for the annotated one
+    # below, 92ed30e3...): stripping that one section from each worker system
+    # message reproduces the earlier recording byte for byte.
     # Re-recorded at 0.20.0: issue #29 gives this diff-file plus repo-dir
     # replay chunk context, so this prompt gains exactly
     # ``assistant/engine.py:12: class Step:``; it was PRE_29_SHA at 0.17.0.
     POST_29_SHA,
+    "74b7798451fd51d57c14e691aaf9ac432e9f8df9cd0585a9d38ef18be4c89e2e",
 ]
 
 
