@@ -12,6 +12,7 @@ forge.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,6 +48,34 @@ class InlineComment:
     start_line: int | None = None
 
 
+_WONT_FIX_RE = re.compile(
+    r"(?:^|(?<=[.!?;:]))[\W_]*"
+    r"(?:won['\u2019]?t[\s-]*fix|will\s+not\s+fix|not\s+(?:going\s+to|gonna)\s+fix"
+    r"|by\s+design|works?\s+as\s+(?:intended|designed)|working\s+as\s+(?:intended|designed))"
+    r"[*_`]*(?=\s*(?:[.!?:;,)\]\u2014\u2013-]|$))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def says_wont_fix(text: object) -> bool:
+    """Whether a human comment explicitly declines the change (issue #73, OD5).
+
+    True when ``text`` states "won't fix" (also ``wontfix``, "will not fix",
+    "not going to fix", "by design", "working as intended") as a statement
+    of its own: at the start of the comment, of a line or of a sentence, and
+    followed by punctuation or the end of the line. Prose that merely uses
+    the words ("retrying won't fix the timeout", "Won't fix the leak when
+    …") does not count, and neither does any body carrying
+    :data:`ATTRIBUTION_MARKER`, because a prxref comment is never a human's
+    decision. A non-string is ``False``.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    if ATTRIBUTION_MARKER in text:
+        return False
+    return _WONT_FIX_RE.search(text) is not None
+
+
 @dataclass
 class Thread:
     """An existing discussion thread on a PR (for dedup against re-review).
@@ -63,9 +92,12 @@ class Thread:
     ``root_id`` is the id of the thread's root comment (a reply carries its
     parent's), the key GitHub's two thread views are joined on, else ``None``.
     ``wont_fix`` marks a thread closed as a deliberate decision not to
-    change the code (Azure DevOps ``wontFix`` / ``byDesign``): it keeps
-    suppressing a duplicate even though it is resolved. :attr:`lapsed` is
-    the one predicate the gates share.
+    change the code: Azure DevOps ``wontFix`` / ``byDesign``, or an explicit
+    human "won't fix" anywhere in the thread (:func:`says_wont_fix`; an
+    adapter that reads replies sets it from the whole thread, and every
+    thread whose own snippet says so gets it at construction). It keeps
+    suppressing a duplicate even though it is resolved or outdated.
+    :attr:`lapsed` is the one predicate the gates share.
     """
 
     path: str | None
@@ -78,6 +110,11 @@ class Thread:
     url: str | None = None
     root_id: int | None = None
     wont_fix: bool = False
+
+    def __post_init__(self) -> None:
+        """Mark the thread won't-fix when its own snippet says so."""
+        if not self.wont_fix and says_wont_fix(self.body_snippet):
+            self.wont_fix = True
 
     @property
     def lapsed(self) -> bool:
