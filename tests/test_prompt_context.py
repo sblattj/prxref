@@ -140,7 +140,11 @@ class TestPromptContext:
     def test_defaults_are_empty_and_equal_to_the_shared_instance(self):
         ctx = PromptContext()
         assert ctx == NO_PROMPT_CONTEXT
-        assert all(getattr(ctx, f.name) == "" for f in dataclasses.fields(ctx))
+        assert all(
+            getattr(ctx, f.name) == ""
+            for f in dataclasses.fields(ctx) if f.name != "routing_probe"
+        )
+        assert ctx.routing_probe is True
 
     def test_the_field_set_is_the_contract(self):
         assert [f.name for f in dataclasses.fields(PromptContext)] == [
@@ -149,6 +153,7 @@ class TestPromptContext:
             "spec_digest",
             "worker_template", "systemic_template",
             "rule_request", "suggestion_request",
+            "routing_probe",
         ]
 
     def test_it_is_frozen(self):

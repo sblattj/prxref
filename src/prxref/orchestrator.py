@@ -559,6 +559,7 @@ def orchestrate_review(
     llm_parse_retries: int = 0,
     context_followup: str = "off",
     suggestions: str = "off",
+    routing_probe: str = "on",
     incremental: str = "off",
     full_review: bool = False,
     full_review_reason: str | None = None,
@@ -1064,6 +1065,14 @@ def orchestrate_review(
     over the ACTIVE findings of the run (a dropped finding is not counted);
     it is all zeros on an exit reached before the passes.
 
+    ``routing_probe`` (``PRXREF_ROUTING_PROBE``, issue #67) is ``"on"`` (the
+    default) or ``"off"``; any other value raises ``ValueError`` before any
+    forge call. On, every chunk worker's SYSTEM prompt keeps the worker
+    template's ``## Matching rules`` section. Off, that section is cut out
+    (:attr:`reviewer.PromptContext.routing_probe`), so every worker prompt,
+    the follow-up re-send included, is the template without it byte for
+    byte; the sweep prompt is the same either way.
+
     ``incremental`` (``PRXREF_INCREMENTAL``, issue #34) is ``"off"`` (the
     default) or ``"on"``; any other value raises ``ValueError`` before any
     forge call. Off, the run makes no extra forge read, every prompt, call,
@@ -1128,6 +1137,10 @@ def orchestrate_review(
     if suggestions not in SUGGESTION_MODES:
         raise ValueError(
             f"suggestions must be one of {SUGGESTION_MODES}, got {suggestions!r}"
+        )
+    if routing_probe not in ROUTING_PROBE_MODES:
+        raise ValueError(
+            f"routing_probe must be one of {ROUTING_PROBE_MODES}, got {routing_probe!r}"
         )
     if incremental not in INCREMENTAL_MODES:
         raise ValueError(
@@ -1626,6 +1639,7 @@ def orchestrate_review(
         systemic_template=prompts.override("systemic") if prompts is not None else "",
         rule_request=reviewer.RULE_REQUEST if rule_active else "",
         suggestion_request=reviewer.SUGGESTION_REQUEST if suggestions == "on" else "",
+        routing_probe=routing_probe == "on",
     )
     if rule_active and prompts is not None:
         _warn_missing_rule_slot(
@@ -3326,6 +3340,7 @@ def _repo_context_record(
 
 
 SUGGESTION_MODES = ("off", "on")
+ROUTING_PROBE_MODES = ("off", "on")
 
 
 def _suggestion_record(
