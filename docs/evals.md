@@ -908,5 +908,5 @@ model response, and those hold the code under review.
 prxref-eval/
 ```
 
-To run the repo's own three cases, see
+To run the repo's own five cases, see
 [`tests/evals/README.md`](../tests/evals/README.md).

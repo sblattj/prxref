@@ -277,7 +277,7 @@ def standards_entries(
     standards_paths: Sequence[str],
     read: Callable[[str], str | None] | None,
     priority: Sequence[str] = (),
-    max_chars: int = 4000,
+    max_chars: int = 6000,
 ) -> list[ContextEntry]:
     """The standards entries for one worker chunk, in rank order.
 
