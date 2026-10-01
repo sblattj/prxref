@@ -151,7 +151,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    each ``Also at:`` site of a grouped or capped representative is
    re-checked against the head file for the representative's own quoted
    snippets within 100 lines of the site, and a site nothing corroborates
-   is dropped from the list and the paragraph — an unreadable file keeps
+   moves out of ``locations`` and the paragraph into a last ``Also at
+   (unverified):`` paragraph — an unreadable file keeps
    every site, folded members keep their drop reasons, and without a
    reader the pass changes nothing) →
    ``apply_quality_gate(confidence_floor=, max_errors=,

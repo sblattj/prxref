@@ -564,3 +564,31 @@ class TestImportAndJavadocTiebreak:
             [finding], read=_reader({APP: content}), model_lines=[40]
         )
         assert out.line == 20
+
+
+def _comment_file() -> str:
+    lines = [f"filler {i}" for i in range(1, 101)]
+    lines[9] = "    # itemIndex is 1-based here"
+    lines[69] = "    x = items[itemIndex]"
+    return "\n".join(lines) + "\n"
+
+
+def _snap(title: str, body: str, line: int = 10) -> int:
+    f = Finding(
+        file="a.py", line=line, severity="warning", confidence=0.8,
+        title=title, body=body,
+    )
+    content = _comment_file()
+    return apply_anchor_snap([f], read=lambda p: content, model_lines=[line])[0].line
+
+
+def test_a_finding_about_the_comment_keeps_its_comment_anchor():
+    assert _snap("Comment says `itemIndex` is 1-based but it is 0-based", "Stale.") == 10
+
+
+def test_a_finding_quoting_the_comment_text_keeps_its_comment_anchor():
+    assert _snap("Wrong claim", "`itemIndex` is 1-based here is wrong") == 10
+
+
+def test_a_finding_about_code_still_moves_off_a_comment_line():
+    assert _snap("Unchecked `itemIndex` lookup", "Index may be out of range.") == 70
