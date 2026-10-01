@@ -1716,6 +1716,7 @@ def _run_review(
         context_followup=cfg["context_followup"],
         rule_scoping=cfg["rule_scoping"],
         suggestions=cfg["suggestions"],
+        routing_probe=cfg["routing_probe"],
         incremental=incremental,
         full_review=full_review_reason is not None,
         full_review_reason=full_review_reason,
