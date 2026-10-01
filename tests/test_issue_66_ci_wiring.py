@@ -259,9 +259,16 @@ class TestInvokes:
         )
         assert ci_wiring.invokes(text, WORKFLOW_PATH, self.CANDIDATE) is False
 
-    def test_a_make_target_without_the_path_is_not_matched(self):
+    def test_a_make_target_alone_is_not_matched_without_its_makefile(self):
         text = "jobs:\n  test:\n    steps:\n      - run: make verify\n"
         assert ci_wiring.invokes(text, WORKFLOW_PATH, self.CANDIDATE) is False
+
+    def test_a_make_target_whose_recipe_names_the_script_is_wired(self):
+        text = "jobs:\n  test:\n    steps:\n      - run: make verify\n"
+        runners = {"Makefile": "verify:\n\t./scripts/verify.sh\n"}
+        assert ci_wiring.invokes(
+            text, WORKFLOW_PATH, self.CANDIDATE, runners=runners,
+        ) is True
 
     def test_a_renamed_copy_counts_as_wired_the_documented_gap(self):
         """The accepted false negative from the issue: a CI job that only
@@ -643,3 +650,199 @@ class TestModifiedCandidates:
         [finding] = findings
         assert "is added but" in finding.title
         assert "This PR adds" in finding.body
+
+
+# --- one hop through runner files (OD10) ---------------------------------------
+
+
+MAKE_WORKFLOW = "jobs:\n  test:\n    steps:\n      - run: make verify\n"
+
+
+class TestRunnerTargets:
+    """The make/npm/yarn/pnpm invocations an invocation line names."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("make verify", {("make", "verify")}),
+            ("make -j4 lint verify V=1", {("make", "lint"), ("make", "verify")}),
+            ("make", {("make", "")}),
+            ("cd app && make verify && echo ok", {("make", "verify")}),
+            ("make -C sub verify", set()),
+            ("make -f ci.mk verify", set()),
+            ("cmake --build .", set()),
+            ("npm run verify", {("npm", "verify")}),
+            ("npm run-script --silent verify", {("npm", "verify")}),
+            ("npm test", {("npm", "test")}),
+            ("npm t", {("npm", "test")}),
+            ("npm ci", set()),
+            ("npm --prefix web run verify", set()),
+            ("yarn verify", {("npm", "verify")}),
+            ("pnpm run verify", {("npm", "verify")}),
+        ],
+    )
+    def test_the_targets(self, line, expected):
+        assert ci_wiring.runner_targets(line) == expected
+
+
+class TestRunnerHop:
+    CANDIDATE = ci_wiring.CiCandidate("scripts/verify.sh", "test")
+
+    def _wired(self, ci_text: str, runners: dict[str, str]) -> bool:
+        return ci_wiring.invokes(ci_text, WORKFLOW_PATH, self.CANDIDATE, runners=runners)
+
+    def test_a_makefile_target_naming_the_script_is_wired(self):
+        assert self._wired(MAKE_WORKFLOW, {"Makefile": "verify:\n\t./scripts/verify.sh\n"})
+
+    def test_a_makefile_target_not_naming_the_script_stays_unwired(self):
+        makefile = "verify:\n\tpytest -q\n\nsmoke:\n\t./scripts/verify.sh\n"
+        assert not self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
+
+    def test_one_hop_only_a_prerequisite_is_not_followed(self):
+        makefile = "verify: smoke\n\t@echo done\n\nsmoke:\n\t./scripts/verify.sh\n"
+        assert not self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
+
+    def test_a_commented_recipe_line_stays_unwired(self):
+        makefile = "verify:\n\t# ./scripts/verify.sh\n\tpytest\n"
+        assert not self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
+
+    def test_a_recipe_prefix_and_a_multi_target_rule(self):
+        makefile = "CHECK := x\n\nlint verify: deps\n\t@bash scripts/verify.sh --all\n"
+        assert self._wired(MAKE_WORKFLOW, {"Makefile": makefile})
+
+    def test_an_inline_recipe_after_a_semicolon(self):
+        assert self._wired(MAKE_WORKFLOW, {"Makefile": "verify: ; ./scripts/verify.sh\n"})
+
+    def test_bare_make_follows_the_default_goal(self):
+        ci_text = "jobs:\n  t:\n    steps:\n      - run: make\n"
+        makefile = ".PHONY: all\nall:\n\t./scripts/verify.sh\n\nother:\n\ttrue\n"
+        assert self._wired(ci_text, {"Makefile": makefile})
+
+    def test_an_npm_script_naming_the_script_is_wired(self):
+        ci_text = "jobs:\n  t:\n    steps:\n      - run: npm run verify\n"
+        package = '{"scripts": {"verify": "bash scripts/verify.sh", "test": "jest"}}'
+        assert self._wired(ci_text, {"package.json": package})
+
+    def test_npm_test_follows_the_test_script(self):
+        ci_text = "jobs:\n  t:\n    steps:\n      - run: npm test\n"
+        package = '{"scripts": {"test": "jest && ./scripts/verify.sh"}}'
+        assert self._wired(ci_text, {"package.json": package})
+
+    def test_an_npm_script_not_naming_the_script_stays_unwired(self):
+        ci_text = "jobs:\n  t:\n    steps:\n      - run: npm run verify\n"
+        package = '{"scripts": {"verify": "tsc --noEmit", "smoke": "./scripts/verify.sh"}}'
+        assert not self._wired(ci_text, {"package.json": package})
+
+    def test_a_malformed_package_json_stays_unwired_and_never_raises(self):
+        ci_text = "jobs:\n  t:\n    steps:\n      - run: npm run verify\n"
+        assert not self._wired(ci_text, {"package.json": "{not json"})
+        assert not self._wired(ci_text, {"package.json": '["a list"]'})
+        assert not self._wired(ci_text, {"package.json": '{"scripts": {"verify": 3}}'})
+
+    def test_a_make_invocation_in_a_comment_is_not_followed(self):
+        ci_text = "jobs:\n  t:\n    steps:\n      - run: pytest\n      # make verify\n"
+        assert not self._wired(ci_text, {"Makefile": "verify:\n\t./scripts/verify.sh\n"})
+
+
+class TestRunnerHopFindings:
+    def _files(self):
+        return parse_unified_diff(VERIFY_DIFF)
+
+    def test_ci_make_verify_with_a_makefile_naming_the_script_gives_no_finding(self):
+        repo = {WORKFLOW_PATH: MAKE_WORKFLOW, "Makefile": "verify:\n\t./scripts/verify.sh\n"}
+        findings, record = ci_wiring.ci_wiring_findings(
+            self._files(), read=repo.get, listing=sorted(repo),
+        )
+        assert findings == []
+        assert record["triggered"] is False
+        assert record["ci_files"] == [WORKFLOW_PATH]
+
+    def test_a_makefile_target_not_naming_the_script_still_gives_a_finding(self):
+        repo = {WORKFLOW_PATH: MAKE_WORKFLOW, "Makefile": "verify:\n\tpytest -q\n"}
+        findings, record = ci_wiring.ci_wiring_findings(
+            self._files(), read=repo.get, listing=sorted(repo),
+        )
+        [finding] = findings
+        assert finding.file == "scripts/verify.sh"
+        assert "`Makefile` (followed from `make verify`)" in finding.body
+        assert record["triggered"] is True
+        assert record["ci_files"] == [WORKFLOW_PATH]
+
+    def test_runner_files_are_read_only_when_ci_invokes_a_runner(self):
+        reads: list[str] = []
+        repo = {
+            WORKFLOW_PATH: "jobs:\n  t:\n    steps:\n      - run: pytest\n",
+            "Makefile": "verify:\n\t./scripts/verify.sh\n",
+            "package.json": '{"scripts": {}}',
+        }
+
+        def read(path):
+            reads.append(path)
+            return repo.get(path)
+
+        findings, _ = ci_wiring.ci_wiring_findings(
+            self._files(), read=read, listing=sorted(repo),
+        )
+        assert len(findings) == 1
+        assert reads == [WORKFLOW_PATH]
+
+    def test_a_runner_absent_from_the_listing_is_not_read(self):
+        reads: list[str] = []
+        repo = {WORKFLOW_PATH: MAKE_WORKFLOW}
+
+        def read(path):
+            reads.append(path)
+            return repo.get(path)
+
+        ci_wiring.ci_wiring_findings(self._files(), read=read, listing=sorted(repo))
+        assert reads == [WORKFLOW_PATH]
+
+    def test_without_a_listing_the_runner_literals_are_read(self):
+        repo = {"Jenkinsfile": "make verify\n", "Makefile": "verify:\n\t./scripts/verify.sh\n"}
+        findings, _ = ci_wiring.ci_wiring_findings(
+            self._files(), read=repo.get, listing=None,
+        )
+        assert findings == []
+
+    def test_gnu_make_prefers_gnumakefile_over_makefile(self):
+        repo = {
+            WORKFLOW_PATH: MAKE_WORKFLOW,
+            "GNUmakefile": "verify:\n\tpytest\n",
+            "Makefile": "verify:\n\t./scripts/verify.sh\n",
+        }
+        findings, _ = ci_wiring.ci_wiring_findings(
+            self._files(), read=repo.get, listing=sorted(repo),
+        )
+        assert len(findings) == 1
+
+    def test_a_raising_runner_read_never_escapes(self):
+        def read(path):
+            if path == "Makefile":
+                raise OSError("boom")
+            return MAKE_WORKFLOW if path == WORKFLOW_PATH else None
+
+        findings, _ = ci_wiring.ci_wiring_findings(
+            self._files(), read=read, listing=[WORKFLOW_PATH, "Makefile"],
+        )
+        assert len(findings) == 1
+
+    def test_the_acceptance_end_to_end_through_the_forge_reader(self):
+        forge = CiForge(VERIFY_DIFF, repo_files={
+            WORKFLOW_PATH: MAKE_WORKFLOW, "Makefile": "verify:\n\t./scripts/verify.sh\n",
+        })
+        res = orchestrate_review(
+            forge, REF, EMPTY_LLM, post=False, ci_wiring="on",
+            ticket=_ticket("Add regression checks."),
+        )
+        assert _ci_findings(res) == []
+        assert "Makefile" in forge.reads
+
+        unwired = CiForge(VERIFY_DIFF, repo_files={
+            WORKFLOW_PATH: MAKE_WORKFLOW, "Makefile": "verify:\n\tpytest\n",
+        })
+        res = orchestrate_review(
+            unwired, REF, EMPTY_LLM, post=False, ci_wiring="on",
+            ticket=_ticket("Add regression checks."),
+        )
+        [f] = _ci_findings(res)
+        assert f.file == "scripts/verify.sh"
