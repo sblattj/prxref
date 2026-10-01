@@ -381,8 +381,8 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("off", "on"),
         default=None,
         help=(
-            "turn the CI wiring check (#66) on for this run "
-            "(PRXREF_CI_WIRING does the same; off is the default): flag a "
+            "turn the CI wiring check (#66) on or off for this run "
+            "(PRXREF_CI_WIRING does the same; on is the default): flag a "
             "check the PR adds — a verify/smoke/check script or flag, a "
             "file that gains a shebang, a test file outside the runner's "
             "default include — that no CI configuration file invokes"
@@ -1551,6 +1551,7 @@ def _run_review(
     ci_wiring_globs: list[str] | None = None,
     evidence_files: list[str] | None = None,
     context_standards_globs: list[str] | None = None,
+    routing_probe: str | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1600,6 +1601,7 @@ def _run_review(
         ci_wiring_globs=ci_wiring_globs,
         evidence_files=evidence_files,
         context_standards_globs=context_standards_globs,
+        routing_probe=routing_probe,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1751,7 +1753,7 @@ def _run_review(
         incremental=incremental,
         full_review=full_review_reason is not None,
         full_review_reason=full_review_reason,
-        ci_wiring=cfg["ci_wiring"],
+        ci_wiring=None if layers.get("ci_wiring") == "default" else cfg["ci_wiring"],
         ci_wiring_globs=cfg["ci_wiring_globs"],
         evidence=evidence,
         evidence_max_chunk_chars=cfg["evidence_max_chunk_chars"],

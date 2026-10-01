@@ -190,6 +190,7 @@ def review(forge=None, llm=None, *, ref: PRRef = REF, **kwargs):
     forge = forge if forge is not None else FixtureForge()
     llm = llm if llm is not None else CapturingLLM()
     kwargs.setdefault("max_files_per_chunk", 1)
+    kwargs.setdefault("ci_wiring", "off")
     result = orchestrate_review(forge, ref, llm, post=False, **kwargs)
     return result, forge, llm
 

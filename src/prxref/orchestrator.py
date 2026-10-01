@@ -571,7 +571,7 @@ def orchestrate_review(
     commit_reference: str = "",
     area_globs: Sequence[str] = (),
     max_areas_per_pr: int = 2,
-    ci_wiring: str = "off",
+    ci_wiring: str | None = None,
     ci_wiring_globs: Sequence[str] = (),
     evidence: Any = None,
     evidence_max_chunk_chars: int = 4000,
@@ -744,7 +744,10 @@ def orchestrate_review(
     ``violations`` one ``{check, title, detail}`` row per note — echoed by
     one ``metadata_rules ok`` trace event.
 
-    ``ci_wiring`` (issue #66) turns on the CI-wiring check:
+    ``ci_wiring`` (issue #66) is ``"on"``, ``"off"`` or ``None`` (the
+    default), which means ``"on"`` as a built-in default rather than an
+    operator's choice; the CLI passes ``None`` when ``PRXREF_CI_WIRING``
+    came from the built-in default. On, it runs the CI-wiring check:
     ``ci_wiring_globs`` (``PRXREF_CI_WIRING_GLOBS``; the default restates
     :data:`prxref.ci_wiring.DEFAULT_CI_GLOBS`) selects the CI
     configuration files, where a set value replaces the built-in set. The
@@ -762,8 +765,9 @@ def orchestrate_review(
     NOT on ``repo_context`` — at most
     :data:`prxref.ci_wiring.MAX_CI_FILES` file reads, never the
     ``repo_context`` reader whose caps a CI file could starve on; with no
-    reader the run logs one WARNING naming ``PRXREF_CI_WIRING`` and the
-    record says why. Off (the default) nothing runs, nothing is read, and
+    reader the run logs one notice naming ``PRXREF_CI_WIRING`` — a WARNING
+    for an explicit ``"on"``, INFO for ``None`` — and the
+    record says why. Off, nothing runs, nothing is read, and
     the record's ``ci_wiring`` key is ``None``; on, it carries
     ``{candidates, ci_files, picked_up_default, triggered}``, echoed by
     one ``ci_wiring ok`` trace event. Never changes the verdict or the
@@ -942,9 +946,18 @@ def orchestrate_review(
     is config's default — and ``context_standards_max_chars``
     (``PRXREF_CONTEXT_STANDARDS_MAX_CHARS``, default 6000, the config
     default restated) is the per-chunk budget of
-    :func:`prxref.repo_standards.standards_entries`. Standards sections are
-    read ONLY at ``"repo"`` with a reader, exactly like contract files, so
-    ``"off"`` and ``"diff"`` never read them. ``repo_dir`` is a
+    :func:`prxref.repo_standards.standards_entries`. Standards discovery is
+    independent of the level (#68, on by default): at ``"diff"`` and
+    ``"repo"`` the standards sections join the chunk's repository context
+    whenever there is a reader, and at ``"off"`` a run with a reader, a
+    non-empty ``context_standards_globs`` and a ``context_standards_max_chars``
+    above 0 lists the repository once and, when the globs select at least
+    one file, builds every chunk's standards sections alone (level
+    ``"standards"``, budgeted at ``context_standards_max_chars``) and
+    records them under ``repo_context`` with ``mode`` ``"standards"`` and
+    ``max_chars`` the standards budget. When the globs select nothing, or
+    there is no reader, the ``"off"`` run is exactly a run without
+    standards. ``repo_dir`` is a
     :class:`prxref.forges.repo_dir.RepoDir` to read the repository from in
     place of the forge; this function does not validate it (``RepoDir``
     does, when it is built). ``repo_context_max_reads``
@@ -953,7 +966,8 @@ def orchestrate_review(
     every chunk together, and ``repo_context_max_chunk_reads``
     (``PRXREF_REPO_CONTEXT_MAX_CHUNK_READS``, default
     :data:`prxref.repo_reader.MAX_CHUNK_READS`) caps each chunk's own; both
-    go to the reader as ``run_cap`` and ``chunk_cap`` (#61). Off, nothing new is built or called: the
+    go to the reader as ``run_cap`` and ``chunk_cap`` (#61). Off, apart
+    from standards discovery, nothing new is built or called: the
     prompts, posts, trace and logs are exactly a run without these
     arguments, and the record's ``repo_context`` key is ``None``.
 
@@ -1149,6 +1163,9 @@ def orchestrate_review(
         raise ValueError(
             f"incremental must be one of {INCREMENTAL_MODES}, got {incremental!r}"
         )
+    ci_wiring_defaulted = ci_wiring is None
+    if ci_wiring_defaulted:
+        ci_wiring = "on"
     if ci_wiring not in CI_WIRING_MODES:
         raise ValueError(
             f"ci_wiring must be one of {CI_WIRING_MODES}, got {ci_wiring!r}"
@@ -1202,24 +1219,25 @@ def orchestrate_review(
     if scoped_rules is not None:
         scoped_meta = {**scoped_rules.record(), "max_chars": scoped_rules_max_chars}
         run_inputs["scoped_rules"] = {**scoped_meta, "units": None}
+    repo_initial: dict[str, Any] = {
+        "mode": repo_context,
+        "max_chars": repo_context_max_chars,
+        "max_reads": repo_context_max_reads,
+        "max_chunk_reads": repo_context_max_chunk_reads,
+        "contract_globs": list(context_contract_globs),
+        "exclude_globs": list(context_exclude_globs),
+        "standards_globs": list(context_standards_globs),
+        "standards_max_chars": context_standards_max_chars,
+        "reader": None,
+        "listing": None,
+        "reads": 0,
+        "read_cap_hit": False,
+        "chunk_read_cap_hit": False,
+        "run_read_cap_hit": False,
+        "units": None,
+    }
     if repo_context != "off":
-        run_inputs["repo_context"] = {
-            "mode": repo_context,
-            "max_chars": repo_context_max_chars,
-            "max_reads": repo_context_max_reads,
-            "max_chunk_reads": repo_context_max_chunk_reads,
-            "contract_globs": list(context_contract_globs),
-            "exclude_globs": list(context_exclude_globs),
-            "standards_globs": list(context_standards_globs),
-            "standards_max_chars": context_standards_max_chars,
-            "reader": None,
-            "listing": None,
-            "reads": 0,
-            "read_cap_hit": False,
-            "chunk_read_cap_hit": False,
-            "run_read_cap_hit": False,
-            "units": None,
-        }
+        run_inputs["repo_context"] = dict(repo_initial)
     # Like the ticket: an EMPTY bundle (files that held no item) is still
     # recorded — the paths and the 0 items — it just reaches no prompt.
     evidence_active = evidence is not None and bool(evidence.active)
@@ -1378,7 +1396,10 @@ def orchestrate_review(
         if ci_reader is None and repo_dir is not None:
             ci_reader = repo_reader.repo_dir_reader(repo_dir)
         if ci_reader is None:
-            logger.warning(CI_WIRING_INACTIVE_WARNING)
+            logger.log(
+                logging.INFO if ci_wiring_defaulted else logging.WARNING,
+                CI_WIRING_INACTIVE_WARNING,
+            )
             run_inputs["ci_wiring"] = {"triggered": False, "reason": "no reader"}
             tracer.event("ci_wiring", "ok", triggered=False, reason="no reader")
         else:
@@ -1667,6 +1688,22 @@ def orchestrate_review(
             repo_dir=repo_dir,
         )
         unit_records = [None] * len(chunks)
+    elif context_standards_globs and context_standards_max_chars > 0:
+        standards_initial = {
+            **repo_initial, "mode": "standards", "max_chars": context_standards_max_chars,
+        }
+        try:
+            standards_plan = _plan_repo_context(
+                "standards", forge, ref, pr, review_files, standards_initial,
+                repo_dir=repo_dir,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("standards discovery failed (continuing without it): %s", e)
+            standards_plan = None
+        if standards_plan is not None and standards_plan.standards_paths:
+            repo_plan = standards_plan
+            run_inputs["repo_context"] = standards_initial
+            unit_records = [None] * len(chunks)
     followup_floor: float | None = None
     followup_records: list[dict[str, Any] | None] | None = None
     if context_followup == "on":
@@ -3255,6 +3292,9 @@ def _plan_repo_context(
 ) -> _RepoPlan:
     """Build the run's reader and its once-per-run inputs, for a level other than ``"off"``.
 
+    ``mode`` is ``"diff"``, ``"repo"`` or ``"standards"``, the level of a
+    run whose repository context is off but whose standards discovery is on
+    (#68).
     ``initial`` is the run's initial ``repo_context`` record, whose
     ``max_chars``, read caps (``max_reads`` as the reader's ``run_cap``,
     ``max_chunk_reads`` as its ``chunk_cap``) and glob lists are the
@@ -3262,8 +3302,11 @@ def _plan_repo_context(
     ``repo_dir`` when it is given, else the forge at the PR's head sha. At
     ``"repo"`` with a reader, the listing is taken here, once, and the
     contract files and the standards files are selected here, once. At
-    ``"repo"``, a missing reader
-    or a missing listing logs the run's one WARNING naming
+    ``"diff"`` and ``"standards"`` with a reader, a non-empty
+    ``standards_globs`` and a ``standards_max_chars`` above 0, the listing
+    is taken here, once, for the standards files alone; ``"standards"``
+    budgets each chunk at ``standards_max_chars``. At ``"repo"``, a missing
+    reader or a missing listing logs the run's one WARNING naming
     ``PRXREF_REPO_CONTEXT``.
     """
     exclude = exclude_predicate(initial["exclude_globs"])
@@ -3276,7 +3319,24 @@ def _plan_repo_context(
         )
     diff_paths = frozenset(f.path for f in files)
     if mode != "repo":
-        return _RepoPlan(mode, reader, initial["max_chars"], exclude, diff_paths)
+        budget = initial["standards_max_chars"]
+        standards_paths: tuple[str, ...] = ()
+        if reader is not None and initial["standards_globs"] and budget > 0:
+            listing = reader.listing()
+            standards_paths = tuple(repo_contracts.select_contract_files(
+                list(initial["standards_globs"]),
+                listing=listing.paths if listing is not None else None,
+                diff_paths=[f.path for f in files if f.status != "removed"],
+            ))
+        return _RepoPlan(
+            mode, reader, budget if mode == "standards" else initial["max_chars"],
+            exclude, diff_paths,
+            standards_paths=standards_paths,
+            standards_priority=tuple(
+                repo_contracts.literal_contract_paths(list(initial["standards_globs"]))
+            ),
+            standards_max_chars=budget,
+        )
     if reader is None:
         logger.warning(
             "PRXREF_REPO_CONTEXT=repo, but there is no repository reader (the forge cannot "
