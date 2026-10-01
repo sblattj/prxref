@@ -933,7 +933,7 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     (issue #74): ``true`` on a model finding whose quoted evidence the
     anchor-snap pass could not locate — no snippet parseable while
     file-level, a snippet the head file does not hold, or an ambiguous
-    multi-match — whose confidence the same pass lowered. ``false`` on
+    multi-match — with its confidence unchanged. ``false`` on
     every other row, and on a finding object without the attribute.
 
     ``id``, ``anchor_block`` and ``id_reused_from`` follow
