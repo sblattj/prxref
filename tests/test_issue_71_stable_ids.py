@@ -265,7 +265,7 @@ class TestVerdictStore:
         path = self._store_with_refuted(tmp_path, original)
         orig_id = finding_id(original)
         reworded = _finding(line=7, title="drain duration hardcoded; should derive from values")
-        assert finding_id(reworded) != orig_id
+        assert finding_id(reworded) == orig_id
         out = apply_stable_ids([reworded], [], verdicts.load(path))
         assert out[0].drop_reason == f"refuted in earlier run ({orig_id})"
         assert out[0].id == orig_id
@@ -294,7 +294,7 @@ class TestVerdictStore:
     def test_a_store_entry_without_a_title_matches_by_exact_id_only(self):
         original = _finding(title="Drain duration is hardcoded instead of derived from values")
         store = {"version": 1, "verdicts": {finding_id(original): {"verdict": "refuted"}}}
-        reworded = _finding(title="drain duration hardcoded; should derive from values")
+        reworded = _finding(title="drain period hardcoded; should derive from values")
         assert apply_stable_ids([reworded], [], store)[0].drop_reason is None
         assert apply_stable_ids([original], [], store)[0].drop_reason is not None
 
@@ -478,6 +478,61 @@ class TestOrchestratorWiring:
         bad.write_text("{not json", encoding="utf-8")
         with pytest.raises(ConfigError, match="not valid JSON"):
             self._run(tmp_path, stable_ids=True, store=str(bad))
+
+
+class TestMorphologicalStability:
+    def test_derived_and_derive_hash_alike(self):
+        assert claim_hash("Drain duration hardcoded, derived from values") == claim_hash(
+            "Drain duration hardcoded, should derive from values"
+        )
+
+    def test_inflections_of_one_word_collapse(self):
+        assert claim_hash("hardcoded values") == claim_hash("hardcoding value")
+        assert claim_hash("cache misses") == claim_hash("cache miss")
+
+    def test_double_s_words_are_not_over_stripped(self):
+        assert claim_hash("access denied") != claim_hash("acces denied")
+
+    def test_distinct_claims_still_differ(self):
+        assert claim_hash("Hardcoded timeout value ignored") != claim_hash(
+            "Hardcoded timeout period ignored"
+        )
+
+
+@pytest.mark.usefixtures("contract_stubs")
+class TestTwoRunReplay:
+    def _run(self, title: str, line: int, store: str | None):
+        findings = {
+            "src/app.py": [
+                {"file": "src/app.py", "line": line, "severity": "error", "confidence": 0.9,
+                 "title": title, "body": "The drain duration never reads the configured values."},
+            ],
+        }
+        forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
+        return orchestrate_review(
+            forge, REF, FakeLLM(findings_by_path=findings), post=True,
+            stable_ids=True, verdict_store=store,
+        )
+
+    def test_reworded_title_and_anchor_one_key_off_keep_the_id_and_drop(self, tmp_path):
+        first = self._run("Drain duration hardcoded, derived from values", 3, None)
+        original = first["findings_active"][0]
+        path = tmp_path / "verdicts.json"
+        verdicts.record(path, [original], {original.id: verdicts.REFUTED}, run="run-1")
+        second = self._run("Drain duration hardcoded, should derive from values", 4, str(path))
+        assert second["findings_active"] == []
+        dropped = second["findings_dropped"][0]
+        assert dropped.id == original.id
+        assert dropped.drop_reason == f"refuted in earlier run ({original.id})"
+
+    def test_control_an_open_store_leaves_the_reworded_finding_active(self, tmp_path):
+        first = self._run("Drain duration hardcoded, derived from values", 3, None)
+        original = first["findings_active"][0]
+        path = tmp_path / "verdicts.json"
+        verdicts.record(path, [original], {original.id: "accepted"}, run="run-1")
+        second = self._run("Drain duration hardcoded, should derive from values", 4, str(path))
+        assert len(second["findings_active"]) == 1
+        assert second["findings_active"][0].id == original.id
 
 
 class TestEvalChurnMetric:
