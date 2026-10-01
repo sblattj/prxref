@@ -208,11 +208,39 @@ its `PRXREF_` name.
 
 ### PR metadata rules
 
-Flat keys, not a `[metadata]` table — the file is flat, so a table is a configuration error.
+The rules live in a separate TOML file that `metadata_rules` names, not in a
+`[metadata]` table: `.prxref.toml` itself is flat, so a table there is a
+configuration error. The path is resolved against `.prxref.toml`'s directory
+and must stay inside the repository, like `review_rules`. The rules file holds
+the same four settings as the flat keys below, and the two pair lists may also
+be written as tables:
+
+```toml
+commit_reference = "ACME-[0-9]+"
+max_areas_per_pr = 2
+
+[branch_patterns]
+fix = "fix/.*"
+feature = "feature/.*"
+
+[area_globs]
+backend = ["src/**", "lib/**"]
+frontend = "web/**"
+```
+
+`branch_patterns = ["fix=fix/.*"]` and `area_globs = ["backend=src/**"]` (the
+flat keys' array form) are accepted too. A key the file leaves out keeps its
+default. The file is read and checked before any network call, by `review`,
+the webhook daemon and `prxref config check`; any other key, a regex that does
+not compile, an empty side of a pair, a negative cap, invalid TOML, a file
+over 64 KiB, or a missing file exits `2`. So does setting one of the four flat
+keys beside a rules file, because the file would silently replace it.
+`metadata_rules = "on"` is the back-compat form that reads the four flat keys
+instead.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `metadata_rules` | string | `on` runs the three deterministic PR-metadata checks below; `off` (the default) runs none ([more](env-vars.md#llm--pipeline)). |
+| `metadata_rules` | string | Path to the PR-metadata rules file above, inside the repository; `on` runs the three checks from the flat keys below instead; `off` (the default) runs none ([more](env-vars.md#llm--pipeline)). |
 | `branch_patterns` | array of strings | `type=regex` pairs: the source branch must match the PR type's pattern ([more](env-vars.md#llm--pipeline)). |
 | `commit_reference` | string | Regex every non-merge commit subject must contain ([more](env-vars.md#llm--pipeline)). |
 | `area_globs` | array of strings | `name=glob` pairs classifying diff paths into areas ([more](env-vars.md#llm--pipeline)). |
@@ -273,7 +301,8 @@ instead, even when the value is empty.
 ## Paths
 
 The path keys (`review_rules`, each `scoped_rules` entry, `prompts_dir`,
-`ticket_context_file` and each `spec_sources` entry) are read **relative to
+`ticket_context_file`, each `spec_sources` entry, and `metadata_rules`
+whenever it is not `on` or `off`) are read **relative to
 the directory holding the config file**, not the working directory. So
 `review_rules = ".prxref/rules.md"` in a root `.prxref.toml` names the same
 file whichever directory prxref runs from, and a file named by
@@ -400,7 +429,7 @@ inside the repository ([Paths](#paths)).
 
 What the author **can** do is relax the review: lower the caps
 (`max_error_findings = 0`), raise `confidence_floor` to `1.0`, point
-`review_rules`, `scoped_rules` or `prompts_dir` at the PR's own copies,
+`review_rules`, `scoped_rules`, `prompts_dir` or `metadata_rules` at the PR's own copies,
 switch `post_mode` to `inline`, or pick a weaker model in `llm_models`. On an
 advisory lane that is the same trust you already extend to the PR's code. On
 a lane where the review gates the merge (`PRXREF_FAIL_ON` set to `error` or

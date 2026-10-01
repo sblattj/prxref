@@ -152,6 +152,7 @@ from prxref.forges.base import detect_forge
 from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
 from prxref.forges.repo_dir import RepoDir
 from prxref.llm import ConfigError
+from prxref.metadata_rules import MetadataRules
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
 from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir
 from prxref.rules import load_review_rules, load_scoped_rules
@@ -256,6 +257,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "team review rules (Markdown/text) added to every review prompt; "
             "overrides PRXREF_REVIEW_RULES, and '' turns it off for this run; "
             "read it from a trusted checkout, never from the PR under review"
+        ),
+    )
+    rev.add_argument(
+        "--metadata-rules",
+        default=None,
+        metavar="PATH",
+        help=(
+            "PR-metadata rules file (TOML: branch_patterns, commit_reference, "
+            "area_globs, max_areas_per_pr) checked without an LLM and reported "
+            "as summary notes; 'on' uses the flat PRXREF_* keys instead; "
+            "overrides PRXREF_METADATA_RULES, and '' or 'off' turns the checks "
+            "off for this run"
         ),
     )
     rev.add_argument(
@@ -1498,6 +1511,32 @@ def _path_loaders() -> PathLoaders:
     )
 
 
+def _metadata_rule_kwargs(cfg: dict[str, Any], loaded: MetadataRules | None) -> dict[str, Any]:
+    """The five PR-metadata arguments of ``orchestrate_review`` (#70).
+
+    ``loaded`` is the rules file :func:`load_path_inputs` read, or ``None``.
+    A rules file turns the checks on with its own four settings; otherwise
+    ``metadata_rules = "on"`` (the back-compat alias) runs them from the
+    flat config keys, and any other switch value (``off``, ``""``) runs
+    none. The orchestrator therefore only ever sees ``on`` or ``off``.
+    """
+    if loaded is not None:
+        return {
+            "metadata_rules": "on",
+            "branch_patterns": list(loaded.branch_patterns),
+            "commit_reference": loaded.commit_reference,
+            "area_globs": list(loaded.area_globs),
+            "max_areas_per_pr": loaded.max_areas_per_pr,
+        }
+    return {
+        "metadata_rules": "on" if cfg["metadata_rules"].strip() == "on" else "off",
+        "branch_patterns": cfg["branch_patterns"],
+        "commit_reference": cfg["commit_reference"],
+        "area_globs": cfg["area_globs"],
+        "max_areas_per_pr": cfg["max_areas_per_pr"],
+    }
+
+
 def _open_repo_dir(path: str | None) -> RepoDir | None:
     """Open ``--repo-dir`` as a :class:`~prxref.forges.repo_dir.RepoDir`, or ``None`` when it is not given.
 
@@ -1553,6 +1592,7 @@ def _run_review(
     evidence_files: list[str] | None = None,
     context_standards_globs: list[str] | None = None,
     routing_probe: str | None = None,
+    metadata_rules: str | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1603,6 +1643,7 @@ def _run_review(
         evidence_files=evidence_files,
         context_standards_globs=context_standards_globs,
         routing_probe=routing_probe,
+        metadata_rules=metadata_rules,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1617,6 +1658,7 @@ def _run_review(
             "ci_wiring_globs": "--ci-wiring-globs",
             "evidence_files": "--evidence-file",
             "context_standards_globs": "--context-standards-globs",
+            "metadata_rules": "--metadata-rules",
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -1725,11 +1767,7 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
-        metadata_rules=cfg["metadata_rules"],
-        branch_patterns=cfg["branch_patterns"],
-        commit_reference=cfg["commit_reference"],
-        area_globs=cfg["area_globs"],
-        max_areas_per_pr=cfg["max_areas_per_pr"],
+        **_metadata_rule_kwargs(cfg, inputs.metadata),
         replay=(
             replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))
             if replay is not None else None
@@ -2019,6 +2057,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             ),
             evidence_files=args.evidence_file,
             context_standards_globs=_standards_globs_arg(args.context_standards_globs),
+            metadata_rules=args.metadata_rules,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

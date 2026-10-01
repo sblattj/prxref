@@ -8,6 +8,15 @@ only when ``metadata_rules = "on"``, and each is configured by its own key
 (``branch_patterns``, ``commit_reference``, ``area_globs`` with
 ``max_areas_per_pr``).
 
+The settings come from one of two places. ``metadata_rules = "<path>"``
+names a separate TOML rules file, read by :func:`load_metadata_rules`
+before any network call: the same four settings, with the two pair lists
+also writable as tables (``[branch_patterns]`` mapping a type to its
+regex, ``[area_globs]`` mapping an area to one glob or a list of them),
+validated by the config layer's own validators so a bad file exits 2.
+``metadata_rules = "on"`` is the back-compat alias that reads the four
+flat config keys instead.
+
 Three checks, one per key, each answering with its notes plus a status
 string — ``"pass"`` (configured, and the PR satisfies it), ``"fail"``
 (configured, and it found violations) or ``"skipped: <reason>"`` (nothing
@@ -28,12 +37,33 @@ them, and they touch neither the verdict nor the exit code —
 from __future__ import annotations
 
 import re
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
+from .config import (
+    _DEFAULTS,
+    _METADATA_FLAT_KEYS,
+    _RANGES,
+    METADATA_RULES_SWITCHES,
+    _check_metadata_rules,
+    _display_path,
+    _file_value,
+)
 from .forges.base import CommitData, PRData
+from .llm import ConfigError
 from .rules import match_globs
 from .triage import FileDiff
+
+#: The largest rules file :func:`load_metadata_rules` reads, in characters.
+#: A fixed cap rather than a config key: a rules file is a few dozen lines.
+RULES_FILE_MAX_CHARS = 65536
+
+#: The values of ``metadata_rules`` that are not a rules-file path.
+SWITCH_VALUES = METADATA_RULES_SWITCHES
+
+_RULES_FILE_KEYS = _METADATA_FLAT_KEYS
 
 # A conventional-commit type: the word before the optional "(scope)" and
 # the ":" that opens a title like "fix(scope): ...". Case-insensitive,
@@ -58,6 +88,113 @@ class MetadataNote:
     def as_dict(self) -> dict[str, str]:
         """The note as the run record's ``{check, title, detail}`` row."""
         return {"check": self.check, "title": self.title, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class MetadataRules:
+    """The four check settings a metadata rules file supplied.
+
+    The same shapes the flat config keys hold: ``TYPE=REGEX`` and
+    ``NAME=GLOB`` strings, a regex string, and the area cap. A key the
+    file leaves out keeps its config default (empty, so that check skips;
+    a cap of 2).
+    """
+
+    branch_patterns: tuple[str, ...] = ()
+    commit_reference: str = ""
+    area_globs: tuple[str, ...] = ()
+    max_areas_per_pr: int = _DEFAULTS["max_areas_per_pr"]
+
+
+def _pair_entries(key: str, raw: object, label: str, *, many: bool) -> list[str]:
+    """``raw`` as ``NAME=VALUE`` strings: a table is flattened, an array kept.
+
+    A table maps each name to one string, or, when ``many`` is true (the
+    area globs), to an array of strings that become one entry each. An
+    array goes through the config file's own type check. A table name
+    holding ``=`` could not round-trip through the ``NAME=VALUE`` form, so
+    it is refused.
+    """
+    if not isinstance(raw, dict):
+        return list(_file_value(key, raw, label))
+    entries: list[str] = []
+    expected = "a string or an array of strings" if many else "a string"
+    for name, value in raw.items():
+        if "=" in name:
+            raise ConfigError(f"{label}: {key}: name {name!r} must not contain '='")
+        values = value if many and isinstance(value, list) else [value]
+        if not values or not all(isinstance(v, str) for v in values):
+            raise ConfigError(
+                f"{label}: {key}: {name!r} must map to {expected}, got {value!r}"
+            )
+        entries.extend(f"{name}={v}" for v in values)
+    return entries
+
+
+def load_metadata_rules(
+    path: str | None, *, max_chars: int, source: str,
+) -> MetadataRules | None:
+    """Load the metadata rules file at ``path``, or ``None`` when it names no file.
+
+    ``None`` and the switch values ``""``, ``off`` and ``on`` are not paths
+    and load nothing. The file is UTF-8 TOML of at most ``max_chars``
+    characters (the caller passes :data:`RULES_FILE_MAX_CHARS`) holding only
+    ``branch_patterns``, ``commit_reference``, ``area_globs`` and
+    ``max_areas_per_pr``. Each value is checked by the config layer's
+    validators (the file value types, the pattern check behind the flat
+    keys and the cap's range), so a file is refused exactly where the same
+    value set as a flat key would be. Every failure is a
+    :class:`~prxref.llm.ConfigError` starting ``<source>: <file>``, which
+    the CLI turns into exit 2 before any network call.
+    """
+    if path is None or path.strip() in SWITCH_VALUES:
+        return None
+    display = _display_path(Path(path))
+    label = f"{source}: {display}"
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        raise ConfigError(
+            f"{source}: cannot read metadata rules file {path!r}: {exc.strerror}"
+        ) from exc
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{label}: not valid UTF-8 (byte {exc.start})") from exc
+    if len(text) > max_chars:
+        raise ConfigError(
+            f"{label}: rules file too large ({len(text)} characters, the limit is {max_chars})"
+        )
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{label}: invalid TOML: {exc}") from exc
+    for key in parsed:
+        if key not in _RULES_FILE_KEYS:
+            allowed = ", ".join(_RULES_FILE_KEYS)
+            raise ConfigError(f"{label}: unknown key {key!r}; a rules file holds {allowed}")
+    cfg: dict[str, object] = {key: _DEFAULTS[key] for key in _RULES_FILE_KEYS}
+    if "branch_patterns" in parsed:
+        cfg["branch_patterns"] = _pair_entries(
+            "branch_patterns", parsed["branch_patterns"], label, many=False,
+        )
+    if "area_globs" in parsed:
+        cfg["area_globs"] = _pair_entries("area_globs", parsed["area_globs"], label, many=True)
+    for key in ("commit_reference", "max_areas_per_pr"):
+        if key in parsed:
+            cfg[key] = _file_value(key, parsed[key], label)
+    sources = {key: f"{label}: {key}" for key in _RULES_FILE_KEYS}
+    cap = cfg["max_areas_per_pr"]
+    cap_range = _RANGES["max_areas_per_pr"]
+    if not cap_range.accepts(cap):
+        raise ConfigError(f"{sources['max_areas_per_pr']}: {cap_range.describe()}, got {cap!r}")
+    _check_metadata_rules(cfg, sources)
+    return MetadataRules(
+        branch_patterns=tuple(cfg["branch_patterns"]),
+        commit_reference=str(cfg["commit_reference"]),
+        area_globs=tuple(cfg["area_globs"]),
+        max_areas_per_pr=int(cap),
+    )
 
 
 def _label_names(pr: PRData) -> list[str]:
