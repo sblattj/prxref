@@ -3216,6 +3216,10 @@ _EVIDENCE_AFTER_KEYWORD = (_EVIDENCE_SCOPE_WORDS - {"to", "of"}) | frozenset({
     "entirely", "completely", "altogether", "everywhere", "anywhere", "here",
     "there", "too", "and", "or", "so", "which", "because", "since", "as",
 })
+_EVIDENCE_AFTER_NAME = (
+    _EVIDENCE_SUBJECT_FILLER | _EVIDENCE_SCOPE_WORDS | _EVIDENCE_AFTER_KEYWORD
+)
+_EVIDENCE_LEADING_ALIAS_RE = re.compile(r"^\s*\([^()]*\)")
 _EVIDENCE_CLAUSE_SPLIT_RE = re.compile(
     r"[.;,\n]|\b(?:but|while|whereas|although|though)\b", re.IGNORECASE,
 )
@@ -3261,9 +3265,12 @@ def _claims_header_missing(text: str, name: str) -> bool:
     - keyword before the name ("missing Cache-Control", "no X header",
       "lacks a Cache-Control header"): the words between them must not
       hold a preposition ("missing includeSubDomains in HSTS") or a
-      directive word ("directive", "value", "flag", ...), and none of the
-      three words after the name may be a directive word or another
-      hyphenated token ("missing Cache-Control max-age directive");
+      directive word ("directive", "value", "flag", ...), none of the
+      three words after the name may be a directive word, and the first
+      word after the name (past an alias parenthetical such as "(HSTS)")
+      must end the clause or be filler, a preposition or a connective —
+      any other word is the keyword's object ("missing Cache-Control
+      max-age", "missing Strict-Transport-Security includeSubDomains");
     - name before the keyword ("Cache-Control is not set", "header
       missing"): the words between them must be filler ("header", "is",
       ...), and the keyword must end the clause or be followed by a
@@ -3303,15 +3310,22 @@ def _words(text: str) -> list[str]:
 
 
 def _keyword_before_name(gap: str, after: str) -> bool:
-    """True when "<keyword> <gap> <name> <after>" says the header is missing."""
+    """True when "<keyword> <gap> <name> <after>" says the header is missing.
+
+    A leading parenthetical after the name is an alias ("(HSTS)") and is
+    skipped. The next word must then end the clause or be filler, a scope
+    word ("to" and "of" included: "missing HSTS to enforce HTTPS" is about
+    the header) or a connective; any other word is the object of the
+    keyword ("missing HSTS includeSubDomains"), so the claim is about a
+    directive.
+    """
     between = _words(gap)
     if any(w in _EVIDENCE_SCOPE_WORDS or w in _EVIDENCE_DIRECTIVE_WORDS for w in between):
         return False
-    following = _words(after)[:3]
-    for word in following:
-        if word in _EVIDENCE_DIRECTIVE_WORDS:
-            return False
-    return not (following and _EVIDENCE_HEADER_TOKEN_RE.fullmatch(following[0]))
+    following = _words(_EVIDENCE_LEADING_ALIAS_RE.sub("", after, count=1))[:3]
+    if any(word in _EVIDENCE_DIRECTIVE_WORDS for word in following):
+        return False
+    return not following or following[0] in _EVIDENCE_AFTER_NAME
 
 
 def _keyword_after_name(gap: str, after: str) -> bool:

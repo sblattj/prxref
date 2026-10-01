@@ -261,9 +261,17 @@ that header present. A finding is dropped only when one item meets all of:
   showing the header does not contradict it. When the keyword comes first
   (`missing Cache-Control`, `lacks a Cache-Control header`), the words up to
   the name may not hold a preposition (`in`, `on`, `of`, `for`, ...) or a
-  directive word (`directive`, `value`, `flag`, `option`, ...), and none of
-  the three words after the name may be a directive word or another
-  hyphenated token. When the name comes first (`Cache-Control is not set`,
+  directive word (`directive`, `value`, `flag`, `option`, ...), none of
+  the three words after the name may be a directive word, and the first
+  word after the name — past an alias in parentheses such as `(HSTS)` — must
+  end the clause or be filler (`header`, `is`, ...), a preposition (`for`,
+  `to`, ...) or a connective (`which`, `and`, ...). Any other word is the
+  keyword's object, so "Missing Strict-Transport-Security includeSubDomains"
+  and "No Cache-Control private" are directive claims, while "Missing
+  Strict-Transport-Security (HSTS) header" and "No Cache-Control for
+  authenticated responses" are about the header. A bare verb after the name
+  ("Missing X-Frame-Options allows clickjacking") also reads as an object,
+  so such a claim is kept rather than dropped. When the name comes first (`Cache-Control is not set`,
   `Cache-Control header missing`), only filler (`header`, `is`, ...) may sit
   between the two, and the keyword must end the clause or be followed by a
   preposition (`missing from responses`), never by an object or by `to`/`of`
