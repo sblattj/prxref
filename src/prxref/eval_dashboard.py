@@ -19,7 +19,6 @@ import html
 import ipaddress
 import json
 import logging
-import re
 import socket
 import threading
 from datetime import UTC, datetime
@@ -27,14 +26,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from prxref.eval_units import RATE_LIMIT_RE
 from prxref.llm import ConfigError
 
 logger = logging.getLogger(__name__)
-
-# Private copy of eval_units.RATE_LIMIT_RE; import that one once it is merged.
-RATE_LIMIT_RE = re.compile(
-    r"\b429\b|rate[ _-]?limit|too many requests|quota|session (cap|limit)", re.IGNORECASE
-)
 
 DEFAULT_TAIL = 20
 POLL_SECONDS = 2
