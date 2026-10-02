@@ -484,6 +484,11 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 - `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`:
   - `--baseline RUN [RUN ...]` / `--candidate RUN [RUN ...]`: scored runs of each side, each a label under `--out` or a run directory. Both required; repeat each side so the baseline has a noise range.
   - `--severity SEV`: gate on recall of the labels of that severity (e.g. `error` for must-fix). Without it the gate is micro recall. A run with no label of that severity exits `2`.
+- `prxref eval dashboard --campaign DIR [--host HOST] [--port PORT] [--once] [--tail N]` shows the live progress of a campaign directory (its `progress.json` and `logs/`), read-only:
+  - `--campaign DIR`: the campaign output directory. Required. A directory with no `progress.json` exits `2`, naming `--campaign`.
+  - `--host HOST` / `--port PORT`: where to serve the page (default `127.0.0.1:8765`; `--port 0` picks a free port, printed as `dashboard: http://HOST:PORT/`). A non-loopback host logs a warning, because the page shows log tails. A port already in use exits `2`, naming `--port`.
+  - `--once`: print a plain-text status table, one row per pass, and exit `0` instead of serving.
+  - `--tail N`: log lines shown per pass (default `20`).
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
