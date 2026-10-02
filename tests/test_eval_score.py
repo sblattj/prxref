@@ -206,6 +206,10 @@ Recall over accepted labels: 100.0% (credit 1 of 1 scored labels).
 
 1 of 3 active AI findings matched no label: 0.33 per PR.
 
+## Precision
+
+Not graded: run `prxref eval score --precision` to grade the unmatched AI findings.
+
 ## Severity agreement
 
 Agreed on 1 of 2 credited labels (50.0%); a human `minor` counts as `warning`.

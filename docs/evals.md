@@ -398,13 +398,14 @@ even when `--cases` has changed since.
 ## `prxref eval score`
 
 ```bash
-prxref eval score --label NAME [--judge-model MODEL] [--out DIR]
+prxref eval score --label NAME [--judge-model MODEL] [--precision] [--out DIR]
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--label NAME` | The run to score, under `--out`. Required. |
 | `--judge-model MODEL` | The one model that grades every label without `must_match`. Required when any label of the run lacks `must_match`. |
+| `--precision` | Also grade the active AI findings that no label credited, as `valid`, `nit`, `invalid`, `duplicate` or `unverifiable`. Requires `--judge-model`. See [Precision](#precision). |
 | `--out DIR` | The directory that holds the runs. Default `./prxref-eval/`. |
 
 It reads `<out>/<label>/run.json` and the cases its `case_ids` list; the
@@ -426,7 +427,9 @@ It exits `2` on a `--label` that is not a safe name; a run with no
 `run.json` (write it with `eval run`, or finish an interrupted one with
 `--resume`); a run file that cannot be read; a case with neither
 `record.json` nor `error.json`; a malformed environment; and a missing or
-unusable `--judge-model`, all before any judge call.
+unusable `--judge-model`, all before any judge call; and `--precision`
+without `--judge-model`, which is reported as a configuration error
+naming `--precision`.
 
 ### Two tiers of grading
 
@@ -488,6 +491,67 @@ label of the case is `none` and counts in the denominator. A failed case is
 listed under `failed` and in the `Failed cases` section of `score.md`, and
 its verdict reads `failed` in the case table. Its review cost is unknown,
 which makes the run's review-cost total unknown too.
+
+### Precision
+
+Recall rewards finding what humans found; it says nothing about the rest of
+what the reviewer posted. `--precision` grades that rest. Without the flag
+no precision call is made and `metrics.precision` and every case row's
+`precision` are `null`.
+
+**What is graded.** Each active AI finding (no `drop_reason`) that no
+credited label names: the same set `unmatched_ai` counts. A grouped finding
+is one unit, however many locations it has. A case with no such finding
+makes no call; every other case makes one single-shot JSON call with the
+packaged `prompts/precision.md`, on the judge client and under the same
+`PRXREF_LLM_PARSE_RETRIES` as the label judge.
+
+**What the judge sees.** The finding (file, line, severity, title, body),
+the case's `context_file` text when it has one, up to 8000 characters, the
+credited findings as context (so it can recognise a restatement), and the
+hunks of the diff for the file each finding names, up to 60000 characters.
+The diff is the case's `diff_file`, else `cases/<id>/diff.patch` in the run
+directory; with neither, the judge is told no diff was available and
+should answer `unverifiable` where the findings alone cannot settle it.
+`eval run` does not write `diff.patch` today: the review result carries no
+diff text, so a case replayed from a pinned commit range has no diff for
+the precision judge.
+
+**The five verdicts.**
+
+| Verdict | Meaning |
+|---|---|
+| `valid` | Correct about the changed code and worth a reviewer's attention. |
+| `nit` | Correct but trivial: style, naming, a comment, a preference. |
+| `invalid` | Wrong, contradicted by the diff or ticket, about code the diff does not touch, or too vague to check. |
+| `duplicate` | Restates another AI finding of the same case, or one a label already credited. |
+| `unverifiable` | The diff and ticket shown cannot settle it. |
+
+**The formulas.** `matched` is the number of active AI findings some
+credited label names (a grouped finding counts once). With `valid`, `nit`,
+`invalid` and `duplicate` the counts of the graded units:
+
+```text
+strict  = (matched + valid)       / (matched + valid + nit + invalid + duplicate)
+lenient = (matched + valid + nit) / (matched + valid + nit + invalid + duplicate)
+```
+
+A finding a label credited counts as correct without a precision call.
+`unverifiable` findings and `judge_error` units are in neither the
+numerator nor the denominator, and both rates are `null` when the
+denominator is 0. `graded` counts the units that got one of the five
+verdicts, so it excludes `judge_error`.
+
+**Failures and caching.** A call that fails, or a reply still rejected
+after the retries (not JSON, no `verdicts` list, an unknown verdict, or a
+missing, repeated or unknown `ai_ref`), makes every unit of that case
+`judge_error`: it is never cached and never counted, and the case shows
+under `judge_error` in `metrics.precision`, not in `judge.errors`. Replies
+are cached in `judge-cache/`, keyed on the precision prompt's sha256, the
+judge model, the findings, the ticket and the diff text, so a rescore with
+nothing changed makes no call. The precision calls' cost, calls, parse
+retries and cache hits are added to `judge`, and their cost to each case's
+`judge_cost_usd`; the traces are `trace/precision.*`.
 
 ### The judge
 
@@ -571,7 +635,12 @@ The keys, in order:
   `judge_error`, `ai_findings`, `unmatched_ai`, `severity_compared`,
   `severity_agreed`, `chunks_failed`, `elapsed_ms`, `review_cost_usd`,
   `review_cost_estimated`, `judge_cost_usd`, `judge_cost_estimated` and
-  `findings`. Each `findings` entry is one label, sorted by id: `human_id`,
+  `findings` and `precision` (`null` without `--precision`, otherwise
+  `verdicts`, a list of `{"ai_ref", "verdict", "reason"}` with `ai_ref` the
+  index of the finding in the record's `findings` and `reason` the judge's
+  one sentence, or the error for a `judge_error`), then the same counts as
+  `metrics.precision` without `strict` and `lenient`). Each `findings`
+  entry is one label, sorted by id: `human_id`,
   `file`, `line`, `severity`, `category`, `accepted`, `grade`, `credit`
   (`null` for `judge_error`), `ai_ref` (the index of the crediting row in
   the record's `findings`, dropped rows included), `ai_line` (the line of
@@ -601,8 +670,8 @@ The keys, in order:
 - **`unmatched_ai`**: `total`, the active AI findings that credit no label;
   `ai_findings`, all active AI findings; and `per_pr`, `total` divided by
   `case_count`. Labels are a floor, not an exhaustive list, so an unmatched
-  finding is not necessarily wrong: read this as noise per PR, not as
-  precision.
+  finding is not necessarily wrong: read this as noise per PR, and grade
+  it with `--precision` to learn how much of it is wrong.
 - **`severity_agreement`**: over the credited labels, whether the crediting
   AI finding has the label's severity, both lowercased and a `minor` read
   as `warning` on either side. It holds `compared`, `agreed`, `rate`
@@ -619,6 +688,10 @@ The keys, in order:
   every judge call raised is unpriced, so it can be `null` while
   `judge.cost_usd`, which skips such a case, is a number. A case whose
   retry raised after a rejected reply is priced by that reply.
+- **`precision`**: `null` without `--precision`, otherwise `graded`,
+  `matched`, `valid`, `nit`, `invalid`, `duplicate`, `unverifiable`,
+  `judge_error`, `strict` and `lenient`, summed over the cases as defined
+  in [Precision](#precision).
 
 ### `score.md`
 
@@ -626,7 +699,7 @@ The same result for a reader. It opens with `# prxref eval score: <label>`,
 the headline, and the self-judging note when stamped, then these sections,
 in order: `## Failed cases`, `## Cases` (one row per case), `## Recall by
 severity`, `## Recall by category`, `## Accepted labels`, `## Unmatched AI
-findings`, `## Severity agreement`, `## Chunks failed`, `## Elapsed`,
+findings`, `## Precision`, `## Severity agreement`, `## Chunks failed`, `## Elapsed`,
 `## Cost` and `## Judge`. An empty section reads `None.` (or `No labels.`
 for a recall table), an unknown value reads `unknown`, and a recall with
 nothing scored reads `n/a`. The judge's cost line names its parse retries
@@ -677,6 +750,10 @@ Recall over accepted labels: 100.0% (credit 1 of 1 scored labels).
 ## Unmatched AI findings
 
 1 of 3 active AI findings matched no label: 0.33 per PR.
+
+## Precision
+
+Not graded: run `prxref eval score --precision` to grade the unmatched AI findings.
 
 ## Severity agreement
 
@@ -738,7 +815,8 @@ Standard output is Markdown, in this order:
   `Cases`, `Recall (micro)`, `Judge errors`, one `Recall, severity` row per
   severity and one `Recall, category` row per category found in either run
   (each sorted), `Recall, accepted labels`, `Unmatched AI per PR`,
-  `Severity agreement`, `Chunks failed`, `Elapsed`, `Review cost` and
+  `Strict precision`, `Lenient precision` (`n/a` on a side that was not
+  scored with `--precision`), `Severity agreement`, `Chunks failed`, `Elapsed`, `Review cost` and
   `Judge cost`. A severity or category only one run has reads `n/a` on the
   other side.
 - `## Stable-id reuse` (#71): printed between `## Metrics` and
@@ -936,6 +1014,8 @@ result of the commands above:
 | Recall, category `style` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
 | Recall, accepted labels | 100.0% (1 of 1) | 0.0% (0 of 1) | -100.0 pp |
 | Unmatched AI per PR | 0.00 (0 of 3) | 0.50 (1 of 2) | +0.50 |
+| Strict precision | n/a | n/a | unknown |
+| Lenient precision | n/a | n/a | unknown |
 | Severity agreement | 66.7% (2 of 3) | 100.0% (1 of 1) | +33.3 pp |
 | Chunks failed | 0 | 1 | +1 |
 | Elapsed | 3.0 s | 3.5 s | +0.5 s |
