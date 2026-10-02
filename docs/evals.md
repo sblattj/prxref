@@ -1087,6 +1087,88 @@ case $? in
 esac
 ```
 
+## Worked example: two arms
+
+Measure whether another model finds more of the labelled problems. Each arm
+is one `eval run` with its own `--label`, and the only difference is the
+environment:
+
+```bash
+# Arm A: the configuration as it is
+prxref eval run --cases tests/evals --label base
+
+# Arm B: the same cases, another model
+PRXREF_LLM_MODELS=example-model-b prxref eval run --cases tests/evals --label cand
+
+# Grade both. Every label of tests/evals has must_match, so no --judge-model
+prxref eval score --label base
+prxref eval score --label cand
+
+prxref eval compare base cand > compare.md
+```
+
+A dataset with judge-tier labels needs `--judge-model` on both `score`
+commands, and the same model on both, or `compare` warns.
+
+This is what a comparison looks like. It is the fixture pair the test suite
+pins (two made-up cases `c1` and `c2`, graded partly by a judge), not the
+result of the commands above:
+
+```text
+# prxref eval compare
+
+- A: base
+- B: cand
+
+## Metrics
+
+| Metric | A | B | Change |
+|---|---:|---:|---:|
+| Cases | 2 | 2 | 0 |
+| Recall (micro) | 62.5% (2.5 of 4) | 25.0% (1 of 4) | -37.5 pp |
+| Judge errors | 0 | 1 | +1 |
+| Recall, severity `error` | 75.0% (1.5 of 2) | 0.0% (0 of 1) | -75.0 pp |
+| Recall, severity `minor` | 100.0% (1 of 1) | 100.0% (1 of 1) | 0.0 pp |
+| Recall, severity `spec` | n/a | 0.0% (0 of 1) | unknown |
+| Recall, severity `warning` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
+| Recall, category `(none)` | n/a | 0.0% (0 of 1) | unknown |
+| Recall, category `logic` | 75.0% (1.5 of 2) | 0.0% (0 of 1) | -75.0 pp |
+| Recall, category `security` | 100.0% (1 of 1) | 100.0% (1 of 1) | 0.0 pp |
+| Recall, category `style` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
+| Recall, accepted labels | 100.0% (1 of 1) | 0.0% (0 of 1) | -100.0 pp |
+| Unmatched AI per PR | 0.00 (0 of 3) | 0.50 (1 of 2) | +0.50 |
+| Strict precision | n/a | n/a | unknown |
+| Lenient precision | n/a | n/a | unknown |
+| Severity agreement | 66.7% (2 of 3) | 100.0% (1 of 1) | +33.3 pp |
+| Chunks failed | 0 | 1 | +1 |
+| Elapsed | 3.0 s | 3.5 s | +0.5 s |
+| Review cost | $0.0300 | unknown | unknown |
+| Judge cost | $0.0020 | $0.0030 | +$0.0010 |
+
+## Changed labels
+
+| Case | Label | Location | A | B |
+|---|---|---|---|---|
+| c1 | H1 | src/a.py:10 | full (1) | none (0) |
+| c1 | H3 | src/a.py:30 | partial (0.5) | judge_error |
+
+## Only in one run
+
+- Label `H4` of case `c1` at `src/a.py:40`: only in B
+```
+
+Reading it:
+
+- B's micro recall fell from 62.5% to 25.0%. But B graded `H3` as
+  `judge_error`, which is left out of its denominator (`1 of 4` counts the
+  new `H4` and not `H3`), and B has a label A does not, so rescore before
+  trusting the headline.
+- `H1` lost its credit: B's findings no longer raise it. The
+  `Changed labels` table is where to start reading B's records.
+- B's review cost is `unknown` because one of its cases could not be priced,
+  so the change is `unknown` too, not a misleading number.
+- B failed a chunk that A did not, which alone can explain missing findings.
+
 ## `prxref eval campaign`
 
 ```bash
@@ -1280,88 +1362,6 @@ rate-limit pattern (`429`, `rate limit`, `too many requests`, `quota`,
 (ok plus failed), `pct`, `elapsed_s`, `eta_s` and `rate_limited_passes`. An
 ETA is the remaining units over the rate observed since `started_at`, and is
 `null` until a unit is done.
-
-## Worked example: two arms
-
-Measure whether another model finds more of the labelled problems. Each arm
-is one `eval run` with its own `--label`, and the only difference is the
-environment:
-
-```bash
-# Arm A: the configuration as it is
-prxref eval run --cases tests/evals --label base
-
-# Arm B: the same cases, another model
-PRXREF_LLM_MODELS=example-model-b prxref eval run --cases tests/evals --label cand
-
-# Grade both. Every label of tests/evals has must_match, so no --judge-model
-prxref eval score --label base
-prxref eval score --label cand
-
-prxref eval compare base cand > compare.md
-```
-
-A dataset with judge-tier labels needs `--judge-model` on both `score`
-commands, and the same model on both, or `compare` warns.
-
-This is what a comparison looks like. It is the fixture pair the test suite
-pins (two made-up cases `c1` and `c2`, graded partly by a judge), not the
-result of the commands above:
-
-```text
-# prxref eval compare
-
-- A: base
-- B: cand
-
-## Metrics
-
-| Metric | A | B | Change |
-|---|---:|---:|---:|
-| Cases | 2 | 2 | 0 |
-| Recall (micro) | 62.5% (2.5 of 4) | 25.0% (1 of 4) | -37.5 pp |
-| Judge errors | 0 | 1 | +1 |
-| Recall, severity `error` | 75.0% (1.5 of 2) | 0.0% (0 of 1) | -75.0 pp |
-| Recall, severity `minor` | 100.0% (1 of 1) | 100.0% (1 of 1) | 0.0 pp |
-| Recall, severity `spec` | n/a | 0.0% (0 of 1) | unknown |
-| Recall, severity `warning` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
-| Recall, category `(none)` | n/a | 0.0% (0 of 1) | unknown |
-| Recall, category `logic` | 75.0% (1.5 of 2) | 0.0% (0 of 1) | -75.0 pp |
-| Recall, category `security` | 100.0% (1 of 1) | 100.0% (1 of 1) | 0.0 pp |
-| Recall, category `style` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
-| Recall, accepted labels | 100.0% (1 of 1) | 0.0% (0 of 1) | -100.0 pp |
-| Unmatched AI per PR | 0.00 (0 of 3) | 0.50 (1 of 2) | +0.50 |
-| Strict precision | n/a | n/a | unknown |
-| Lenient precision | n/a | n/a | unknown |
-| Severity agreement | 66.7% (2 of 3) | 100.0% (1 of 1) | +33.3 pp |
-| Chunks failed | 0 | 1 | +1 |
-| Elapsed | 3.0 s | 3.5 s | +0.5 s |
-| Review cost | $0.0300 | unknown | unknown |
-| Judge cost | $0.0020 | $0.0030 | +$0.0010 |
-
-## Changed labels
-
-| Case | Label | Location | A | B |
-|---|---|---|---|---|
-| c1 | H1 | src/a.py:10 | full (1) | none (0) |
-| c1 | H3 | src/a.py:30 | partial (0.5) | judge_error |
-
-## Only in one run
-
-- Label `H4` of case `c1` at `src/a.py:40`: only in B
-```
-
-Reading it:
-
-- B's micro recall fell from 62.5% to 25.0%. But B graded `H3` as
-  `judge_error`, which is left out of its denominator (`1 of 4` counts the
-  new `H4` and not `H3`), and B has a label A does not, so rescore before
-  trusting the headline.
-- `H1` lost its credit: B's findings no longer raise it. The
-  `Changed labels` table is where to start reading B's records.
-- B's review cost is `unknown` because one of its cases could not be priced,
-  so the change is `unknown` too, not a misleading number.
-- B failed a chunk that A did not, which alone can explain missing findings.
 
 ## `prxref eval mine`
 
