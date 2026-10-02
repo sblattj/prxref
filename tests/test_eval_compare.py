@@ -144,6 +144,8 @@ GOLDEN = """\
 | Recall, category `style` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
 | Recall, accepted labels | 100.0% (1 of 1) | 0.0% (0 of 1) | -100.0 pp |
 | Unmatched AI per PR | 0.00 (0 of 3) | 0.50 (1 of 2) | +0.50 |
+| Strict precision | n/a | n/a | unknown |
+| Lenient precision | n/a | n/a | unknown |
 | Severity agreement | 66.7% (2 of 3) | 100.0% (1 of 1) | +33.3 pp |
 | Chunks failed | 0 | 1 | +1 |
 | Elapsed | 3.0 s | 3.5 s | +0.5 s |

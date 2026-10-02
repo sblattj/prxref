@@ -545,6 +545,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     ev_score.add_argument(
+        "--precision",
+        action="store_true",
+        help=(
+            "also grade the AI findings no label matched as valid, nit, invalid, "
+            "duplicate or unverifiable, with --judge-model; adds strict and lenient precision"
+        ),
+    )
+    ev_score.add_argument(
         "--out",
         default=eval_out,
         metavar="DIR",

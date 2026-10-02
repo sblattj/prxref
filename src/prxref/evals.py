@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from prxref import eval_judge, eval_metrics, reviewer
+from prxref import eval_judge, eval_metrics, eval_precision, reviewer
 from prxref.config import find_config_file, load_config, load_config_with_sources
 from prxref.eval_cases import EvalCase, case_from_json_record, case_to_json, is_safe_id, load_cases
 from prxref.eval_metrics import (
@@ -452,13 +452,35 @@ def eval_score(args: argparse.Namespace) -> int:
       failed, by case id;
     - ``metrics`` and ``cases``: :func:`prxref.eval_metrics.score_cases`.
       Each ``cases[].findings[]`` entry's ``method`` is ``must_match`` or
-      :data:`JUDGE_METHOD`.
+      :data:`JUDGE_METHOD`. ``metrics`` ends with ``precision`` and each
+      case row with ``precision``, both ``null`` without ``--precision``.
+
+    ``--precision`` also grades precision (:mod:`prxref.eval_precision`):
+    each active AI finding that no credited grade names (the
+    ``unmatched_ai`` set; a grouped finding is one unit) gets a verdict
+    ``valid``, ``nit``, ``invalid``, ``duplicate`` or ``unverifiable`` from
+    one single-shot judge call per case that has such a finding. The judge
+    sees the finding, the case's ``context_file`` text and the diff hunks of
+    the finding's file, read from the case's ``diff_file`` or else from
+    ``cases/<id>/diff.patch``. It needs ``--judge-model`` (a missing one
+    raises ``ConfigError`` naming ``--precision``), uses the ``judge-cache/``
+    and ``llm_parse_retries`` as the label judge does, and its calls and
+    cost count in ``judge``. A failed call makes the case's units
+    ``judge_error``, which is counted nowhere. ``metrics.precision`` is
+    ``{"graded", "matched", "valid", "nit", "invalid", "duplicate",
+    "unverifiable", "judge_error", "strict", "lenient"}`` where ``matched``
+    is the active AI findings some credited grade names, ``strict`` is
+    ``(matched + valid) / (matched + valid + nit + invalid + duplicate)``,
+    ``lenient`` adds ``nit`` to the numerator, and both are ``null`` when
+    the denominator is 0. A case row's ``precision`` is ``{"verdicts":
+    [{"ai_ref", "verdict", "reason"}], <the counts above>}``, ``ai_ref``
+    being an index into the record's ``findings``.
 
     ``score.md`` is the same result for a reader, in this order: a title, the
     headline (micro recall), a self-judging note when stamped, then the
     sections ``Failed cases``, ``Cases`` (one row per case), ``Recall by
     severity``, ``Recall by category``, ``Accepted labels``, ``Unmatched AI
-    findings``, ``Severity agreement`` (a human ``minor`` counts as
+    findings``, ``Precision``, ``Severity agreement`` (a human ``minor`` counts as
     ``warning``), ``Chunks failed``, ``Elapsed``, ``Cost`` and ``Judge``. A
     ``None`` cost is written as ``unknown`` and never summed. The judge's
     cost line names its parse retries only when there were any. It holds no
@@ -472,11 +494,18 @@ def eval_score(args: argparse.Namespace) -> int:
             "--label: must be one directory name of letters, digits, '.', '_' and '-' "
             f"that starts with a letter or digit, got {args.label!r}"
         )
+    precision = bool(getattr(args, "precision", False))
+    if precision and args.judge_model is None:
+        raise ConfigError(
+            f"{eval_precision.PRECISION_FLAG}: requires --judge-model, because the precision judge is a model call"
+        )
     run_dir = Path(args.out) / args.label
     run = _read_run(run_dir)
     cfg = load_config()
     cases = [_read_run_case(run_dir, case_id) for case_id in run["case_ids"]]
     judge_model = _judge_model(args.judge_model, cases)
+    if precision and judge_model is None:
+        judge_model = args.judge_model
     client = None
     self_judged = False
     if judge_model is not None:
@@ -485,15 +514,27 @@ def eval_score(args: argparse.Namespace) -> int:
     cache_dir = eval_judge.judge_cache_dir(args.out, args.label)
     graded: list[GradedCase] = []
     outcomes: list[eval_judge.JudgeOutcome] = []
+    blocks: dict[str, dict[str, Any]] = {}
+    precision_outcomes: list[eval_precision.PrecisionOutcome] = []
     for run_case in cases:
         graded_case, outcome = _grade_case(run_case, client, judge_model, cache_dir=cache_dir, cfg=cfg)
-        graded.append(graded_case)
         if outcome is not None:
             outcomes.append(outcome)
+        if precision:
+            graded_case, block, precision_outcome = _precision_case(
+                run_case, graded_case, client, judge_model, cache_dir=cache_dir, cfg=cfg
+            )
+            blocks[run_case.case.id] = block
+            if precision_outcome is not None:
+                precision_outcomes.append(precision_outcome)
+        graded.append(graded_case)
     judge = None
     if client is not None and judge_model is not None:
-        judge = _judge_block(client, judge_model, self_judged, outcomes, cfg["price_table"])
-    score = _score_json(args.label, run, cases, score_cases(graded), judge)
+        judge = _judge_block(
+            client, judge_model, self_judged, outcomes, cfg["price_table"], extra=precision_outcomes
+        )
+    scored = _with_precision(score_cases(graded), blocks if precision else None)
+    score = _score_json(args.label, run, cases, scored, judge)
     _write_json(run_dir / "score.json", score)
     _write_text(run_dir / "score.md", _score_markdown(score))
     print(_headline(score["metrics"]), flush=True)
@@ -642,6 +683,64 @@ def _grade_case(
     return graded, outcome
 
 
+def _precision_case(
+    run_case: _RunCase,
+    graded: GradedCase,
+    client: Any,
+    judge_model: str | None,
+    *,
+    cache_dir: Path,
+    cfg: Mapping[str, Any],
+) -> tuple[GradedCase, dict[str, Any], eval_precision.PrecisionOutcome | None]:
+    """Grade one case's unmatched active AI findings for ``--precision``.
+
+    Returns the case with the precision call's cost added to its judge cost,
+    its ``precision`` row, and the outcome (``None`` when the case had no
+    unmatched active finding, so no call was made).
+    """
+    record = run_case.record
+    findings: list[Any] = record["findings"] if record is not None else []
+    credited = eval_precision.credited_refs(graded.grades)
+    units = eval_precision.unit_indexes(findings, credited)
+    outcome = None
+    if units and client is not None and judge_model is not None:
+        outcome = eval_precision.grade_case(
+            client, judge_model, run_case.case.id, findings, credited,
+            ticket=_read_ticket(run_case.case.context_file),
+            diff=eval_precision.load_diff(run_case.case.diff_file, run_case.case_dir),
+            cache_dir=cache_dir,
+            price_table=cfg["price_table"],
+            max_tokens=cfg["llm_max_tokens"],
+            trace_dir=str(run_case.case_dir / "trace"),
+            parse_retries=cfg["llm_parse_retries"],
+        )
+    block = eval_precision.case_block(outcome, units, len(credited))
+    cost, estimated = eval_precision.add_cost(graded.judge_cost_usd, graded.judge_cost_estimated, outcome)
+    return replace(graded, judge_cost_usd=cost, judge_cost_estimated=estimated), block, outcome
+
+
+def _with_precision(scored: dict[str, Any], blocks: Mapping[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """Append ``precision`` to ``metrics`` and to each case row of ``scored``, in place.
+
+    ``blocks`` maps a case id to its :func:`prxref.eval_precision.case_block`;
+    ``None`` (no ``--precision``) writes ``null`` everywhere.
+    """
+    scored["metrics"]["precision"] = None if blocks is None else eval_precision.summarize(blocks.values())
+    for row in scored["cases"]:
+        row["precision"] = None if blocks is None else blocks.get(row["case_id"])
+    return scored
+
+
+def _read_ticket(path: str | None) -> str | None:
+    """The case's ticket text, or ``None`` when it has none or it cannot be read."""
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def _judge_record(record: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
     """The record the judge grades, and the record index each of its ``findings`` rows came from.
 
@@ -729,16 +828,25 @@ def _judge_block(
     self_judged: bool,
     outcomes: Sequence[eval_judge.JudgeOutcome],
     price_table: Any,
+    *,
+    extra: Sequence[eval_precision.PrecisionOutcome] = (),
 ) -> dict[str, Any]:
-    """The ``judge`` stamp of ``score.json``: the judge stamp plus the run's judge cost, calls and retries."""
-    cost_usd, cost_estimated = eval_judge.judge_cost(outcomes, price_table)
+    """The ``judge`` stamp of ``score.json``: the judge stamp plus the run's judge cost, calls and retries.
+
+    ``extra`` holds the precision outcomes of ``--precision``. Their cost,
+    calls, parse retries and cache hits are folded into the totals; their
+    errors are not listed in ``errors``, which names label-judge errors, and
+    show as ``judge_error`` in the precision block instead.
+    """
+    every = [*outcomes, *extra]
+    cost_usd, cost_estimated = eval_judge.judge_cost(every, price_table)
     return {
         **eval_judge.judge_stamp(client, judge_model, self_judged=self_judged),
         "cost_usd": cost_usd,
         "cost_estimated": cost_estimated,
-        "llm_calls": sum(outcome.llm_calls for outcome in outcomes),
-        "parse_retries": sum(outcome.parse_retries for outcome in outcomes),
-        "cached":sum(1 for outcome in outcomes if outcome.cached),
+        "llm_calls": sum(outcome.llm_calls for outcome in every),
+        "parse_retries": sum(outcome.parse_retries for outcome in every),
+        "cached": sum(1 for outcome in every if outcome.cached),
         "errors": [
             {"case_id": outcome.case_id, "error": outcome.error}
             for outcome in sorted(outcomes, key=lambda item: item.case_id)
@@ -904,6 +1012,19 @@ def _judge_lines(judge: Mapping[str, Any] | None) -> list[str]:
     return [*lines, *(f"- Judge error in `{_cell(e['case_id'])}`: {_cell(e['error'])}" for e in judge["errors"])]
 
 
+def _precision_lines(block: Mapping[str, Any] | None) -> list[str]:
+    if block is None:
+        return ["Not graded: run `prxref eval score --precision` to grade the unmatched AI findings."]
+    return [
+        f"Strict precision: {_pct(block['strict'])}. Lenient precision: {_pct(block['lenient'])}.",
+        "",
+        f"- Matched (credited by a label): {block['matched']}",
+        f"- Graded unmatched: {block['graded']} ({block['valid']} valid, {block['nit']} nit, "
+        f"{block['invalid']} invalid, {block['duplicate']} duplicate, {block['unverifiable']} unverifiable)",
+        f"- Judge error (not counted): {block['judge_error']}",
+    ]
+
+
 def _score_markdown(score: Mapping[str, Any]) -> str:
     """Render ``score.md`` from the ``score.json`` dict alone."""
     metrics = score["metrics"]
@@ -928,6 +1049,7 @@ def _score_markdown(score: Mapping[str, Any]) -> str:
         f"{unmatched['total']} of {unmatched['ai_findings']} active AI findings matched no label: "
         f"{per_pr} per PR.",
     ]
+    lines += ["", "## Precision", "", *_precision_lines(metrics.get("precision"))]
     lines += ["", "## Severity agreement", "", *_agreement_lines(metrics["severity_agreement"])]
     lines += ["", "## Chunks failed", "", _total_line(metrics["chunks_failed"], str)]
     lines += ["", "## Elapsed", "", _total_line(metrics["elapsed_ms"], _seconds)]
@@ -1244,6 +1366,12 @@ def _unmatched_side(block: Mapping[str, Any] | None) -> _Side:
     return block["per_pr"], f"{block['per_pr']:.2f} ({block['total']} of {block['ai_findings']})"
 
 
+def _precision_side(block: Mapping[str, Any] | None, key: str) -> _Side:
+    if not isinstance(block, Mapping) or block.get(key) is None:
+        return None, "n/a"
+    return block[key], _pct(block[key])
+
+
 def _agreement_side(block: Mapping[str, Any] | None) -> _Side:
     if block is None:
         return None, "n/a"
@@ -1309,6 +1437,14 @@ def _metric_table(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> lis
         _metric_row(
             "Unmatched AI per PR", _unmatched_side(a.get("unmatched_ai")), _unmatched_side(b.get("unmatched_ai")),
             _per_pr_change,
+        ),
+        _metric_row(
+            "Strict precision", _precision_side(a.get("precision"), "strict"),
+            _precision_side(b.get("precision"), "strict"), _points_change,
+        ),
+        _metric_row(
+            "Lenient precision", _precision_side(a.get("precision"), "lenient"),
+            _precision_side(b.get("precision"), "lenient"), _points_change,
         ),
         _metric_row(
             "Severity agreement", _agreement_side(a.get("severity_agreement")),
