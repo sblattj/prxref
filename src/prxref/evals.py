@@ -1,8 +1,9 @@
 """The ``prxref eval`` actions: replay labelled cases, score them, compare runs, gate an upgrade.
 
-``prxref.cli`` routes ``eval run``, ``eval score``, ``eval compare`` and
-``eval verdict`` to :func:`eval_run`, :func:`eval_score`, :func:`eval_compare`
-and :func:`eval_verdict`. Each takes the
+``prxref.cli`` routes ``eval run``, ``eval score``, ``eval compare``,
+``eval verdict`` and ``eval campaign`` to :func:`eval_run`,
+:func:`eval_score`, :func:`eval_compare`, :func:`eval_verdict` and
+:func:`eval_campaign`. Each takes the
 parsed ``argparse.Namespace`` and returns the process exit code;
 :func:`eval_run` also takes the review runner and the record builder, which
 the CLI passes in. A configuration problem raises ``ConfigError`` naming the
@@ -21,6 +22,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -1971,3 +1973,15 @@ def _campaign_text(args: argparse.Namespace, arms: Sequence[_VerdictArm], decisi
         lines += _verdict_blocks(arm.runs, "###")[1]
     lines += ["", "## Decision", "", f"**{DECISION_ADOPT if decision else DECISION_HOLD}**: {reason}"]
     return "\n".join(lines) + "\n"
+
+
+def eval_campaign(args: argparse.Namespace) -> int:
+    """Run arms x repeats of ``eval run`` from ``--arms``, in parallel and resumably, and score each pass.
+
+    The work lives in :func:`prxref.eval_campaign.run_campaign`, imported
+    here lazily so ``eval run|score|compare|verdict`` never load it. Every
+    configuration problem raises ``ConfigError`` naming its flag (exit 2)
+    before any review runs; otherwise the return value is 0, failed passes
+    included (they are reported in ``progress.json`` and on stdout).
+    """
+    return importlib.import_module("prxref.eval_campaign").run_campaign(args)

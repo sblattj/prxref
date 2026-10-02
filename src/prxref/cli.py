@@ -4,10 +4,12 @@ Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, Gitea/Forgejo, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H] [--config PATH]`` — webhook listener daemon.
-  * ``eval run|score|compare|verdict|mine`` — replay labelled cases, score the
-    findings against the human labels, compare two scored runs, decide
-    whether candidate runs beat baseline runs beyond their noise, and mine a
-    GitHub repo's merged PRs into a dataset (``prxref.evals``).
+    * ``eval run|score|compare|verdict|campaign|dashboard|mine`` — replay
+      labelled cases, score the findings against the human labels, compare
+      two scored runs, decide whether candidate runs beat baseline runs beyond
+      their noise, run a campaign of repeated runs per rules arm, watch its
+      progress, and mine a GitHub repo's merged PRs into a dataset
+      (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
   * ``prompts export DIR [--force]`` — the packaged prompt templates, written
     to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
@@ -598,6 +600,56 @@ def _build_parser() -> argparse.ArgumentParser:
     ev_verdict.add_argument(
         "--json", dest="json_path", metavar="PATH",
         help="also write the verdict as JSON (verdict.json) to PATH",
+    )
+    ev_campaign = ev_sub.add_parser(
+        "campaign",
+        help="run arms x repeats of eval run in parallel, resumably, and score every pass",
+    )
+    ev_campaign.add_argument(
+        "--cases", required=True, metavar="PATH",
+        help="the labelled cases: a cases.json file or a directory of case-*/ directories",
+    )
+    ev_campaign.add_argument(
+        "--arms", required=True, metavar="TOML",
+        help="arms.toml: one [[arm]] table per rules configuration to compare",
+    )
+    ev_campaign.add_argument(
+        "--repeats", type=int, default=3, metavar="N", help="passes per arm (default 3)",
+    )
+    ev_campaign.add_argument(
+        "--out", required=True, metavar="DIR",
+        help="the campaign directory; a non-empty one is refused unless --resume is given",
+    )
+    ev_campaign.add_argument(
+        "--prxref", default=None, metavar="VERSION|PATH",
+        help="review with this prxref version (or local checkout), installed once with uv into DIR/envs/",
+    )
+    ev_campaign.add_argument(
+        "--folds", type=int, default=1, metavar="K",
+        help="folds for arms that mine rules leave-fold-out (default 1; mining needs at least 2)",
+    )
+    ev_campaign.add_argument(
+        "--jobs", type=int, default=1, metavar="J", help="passes run at once (default 1)",
+    )
+    ev_campaign.add_argument(
+        "--case-jobs", type=int, default=1, metavar="C",
+        help="eval run subprocesses at once within one pass, each over a shard of the cases (default 1)",
+    )
+    ev_campaign.add_argument(
+        "--judge-model", default=None, metavar="MODEL",
+        help="model that scores labels without must_match and mines rules; enables precision grading",
+    )
+    ev_campaign.add_argument(
+        "--severity", metavar="SEV",
+        help="also report recall of the human labels of this severity, e.g. error",
+    )
+    ev_campaign.add_argument(
+        "--resume", action="store_true",
+        help="continue the campaign in --out: scored passes are kept, finished units are not re-run",
+    )
+    ev_campaign.add_argument(
+        "--max-attempts", type=int, default=3, metavar="A",
+        help="attempts per pass at units that failed or were rate limited (default 3)",
     )
     ev_dash = ev_sub.add_parser(
         "dashboard",
@@ -2240,7 +2292,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    """Route ``eval run|score|compare|verdict|dashboard|mine`` to ``prxref.evals`` and return its exit code.
+    """Route ``eval run|score|compare|verdict|campaign|dashboard|mine`` to ``prxref.evals`` and return its exit code.
 
     ``prxref.evals`` is imported here rather than at module top, because the
     eval modules must never import the CLI back. For the same reason ``run``
@@ -2256,6 +2308,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         "score": evals.eval_score,
         "compare": evals.eval_compare,
         "verdict": evals.eval_verdict,
+        "campaign": evals.eval_campaign,
         "dashboard": evals.eval_dashboard,
         "mine": evals.eval_mine,
     }[args.eval_command]
@@ -2362,7 +2415,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare|verdict``,
+    """CLI entry point dispatching ``review``, ``serve``, ``eval <action>``,
     ``trace render``, ``prompts export``, ``config check``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
