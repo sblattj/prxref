@@ -8,15 +8,17 @@ measures the change across a dataset instead. You give it pull requests that
 human reviewers have already reviewed, each labelled with the findings those
 reviewers left. It reviews every case again through the real pipeline,
 grades the findings prxref produced against the labels, and puts two such
-runs side by side.
+runs side by side. Given repeats of each, it decides whether a candidate
+beats the current setup by more than run-to-run noise.
 
-It has three actions:
+It has four actions:
 
 | Action | What it does | What it writes |
 |---|---|---|
 | `prxref eval run` | reviews every case, never posting | the run directory `<out>/<label>/` |
 | `prxref eval score` | grades one run against its labels | `score.json` and `score.md` in the run directory |
 | `prxref eval compare` | prints two scored runs side by side | standard output only |
+| `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output only |
 
 ```bash
 prxref eval run --cases tests/evals --label base
@@ -33,6 +35,7 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - [`prxref eval run`](#prxref-eval-run)
 - [`prxref eval score`](#prxref-eval-score)
 - [`prxref eval compare`](#prxref-eval-compare)
+- [`prxref eval verdict`](#prxref-eval-verdict)
 - [Worked example: two arms](#worked-example-two-arms)
 - [The judge prompt](#the-judge-prompt)
 - [Where runs are kept](#where-runs-are-kept)
@@ -41,13 +44,14 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 
 - `0`: the action finished. `eval run` exits `0` however its cases went. A
   case whose review fails is recorded as a failed case and the run moves on
-  to the next one. `PRXREF_FAIL_ON` does not apply to `prxref eval`, which
-  never exits `1`.
+  to the next one. `PRXREF_FAIL_ON` does not apply to `prxref eval`.
+- `1`: only from `eval verdict`, when the candidate is not `better`.
 - `2`: a configuration error, printed to standard error as
   `configuration error: <message>`. The message names what supplied the bad
   value: a flag (`--cases`, `--label`, `--out`, `--rules-file`,
   `--scoped-rules`, `--prompts-dir`, `--judge-model`), the
-  argument `A` or `B` of `compare`, or an environment variable. Every
+  argument `A` or `B` of `compare`, a run of `verdict`'s `--baseline` or
+  `--candidate`, or an environment variable. Every
   exit-`2` check of `eval run` happens before any case runs and before
   anything is written. `prxref eval` with no action prints the help to
   standard error and exits `2`.
@@ -806,6 +810,81 @@ two runs are not like for like:
 The report holds no timestamp and no path other than `A` and `B` as given,
 and it is ASCII. Comparing the same two runs twice prints the same bytes, so
 a report can be kept in a repository and diffed.
+
+## `prxref eval verdict`
+
+```bash
+prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]
+```
+
+One run is not evidence. Two runs of the same setup on the same cases can
+differ by several points of recall, because the model does not answer the
+same way twice. `eval verdict` takes repeats of each side, scored runs
+resolved as `eval compare` resolves `A` and `B`, and treats the spread of
+the baseline's repeats as the noise a candidate has to clear.
+
+The gate is the recall of human labels of severity `--severity` (for
+example `error`, the labels a reviewer would block a merge on), or the
+micro recall without it. The candidate is:
+
+- `better` when its mean gate is above the **best** baseline run's gate,
+  its mean micro recall is not below the worst baseline run's, and its mean
+  unmatched AI findings per PR is not above the worst baseline run's. A
+  candidate that finds more must-fix problems by raising far more findings,
+  or by missing everything else, is not better.
+- `worse` when its mean gate is below the **worst** baseline run's gate.
+- `within noise` otherwise.
+
+It exits `0` when the candidate is `better` and `1` otherwise, so a CI job
+can gate an upgrade of prxref, a model, a prompt template or a rules file
+on it. It exits `2` for any run `eval compare` refuses, and for a run with
+no scored label of the gated severity or no case. It logs `eval compare`'s
+judge and case warnings for every run against the first baseline run.
+With one baseline run there is no noise range, and the report says to
+repeat it before adopting.
+
+Standard output is Markdown, holds no timestamp and no path other than the
+runs as given, and is ASCII. Two repeats of each side, gated on `error`:
+
+```bash
+prxref eval verdict --baseline base-r1 base-r2 --candidate cand-r1 cand-r2 --severity error
+```
+
+```markdown
+# prxref eval verdict
+
+- Baseline: base-r1, base-r2
+- Candidate: cand-r1, cand-r2
+- Gate: Recall, severity `error`
+
+## Runs
+
+| Run | Side | Gate | Recall (micro) | Unmatched AI per PR |
+|---|---|---:|---:|---:|
+| base-r1 | baseline | 25.0% | 37.5% | 0.00 |
+| base-r2 | baseline | 50.0% | 50.0% | 1.00 |
+| cand-r1 | candidate | 75.0% | 62.5% | 0.00 |
+| cand-r2 | candidate | 75.0% | 62.5% | 1.00 |
+
+## Summary
+
+| Metric | Baseline mean (range) | Candidate mean (range) | Change |
+|---|---|---|---:|
+| Gate | 37.5% (25.0% to 50.0%) | 75.0% (75.0% to 75.0%) | +37.5 pp |
+| Recall (micro) | 43.8% (37.5% to 50.0%) | 62.5% (62.5% to 62.5%) | +18.8 pp |
+| Unmatched AI per PR | 0.50 (0.00 to 1.00) | 0.50 (0.00 to 1.00) | 0.00 |
+
+## Verdict
+
+**better**: the candidate's mean gate 75.0% is above the best baseline run's 50.0%, with micro recall and unmatched AI findings per PR no worse than the worst baseline run.
+```
+
+The report opens with `# prxref eval verdict` and the runs of each side.
+`## Runs` lists every run in the table
+`| Run | Side | Gate | Recall (micro) | Unmatched AI per PR |`. `## Summary`
+gives each side's mean and range and the change of the means in the table
+`| Metric | Baseline mean (range) | Candidate mean (range) | Change |`.
+`## Verdict` names the verdict and the one comparison that decided it.
 
 ## Worked example: two arms
 

@@ -539,6 +539,7 @@ prxref eval compare base cand
 
 - **Cases** come as a `cases.json` file or as a directory of `case-*/` directories, the layout of [`tests/evals/`](tests/evals/README.md). A label is graded deterministically when it carries a `must_match` predicate, and by an LLM judge on the review's own backend (`--judge-model`) when it does not.
 - **Recall** is micro recall over every label, with half credit for a `partial` judge grade, broken down by severity and by category. The score also reports unmatched AI findings per PR, severity agreement, failed chunks, time and cost, and never sums an unknown cost.
+- **Verdict**: `prxref eval verdict --baseline base-r1 base-r2 --candidate cand-r1 cand-r2 --severity error` decides from repeated runs whether the candidate beats the baseline by more than run-to-run noise, and exits `1` when it does not, so CI can gate an upgrade on it.
 - **Runs** go to `./prxref-eval/<label>/` by default; add `prxref-eval/` to your `.gitignore`. A run never posts, and a case that fails is recorded and scored, never fatal.
 
 The full reference is [docs/evals.md](docs/evals.md).

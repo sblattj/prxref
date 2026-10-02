@@ -33,6 +33,7 @@ from prxref.quality import DEFAULT_LINE_TOLERANCE
 from tests.test_docs_consistency import allowed_names
 from tests.test_eval_compare import GOLDEN as COMPARE_GOLDEN
 from tests.test_eval_score import GOLDEN as SCORE_GOLDEN
+from tests.test_eval_verdict import GOLDEN as VERDICT_GOLDEN
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC = (REPO_ROOT / "docs" / "evals.md").read_text(encoding="utf-8")
@@ -175,12 +176,22 @@ class TestTheRenderedOutputIsDocumented:
     def test_the_worked_example_is_the_pinned_comparison(self):
         assert f"```text\n{COMPARE_GOLDEN}```\n" in DOC
 
+    def test_the_verdict_example_is_the_pinned_verdict(self):
+        assert f"```markdown\n{VERDICT_GOLDEN}```\n" in DOC
+
+    def test_every_verdict_heading_and_table_header_is_named(self):
+        lines = VERDICT_GOLDEN.splitlines()
+        named = [line for line in lines if line.startswith("#") or line.startswith("| Run |")
+                 or line.startswith("| Metric |")]
+        assert len(named) == 6
+        assert _undocumented(named) == []
+
 
 class TestTheInputsAreDocumented:
     def test_the_human_severities_are_listed_in_order(self):
         assert ", ".join(_code(severity) for severity in HUMAN_SEVERITIES) in FLAT
 
-    @pytest.mark.parametrize("action", ["run", "score", "compare"])
+    @pytest.mark.parametrize("action", ["run", "score", "compare", "verdict"])
     def test_every_action_has_a_section(self, action):
         assert f"\n## `prxref eval {action}`\n" in DOC
 

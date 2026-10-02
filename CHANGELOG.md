@@ -8,6 +8,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Added
+
+- `prxref eval verdict` decides whether a candidate setup beats the current
+  one by more than run-to-run noise (#81). It takes repeated scored runs of
+  each side (`--baseline`, `--candidate`), gates on the recall of one label
+  severity (`--severity error`) or the micro recall, and calls the candidate
+  `better` only when its mean gate beats the best baseline run while micro
+  recall and unmatched AI findings per PR stay no worse than the worst one.
+  It exits `1` when the candidate is not `better`, so CI can gate an upgrade.
+
 ## [0.30.1] — 2026-09-30
 
 An audit of 0.30.0 against its nine issues' acceptance criteria and the
