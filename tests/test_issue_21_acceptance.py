@@ -407,7 +407,7 @@ class TestZeroIsTheOldBehaviour:
         assert run.payload["parse_retries"] is None
         assert run.attempt_files() == []
         names = {p.name for p in run.trace.iterdir()}
-        assert names == {label + suffix for label in LABELS.values() for suffix in BASE_UNIT_FILES}
+        assert names == {label + suffix for label in LABELS.values() for suffix in BASE_UNIT_FILES} | {"diff.patch"}
         for unit in LABELS:
             assert list(run.meta(unit)) == BASE_META_KEYS
 

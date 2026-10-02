@@ -226,6 +226,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import threading
 import time
@@ -523,6 +524,18 @@ def _strip_verdict_stamp(template: str) -> str:
     return _VERDICT_STAMP_RE.sub("", template)
 
 
+def _write_trace_diff(trace_dir: str | None, raw: str) -> None:
+    """Write the reviewed diff to ``<trace_dir>/diff.patch``; a failure is a logged warning."""
+    if not trace_dir:
+        return
+    try:
+        os.makedirs(trace_dir, exist_ok=True)
+        with open(os.path.join(trace_dir, "diff.patch"), "w", encoding="utf-8") as fh:
+            fh.write(raw)
+    except OSError as e:
+        logger.warning("trace dump of the diff to %s failed: %s", trace_dir, e)
+
+
 def orchestrate_review(
     forge: Forge,
     ref: PRRef,
@@ -682,8 +695,9 @@ def orchestrate_review(
     unit writes ``<label>.system.md``, ``<label>.user.md``,
     ``<label>.response.json`` (raw model text), and ``<label>.meta.json``
     (model, token counts, elapsed, error) under that directory, labelled
-    ``chunk0`` … ``chunkN-1`` and ``sweep``. Empty (the default) traces
-    nothing; a write failure is a logged warning, never a review failure.
+    ``chunk0`` … ``chunkN-1`` and ``sweep``, plus ``diff.patch``, the
+    unified diff the review read. Empty (the default) traces nothing; a
+    write failure is a logged warning, never a review failure.
 
     ``spec_sources`` grounds the review against written specs: each entry is
     fetched by :func:`prxref.specs.fetch_specs` and the pruned constraint
@@ -1319,6 +1333,7 @@ def orchestrate_review(
         with tracer.span("forge.get_diff") as sp:
             raw = forge.get_diff(ref)
             sp["bytes"] = len(raw.encode("utf-8"))
+        _write_trace_diff(trace_dir, raw)
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
