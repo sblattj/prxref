@@ -836,6 +836,10 @@ class TestThroughTheCli:
                 "description": "file", "as_of": None, "as_of_source": None,
             }
             assert {"chunk0.user.md", "sweep.user.md"} <= {p.name for p in (case_dir / "trace").iterdir()}
+            assert not (case_dir / "trace" / "diff.patch").exists()
+            assert (case_dir / "diff.patch").read_text(encoding="utf-8") == (
+                dataset / case_id / "diff.patch"
+            ).read_text(encoding="utf-8")
             assert _read(case_dir / "case.json")["expected"][0]["must_match"] == "print"
             assert not (case_dir / "error.json").exists()
             prompts = "".join(p.read_text(encoding="utf-8") for p in (case_dir / "trace").glob("*.md"))

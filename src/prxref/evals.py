@@ -166,6 +166,9 @@ def eval_run(
       ``eval score`` needs no ``--cases``;
     - ``cases/<id>/trace/``: the review's ``trace_dir`` (each review unit's
       prompt, response and meta);
+    - ``cases/<id>/diff.patch``: the unified diff the review read, moved out
+      of ``trace/`` when the review got that far (``eval score
+      --precision`` shows its hunks to the judge);
     - ``cases/<id>/record.json``: ``build_record(result)``, when the review
       returned;
     - ``cases/<id>/error.json``: ``{"case_id", "error"}`` with ``error`` as
@@ -292,6 +295,7 @@ def _run_case(
         if result is None:
             raise RuntimeError(f"unrecognized PR URL {case.pr_url!r}")
         record = build_record(result)
+        _keep_diff(case_dir)
         _write_json(case_dir / "record.json", record)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -300,6 +304,12 @@ def _run_case(
         return f"{case.id}: failed: {error}"
     count = _active_count(record)
     return f"{case.id}: {record.get('verdict')} ({count} active finding{'' if count == 1 else 's'})"
+
+
+def _keep_diff(case_dir: Path) -> None:
+    """Move the review's ``trace/diff.patch`` to ``<case_dir>/diff.patch``, when there is one."""
+    with contextlib.suppress(OSError):
+        os.replace(case_dir / "trace" / "diff.patch", case_dir / "diff.patch")
 
 
 def _pins() -> dict[str, Any]:

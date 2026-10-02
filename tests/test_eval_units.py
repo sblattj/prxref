@@ -192,9 +192,10 @@ class TestUnitState:
 
 
 class TestResetUnit:
-    def test_removes_the_three_and_keeps_case_json(self, tmp_path):
+    def test_removes_the_four_and_keeps_case_json(self, tmp_path):
         case = _unit(tmp_path, record={"verdict": "Approved"}, error="x", metas={"c.meta.json": {}})
         _json(case / "case.json", {"id": "a"})
+        (case / "diff.patch").write_text("diff --git a/x b/x\n", encoding="utf-8")
         units.reset_unit(case)
         assert sorted(p.name for p in case.iterdir()) == ["case.json"]
         assert units.unit_state(case) == units.UNIT_MISSING

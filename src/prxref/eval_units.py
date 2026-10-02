@@ -111,13 +111,13 @@ def unit_state(case_dir: Path) -> str:
 
 
 def reset_unit(case_dir: Path) -> None:
-    """Delete ``record.json``, ``error.json`` and ``trace/`` of the unit in ``case_dir``.
+    """Delete ``record.json``, ``error.json``, ``diff.patch`` and ``trace/`` of the unit in ``case_dir``.
 
     ``eval run --resume`` then runs the case again; ``case.json`` stays, and
     a unit with none of these files is left alone.
     """
     case_dir = Path(case_dir)
-    for name in ("record.json", "error.json"):
+    for name in ("record.json", "error.json", "diff.patch"):
         try:
             (case_dir / name).unlink()
         except FileNotFoundError:

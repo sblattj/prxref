@@ -343,6 +343,9 @@ prxref-eval/                        --out
   each unit's `.system.md`, `.user.md`, `.response.json` and `.meta.json`
   files (`chunk0`, ..., `sweep`). `eval score` adds the judge's `judge.*`
   files after a live judge call.
+- **`cases/<id>/diff.patch`** is the unified diff the review read, moved
+  out of `trace/` when the review got as far as fetching it. `eval score
+  --precision` shows its hunks to the judge.
 
 `run.json` holds, in this order:
 
@@ -517,11 +520,11 @@ the case's `context_file` text when it has one, up to 8000 characters, the
 credited findings as context (so it can recognise a restatement), and the
 hunks of the diff for the file each finding names, up to 60000 characters.
 The diff is the case's `diff_file`, else `cases/<id>/diff.patch` in the run
-directory; with neither, the judge is told no diff was available and
-should answer `unverifiable` where the findings alone cannot settle it.
-`eval run` does not write `diff.patch` today: the review result carries no
-diff text, so a case replayed from a pinned commit range has no diff for
-the precision judge.
+directory, which `eval run` keeps for every case whose review fetched its
+diff (so a case replayed from a pinned commit range has one too); with
+neither, the judge is told no diff was available and should answer
+`unverifiable` where the findings alone cannot settle it. A run recorded
+before 0.31.0 has no `diff.patch`.
 
 **The five verdicts.**
 
