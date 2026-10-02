@@ -481,9 +481,10 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 - `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
   - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.
 - `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed and the cases and labels only one run has. `A` and `B` are each a label under `--out` or a run directory. It warns when the runs are not like for like.
-- `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`:
+- `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--json PATH] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`. When every run has strict precision the second guard is strict precision; otherwise it is unmatched AI findings per PR:
   - `--baseline RUN [RUN ...]` / `--candidate RUN [RUN ...]`: scored runs of each side, each a label under `--out` or a run directory. Both required; repeat each side so the baseline has a noise range.
   - `--severity SEV`: gate on recall of the labels of that severity (e.g. `error` for must-fix). Without it the gate is micro recall. A run with no label of that severity exits `2`.
+  - `--json PATH`: also write the verdict as JSON (`verdict.json`) to `PATH`. With a campaign directory per side (see [docs/evals.md](docs/evals.md#prxref-eval-verdict)) the arms are compared one by one and the exit code is `0` only to adopt.
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
