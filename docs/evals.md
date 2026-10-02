@@ -18,7 +18,7 @@ It has five actions:
 | `prxref eval run` | reviews every case, never posting | the run directory `<out>/<label>/` |
 | `prxref eval score` | grades one run against its labels | `score.json` and `score.md` in the run directory |
 | `prxref eval compare` | prints two scored runs side by side | standard output only |
-| `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output only |
+| `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output, and `--json` |
 | `prxref eval dashboard` | shows the live progress of a campaign directory | standard output, or a local web page |
 
 ```bash
@@ -47,7 +47,7 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - `0`: the action finished. `eval run` exits `0` however its cases went. A
   case whose review fails is recorded as a failed case and the run moves on
   to the next one. `PRXREF_FAIL_ON` does not apply to `prxref eval`.
-- `1`: only from `eval verdict`, when the candidate is not `better`.
+- `1`: only from `eval verdict`, when the candidate is not `better` (a campaign: when the decision is `do not adopt`).
 - `2`: a configuration error, printed to standard error as
   `configuration error: <message>`. The message names what supplied the bad
   value: a flag (`--cases`, `--label`, `--out`, `--rules-file`,
@@ -817,7 +817,7 @@ a report can be kept in a repository and diffed.
 ## `prxref eval verdict`
 
 ```bash
-prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]
+prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--json PATH] [--out DIR]
 ```
 
 One run is not evidence. Two runs of the same setup on the same cases can
@@ -831,10 +831,10 @@ example `error`, the labels a reviewer would block a merge on), or the
 micro recall without it. The candidate is:
 
 - `better` when its mean gate is above the **best** baseline run's gate,
-  its mean micro recall is not below the worst baseline run's, and its mean
-  unmatched AI findings per PR is not above the worst baseline run's. A
-  candidate that finds more must-fix problems by raising far more findings,
-  or by missing everything else, is not better.
+  its mean micro recall is not below the worst baseline run's, and the
+  precision guard holds (below). A candidate that finds more must-fix
+  problems by raising far more findings, or by missing everything else, is
+  not better.
 - `worse` when its mean gate is below the **worst** baseline run's gate.
 - `within noise` otherwise.
 
@@ -880,6 +880,8 @@ prxref eval verdict --baseline base-r1 base-r2 --candidate cand-r1 cand-r2 --sev
 ## Verdict
 
 **better**: the candidate's mean gate 75.0% is above the best baseline run's 50.0%, with micro recall and unmatched AI findings per PR no worse than the worst baseline run.
+
+strict precision is missing from at least one run, so the guard is unmatched AI findings per PR
 ```
 
 The report opens with `# prxref eval verdict` and the runs of each side.
@@ -888,6 +890,115 @@ The report opens with `# prxref eval verdict` and the runs of each side.
 gives each side's mean and range and the change of the means in the table
 `| Metric | Baseline mean (range) | Candidate mean (range) | Change |`.
 `## Verdict` names the verdict and the one comparison that decided it.
+
+### The precision guard
+
+The second guard keeps a candidate from buying recall with noise.
+
+- When **every** baseline and candidate run has `metrics.precision.strict`
+  (a run scored with `eval score --precision`), the guard is strict
+  precision: the candidate's mean strict precision must not be below the
+  **worst** baseline run's. The report adds a `Strict precision` column to
+  `## Runs` and a row to `## Summary`.
+- Otherwise the guard is the mean unmatched AI findings per PR, which must
+  not be above the worst baseline run's, and the report ends its verdict
+  with `strict precision is missing from at least one run, so the guard is
+  unmatched AI findings per PR`. One run scored without `--precision` is
+  enough to switch the whole comparison back.
+
+### `--json PATH`
+
+`--json PATH` also writes the verdict to `PATH` (parent directories are
+created) as indented JSON with a trailing newline, through a temporary file
+and an atomic rename; a path that cannot be written exits `2` naming
+`--json`. Standard output is unchanged.
+
+```json
+{
+  "version": 1,
+  "mode": "runs",
+  "severity": "error",
+  "guard": "unmatched_per_pr",
+  "decision": "adopt",
+  "exit_code": 0,
+  "arms": [
+    {
+      "arm": null,
+      "role": null,
+      "verdict": "better",
+      "reason": "the candidate's mean gate 75.0% is above ...",
+      "baseline": {
+        "runs": ["prxref-eval/base-r1", "prxref-eval/base-r2"],
+        "gate": {"mean": 0.375, "min": 0.25, "max": 0.5, "values": [0.25, 0.5]},
+        "recall": {"mean": 0.4375, "min": 0.375, "max": 0.5, "values": [0.375, 0.5]},
+        "precision": null,
+        "unmatched_per_pr": {"mean": 0.5, "min": 0.0, "max": 1.0, "values": [0.0, 1.0]}
+      },
+      "candidate": {"runs": ["..."], "gate": {}, "recall": {}, "precision": null, "unmatched_per_pr": {}}
+    }
+  ]
+}
+```
+
+(`candidate` carries the same five keys as `baseline`; its statistics are
+abbreviated above.)
+
+- `mode` is `runs` or `campaign`; `severity` is the `--severity` value or
+  `null`.
+- `guard` is `strict_precision` when every arm used the strict guard and
+  `unmatched_per_pr` otherwise.
+- `decision` is `adopt` (`exit_code` `0`) or `do not adopt` (`exit_code`
+  `1`). In `runs` mode `adopt` means the candidate is `better`.
+- Each arm has `verdict` (`better`, `worse` or `within noise`) and the
+  `reason` sentence printed under `## Verdict`. In `runs` mode there is one
+  arm and `arm` and `role` are `null`.
+- `baseline` and `candidate` list the `runs` (paths of the run
+  directories) and, for `gate`, `recall` (micro), `precision` (strict) and
+  `unmatched_per_pr`, an object `{"mean", "min", "max", "values"}` with the
+  values in run order. `precision` is `null` unless every run of that side
+  has strict precision.
+
+### Campaign mode
+
+`prxref eval verdict --baseline CAMPAIGN_A --candidate CAMPAIGN_B` compares
+two campaign directories, each the output of `prxref eval campaign` (a
+directory holding `campaign.json` and `runs/<arm>/r<k>/score.json`; a label
+under `--out` works as for runs). `--baseline` and `--candidate` must each
+be exactly one such directory; mixing a campaign with run directories exits
+`2`.
+
+- Arms are matched by `name`. An arm only one campaign has, an arm with no
+  scored `runs/<arm>/r<k>`, a `campaign.json` that cannot be read or lists
+  no arms, and a run with no label of the gated severity all exit `2`, the
+  first three naming `--candidate` or `--baseline`.
+- An arm's repeats are its `runs/<arm>/r<k>` directories that hold a
+  `score.json`, in order of `k`. Each arm is judged exactly as in runs mode,
+  against its own baseline repeats, including the precision guard.
+- An arm's role comes from the candidate campaign's `campaign.json`:
+  `no-rules` when `rules_file` is `""` and it has no `scoped_rules` and no
+  `mine_rules`, else `rules`.
+- **Adopt rule.** The decision is `adopt` (exit `0`) only when every `rules`
+  arm is `better` **and** no `no-rules` arm is `worse`. A rules arm within
+  noise blocks adoption: the rules did not help beyond noise. A no-rules arm
+  within noise does not block it, but one that is `worse` does: the
+  candidate regressed with rules off. A campaign with no rules arm is
+  adopted only when every arm is `better`. Otherwise the decision is `do not
+  adopt` (exit `1`).
+
+The report prints one `## Arm <name>` block per arm, with its `Role` and
+`### Runs`, `### Summary` and `### Verdict`, then `## Decision`.
+
+Gate an upgrade in CI on the exit code, and keep the JSON as an artifact:
+
+```bash
+prxref eval verdict --baseline campaigns/main --candidate campaigns/pr \
+  --severity error --json verdict.json
+case $? in
+  0) echo "adopt" ;;
+  1) echo "do not adopt"; exit 1 ;;
+  *) echo "bad input"; exit 2 ;;
+esac
+```
 
 ## `prxref eval dashboard`
 
