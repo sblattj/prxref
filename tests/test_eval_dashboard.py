@@ -56,6 +56,11 @@ class TestStatusMath:
         p = eval_dashboard.status(d, now=NOW)["passes"][0]
         assert (p["pct"], p["eta_s"]) == (100.0, 0.0)
 
+    def test_a_pass_finished_within_its_start_second_has_no_time_left_either(self, tmp_path):
+        stamp = "2026-10-02T10:00:00Z"
+        d = _campaign(tmp_path, [_pass(state="scored", total=2, ok=2, started=stamp, finished=stamp)])
+        assert eval_dashboard.status(d, now=NOW)["passes"][0]["eta_s"] == 0.0
+
     def test_overall_sums_the_passes(self, tmp_path):
         d = _campaign(tmp_path, [
             _pass(arm="a", total=10, ok=5), _pass(arm="b", total=10, ok=2, failed=1),

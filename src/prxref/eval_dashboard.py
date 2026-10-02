@@ -58,10 +58,12 @@ def _pct(done: int, total: int) -> float:
 
 
 def _eta(done: int, total: int, elapsed: float | None) -> float | None:
-    """Remaining units over the observed rate; ``None`` until a unit is done."""
+    """Remaining units over the observed rate; ``0`` when none remain, ``None`` until a unit is done."""
+    remaining = max(total - done, 0)
+    if done > 0 and remaining == 0:
+        return 0.0
     if done <= 0 or elapsed is None or elapsed <= 0:
         return None
-    remaining = max(total - done, 0)
     return round(remaining / (done / elapsed), 1)
 
 
