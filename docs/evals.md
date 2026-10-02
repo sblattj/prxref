@@ -11,7 +11,7 @@ grades the findings prxref produced against the labels, and puts two such
 runs side by side. Given repeats of each, it decides whether a candidate
 beats the current setup by more than run-to-run noise.
 
-It has four actions:
+It has five actions:
 
 | Action | What it does | What it writes |
 |---|---|---|
@@ -19,6 +19,7 @@ It has four actions:
 | `prxref eval score` | grades one run against its labels | `score.json` and `score.md` in the run directory |
 | `prxref eval compare` | prints two scored runs side by side | standard output only |
 | `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output only |
+| `prxref eval mine` | builds a dataset from a GitHub repo's merged PRs | `cases.json`, `mine.json` and `severity-review.md` in `--out` |
 
 ```bash
 prxref eval run --cases tests/evals --label base
@@ -36,6 +37,7 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - [`prxref eval score`](#prxref-eval-score)
 - [`prxref eval compare`](#prxref-eval-compare)
 - [`prxref eval verdict`](#prxref-eval-verdict)
+- [`prxref eval mine`](#prxref-eval-mine)
 - [Worked example: two arms](#worked-example-two-arms)
 - [The judge prompt](#the-judge-prompt)
 - [Where runs are kept](#where-runs-are-kept)
@@ -49,7 +51,8 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - `2`: a configuration error, printed to standard error as
   `configuration error: <message>`. The message names what supplied the bad
   value: a flag (`--cases`, `--label`, `--out`, `--rules-file`,
-  `--scoped-rules`, `--prompts-dir`, `--judge-model`), the
+  `--scoped-rules`, `--prompts-dir`, `--judge-model`, and for `mine` `--repo`, `--since`, `--prs`,
+  `--min-comments`, `--rehash`), the
   argument `A` or `B` of `compare`, a run of `verdict`'s `--baseline` or
   `--candidate`, or an environment variable. Every
   exit-`2` check of `eval run` happens before any case runs and before
@@ -965,6 +968,102 @@ Reading it:
 - B's review cost is `unknown` because one of its cases could not be priced,
   so the change is `unknown` too, not a misleading number.
 - B failed a chunk that A did not, which alone can explain missing findings.
+
+## `prxref eval mine`
+
+```bash
+prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--prs N] [--judge-model MODEL] [--min-comments K]
+prxref eval mine --rehash DIR [--allow-unconfirmed]
+```
+
+Hand-labelling cases is the slow part of an evaluation, and a repository's
+history already holds labels: the review comments human reviewers left on
+merged pull requests. `eval mine` turns them into a dataset `eval run`
+replays. It reads GitHub only (github.com or a GitHub Enterprise Server
+host) and posts nothing.
+
+- `--repo OWNER/NAME` is the repository. Required, except with `--rehash`.
+- `--out DIR` receives the dataset. Required, except with `--rehash`. A
+  directory that exists and is not empty exits `2` naming `--out`, so a
+  confirmed dataset is never overwritten.
+- `--host HOST` is the GitHub host (default `github.com`). An Enterprise host
+  uses the API base `https://HOST/api/v3` and the token the review would use,
+  `PRXREF_GITHUB_ENTERPRISE_TOKEN` else `PRXREF_GITHUB_TOKEN`.
+- `--since YYYY-MM-DD` keeps only PRs merged on or after that date.
+- `--prs N` is the number of PRs to mine (default 50): the most recently
+  merged PRs that qualify.
+- `--min-comments K` is how many qualifying comments a PR needs to qualify
+  (default 1).
+- `--judge-model MODEL` drafts each label's severity on the review's own LLM
+  backend. Without it every label is `warning`.
+- `--rehash DIR` and `--allow-unconfirmed` record a human review, below.
+
+A repository without a token still mines, within GitHub's unauthenticated
+rate limit; the command logs a warning that says so. A read that fails for
+one PR logs a warning and skips that PR. A repository that cannot be listed
+at all (not found, bad credentials) exits `2` naming `--repo`.
+
+### What becomes a case
+
+A comment is a label when it is a review comment on a line, starts its
+thread, was left by someone who is neither a bot (`user.type` is `Bot`, or
+the login ends in `[bot]`) nor the PR's author, and has a body. The bodies
+of the replies in its thread are appended to its `text`.
+
+One case is written per commit the qualifying comments were left on:
+
+- `id` is `pr<number>-<first 7 characters of the commit>` and `pr_url` is the
+  PR's URL.
+- `head_sha` is the reviewed commit. `base_sha` is its merge base with the
+  head of the PR's base branch, so the range is what the reviewer saw. A
+  commit already contained in the base branch, or one GitHub no longer has
+  (a force-push), is skipped with a warning.
+- Each label has `id` `c<comment id>`, the comment's `file` and `line`
+  (the line it was left on), `category` `null`, the comment as `text`, a
+  `severity` and `accepted`.
+- `accepted` is `true` when the PR's final head changed that file within 3
+  lines of the label's line after the reviewed commit, `false` when the file
+  did not change after it, and `null` when that cannot be told (the comparison
+  fails, the history was rewritten, or GitHub withheld the patch).
+- `severity` is one of the human severities with `--judge-model`: one
+  single-shot call per case reads all its comments (prompt
+  `mine_severity.md`, not overridable) and gives each one severity. A call or
+  reply that fails after `PRXREF_LLM_PARSE_RETRIES` retries leaves the case's
+  labels at `warning`, recorded as `judge_error`.
+
+Standard output is one line per PR written, `#<number>: <K> cases, <L> labels`,
+then `cases: <path>`. The exit code is `0`.
+
+### The output directory
+
+- `cases.json` loads with `--cases` as it is: the case loader refuses fields
+  it does not know, so nothing else lives in it.
+- `mine.json` holds the provenance: `version` (1), `repo`, `host`, `since`,
+  `prs_requested`, `created_at`, `prxref_version`, `judge_model`,
+  `cases_sha256` (the SHA-256 of the `cases.json` bytes), `prs` (each with
+  `number`, `merged_at` and its `cases` ids) and `labels` (each with
+  `case_id`, `label_id`, `severity`, `severity_source`, `confirmed` and
+  `comment_url`). `severity_source` is `judge`, `default` (no judge) or
+  `judge_error`. `confirmed` starts `false`.
+- `severity-review.md` is a table per case of every label: its id, file and
+  line, drafted severity, source, the first 120 characters of its text and a
+  link to the comment.
+
+### Confirming the severities
+
+A drafted severity is a guess, and the must-fix recall `eval verdict` gates on
+depends on it. Read `severity-review.md`, edit each wrong `severity` in
+`cases.json`, set `confirmed` to `true` for each label you checked in
+`mine.json`, then record the new hash:
+
+```bash
+prxref eval mine --rehash DIR
+```
+
+`--rehash` recomputes `cases_sha256` from the edited `cases.json`, after
+checking that it still loads. While any label in `mine.json` is
+`confirmed: false` it exits `2` naming `--rehash`; `--allow-unconfirmed`
+records the hash anyway. It prints `cases_sha256: <hex>`.
 
 ## The judge prompt
 

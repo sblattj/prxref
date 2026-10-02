@@ -22,7 +22,7 @@ from prxref.llm import ConfigError
 
 README = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
 
-EVAL_ACTIONS = ("run", "score", "compare", "verdict")
+EVAL_ACTIONS = ("run", "score", "compare", "verdict", "mine")
 
 
 def _parse(*argv: str) -> argparse.Namespace:
@@ -131,7 +131,7 @@ class TestEvalCompareArgs:
 
 
 class TestEvalParserShape:
-    def test_eval_has_exactly_the_four_actions(self):
+    def test_eval_has_exactly_these_actions(self):
         ev = _subparser(cli._build_parser(), "eval")
         actions = next(a for a in ev._actions if isinstance(a, argparse._SubParsersAction))
         assert tuple(actions.choices) == EVAL_ACTIONS
@@ -141,6 +141,7 @@ class TestEvalParserShape:
         assert _option_strings(ev) == {
             "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
             "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity",
+            "--repo", "--host", "--since", "--prs", "--min-comments", "--rehash", "--allow-unconfirmed",
         }
 
     def test_an_unknown_action_exits_2(self, capsys):
@@ -159,7 +160,7 @@ class TestBareEval:
 @pytest.fixture
 def recorders(monkeypatch):
     calls: dict[str, list[argparse.Namespace]] = {name: [] for name in EVAL_ACTIONS}
-    codes = {"run": 0, "score": 3, "compare": 5, "verdict": 7}
+    codes = {"run": 0, "score": 3, "compare": 5, "verdict": 7, "mine": 9}
 
     def _recorder(name: str):
         def _record(args: argparse.Namespace, **_injected: object) -> int:
@@ -177,7 +178,7 @@ class TestDispatch:
     def test_verdict_routes_to_eval_verdict_and_returns_its_exit_code(self, recorders):
         code = cli.main(["eval", "verdict", "--baseline", "B1", "B2", "--candidate", "C1", "--severity", "error"])
         assert code == 7
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 0, 1]
+        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 0, 1, 0]
         args = recorders["verdict"][0]
         assert (args.eval_command, args.baseline, args.candidate, args.severity, args.out) == (
             "verdict", ["B1", "B2"], ["C1"], "error", "./prxref-eval/",
@@ -189,7 +190,7 @@ class TestDispatch:
             "--out", "D", "--rules-file", "R.md", "--resume",
         ])
         assert code == 0
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [1, 0, 0, 0]
+        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [1, 0, 0, 0, 0]
         args = recorders["run"][0]
         assert (args.eval_command, args.cases, args.label, args.out, args.rules_file, args.resume) == (
             "run", "cases.json", "L", "D", "R.md", True,
@@ -198,7 +199,7 @@ class TestDispatch:
     def test_score_routes_to_eval_score_and_returns_its_exit_code(self, recorders):
         code = cli.main(["eval", "score", "--label", "L", "--judge-model", "judge-x"])
         assert code == 3
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 1, 0, 0]
+        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 1, 0, 0, 0]
         args = recorders["score"][0]
         assert (args.eval_command, args.label, args.judge_model, args.out) == (
             "score", "L", "judge-x", "./prxref-eval/",
@@ -207,9 +208,17 @@ class TestDispatch:
     def test_compare_routes_to_eval_compare_and_returns_its_exit_code(self, recorders):
         code = cli.main(["eval", "compare", "A1", "B1", "--out", "D"])
         assert code == 5
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 1, 0]
+        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 1, 0, 0]
         args = recorders["compare"][0]
         assert (args.eval_command, args.run_a, args.run_b, args.out) == ("compare", "A1", "B1", "D")
+
+    def test_mine_routes_to_eval_mine_with_its_defaults(self, recorders):
+        code = cli.main(["eval", "mine", "--repo", "o/r", "--out", "D"])
+        assert code == 9
+        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 0, 0, 1]
+        args = recorders["mine"][0]
+        assert (args.repo, args.out, args.host, args.since, args.prs, args.judge_model, args.min_comments,
+                args.rehash, args.allow_unconfirmed) == ("o/r", "D", "github.com", None, 50, None, 1, None, False)
 
     @pytest.mark.parametrize(
         "action, argv",
