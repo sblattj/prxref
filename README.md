@@ -466,7 +466,7 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
-`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its four actions:
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its five actions:
 
 - `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]` replays every case and writes the run to `DIR/NAME/`:
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
@@ -491,6 +491,12 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
   - `--host HOST` / `--port PORT`: where to serve the page (default `127.0.0.1:8765`; `--port 0` picks a free port, printed as `dashboard: http://HOST:PORT/`). A non-loopback host logs a warning, because the page shows log tails. A port already in use exits `2`, naming `--port`.
   - `--once`: print a plain-text status table, one row per pass, and exit `0` instead of serving.
   - `--tail N`: log lines shown per pass (default `20`).
+- `prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--prs N] [--judge-model MODEL] [--min-comments K]` builds a dataset from a GitHub repository's merged PRs, with the human review comments as labels, and writes `cases.json`, `mine.json` and `severity-review.md` to `DIR`:
+  - `--repo OWNER/NAME` / `--out DIR` — the repository and the new or empty directory. Required. A non-empty `--out` exits `2`.
+  - `--host HOST` — the GitHub host (default `github.com`); a GitHub Enterprise Server host reads `PRXREF_GITHUB_ENTERPRISE_TOKEN`, else `PRXREF_GITHUB_TOKEN`.
+  - `--since YYYY-MM-DD` — only PRs merged on or after the date. `--prs N` — the N most recently merged qualifying PRs (default 50). `--min-comments K` — comments a PR needs (default 1).
+  - `--judge-model MODEL` — drafts each label's severity; without it every label is `warning`. The drafts are for a human to confirm.
+  - `--rehash DIR [--allow-unconfirmed]` — after you edit `cases.json`, recomputes `cases_sha256` in `mine.json`; exits `2` while a label is unconfirmed unless `--allow-unconfirmed` is given.
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 

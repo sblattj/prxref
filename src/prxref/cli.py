@@ -4,10 +4,10 @@ Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, Gitea/Forgejo, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H] [--config PATH]`` — webhook listener daemon.
-  * ``eval run|score|compare|verdict`` — replay labelled cases, score the
-    findings against the human labels, compare two scored runs, and decide
-    whether candidate runs beat baseline runs beyond their noise
-    (``prxref.evals``).
+  * ``eval run|score|compare|verdict|mine`` — replay labelled cases, score the
+    findings against the human labels, compare two scored runs, decide
+    whether candidate runs beat baseline runs beyond their noise, and mine a
+    GitHub repo's merged PRs into a dataset (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
   * ``prompts export DIR [--force]`` — the packaged prompt templates, written
     to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
@@ -622,6 +622,44 @@ def _build_parser() -> argparse.ArgumentParser:
     ev_dash.add_argument(
         "--tail", type=int, default=20, metavar="N",
         help="log lines shown per pass (default 20)",
+    )
+    ev_mine = ev_sub.add_parser(
+        "mine",
+        help="build an eval dataset from a GitHub repo's merged PRs, with human review comments as labels",
+    )
+    ev_mine.add_argument(
+        "--repo", metavar="OWNER/NAME", help="the GitHub repository to mine (required unless --rehash)",
+    )
+    ev_mine.add_argument(
+        "--out", default=None, metavar="DIR",
+        help="new or empty directory for cases.json, mine.json and severity-review.md (required unless --rehash)",
+    )
+    ev_mine.add_argument(
+        "--host", default="github.com", metavar="HOST",
+        help="GitHub host, a GitHub Enterprise Server host included (default github.com)",
+    )
+    ev_mine.add_argument(
+        "--since", default=None, metavar="YYYY-MM-DD", help="only PRs merged on or after this date",
+    )
+    ev_mine.add_argument(
+        "--prs", type=int, default=50, metavar="N",
+        help="the N most recently merged PRs that qualify (default 50)",
+    )
+    ev_mine.add_argument(
+        "--judge-model", default=None, metavar="MODEL",
+        help="model that drafts each label's severity on the review's LLM backend (default: every label is warning)",
+    )
+    ev_mine.add_argument(
+        "--min-comments", type=int, default=1, metavar="K",
+        help="a PR needs at least K qualifying human review comments (default 1)",
+    )
+    ev_mine.add_argument(
+        "--rehash", default=None, metavar="DIR",
+        help="recompute cases_sha256 in DIR/mine.json after editing cases.json; refuses while a label is unconfirmed",
+    )
+    ev_mine.add_argument(
+        "--allow-unconfirmed", action="store_true",
+        help="with --rehash, accept labels whose severity is still unconfirmed",
     )
 
     tr = sub.add_parser("trace", help="work with a JSONL run trace")
@@ -2202,7 +2240,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    """Route ``eval run|score|compare|verdict|dashboard`` to ``prxref.evals`` and return its exit code.
+    """Route ``eval run|score|compare|verdict|dashboard|mine`` to ``prxref.evals`` and return its exit code.
 
     ``prxref.evals`` is imported here rather than at module top, because the
     eval modules must never import the CLI back. For the same reason ``run``
@@ -2219,6 +2257,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         "compare": evals.eval_compare,
         "verdict": evals.eval_verdict,
         "dashboard": evals.eval_dashboard,
+        "mine": evals.eval_mine,
     }[args.eval_command]
     try:
         return action(args)
