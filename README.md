@@ -466,7 +466,7 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
-`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its five actions:
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its seven actions:
 
 - `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]` replays every case and writes the run to `DIR/NAME/`:
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
@@ -497,6 +497,12 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
   - `--since YYYY-MM-DD` — only PRs merged on or after the date. `--prs N` — the N most recently merged qualifying PRs (default 50). `--min-comments K` — comments a PR needs (default 1).
   - `--judge-model MODEL` — drafts each label's severity; without it every label is `warning`. The drafts are for a human to confirm.
   - `--rehash DIR [--allow-unconfirmed]` — after you edit `cases.json`, recomputes `cases_sha256` in `mine.json`; exits `2` while a label is unconfirmed unless `--allow-unconfirmed` is given.
+- `prxref eval campaign --cases PATH --arms TOML --out DIR [--repeats N] [--prxref VERSION|PATH] [--folds K] [--jobs J] [--case-jobs C] [--judge-model MODEL] [--severity SEV] [--resume] [--max-attempts A]` runs every arm of `TOML` `N` times as `eval run` passes, in parallel and resumably, merges and scores each pass under `DIR/runs/<arm>/r<k>/`, and prints recall per arm. It exits `0` once every pass is scored or failed, and `2` for a bad flag, arms file or dataset; feed two campaign directories to `eval verdict` to gate on them:
+  - `--arms TOML` — one `[[arm]]` table per arm: `name`, and optionally `rules_file`, `scoped_rules`, `prompts_dir` and `[arm.mine_rules]`, which mines the arm's rules per fold from the other folds' labels. Required.
+  - `--repeats N` — passes per arm (default `3`). `--folds K` — folds for mined rules (default `1`; mining needs `2` or more).
+  - `--jobs J` / `--case-jobs C` — passes run at once (default `1`) and `eval run` processes per pass (default `1`), so at most `J × C` at once.
+  - `--prxref VERSION|PATH` — run every pass with that released prxref or checkout, installed once into `DIR/envs/` with `uv`. Without it the passes run this prxref.
+  - `--resume` — continue a campaign in `--out`: scored passes are kept and only unfinished cases rerun. `--max-attempts A` — tries per case, with a pause after rate limits (default `3`).
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 

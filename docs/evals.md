@@ -11,7 +11,7 @@ grades the findings prxref produced against the labels, and puts two such
 runs side by side. Given repeats of each, it decides whether a candidate
 beats the current setup by more than run-to-run noise.
 
-It has six actions:
+It has seven actions:
 
 | Action | What it does | What it writes |
 |---|---|---|
@@ -19,6 +19,7 @@ It has six actions:
 | `prxref eval score` | grades one run against its labels | `score.json` and `score.md` in the run directory |
 | `prxref eval compare` | prints two scored runs side by side | standard output only |
 | `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output, and `--json` |
+| `prxref eval campaign` | runs arms × repeats of `eval run` in parallel, resumably, and scores every pass | the campaign directory `<out>/` |
 | `prxref eval dashboard` | shows the live progress of a campaign directory | standard output, or a local web page |
 | `prxref eval mine` | builds a dataset from a GitHub repo's merged PRs | `cases.json`, `mine.json` and `severity-review.md` in `--out` |
 
@@ -38,6 +39,7 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - [`prxref eval score`](#prxref-eval-score)
 - [`prxref eval compare`](#prxref-eval-compare)
 - [`prxref eval verdict`](#prxref-eval-verdict)
+- [`prxref eval campaign`](#prxref-eval-campaign)
 - [`prxref eval dashboard`](#prxref-eval-dashboard)
 - [`prxref eval mine`](#prxref-eval-mine)
 - [Worked example: two arms](#worked-example-two-arms)
@@ -50,6 +52,7 @@ reads the same `PRXREF_*` settings `prxref review` does (see
   case whose review fails is recorded as a failed case and the run moves on
   to the next one. `PRXREF_FAIL_ON` does not apply to `prxref eval`.
 - `1`: only from `eval verdict`, when the candidate is not `better` (a campaign: when the decision is `do not adopt`).
+  `eval campaign` exits `0` however its passes went.
 - `2`: a configuration error, printed to standard error as
   `configuration error: <message>`. The message names what supplied the bad
   value: a flag (`--cases`, `--label`, `--out`, `--rules-file`,
@@ -1083,6 +1086,162 @@ case $? in
   *) echo "bad input"; exit 2 ;;
 esac
 ```
+
+## `prxref eval campaign`
+
+```bash
+prxref eval campaign --cases PATH --arms TOML --out DIR [--repeats N] [--prxref VERSION|PATH]
+  [--folds K] [--jobs J] [--case-jobs C] [--judge-model MODEL] [--severity SEV] [--resume]
+  [--max-attempts A]
+```
+
+`eval verdict` needs repeats of each side, and a fair comparison needs every
+side run the same way. `eval campaign` does that bookkeeping: it runs every
+arm of an arms file `--repeats` times, each pass an `eval run` over the whole
+dataset, in parallel and resumably, then merges and scores each pass. It
+never posts, and never exits `1`: it exits `0` once every pass is scored or
+has failed (a failed pass is reported, not fatal), and `2` for a
+configuration error, before anything runs.
+
+- `--cases PATH` — the labelled cases, as for `eval run`. Required.
+- `--arms TOML` — the arms to compare (see [The arms file](#the-arms-file)). Required.
+- `--out DIR` — the campaign directory. Required, and it must be empty or
+  missing unless `--resume` is given.
+- `--repeats N` — passes per arm (default `3`).
+- `--folds K` — the number of folds for arms that mine their rules (default
+  `1`). Mining needs at least `2`, and no more than the dataset has PR groups.
+- `--jobs J` — passes run at once (default `1`).
+- `--case-jobs C` — `eval run` processes per pass (default `1`): each pass
+  splits its cases into `C` shards, round-robin, and runs them at once. At most
+  `J × C` `eval run` processes run at the same time.
+- `--judge-model MODEL` — the judge for every label without `must_match`, as
+  for `eval score`, and the default model for mining rules. Required when any
+  label lacks `must_match`. With it, every pass is also scored with
+  `--precision`, so `eval verdict` guards on strict precision.
+- `--severity SEV` — adds the recall of labels of that severity to the
+  summary. A severity no label has exits `2`.
+- `--prxref VERSION|PATH` — run every pass with another prxref (see
+  [Running another prxref](#running-another-prxref)).
+- `--resume` — continue the campaign in `--out` (see
+  [Resuming and retries](#resuming-and-retries)).
+- `--max-attempts A` — tries per case before it counts as failed (default `3`).
+
+Every check happens before the first pass runs: a count below `1`, a bad
+dataset, a bad arms file, an arm's rules file, scoped rules or prompts
+directory that `eval run` would refuse, a missing `--judge-model`, too few or
+too many folds, and an `--out` that holds something else. Each exits `2`
+naming the flag (`--cases`, `--arms`, `--out`, `--repeats`, `--folds`,
+`--jobs`, `--case-jobs`, `--max-attempts`, `--judge-model`, `--severity`,
+`--resume` or `--prxref`).
+
+### The arms file
+
+```toml
+[[arm]]
+name = "no-rules"
+rules_file = ""
+scoped_rules = []
+
+[[arm]]
+name = "team-rules"
+rules_file = "rules/TEAM.md"
+prompts_dir = "prompts/"
+
+[[arm]]
+name = "mined"
+[arm.mine_rules]
+judge_model = "example-judge-model"
+```
+
+Each `[[arm]]` table is one arm, in the order the summary lists them:
+
+- `name` — the arm's id: letters, digits, `.`, `_` and `-`, unique. Required.
+- `rules_file` — passed as `--rules-file`. `""` turns team rules off; leaving
+  the key out keeps whatever the environment sets.
+- `scoped_rules` — a list of paths, each passed as `--scoped-rules`. `[]`
+  turns scoped rules off; leaving the key out keeps the environment's.
+- `prompts_dir` — passed as `--prompts-dir`.
+- `[arm.mine_rules]` — mine the arm's team rules from the labels instead of
+  reading a file. The cases are split into `--folds` folds (cases of one PR
+  share a fold), and fold `j`'s cases are reviewed with rules mined from the
+  labels of every other fold only, so no case is reviewed with rules that saw
+  its own labels. Its one key, `judge_model`, is the mining model (default
+  `--judge-model`). It cannot be combined with a non-empty `rules_file`.
+
+Relative paths are relative to the arms file. Any other key exits `2`.
+
+### The campaign directory
+
+```text
+<out>/
+  campaign.json                 the inputs, written once
+  progress.json                 the state of every pass
+  logs/<arm>-r<k>.log           every eval run and scoring of a pass
+  rules/<arm>/f<j>.md           rules mined for fold j
+  units/<arm>/r<k>/f<j>-s<i>/   the eval run of fold j, shard i of pass k
+  runs/<arm>/r<k>/              the merged and scored pass: run.json, cases/, score.json, score.md
+  envs/<version>/               the environment --prxref installed
+```
+
+`campaign.json` holds `version`, `created_at`, `cases_path`, `cases_sha256`
+(the SHA-256 of the loaded cases, so an edited dataset is noticed),
+`repeats`, `folds`, `severity`, `judge_model`, `prxref` (`requested`,
+`version`, `python`) and `arms` (each `name`, `rules_file`, `scoped_rules`,
+`prompts_dir`, `mine_rules`).
+
+`progress.json` holds `version`, `started_at`, `updated_at` and `passes`, one
+entry per arm and repeat: `arm`, `repeat`, `state` (`pending`, `running`,
+`scoring`, `scored` or `failed`), `units_total`, `units_ok`, `units_failed`,
+`units_rate_limited`, `attempt`, `started_at`, `finished_at`, `log` and
+`error`. It is rewritten atomically on every change, so another process can
+watch it; each change of state is also printed as
+`<arm> r<k>: <state> (<ok>/<total> units)`.
+
+Each pass is scored by one scorer, `eval score` with `--judge-model` and
+`--precision` (or with neither, when no `--judge-model` was given), one pass
+at a time, so every pass of every arm is graded the same way. At the end the
+campaign prints recall per arm, the mean and each pass, and the line to
+compare it with another campaign.
+
+### Resuming and retries
+
+A case whose review was rate limited or failed is reset and run again with
+`eval run --resume`, up to `--max-attempts` tries in all; before a retry
+after a rate limit the campaign sleeps 30 seconds times the attempt, at most
+300. A case still failing after the last try is recorded as a failed case
+(a rate-limited record is kept as `record.rejected.json`), and `eval score`
+counts it as a miss. An `eval run` that exits `2` fails its pass at once.
+
+`--resume` continues the campaign in `--out`: passes already scored are kept,
+every other pass restarts from its unit directories, keeping each case that
+finished, and mined rules files are reused. The dataset, the arms,
+`--repeats`, `--folds` and `--prxref` must match `campaign.json`, or it exits
+`2`. Interrupt a campaign at any time and run the same command with
+`--resume`.
+
+### Running another prxref
+
+Without `--prxref`, every pass runs this prxref. With `--prxref 0.29.0` the
+passes run that release, and with `--prxref ../prxref` that checkout: it is
+installed once with `uv` into `<out>/envs/`, and its version and Python are
+recorded in `campaign.json`. It exits `2` when `uv` is missing, the install
+fails, the installed version is not the one asked for, or its `eval run`
+lacks a flag the arms need. A unit written by any other version fails its
+pass. Mining and scoring always run this prxref, so two campaigns of two
+versions are graded alike.
+
+### Example: gate an upgrade in CI
+
+```bash
+prxref eval campaign --cases tests/evals --arms arms.toml --out camp-old \
+  --prxref 0.29.0 --repeats 3 --jobs 2 --case-jobs 2
+prxref eval campaign --cases tests/evals --arms arms.toml --out camp-new \
+  --repeats 3 --jobs 2 --case-jobs 2
+prxref eval verdict --baseline camp-old --candidate camp-new --severity error
+```
+
+The two campaigns exit `0` however their passes went; the `eval verdict`
+exits `1` unless the new prxref is `better`, which fails the CI job.
 
 ## `prxref eval dashboard`
 

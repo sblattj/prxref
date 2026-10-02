@@ -22,7 +22,7 @@ from prxref.llm import ConfigError
 
 README = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
 
-EVAL_ACTIONS = ("run", "score", "compare", "verdict", "dashboard", "mine")
+EVAL_ACTIONS = ("run", "score", "compare", "verdict", "campaign", "dashboard", "mine")
 
 
 def _parse(*argv: str) -> argparse.Namespace:
@@ -130,6 +130,31 @@ class TestEvalCompareArgs:
         assert "usage:" in capsys.readouterr().err.lower()
 
 
+class TestEvalCampaignFlags:
+    def test_the_required_flags_parse_and_every_other_flag_takes_its_default(self):
+        args = _parse("eval", "campaign", "--cases", "c.json", "--arms", "a.toml", "--out", "D")
+        assert (
+            args.cases, args.arms, args.out, args.repeats, args.prxref, args.folds, args.jobs, args.case_jobs,
+            args.judge_model, args.severity, args.resume, args.max_attempts,
+        ) == ("c.json", "a.toml", "D", 3, None, 1, 1, 1, None, None, False, 3)
+
+    @pytest.mark.parametrize("flag", ["--cases", "--arms", "--out"])
+    def test_a_missing_required_flag_exits_2_naming_it(self, flag, capsys):
+        argv = {"--cases": "c.json", "--arms": "a.toml", "--out": "D"}
+        rest = [part for name, value in argv.items() if name != flag for part in (name, value)]
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["eval", "campaign", *rest])
+        assert excinfo.value.code == 2
+        assert flag in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--repeats", "--folds", "--jobs", "--case-jobs", "--max-attempts"])
+    def test_a_count_that_is_not_an_integer_exits_2(self, flag, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["eval", "campaign", "--cases", "c", "--arms", "a", "--out", "D", flag, "two"])
+        assert excinfo.value.code == 2
+        assert flag in capsys.readouterr().err
+
+
 class TestEvalParserShape:
     def test_eval_has_exactly_these_actions(self):
         ev = _subparser(cli._build_parser(), "eval")
@@ -143,6 +168,7 @@ class TestEvalParserShape:
             "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity", "--json",
             "--precision", "--campaign", "--host", "--port", "--once", "--tail",
             "--repo", "--since", "--prs", "--min-comments", "--rehash", "--allow-unconfirmed",
+            "--arms", "--repeats", "--prxref", "--folds", "--jobs", "--case-jobs", "--max-attempts",
         }
 
     def test_an_unknown_action_exits_2(self, capsys):
@@ -161,7 +187,7 @@ class TestBareEval:
 @pytest.fixture
 def recorders(monkeypatch):
     calls: dict[str, list[argparse.Namespace]] = {name: [] for name in EVAL_ACTIONS}
-    codes = {"run": 0, "score": 3, "compare": 5, "verdict": 7, "dashboard": 9, "mine": 11}
+    codes = {"run": 0, "score": 3, "compare": 5, "verdict": 7, "dashboard": 9, "mine": 11, "campaign": 13}
 
     def _recorder(name: str):
         def _record(args: argparse.Namespace, **_injected: object) -> int:
@@ -232,12 +258,27 @@ class TestDispatch:
         assert (args.repo, args.out, args.host, args.since, args.prs, args.judge_model, args.min_comments,
                 args.rehash, args.allow_unconfirmed) == ("o/r", "D", "github.com", None, 50, None, 1, None, False)
 
+    def test_campaign_routes_to_eval_campaign_and_returns_its_exit_code(self, recorders):
+        code = cli.main([
+            "eval", "campaign", "--cases", "c.json", "--arms", "arms.toml", "--out", "D", "--repeats", "5",
+            "--prxref", "0.29.0", "--folds", "3", "--jobs", "4", "--case-jobs", "2", "--judge-model", "j",
+            "--severity", "error", "--resume", "--max-attempts", "6",
+        ])
+        assert code == 13
+        assert _routed(recorders) == ["campaign"]
+        args = recorders["campaign"][0]
+        assert (
+            args.eval_command, args.cases, args.arms, args.out, args.repeats, args.prxref, args.folds, args.jobs,
+            args.case_jobs, args.judge_model, args.severity, args.resume, args.max_attempts,
+        ) == ("campaign", "c.json", "arms.toml", "D", 5, "0.29.0", 3, 4, 2, "j", "error", True, 6)
+
     @pytest.mark.parametrize(
         "action, argv",
         [
             ("run", ["eval", "run", "--cases", "c.json", "--label", "L"]),
             ("score", ["eval", "score", "--label", "L"]),
             ("compare", ["eval", "compare", "A", "B"]),
+            ("campaign", ["eval", "campaign", "--cases", "c.json", "--arms", "a.toml", "--out", "D"]),
         ],
     )
     def test_a_config_error_exits_2_printed_as_review_prints_one(self, action, argv, monkeypatch, capsys):
