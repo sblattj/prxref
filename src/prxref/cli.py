@@ -4,8 +4,10 @@ Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, Gitea/Forgejo, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H] [--config PATH]`` — webhook listener daemon.
-  * ``eval run|score|compare`` — replay labelled cases, score the findings
-    against the human labels, and compare two scored runs (``prxref.evals``).
+  * ``eval run|score|compare|verdict`` — replay labelled cases, score the
+    findings against the human labels, compare two scored runs, and decide
+    whether candidate runs beat baseline runs beyond their noise
+    (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
   * ``prompts export DIR [--force]`` — the packaged prompt templates, written
     to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
@@ -558,6 +560,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "run_b", metavar="B", help="second run: a label under --out, or a run directory"
     )
     ev_cmp.add_argument(
+        "--out",
+        default=eval_out,
+        metavar="DIR",
+        help=f"directory that holds the runs (default {eval_out})",
+    )
+    ev_verdict = ev_sub.add_parser(
+        "verdict",
+        help="decide whether candidate runs beat baseline runs by more than their noise",
+    )
+    ev_verdict.add_argument(
+        "--baseline", nargs="+", required=True, metavar="RUN",
+        help="scored runs of the current setup, repeats of one configuration: labels under --out or run directories",
+    )
+    ev_verdict.add_argument(
+        "--candidate", nargs="+", required=True, metavar="RUN",
+        help="scored runs of the setup to adopt, repeats of one configuration",
+    )
+    ev_verdict.add_argument(
+        "--severity", metavar="SEV",
+        help="gate on the recall of human labels of this severity, e.g. error (default: micro recall)",
+    )
+    ev_verdict.add_argument(
         "--out",
         default=eval_out,
         metavar="DIR",
@@ -2142,7 +2166,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    """Route ``eval run|score|compare`` to ``prxref.evals`` and return its exit code.
+    """Route ``eval run|score|compare|verdict`` to ``prxref.evals`` and return its exit code.
 
     ``prxref.evals`` is imported here rather than at module top, because the
     eval modules must never import the CLI back. For the same reason ``run``
@@ -2157,6 +2181,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         ),
         "score": evals.eval_score,
         "compare": evals.eval_compare,
+        "verdict": evals.eval_verdict,
     }[args.eval_command]
     try:
         return action(args)
@@ -2261,7 +2286,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare``,
+    """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare|verdict``,
     ``trace render``, ``prompts export``, ``config check``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
