@@ -191,7 +191,7 @@ class TestTheInputsAreDocumented:
     def test_the_human_severities_are_listed_in_order(self):
         assert ", ".join(_code(severity) for severity in HUMAN_SEVERITIES) in FLAT
 
-    @pytest.mark.parametrize("action", ["run", "score", "compare", "verdict"])
+    @pytest.mark.parametrize("action", ["run", "score", "compare", "verdict", "mine"])
     def test_every_action_has_a_section(self, action):
         assert f"\n## `prxref eval {action}`\n" in DOC
 

@@ -466,7 +466,7 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
-`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its four actions:
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its five actions:
 
 - `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]` replays every case and writes the run to `DIR/NAME/`:
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
@@ -484,6 +484,12 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 - `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`:
   - `--baseline RUN [RUN ...]` / `--candidate RUN [RUN ...]`: scored runs of each side, each a label under `--out` or a run directory. Both required; repeat each side so the baseline has a noise range.
   - `--severity SEV`: gate on recall of the labels of that severity (e.g. `error` for must-fix). Without it the gate is micro recall. A run with no label of that severity exits `2`.
+- `prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--prs N] [--judge-model MODEL] [--min-comments K]` builds a dataset from a GitHub repository's merged PRs, with the human review comments as labels, and writes `cases.json`, `mine.json` and `severity-review.md` to `DIR`:
+  - `--repo OWNER/NAME` / `--out DIR` — the repository and the new or empty directory. Required. A non-empty `--out` exits `2`.
+  - `--host HOST` — the GitHub host (default `github.com`); a GitHub Enterprise Server host reads `PRXREF_GITHUB_ENTERPRISE_TOKEN`, else `PRXREF_GITHUB_TOKEN`.
+  - `--since YYYY-MM-DD` — only PRs merged on or after the date. `--prs N` — the N most recently merged qualifying PRs (default 50). `--min-comments K` — comments a PR needs (default 1).
+  - `--judge-model MODEL` — drafts each label's severity; without it every label is `warning`. The drafts are for a human to confirm.
+  - `--rehash DIR [--allow-unconfirmed]` — after you edit `cases.json`, recomputes `cases_sha256` in `mine.json`; exits `2` while a label is unconfirmed unless `--allow-unconfirmed` is given.
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
