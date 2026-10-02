@@ -865,6 +865,8 @@ def _units(trace_dir: str) -> dict:
     if not os.path.isdir(trace_dir):
         return out
     for name in sorted(os.listdir(trace_dir)):
+        if name == "diff.patch":
+            continue
         with open(os.path.join(trace_dir, name), encoding="utf-8") as fh:
             text = fh.read()
         if name.endswith(".meta.json"):

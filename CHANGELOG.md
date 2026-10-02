@@ -25,6 +25,15 @@ tracker.
   also writes the verdict as `verdict.json`. Given one `eval campaign`
   directory per side, it compares the arms one by one and adopts (exit `0`)
   only when every rules arm is `better` and no no-rules arm is `worse`.
+- `prxref eval campaign --cases PATH --arms TOML --out DIR` runs every arm
+  of an arms file (`rules_file`, `scoped_rules`, `prompts_dir`, or rules
+  mined per fold from the other folds' labels with `[arm.mine_rules]`)
+  `--repeats` times as parallel, sharded `eval run` passes (`--jobs`,
+  `--case-jobs`), retries rate-limited and failed cases with a capped pause
+  (`--max-attempts`), scores every pass (with `--precision` when
+  `--judge-model` is given), and keeps `campaign.json` and `progress.json`
+  so `--resume` continues where it stopped. `--prxref VERSION|PATH` runs
+  the passes with another prxref, installed once with `uv` (#81).
 - `prxref eval score --precision` grades the active AI findings no label
   credited as `valid`, `nit`, `invalid`, `duplicate` or `unverifiable`, with
   one judge call per case, and reports strict and lenient precision in

@@ -171,7 +171,8 @@ class TestOrchestratorLabelsEveryUnit:
             name.format(u=u)
             for u in ("chunk0", "sweep")
             for name in UNIT_FILES
-        }
+        } | {"diff.patch"}
+        assert (tmp_path / "diff.patch").read_text(encoding="utf-8") == forge.get_diff(REF)
 
     def test_multi_chunk_runs_are_numbered_from_zero(self, tmp_path):
         diff = "".join(_added_file_diff(f"src/f{i}.py", 20) for i in range(3))
@@ -180,7 +181,7 @@ class TestOrchestratorLabelsEveryUnit:
             forge, REF, FakeLLM(), post=False,
             trace_dir=str(tmp_path), max_files_per_chunk=1,
         )
-        units = {p.name.split(".")[0] for p in tmp_path.iterdir()}
+        units = {p.name.split(".")[0] for p in tmp_path.iterdir() if p.name != "diff.patch"}
         assert units == {"chunk0", "chunk1", "chunk2", "sweep"}
 
     def test_the_trace_directory_is_created_when_missing(self, tmp_path):
