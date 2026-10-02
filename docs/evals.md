@@ -11,7 +11,7 @@ grades the findings prxref produced against the labels, and puts two such
 runs side by side. Given repeats of each, it decides whether a candidate
 beats the current setup by more than run-to-run noise.
 
-It has four actions:
+It has five actions:
 
 | Action | What it does | What it writes |
 |---|---|---|
@@ -19,6 +19,7 @@ It has four actions:
 | `prxref eval score` | grades one run against its labels | `score.json` and `score.md` in the run directory |
 | `prxref eval compare` | prints two scored runs side by side | standard output only |
 | `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output only |
+| `prxref eval dashboard` | shows the live progress of a campaign directory | standard output, or a local web page |
 
 ```bash
 prxref eval run --cases tests/evals --label base
@@ -36,6 +37,7 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - [`prxref eval score`](#prxref-eval-score)
 - [`prxref eval compare`](#prxref-eval-compare)
 - [`prxref eval verdict`](#prxref-eval-verdict)
+- [`prxref eval dashboard`](#prxref-eval-dashboard)
 - [Worked example: two arms](#worked-example-two-arms)
 - [The judge prompt](#the-judge-prompt)
 - [Where runs are kept](#where-runs-are-kept)
@@ -885,6 +887,44 @@ The report opens with `# prxref eval verdict` and the runs of each side.
 gives each side's mean and range and the change of the means in the table
 `| Metric | Baseline mean (range) | Candidate mean (range) | Change |`.
 `## Verdict` names the verdict and the one comparison that decided it.
+
+## `prxref eval dashboard`
+
+```bash
+prxref eval dashboard --campaign DIR [--host HOST] [--port PORT] [--once] [--tail N]
+```
+
+A read-only live view of one campaign directory. It reads `progress.json` and
+the pass logs under `logs/` (and `campaign.json`, when present), never writes
+to the directory and never starts a review.
+
+- `--campaign DIR`: the campaign output directory. Required. A directory with
+  no `progress.json` exits `2`, naming `--campaign`.
+- `--once`: print one plain-text table and exit `0`. It has one row per pass
+  (`arm`, `repeat`, `state`, `ok/total`, `pct`, `eta`, `rate-limit`) and an
+  `overall:` line. This is the form for CI and scripts.
+- `--host HOST` and `--port PORT`: without `--once`, serve on
+  `127.0.0.1:8765`. `--port 0` picks a free port. The first line printed is
+  `dashboard: http://HOST:PORT/` with the real port. A port already in use
+  exits `2`, naming `--port`. A `--host` that is not loopback logs a
+  `WARNING`, because the page shows log tails to anyone who can reach it.
+  Ctrl-C exits `0`.
+- `--tail N`: the log lines shown per pass (default `20`).
+
+The server answers `GET /` (one self-contained page, no external assets, that
+polls `/status.json` every two seconds), `GET /status.json`, and `404` for
+anything else. Every log line is HTML-escaped. An unreadable `progress.json`
+(the runner writes it atomically, but a read can still land mid-write) serves
+the last good status.
+
+`/status.json` is `{"campaign", "updated_at", "passes", "overall"}`. Each pass
+is its `progress.json` entry plus `pct`, `eta_s`, `log_tail` and
+`rate_limit_lines`, the number of lines of the whole log that match a
+rate-limit pattern (`429`, `rate limit`, `too many requests`, `quota`,
+`session cap`, `session limit`). `overall` holds `units_total`, `units_done`
+(ok plus failed), `pct`, `elapsed_s`, `eta_s` and `rate_limited_passes`. An
+ETA is the remaining units over the rate observed since `started_at`, and is
+`null` until a unit is done.
 
 ## Worked example: two arms
 

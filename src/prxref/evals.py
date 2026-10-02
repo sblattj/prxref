@@ -1452,6 +1452,21 @@ def eval_verdict(args: argparse.Namespace) -> int:
     return 0 if verdict == VERDICT_BETTER else 1
 
 
+def eval_dashboard(args: argparse.Namespace) -> int:
+    """Show the live progress of a campaign directory, as a table or a local web page.
+
+    Reads ``args.campaign``, ``args.host``, ``args.port``, ``args.once`` and
+    ``args.tail``. With ``--once`` it prints one status table and returns 0;
+    otherwise it serves the page until interrupted and returns 0. The work is in
+    :mod:`prxref.eval_dashboard`, imported here so the web server code is only
+    loaded by this action. Raises ``ConfigError`` (exit 2) for a campaign with
+    no ``progress.json`` and for a port already in use.
+    """
+    from prxref import eval_dashboard as dashboard
+
+    return dashboard.run(args)
+
+
 def _verdict_run(side: str, run: _ScoredRun, severity: str | None) -> _VerdictRun:
     """Read the gate, the micro recall and the unmatched AI per PR of one run."""
     metrics = run.score["metrics"]

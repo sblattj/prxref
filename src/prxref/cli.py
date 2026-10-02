@@ -587,6 +587,30 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=f"directory that holds the runs (default {eval_out})",
     )
+    ev_dash = ev_sub.add_parser(
+        "dashboard",
+        help="show the live progress of a campaign directory as a table or a local web page",
+    )
+    ev_dash.add_argument(
+        "--campaign", required=True, metavar="DIR",
+        help="the campaign output directory (holds progress.json and logs/)",
+    )
+    ev_dash.add_argument(
+        "--host", default="127.0.0.1", metavar="HOST",
+        help="address to bind (default 127.0.0.1; a non-loopback host exposes the log tails)",
+    )
+    ev_dash.add_argument(
+        "--port", type=int, default=8765, metavar="PORT",
+        help="port to listen on (default 8765; 0 picks a free one)",
+    )
+    ev_dash.add_argument(
+        "--once", action="store_true",
+        help="print one plain-text status table and exit instead of serving",
+    )
+    ev_dash.add_argument(
+        "--tail", type=int, default=20, metavar="N",
+        help="log lines shown per pass (default 20)",
+    )
 
     tr = sub.add_parser("trace", help="work with a JSONL run trace")
     tr_sub = tr.add_subparsers(dest="trace_command")
@@ -2166,7 +2190,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    """Route ``eval run|score|compare|verdict`` to ``prxref.evals`` and return its exit code.
+    """Route ``eval run|score|compare|verdict|dashboard`` to ``prxref.evals`` and return its exit code.
 
     ``prxref.evals`` is imported here rather than at module top, because the
     eval modules must never import the CLI back. For the same reason ``run``
@@ -2182,6 +2206,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         "score": evals.eval_score,
         "compare": evals.eval_compare,
         "verdict": evals.eval_verdict,
+        "dashboard": evals.eval_dashboard,
     }[args.eval_command]
     try:
         return action(args)
