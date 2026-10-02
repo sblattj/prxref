@@ -732,3 +732,37 @@ class TestEndToEnd:
         log = (out / "logs" / "rules-r2.log").read_text(encoding="utf-8")
         assert "run directory: " in log
         assert "| rules | 2/2 | 100.0%; 100.0%, 100.0% | 100.0%; 100.0%, 100.0% |" in out_buf.getvalue()
+
+    def test_two_judged_campaigns_feed_eval_verdict_with_the_precision_guard(self, tmp_path, monkeypatch, capsys):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _StubLLM)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.chdir(tmp_path)
+            monkeypatch.setenv("PRXREF_LLM_BASE_URL", f"http://127.0.0.1:{server.server_address[1]}/v1")
+            monkeypatch.setenv("PRXREF_LLM_MODELS", "stub-m")
+            monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+            cases = _dataset(tmp_path, ids=("a", "b"))
+            for name in ("camp-a", "camp-b"):
+                argv = _argv(tmp_path, "--repeats", "2", "--judge-model", "stub-m", cases=cases,
+                             out=tmp_path / name)
+                code = eval_campaign.run_campaign(cli._build_parser().parse_args(argv), stdout=io.StringIO())
+                assert code == 0
+        finally:
+            server.shutdown()
+            server.server_close()
+        for arm in ("no-rules", "rules"):
+            run = tmp_path / "camp-a" / "runs" / arm / "r1"
+            assert _read(run / "score.json")["metrics"]["precision"]["strict"] == 1.0
+            assert (run / "cases" / "a" / "diff.patch").read_text(encoding="utf-8") == DIFF
+        capsys.readouterr()
+        code = cli.main(["eval", "verdict", "--baseline", str(tmp_path / "camp-a"),
+                         "--candidate", str(tmp_path / "camp-b"), "--json", str(tmp_path / "verdict.json")])
+        verdict = _read(tmp_path / "verdict.json")
+        assert (code, verdict["mode"], verdict["guard"], verdict["decision"]) == (
+            1, "campaign", "strict_precision", "do not adopt",
+        )
+        assert {(a["arm"], a["role"], a["verdict"]) for a in verdict["arms"]} == {
+            ("no-rules", "no-rules", "within noise"), ("rules", "rules", "within noise"),
+        }
+        assert "## Decision" in capsys.readouterr().out
