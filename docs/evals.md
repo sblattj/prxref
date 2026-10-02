@@ -344,6 +344,7 @@ prxref-eval/                        --out
 | Key | Value |
 |---|---|
 | `version` | `1` |
+| `prxref_version` | the prxref version that wrote the run, like `0.30.1` |
 | `label` | `--label` |
 | `cases_path` | `--cases` as given |
 | `created_at` | when this invocation started, in UTC, like `2026-09-24T10:30:00Z`; a `--resume` rewrites it |
