@@ -141,7 +141,7 @@ class TestEvalParserShape:
         assert _option_strings(ev) == {
             "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
             "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity", "--json",
-            "--campaign", "--host", "--port", "--once", "--tail",
+            "--precision", "--campaign", "--host", "--port", "--once", "--tail",
         }
 
     def test_an_unknown_action_exits_2(self, capsys):
