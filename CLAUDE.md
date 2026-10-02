@@ -4,11 +4,10 @@ Fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and 
 
 ## What This Is
 
-A Python CLI + webhook service that reviews PRs/MRs on any of five forges
-(Bitbucket, GitHub, GitLab, Gitea/Forgejo, Azure DevOps) by: parsing one
-unified diff, chunking it, running parallel single-shot LLM worker reviews
-with a fallback model chain, gating findings through deterministic quality
-passes, and posting inline comments + a summary.
+A Python CLI + webhook service that reviews PRs/MRs on any of those forges by:
+parsing one unified diff, chunking it, running parallel single-shot LLM worker
+reviews with a fallback model chain, gating findings through deterministic
+quality passes, and posting inline comments + a summary.
 
 `prxref review --pr-url https://<any-forge>/<owner>/<repo>/pull|pulls|pullrequest|merge_requests/<n>`
 auto-detects the forge.
@@ -17,39 +16,23 @@ auto-detects the forge.
 
 - Python 3.12+, `uv` for env/lock, hatchling packaging
 - One `Forge` Protocol (src/prxref/forges/base.py), six adapters for five
-  forges
-- Bitbucket needs two of them: Cloud speaks `/2.0` on `bitbucket.org` only,
-  Server / Data Center speaks `/rest/api/1.0` on any host, so the adapter is
-  picked from the URL. `detect_forge` asks Cloud first, but that order is
-  defensive, not load-bearing: Cloud pins `bitbucket.org` and a bare
-  `owner/repo/pull-requests/N` path while Server requires a
-  `/projects|users/KEY/repos/REPO/` prefix, so the two patterns are disjoint and
-  every URL resolves identically under either order. Asking the narrower parser
-  first means a later loosening degrades into a shadowed forge rather than a
-  silently mis-routed one. GitHub and GitLab stay one adapter each, because
-  their self-hosted products differ only in base URL.
-- Gitea/Forgejo is one adapter for every host (Codeberg, gitea.com,
-  self-hosted, optionally under a sub-path), because Forgejo keeps Gitea's
-  `/api/v1`. Its `/pulls/N` path is disjoint from the other forges' patterns;
-  `detect_forge` asks it after GitLab and before Azure DevOps. Since the
-  pattern accepts any host, the parser refuses the other forges' cloud hosts
-  and any URL with an `/api/` segment ahead of the owner, which would
-  otherwise capture API URLs that resolve to nothing. The API has no
-  compare-diff endpoint, so the pinned-range diff is rebuilt locally from the
-  compare file listing plus whole files at the merge base and the head.
-- Azure DevOps is one adapter for Services and Server, asked last by
-  `detect_forge`; it has no unified-diff endpoint, so it rebuilds the diff
-  locally from the Diffs API change list plus blob contents.
+  forges (Bitbucket Cloud and Server/Data Center are separate). `detect_forge`
+  asks Bitbucket Cloud, Bitbucket Server, GitHub, GitLab, Gitea/Forgejo, then
+  Azure DevOps last; the URL patterns must stay disjoint, and Gitea's any-host
+  parser must keep refusing the other forges' hosts and `/api/` URLs. Gitea
+  and Azure DevOps rebuild the diff locally. Per-forge detail:
+  `docs/forges.md`.
 - LLM access via a fallback chain (llm-ferry preferred, litellm optional,
   plain-HTTP client as zero-dependency default) — provider-agnostic, no
   Anthropic key by design
 
 ## Commands
 
-- `uv run pytest` — tests (pytest lives in the `dev` dependency group, which
-  uv installs by default; it is not a project extra, so no flag is needed)
+- `uv run pytest` — tests (pytest is in the default `dev` dependency group)
 - `uv run ruff check src tests` — lint
 - `uv run prxref review --pr-url ...` — one-shot review
+- `uv run prxref config check` — validate config (bare `prxref config` only
+  prints help, rc 0)
 
 ## Conventions
 
@@ -70,12 +53,41 @@ auto-detects the forge.
   `error`/`any` exit 1 on findings and on a failed review, for CI lanes that
   explicitly want the gate. Do not widen that knob by accident.
 - config lives in one place: `config._DEFAULTS` plus the `_INT_KEYS` /
-  `_FLOAT_KEYS` / `_RANGES` / `_CHOICE_KEYS` tables. A new key needs all four
-  surfaces — those tables, the `config.py` docstring, `.env.example`, and
-  `docs/env-vars.md` — plus a classification into `FILE_KEYS` or
-  `ENV_ONLY_KEYS` (and its row in `docs/config-file.md`).
-- config file: `.prxref.toml` sits between defaults and env; a new key must
-  be classified into `FILE_KEYS` or `ENV_ONLY_KEYS` (a test enforces the
-  partition), and anything that names a host, runs a program, writes a file
-  or reads outside the repo is env-only.
+  `_FLOAT_KEYS` / `_RANGES` / `_CHOICE_KEYS` tables. A new key needs those
+  tables, the `config.py` docstring, `.env.example`, `docs/env-vars.md`, and a
+  classification into `FILE_KEYS` (`.prxref.toml`, between defaults and env)
+  or `ENV_ONLY_KEYS` with its row in `docs/config-file.md`; a test enforces
+  the partition. Anything that names a host, runs a program, writes a file or
+  reads outside the repo is env-only. Renaming a file key in a release needs
+  an alias, or existing `.prxref.toml` files exit 2.
 - every posted comment carries model attribution
+
+## Testing gotchas
+
+- Editing `src/prxref/prompts/worker.md` moves pinned prompt hashes: re-record
+  them in `tests/test_rule_prompt_slot.py`, `test_orchestrator_grouping.py`,
+  `test_orchestrator_rule_cap.py`, `test_issue_17_acceptance.py`,
+  `test_issue_20_acceptance.py`, `test_context_followup_off_identity.py` and
+  the golden JSON under `tests/fixtures/issue17/` and `issue20/`
+  (`make_golden.py`). Take the new values from the failing assertions.
+- Output key sets (run config, run record, result JSON) are pinned in several
+  test files under different names; `grep -rl RUN_CONFIG_KEYS tests` lists the
+  run-config ones. The doc-count tests (pass counts, key-word counts) live in
+  `tests/test_rule_cap_config.py`.
+- The numbered quality-pass list is the `quality.py` module docstring.
+- `cli.py` reaches `orchestrate_review` through `importlib`, so
+  `grep 'orchestrate_review('` finds no CLI caller.
+- `tests/evals/` is a spec-grounded, recall-only dataset; the structural tests
+  in `tests/evals/test_evals.py` reject cases that break that contract. Read
+  them before adding a case. Eval runs pin `ci_wiring`, `routing_probe` and
+  standards discovery off (`evals.EVAL_PINS`).
+- Ad-hoc probes: run through `uv run` (plain python3 lacks `requests`).
+  `Finding` and `parse_unified_diff` live in `prxref.triage`; `Finding` needs
+  `confidence`. `load_config` never finds `.prxref.toml` on its own: pass
+  `config_file=`. An orchestrator probe needs the `contract_stubs` fixture
+  (`tests/conftest.py`), or `FakeLLM` sees a non-JSON prompt; append the probe
+  to a copy of the owning test module instead of importing from it.
+- A red-proof on a `/tmp` copy of the tree needs `PYTHONPATH=<copy>/src`, or
+  the editable install keeps importing the worktree.
+- `docs/env-vars.md` rows are single long lines; read diffs with
+  `git diff -U0 -- docs/env-vars.md | cut -c1-300`.
