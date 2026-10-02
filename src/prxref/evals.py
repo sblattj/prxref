@@ -1826,6 +1826,19 @@ def eval_dashboard(args: argparse.Namespace) -> int:
     return dashboard.run(args)
 
 
+def eval_mine(args: argparse.Namespace) -> int:
+    """Build an eval dataset from a GitHub repo's merged PRs, or re-hash one after a human edit.
+
+    Reads ``args.repo``, ``args.out``, ``args.host``, ``args.since``,
+    ``args.prs``, ``args.judge_model``, ``args.min_comments``, ``args.rehash``
+    and ``args.allow_unconfirmed``. The work is in :mod:`prxref.eval_mine`,
+    imported here so that no other action pays for it.
+    """
+    from prxref import eval_mine as _eval_mine
+
+    return _eval_mine.mine(args)
+
+
 def _verdict_run(side: str, run: _ScoredRun, severity: str | None) -> _VerdictRun:
     """Read the gate, the micro recall, the unmatched AI per PR and the strict precision of one run."""
     metrics = run.score["metrics"]
