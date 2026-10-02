@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import prxref
 from prxref import eval_judge, eval_metrics, reviewer
 from prxref.config import find_config_file, load_config, load_config_with_sources
 from prxref.eval_cases import EvalCase, case_from_json_record, case_to_json, is_safe_id, load_cases
@@ -169,6 +170,7 @@ def eval_run(
       ``"<ExceptionType>: <message>"``, when it did not.
 
     ``run.json`` holds, in this order: ``version`` (:data:`RUN_VERSION`);
+    ``prxref_version`` (``prxref.__version__`` of the process that wrote it);
     ``label``; ``cases_path`` (``--cases`` as given); ``created_at`` (this
     invocation's start, ISO-8601 UTC with a ``Z``); ``case_ids`` in dataset
     order; ``prompts``, holding ``sha256`` (the sha256 of each packaged
@@ -329,6 +331,7 @@ def _run_json(
     first = _first_reviewed_record(cases_dir, case_ids) or {}
     return {
         "version": RUN_VERSION,
+        "prxref_version": prxref.__version__,
         "label": args.label,
         "cases_path": args.cases,
         "created_at": created_at,
