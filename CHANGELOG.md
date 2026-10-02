@@ -19,6 +19,31 @@ tracker.
   `better` only when its mean gate beats the best baseline run while micro
   recall and unmatched AI findings per PR stay no worse than the worst one.
   It exits `1` when the candidate is not `better`, so CI can gate an upgrade.
+  When every run was scored with `--precision`, the second guard is strict
+  precision (no worse than the worst baseline run) instead of unmatched AI
+  findings per PR, and the report says which guard it used. `--json PATH`
+  also writes the verdict as `verdict.json`. Given one `eval campaign`
+  directory per side, it compares the arms one by one and adopts (exit `0`)
+  only when every rules arm is `better` and no no-rules arm is `worse`.
+- `prxref eval score --precision` grades the active AI findings no label
+  credited as `valid`, `nit`, `invalid`, `duplicate` or `unverifiable`, with
+  one judge call per case, and reports strict and lenient precision in
+  `score.json` (`metrics.precision` and each case's `precision`), in
+  `score.md` (`## Precision`) and in `eval compare`. It requires
+  `--judge-model` (#81).
+- `prxref eval mine --repo OWNER/NAME --out DIR` builds an eval dataset from
+  a GitHub repository's merged PRs, with the human review comments as
+  labels: `cases.json`, `mine.json` (provenance and the dataset's sha256)
+  and `severity-review.md`. `--judge-model` drafts each label's severity for
+  a human to confirm, and `--rehash DIR` re-records the hash after the
+  edit (#81).
+- `prxref eval dashboard --campaign DIR` shows a campaign's live progress
+  read-only, as a plain-text table with `--once` or as a local web page
+  that polls `/status.json` (#81).
+- `eval run` records `prxref_version` in `run.json` and keeps the unified
+  diff each review read as `cases/<id>/diff.patch`, which the precision
+  judge shows; the review's `--trace-dir` dump now includes that
+  `diff.patch` too (#81).
 
 ## [0.30.1] — 2026-09-30
 
