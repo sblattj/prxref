@@ -587,6 +587,10 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=f"directory that holds the runs (default {eval_out})",
     )
+    ev_verdict.add_argument(
+        "--json", dest="json_path", metavar="PATH",
+        help="also write the verdict as JSON (verdict.json) to PATH",
+    )
     ev_dash = ev_sub.add_parser(
         "dashboard",
         help="show the live progress of a campaign directory as a table or a local web page",

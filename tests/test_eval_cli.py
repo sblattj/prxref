@@ -140,7 +140,7 @@ class TestEvalParserShape:
         ev = _subparser(cli._build_parser(), "eval")
         assert _option_strings(ev) == {
             "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
-            "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity",
+            "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity", "--json",
             "--campaign", "--host", "--port", "--once", "--tail",
         }
 
