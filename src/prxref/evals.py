@@ -19,10 +19,12 @@ call it makes is single-shot, and it never posts to a forge.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import logging
 import os
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -1398,17 +1400,50 @@ def _only_in_one_run(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> 
 VERDICT_BETTER = "better"
 VERDICT_WORSE = "worse"
 VERDICT_NOISE = "within noise"
+DECISION_ADOPT = "adopt"
+DECISION_HOLD = "do not adopt"
+GUARD_STRICT = "strict_precision"
+GUARD_UNMATCHED = "unmatched_per_pr"
+ROLE_RULES = "rules"
+ROLE_NO_RULES = "no-rules"
+VERDICT_JSON_VERSION = 1
+STRICT_MISSING_NOTE = "strict precision is missing from at least one run, so the guard is unmatched AI findings per PR"
 
 
 @dataclass(frozen=True)
 class _VerdictRun:
-    """One run of ``eval verdict``: its side, the run as given, and its three gated values."""
+    """One run of ``eval verdict``: its side, the run as given, and its gated values."""
 
     side: str
     given: str
     gate: float
     recall: float
     unmatched: float
+    strict: float | None = None
+    path: str = ""
+
+
+@dataclass(frozen=True)
+class _VerdictArm:
+    """The runs of one arm (``name`` and ``role`` are ``None`` in runs mode) and the verdict reached on them."""
+
+    name: str | None
+    role: str | None
+    runs: tuple[_VerdictRun, ...]
+    verdict: str = ""
+    reason: str = ""
+
+    @property
+    def base(self) -> list[_VerdictRun]:
+        return [run for run in self.runs if run.side == "baseline"]
+
+    @property
+    def cand(self) -> list[_VerdictRun]:
+        return [run for run in self.runs if run.side == "candidate"]
+
+    @property
+    def strict_guard(self) -> bool:
+        return all(run.strict is not None for run in self.runs)
 
 
 def eval_verdict(args: argparse.Namespace) -> int:
@@ -1416,54 +1451,241 @@ def eval_verdict(args: argparse.Namespace) -> int:
 
     Reads ``args.baseline`` and ``args.candidate`` (one or more scored runs
     each, resolved as ``eval compare`` resolves ``A`` and ``B``),
-    ``args.severity`` and ``args.out``. The runs of one side are repeats of
-    one configuration: their spread is the noise a single run carries.
+    ``args.severity``, ``args.out`` and ``args.json_path``. The runs of one
+    side are repeats of one configuration: their spread is the noise a single
+    run carries.
 
     The gate is the recall of the human labels of severity ``--severity``
     (``recall_by_severity``), or the micro recall without it. The candidate is:
 
     - ``better`` when its mean gate is above the best baseline run's gate,
-      its mean micro recall is not below the worst baseline run's, and its
-      mean unmatched AI findings per PR is not above the worst baseline run's;
+      its mean micro recall is not below the worst baseline run's, and the
+      guard holds;
     - ``worse`` when its mean gate is below the worst baseline run's gate;
     - ``within noise`` otherwise.
 
+    The guard is strict precision (``metrics.precision.strict``: the mean
+    must not be below the worst baseline run's) when every run of the
+    comparison has it, and otherwise the mean unmatched AI findings per PR,
+    which must not be above the worst baseline run's; the report then says
+    strict precision is missing.
+
+    When ``--baseline`` and ``--candidate`` are each one directory holding a
+    ``campaign.json``, the arms of the two campaigns are compared one by one
+    (each arm's repeats are its ``runs/<arm>/r<k>`` that hold a
+    ``score.json``) and the decision is ``adopt`` only when every arm that
+    uses rules is ``better`` and no arm without rules is ``worse``; with no
+    rules arm, only when every arm is ``better``.
+
     Standard output is Markdown: ``# prxref eval verdict``, the inputs, a
     ``## Runs`` table, a ``## Summary`` table of each side's mean and range,
-    and ``## Verdict``. It holds no timestamp and no path other than the runs
+    and ``## Verdict`` (campaign mode: one such block per ``## Arm``, then
+    ``## Decision``). It holds no timestamp and no path other than the runs
     as given. ``eval compare``'s judge and case warnings are logged for every
-    run against the first baseline run.
+    run against the first baseline run. ``--json PATH`` also writes the
+    verdict as ``verdict.json``.
 
-    Returns 0 when the candidate is ``better`` and 1 otherwise, so a CI job
-    can gate an upgrade on it. Raises ``ConfigError`` (exit 2) for any run
-    ``eval compare`` refuses, and for a run with no scored label of the gated
-    severity or no case.
+    Returns 0 when the candidate is ``better`` (campaign: the decision is
+    ``adopt``) and 1 otherwise, so a CI job can gate an upgrade on it. Raises
+    ``ConfigError`` (exit 2) for any run ``eval compare`` refuses, for a run
+    with no scored label of the gated severity or no case, for a campaign
+    mixed with runs, an arm only one campaign has, an arm with no scored run,
+    a ``campaign.json`` that cannot be read, and a ``--json`` path that
+    cannot be written.
     """
+    campaign = _campaign_sides(args)
+    if campaign is None:
+        arms = [_runs_arm(args)]
+    else:
+        arms = _campaign_arms(args, *campaign)
+    arms = [_judged(arm) for arm in arms]
+    mode = "runs" if campaign is None else "campaign"
+    if campaign is None:
+        decision, decision_reason = (arms[0].verdict == VERDICT_BETTER), ""
+        text = _verdict_text(arms[0].runs, args.severity)[1]
+    else:
+        decision, decision_reason = _decide_campaign(arms)
+        text = _campaign_text(args, arms, decision, decision_reason)
+    print(text, end="", flush=True)
+    exit_code = 0 if decision else 1
+    if getattr(args, "json_path", None):
+        _write_verdict_json(args.json_path, mode, args.severity, arms, decision, exit_code)
+    return exit_code
+
+
+def _judged(arm: _VerdictArm) -> _VerdictArm:
+    """The arm with its verdict and reason decided."""
+    verdict, reason = _decide(arm.base, arm.cand)
+    return replace(arm, verdict=verdict, reason=reason)
+
+
+def _runs_arm(args: argparse.Namespace) -> _VerdictArm:
+    """Read the runs given on the command line as the one arm of runs mode."""
     baseline = [_read_scored_run(f"--baseline {given}", given, args.out) for given in args.baseline]
     candidate = [_read_scored_run(f"--candidate {given}", given, args.out) for given in args.candidate]
+    return _arm_from_scored(None, None, baseline, candidate, args.severity)
+
+
+def _arm_from_scored(name: str | None, role: str | None, baseline: Sequence[_ScoredRun],
+                     candidate: Sequence[_ScoredRun], severity: str | None) -> _VerdictArm:
     first = baseline[0]
     for run in [*baseline[1:], *candidate]:
         _warn_judge(first.score, run.score)
         _warn_cases(first.score, run.score)
-    runs = [_verdict_run("baseline", run, args.severity) for run in baseline]
-    runs += [_verdict_run("candidate", run, args.severity) for run in candidate]
-    verdict, text = _verdict_text(runs, args.severity)
-    print(text, end="", flush=True)
-    return 0 if verdict == VERDICT_BETTER else 1
+    runs = [_verdict_run("baseline", run, severity) for run in baseline]
+    runs += [_verdict_run("candidate", run, severity) for run in candidate]
+    return _VerdictArm(name, role, tuple(runs))
+
+
+def _campaign_dir(given: str, out: str) -> Path | None:
+    """The campaign directory ``given`` names (a label under ``out`` or a path), or ``None``."""
+    label_dir = Path(out) / given
+    directory = label_dir if is_safe_id(given) and label_dir.is_dir() else Path(given)
+    return directory if (directory / "campaign.json").is_file() else None
+
+
+def _campaign_sides(args: argparse.Namespace) -> tuple[Path, Path] | None:
+    """The two campaign directories, ``None`` for runs mode; mixing the two modes is a ``ConfigError``."""
+    sides = (("--baseline", args.baseline), ("--candidate", args.candidate))
+    found = {flag: [_campaign_dir(given, args.out) for given in given_list] for flag, given_list in sides}
+    if not any(directory for directories in found.values() for directory in directories):
+        return None
+    for flag, given_list in sides:
+        if len(given_list) != 1 or found[flag][0] is None:
+            raise ConfigError(
+                f"{flag}: a campaign directory (one holding campaign.json) must be the only value of both "
+                "--baseline and --candidate; the two modes cannot be mixed"
+            )
+    return found["--baseline"][0], found["--candidate"][0]  # type: ignore[return-value]
+
+
+def _read_campaign(flag: str, given: str, directory: Path) -> dict[str, dict[str, Any]]:
+    """The arms of one ``campaign.json`` by name, in file order."""
+    path = directory / "campaign.json"
+    data = _read_compare_json(f"{flag} {given}", path)
+    listed = data.get("arms") if isinstance(data, dict) else None
+    if not isinstance(listed, list) or not listed:
+        raise ConfigError(f"{flag} {given}: {path}: not a campaign.json (it lists no arms)")
+    arms: dict[str, dict[str, Any]] = {}
+    for arm in listed:
+        name = arm.get("name") if isinstance(arm, dict) else None
+        if not isinstance(name, str) or not is_safe_id(name) or name in arms:
+            raise ConfigError(f"{flag} {given}: {path}: not a campaign.json (arm {name!r} is not a unique safe id)")
+        arms[name] = arm
+    return arms
+
+
+def _campaign_role(arm: Mapping[str, Any]) -> str:
+    """``no-rules`` for an arm that turns rules off and mines none, else ``rules``."""
+    bare = arm.get("rules_file") == "" and not arm.get("scoped_rules") and not arm.get("mine_rules")
+    return ROLE_NO_RULES if bare else ROLE_RULES
+
+
+def _arm_scored_runs(flag: str, given: str, directory: Path, name: str, out: str) -> list[_ScoredRun]:
+    """The scored ``runs/<name>/r<k>`` of a campaign, ordered by ``k``, each named ``r<k>``."""
+    root = directory / "runs" / name
+    found: list[tuple[int, Path]] = []
+    if root.is_dir():
+        for child in root.iterdir():
+            match = re.fullmatch(r"r(\d+)", child.name)
+            if match and (child / "score.json").is_file():
+                found.append((int(match[1]), child))
+    if not found:
+        raise ConfigError(f"{flag} {given}: arm {name!r} has no scored run (no runs/{name}/r<k>/score.json)")
+    runs = []
+    for k, child in sorted(found):
+        run = _read_scored_run(f"{flag} {given}: arm {name!r} r{k}", str(child), out)
+        runs.append(replace(run, given=f"r{k}"))
+    return runs
+
+
+def _campaign_arms(args: argparse.Namespace, base_dir: Path, cand_dir: Path) -> list[_VerdictArm]:
+    """Read both campaigns and pair their arms by name."""
+    base_given, cand_given = args.baseline[0], args.candidate[0]
+    base_arms = _read_campaign("--baseline", base_given, base_dir)
+    cand_arms = _read_campaign("--candidate", cand_given, cand_dir)
+    for name in cand_arms.keys() - base_arms.keys():
+        raise ConfigError(f"--candidate {cand_given}: arm {name!r} is not in the --baseline campaign {base_given}")
+    for name in base_arms.keys() - cand_arms.keys():
+        raise ConfigError(f"--candidate {cand_given}: it has no arm {name!r}, which the --baseline campaign has")
+    arms = []
+    for name, arm in cand_arms.items():
+        baseline = _arm_scored_runs("--baseline", base_given, base_dir, name, args.out)
+        candidate = _arm_scored_runs("--candidate", cand_given, cand_dir, name, args.out)
+        arms.append(_arm_from_scored(name, _campaign_role(arm), baseline, candidate, args.severity))
+    return arms
+
+
+def _decide_campaign(arms: Sequence[_VerdictArm]) -> tuple[bool, str]:
+    """Whether to adopt the candidate campaign, and the one sentence that explains it."""
+    if any(arm.role == ROLE_RULES for arm in arms):
+        blockers = [f"rules arm `{arm.name}` is {arm.verdict}" for arm in arms
+                    if arm.role == ROLE_RULES and arm.verdict != VERDICT_BETTER]
+        blockers += [f"no-rules arm `{arm.name}` is {arm.verdict}" for arm in arms
+                     if arm.role == ROLE_NO_RULES and arm.verdict == VERDICT_WORSE]
+        adopt = "every rules arm is better and no no-rules arm is worse."
+    else:
+        blockers = [f"arm `{arm.name}` is {arm.verdict}" for arm in arms if arm.verdict != VERDICT_BETTER]
+        adopt = "no arm uses rules and every arm is better."
+    if blockers:
+        return False, f"{'; '.join(blockers)}."
+    return True, adopt
+
+
+def _stats(values: Sequence[float]) -> dict[str, Any]:
+    return {"mean": _mean(values), "min": min(values), "max": max(values), "values": list(values)}
+
+
+def _side_json(runs: Sequence[_VerdictRun]) -> dict[str, Any]:
+    strict = [run.strict for run in runs]
+    return {
+        "runs": [run.path for run in runs],
+        "gate": _stats([run.gate for run in runs]),
+        "recall": _stats([run.recall for run in runs]),
+        "precision": None if any(value is None for value in strict) else _stats(strict),  # type: ignore[arg-type]
+        "unmatched_per_pr": _stats([run.unmatched for run in runs]),
+    }
+
+
+def _write_verdict_json(path: str, mode: str, severity: str | None, arms: Sequence[_VerdictArm], decision: bool,
+                        exit_code: int) -> None:
+    """Write ``verdict.json`` atomically; an unwritable path is a ``ConfigError`` naming ``--json``."""
+    guard = GUARD_STRICT if all(arm.strict_guard for arm in arms) else GUARD_UNMATCHED
+    payload = {
+        "version": VERDICT_JSON_VERSION, "mode": mode, "severity": severity, "guard": guard,
+        "decision": DECISION_ADOPT if decision else DECISION_HOLD, "exit_code": exit_code,
+        "arms": [
+            {"arm": arm.name, "role": arm.role, "verdict": arm.verdict, "reason": arm.reason,
+             "baseline": _side_json(arm.base), "candidate": _side_json(arm.cand)}
+            for arm in arms
+        ],
+    }
+    target = Path(path)
+    temp = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, target)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            temp.unlink(missing_ok=True)
+        raise ConfigError(f"--json {path}: cannot write {target}: {exc}") from exc
 
 
 def _verdict_run(side: str, run: _ScoredRun, severity: str | None) -> _VerdictRun:
-    """Read the gate, the micro recall and the unmatched AI per PR of one run."""
+    """Read the gate, the micro recall, the unmatched AI per PR and the strict precision of one run."""
     metrics = run.score["metrics"]
     recall = (metrics.get("recall") or {}).get("recall")
     gate = recall if severity is None else ((metrics.get("recall_by_severity") or {}).get(severity) or {}).get("recall")
     unmatched = (metrics.get("unmatched_ai") or {}).get("per_pr")
+    precision = metrics.get("precision")
+    strict = precision.get("strict") if isinstance(precision, dict) else None
     if gate is None or recall is None:
         what = "no scored label" if severity is None else f"no scored label of severity {severity!r}"
         raise ConfigError(f"{run.argument}: the run has {what}, so it cannot be gated")
     if unmatched is None:
         raise ConfigError(f"{run.argument}: the run has no case, so it cannot be gated")
-    return _VerdictRun(side, run.given, gate, recall, unmatched)
+    return _VerdictRun(side, run.given, gate, recall, unmatched, strict, str(run.run_dir))
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -1480,6 +1702,7 @@ def _per_pr(value: float) -> str:
 
 def _decide(base: Sequence[_VerdictRun], cand: Sequence[_VerdictRun]) -> tuple[str, str]:
     """The verdict and the one sentence that explains it."""
+    strict = all(run.strict is not None for run in [*base, *cand])
     gate, recall, unmatched = (_mean([run.gate for run in cand]), _mean([run.recall for run in cand]),
                                _mean([run.unmatched for run in cand]))
     best, worst = max(run.gate for run in base), min(run.gate for run in base)
@@ -1492,6 +1715,15 @@ def _decide(base: Sequence[_VerdictRun], cand: Sequence[_VerdictRun]) -> tuple[s
     if recall < floor:
         return VERDICT_NOISE, (f"the gate rose, but the mean micro recall {_pct(recall)} is below the worst baseline "
                                f"run's {_pct(floor)}.")
+    if strict:
+        precision = _mean([run.strict for run in cand])  # type: ignore[misc]
+        lowest = min(run.strict for run in base)  # type: ignore[type-var]
+        if precision < lowest:
+            return VERDICT_NOISE, (f"the gate rose, but the mean strict precision {_pct(precision)} is below the "
+                                   f"worst baseline run's {_pct(lowest)}.")
+        return VERDICT_BETTER, (f"the candidate's mean gate {_pct(gate)} is above the best baseline run's "
+                                f"{_pct(best)}, with micro recall and strict precision no worse than the worst "
+                                "baseline run.")
     if unmatched > ceiling:
         return VERDICT_NOISE, (f"the gate rose, but the mean unmatched AI findings per PR {_per_pr(unmatched)} is "
                                f"above the worst baseline run's {_per_pr(ceiling)}.")
@@ -1499,34 +1731,66 @@ def _decide(base: Sequence[_VerdictRun], cand: Sequence[_VerdictRun]) -> tuple[s
                             "with micro recall and unmatched AI findings per PR no worse than the worst baseline run.")
 
 
-def _verdict_text(runs: Sequence[_VerdictRun], severity: str | None) -> tuple[str, str]:
-    """The verdict and the Markdown printed to standard output."""
+def _verdict_blocks(runs: Sequence[_VerdictRun], heading: str) -> tuple[str, list[str]]:
+    """The verdict and the Runs, Summary and Verdict blocks of one arm, their headings at level ``heading``."""
     base = [run for run in runs if run.side == "baseline"]
     cand = [run for run in runs if run.side == "candidate"]
-    gate_name = "Recall (micro)" if severity is None else f"Recall, severity `{_cell(severity)}`"
+    strict = all(run.strict is not None for run in runs)
+    head = ("| Run | Side | Gate | Recall (micro) |" + (" Strict precision |" if strict else "")
+            + " Unmatched AI per PR |")
+    rule = "|---|---|---:|---:|" + ("---:|" if strict else "") + "---:|"
     lines = [
-        "# prxref eval verdict", "",
-        f"- Baseline: {', '.join(run.given for run in base)}",
-        f"- Candidate: {', '.join(run.given for run in cand)}",
-        f"- Gate: {gate_name}",
-        "", "## Runs", "",
-        "| Run | Side | Gate | Recall (micro) | Unmatched AI per PR |", "|---|---|---:|---:|---:|",
-        *(f"| {_cell(run.given)} | {run.side} | {_pct(run.gate)} | {_pct(run.recall)} | {_per_pr(run.unmatched)} |"
-          for run in runs),
-        "", "## Summary", "",
+        f"{heading} Runs", "", head, rule,
+        *(f"| {_cell(run.given)} | {run.side} | {_pct(run.gate)} | {_pct(run.recall)} | "
+          + (f"{_pct(run.strict)} | " if strict else "") + f"{_per_pr(run.unmatched)} |" for run in runs),
+        "", f"{heading} Summary", "",
         "| Metric | Baseline mean (range) | Candidate mean (range) | Change |", "|---|---|---|---:|",
     ]
-    for name, key, render, change in (
-        ("Gate", "gate", _pct, _points_change),
-        ("Recall (micro)", "recall", _pct, _points_change),
-        ("Unmatched AI per PR", "unmatched", _per_pr, _per_pr_change),
-    ):
+    rows = [("Gate", "gate", _pct, _points_change), ("Recall (micro)", "recall", _pct, _points_change)]
+    if strict:
+        rows.append(("Strict precision", "strict", _pct, _points_change))
+    rows.append(("Unmatched AI per PR", "unmatched", _per_pr, _per_pr_change))
+    for name, key, render, change in rows:
         values_b = [getattr(run, key) for run in base]
         values_c = [getattr(run, key) for run in cand]
         lines.append(f"| {name} | {_spread(values_b, render)} | {_spread(values_c, render)} | "
                      f"{change(_mean(values_c) - _mean(values_b))} |")
     verdict, reason = _decide(base, cand)
-    lines += ["", "## Verdict", "", f"**{verdict}**: {reason}"]
+    lines += ["", f"{heading} Verdict", "", f"**{verdict}**: {reason}"]
+    if not strict:
+        lines += ["", STRICT_MISSING_NOTE]
     if len(base) < 2:
         lines += ["", "The baseline has one run, so it has no noise range. Repeat it before adopting the candidate."]
-    return verdict, "\n".join(lines) + "\n"
+    return verdict, lines
+
+
+def _gate_name(severity: str | None) -> str:
+    return "Recall (micro)" if severity is None else f"Recall, severity `{_cell(severity)}`"
+
+
+def _verdict_text(runs: Sequence[_VerdictRun], severity: str | None) -> tuple[str, str]:
+    """The verdict and the Markdown printed to standard output in runs mode."""
+    base = [run for run in runs if run.side == "baseline"]
+    cand = [run for run in runs if run.side == "candidate"]
+    lines = [
+        "# prxref eval verdict", "",
+        f"- Baseline: {', '.join(run.given for run in base)}",
+        f"- Candidate: {', '.join(run.given for run in cand)}",
+        f"- Gate: {_gate_name(severity)}", "",
+    ]
+    verdict, blocks = _verdict_blocks(runs, "##")
+    return verdict, "\n".join(lines + blocks) + "\n"
+
+
+def _campaign_text(args: argparse.Namespace, arms: Sequence[_VerdictArm], decision: bool, reason: str) -> str:
+    """The Markdown printed to standard output in campaign mode."""
+    lines = [
+        "# prxref eval verdict", "",
+        f"- Baseline: {args.baseline[0]}", f"- Candidate: {args.candidate[0]}",
+        f"- Gate: {_gate_name(args.severity)}",
+    ]
+    for arm in arms:
+        lines += ["", f"## Arm {_cell(arm.name)}", "", f"Role: {arm.role}", ""]
+        lines += _verdict_blocks(arm.runs, "###")[1]
+    lines += ["", "## Decision", "", f"**{DECISION_ADOPT if decision else DECISION_HOLD}**: {reason}"]
+    return "\n".join(lines) + "\n"

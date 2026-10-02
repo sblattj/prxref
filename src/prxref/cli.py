@@ -587,8 +587,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=f"directory that holds the runs (default {eval_out})",
     )
+    ev_verdict.add_argument(
+        "--json", dest="json_path", metavar="PATH",
+        help="also write the verdict as JSON (verdict.json) to PATH",
+    )
 
-    tr = sub.add_parser("trace", help="work with a JSONL run trace")
+    tr =sub.add_parser("trace", help="work with a JSONL run trace")
     tr_sub = tr.add_subparsers(dest="trace_command")
     tr_render = tr_sub.add_parser(
         "render", help="render a run trace to a standalone HTML pipeline view"
