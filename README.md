@@ -466,7 +466,7 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
-`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its three actions:
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its four actions:
 
 - `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]` replays every case and writes the run to `DIR/NAME/`:
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
@@ -481,6 +481,9 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 - `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
   - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.
 - `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed and the cases and labels only one run has. `A` and `B` are each a label under `--out` or a run directory. It warns when the runs are not like for like.
+- `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`:
+  - `--baseline RUN [RUN ...]` / `--candidate RUN [RUN ...]`: scored runs of each side, each a label under `--out` or a run directory. Both required; repeat each side so the baseline has a noise range.
+  - `--severity SEV`: gate on recall of the labels of that severity (e.g. `error` for must-fix). Without it the gate is micro recall. A run with no label of that severity exits `2`.
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
@@ -539,6 +542,7 @@ prxref eval compare base cand
 
 - **Cases** come as a `cases.json` file or as a directory of `case-*/` directories, the layout of [`tests/evals/`](tests/evals/README.md). A label is graded deterministically when it carries a `must_match` predicate, and by an LLM judge on the review's own backend (`--judge-model`) when it does not.
 - **Recall** is micro recall over every label, with half credit for a `partial` judge grade, broken down by severity and by category. The score also reports unmatched AI findings per PR, severity agreement, failed chunks, time and cost, and never sums an unknown cost.
+- **Verdict**: `prxref eval verdict --baseline base-r1 base-r2 --candidate cand-r1 cand-r2 --severity error` decides from repeated runs whether the candidate beats the baseline by more than run-to-run noise, and exits `1` when it does not, so CI can gate an upgrade on it.
 - **Runs** go to `./prxref-eval/<label>/` by default; add `prxref-eval/` to your `.gitignore`. A run never posts, and a case that fails is recorded and scored, never fatal.
 
 The full reference is [docs/evals.md](docs/evals.md).

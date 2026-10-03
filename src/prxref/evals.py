@@ -1,7 +1,8 @@
-"""The ``prxref eval`` actions: replay labelled cases, score them, compare runs.
+"""The ``prxref eval`` actions: replay labelled cases, score them, compare runs, gate an upgrade.
 
-``prxref.cli`` routes ``eval run``, ``eval score`` and ``eval compare`` to
-:func:`eval_run`, :func:`eval_score` and :func:`eval_compare`. Each takes the
+``prxref.cli`` routes ``eval run``, ``eval score``, ``eval compare`` and
+``eval verdict`` to :func:`eval_run`, :func:`eval_score`, :func:`eval_compare`
+and :func:`eval_verdict`. Each takes the
 parsed ``argparse.Namespace`` and returns the process exit code;
 :func:`eval_run` also takes the review runner and the record builder, which
 the CLI passes in. A configuration problem raises ``ConfigError`` naming the
@@ -1392,3 +1393,140 @@ def _only_in_one_run(score_a: Mapping[str, Any], score_b: Mapping[str, Any]) -> 
                     f"- Label `{label_id}` of case `{case_id}` at `{location}`: only in {side}",
                 ))
     return [text for *_, text in sorted(entries)] or ["None."]
+
+
+VERDICT_BETTER = "better"
+VERDICT_WORSE = "worse"
+VERDICT_NOISE = "within noise"
+
+
+@dataclass(frozen=True)
+class _VerdictRun:
+    """One run of ``eval verdict``: its side, the run as given, and its three gated values."""
+
+    side: str
+    given: str
+    gate: float
+    recall: float
+    unmatched: float
+
+
+def eval_verdict(args: argparse.Namespace) -> int:
+    """Decide whether the candidate runs beat the baseline runs by more than their run-to-run noise.
+
+    Reads ``args.baseline`` and ``args.candidate`` (one or more scored runs
+    each, resolved as ``eval compare`` resolves ``A`` and ``B``),
+    ``args.severity`` and ``args.out``. The runs of one side are repeats of
+    one configuration: their spread is the noise a single run carries.
+
+    The gate is the recall of the human labels of severity ``--severity``
+    (``recall_by_severity``), or the micro recall without it. The candidate is:
+
+    - ``better`` when its mean gate is above the best baseline run's gate,
+      its mean micro recall is not below the worst baseline run's, and its
+      mean unmatched AI findings per PR is not above the worst baseline run's;
+    - ``worse`` when its mean gate is below the worst baseline run's gate;
+    - ``within noise`` otherwise.
+
+    Standard output is Markdown: ``# prxref eval verdict``, the inputs, a
+    ``## Runs`` table, a ``## Summary`` table of each side's mean and range,
+    and ``## Verdict``. It holds no timestamp and no path other than the runs
+    as given. ``eval compare``'s judge and case warnings are logged for every
+    run against the first baseline run.
+
+    Returns 0 when the candidate is ``better`` and 1 otherwise, so a CI job
+    can gate an upgrade on it. Raises ``ConfigError`` (exit 2) for any run
+    ``eval compare`` refuses, and for a run with no scored label of the gated
+    severity or no case.
+    """
+    baseline = [_read_scored_run(f"--baseline {given}", given, args.out) for given in args.baseline]
+    candidate = [_read_scored_run(f"--candidate {given}", given, args.out) for given in args.candidate]
+    first = baseline[0]
+    for run in [*baseline[1:], *candidate]:
+        _warn_judge(first.score, run.score)
+        _warn_cases(first.score, run.score)
+    runs = [_verdict_run("baseline", run, args.severity) for run in baseline]
+    runs += [_verdict_run("candidate", run, args.severity) for run in candidate]
+    verdict, text = _verdict_text(runs, args.severity)
+    print(text, end="", flush=True)
+    return 0 if verdict == VERDICT_BETTER else 1
+
+
+def _verdict_run(side: str, run: _ScoredRun, severity: str | None) -> _VerdictRun:
+    """Read the gate, the micro recall and the unmatched AI per PR of one run."""
+    metrics = run.score["metrics"]
+    recall = (metrics.get("recall") or {}).get("recall")
+    gate = recall if severity is None else ((metrics.get("recall_by_severity") or {}).get(severity) or {}).get("recall")
+    unmatched = (metrics.get("unmatched_ai") or {}).get("per_pr")
+    if gate is None or recall is None:
+        what = "no scored label" if severity is None else f"no scored label of severity {severity!r}"
+        raise ConfigError(f"{run.argument}: the run has {what}, so it cannot be gated")
+    if unmatched is None:
+        raise ConfigError(f"{run.argument}: the run has no case, so it cannot be gated")
+    return _VerdictRun(side, run.given, gate, recall, unmatched)
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values)
+
+
+def _spread(values: Sequence[float], render: Callable[[float], str]) -> str:
+    return f"{render(_mean(values))} ({render(min(values))} to {render(max(values))})"
+
+
+def _per_pr(value: float) -> str:
+    return f"{value:.2f}"
+
+
+def _decide(base: Sequence[_VerdictRun], cand: Sequence[_VerdictRun]) -> tuple[str, str]:
+    """The verdict and the one sentence that explains it."""
+    gate, recall, unmatched = (_mean([run.gate for run in cand]), _mean([run.recall for run in cand]),
+                               _mean([run.unmatched for run in cand]))
+    best, worst = max(run.gate for run in base), min(run.gate for run in base)
+    floor, ceiling = min(run.recall for run in base), max(run.unmatched for run in base)
+    if gate < worst:
+        return VERDICT_WORSE, f"the candidate's mean gate {_pct(gate)} is below the worst baseline run's {_pct(worst)}."
+    if gate <= best:
+        return VERDICT_NOISE, (f"the candidate's mean gate {_pct(gate)} is not above the best baseline run's "
+                               f"{_pct(best)}.")
+    if recall < floor:
+        return VERDICT_NOISE, (f"the gate rose, but the mean micro recall {_pct(recall)} is below the worst baseline "
+                               f"run's {_pct(floor)}.")
+    if unmatched > ceiling:
+        return VERDICT_NOISE, (f"the gate rose, but the mean unmatched AI findings per PR {_per_pr(unmatched)} is "
+                               f"above the worst baseline run's {_per_pr(ceiling)}.")
+    return VERDICT_BETTER, (f"the candidate's mean gate {_pct(gate)} is above the best baseline run's {_pct(best)}, "
+                            "with micro recall and unmatched AI findings per PR no worse than the worst baseline run.")
+
+
+def _verdict_text(runs: Sequence[_VerdictRun], severity: str | None) -> tuple[str, str]:
+    """The verdict and the Markdown printed to standard output."""
+    base = [run for run in runs if run.side == "baseline"]
+    cand = [run for run in runs if run.side == "candidate"]
+    gate_name = "Recall (micro)" if severity is None else f"Recall, severity `{_cell(severity)}`"
+    lines = [
+        "# prxref eval verdict", "",
+        f"- Baseline: {', '.join(run.given for run in base)}",
+        f"- Candidate: {', '.join(run.given for run in cand)}",
+        f"- Gate: {gate_name}",
+        "", "## Runs", "",
+        "| Run | Side | Gate | Recall (micro) | Unmatched AI per PR |", "|---|---|---:|---:|---:|",
+        *(f"| {_cell(run.given)} | {run.side} | {_pct(run.gate)} | {_pct(run.recall)} | {_per_pr(run.unmatched)} |"
+          for run in runs),
+        "", "## Summary", "",
+        "| Metric | Baseline mean (range) | Candidate mean (range) | Change |", "|---|---|---|---:|",
+    ]
+    for name, key, render, change in (
+        ("Gate", "gate", _pct, _points_change),
+        ("Recall (micro)", "recall", _pct, _points_change),
+        ("Unmatched AI per PR", "unmatched", _per_pr, _per_pr_change),
+    ):
+        values_b = [getattr(run, key) for run in base]
+        values_c = [getattr(run, key) for run in cand]
+        lines.append(f"| {name} | {_spread(values_b, render)} | {_spread(values_c, render)} | "
+                     f"{change(_mean(values_c) - _mean(values_b))} |")
+    verdict, reason = _decide(base, cand)
+    lines += ["", "## Verdict", "", f"**{verdict}**: {reason}"]
+    if len(base) < 2:
+        lines += ["", "The baseline has one run, so it has no noise range. Repeat it before adopting the candidate."]
+    return verdict, "\n".join(lines) + "\n"
