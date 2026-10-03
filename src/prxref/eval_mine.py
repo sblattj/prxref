@@ -22,6 +22,15 @@ Severities are drafted by one single-shot judge call per case with
 ``--judge-model``, else ``warning``. ``--rehash DIR`` recomputes the hash
 after a human has edited ``cases.json``.
 
+``--until`` bounds the merge date from above. Candidates then come from the
+GitHub search API (``is:pr is:merged merged:<since|*>..<until>``) rather than
+the pulls walk; search reaches only the 1000 newest-created hits of a query,
+so a wide window logs a warning and wants a narrower ``--since``. ``--pr``
+mines exactly the listed PRs. ``--reviewers maintainers`` keeps only thread
+roots whose ``author_association`` is OWNER, MEMBER or COLLABORATOR. A PR
+whose base branch was later renamed is still mined: the merge base is looked
+up against ``base.ref``, then the repo's default branch, then ``base.sha``.
+
 GitHub only. Authentication, the API base for a GitHub Enterprise host,
 paging and retries are the GitHub forge's own.
 """
@@ -68,6 +77,11 @@ REVIEW_TEXT_CHARS = 120
 _COMPARE_FILE_CAP = 300
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+MAINTAINER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+REVIEWERS_CHOICES = ("any", "maintainers")
+SEARCH_PAGE_SIZE = 100
+SEARCH_RESULT_CAP = 1000
+_FALLBACK_STATUSES = (404, 422)
 _PR_STATE_PARAMS = {"state": "closed", "sort": "updated", "direction": "desc"}
 
 
@@ -131,6 +145,19 @@ def _validate(args: Any) -> None:
         raise _cfg_flag("--out", "required (the directory to write cases.json, mine.json and severity-review.md)")
     if getattr(args, "since", None) and _parse_since(args.since) is None:
         raise _cfg_flag("--since", f"must be a date like 2026-01-31, got {args.since!r}")
+    until_text = getattr(args, "until", None)
+    if until_text and _parse_since(until_text) is None:
+        raise _cfg_flag("--until", f"must be a date like 2026-01-31, got {until_text!r}")
+    if until_text and getattr(args, "since", None) and _parse_since(until_text) < _parse_since(args.since):
+        raise _cfg_flag("--until", f"must not be earlier than --since ({args.since}), got {until_text!r}")
+    reviewers = getattr(args, "reviewers", None) or "any"
+    if reviewers not in REVIEWERS_CHOICES:
+        raise _cfg_flag("--reviewers", f"must be one of {', '.join(REVIEWERS_CHOICES)}, got {reviewers!r}")
+    if getattr(args, "pr", None) is not None:
+        _parse_pr_numbers(args.pr)
+        for flag, dest in (("--since", "since"), ("--until", "until")):
+            if getattr(args, dest, None):
+                raise _cfg_flag("--pr", f"cannot be combined with {flag}")
     for flag, dest in (("--prs", "prs"), ("--min-comments", "min_comments")):
         value = getattr(args, dest, None)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -147,6 +174,20 @@ def _parse_since(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _parse_pr_numbers(value: Any) -> list[int] | None:
+    """The distinct positive PR numbers of a ``--pr 1,2,3`` value in order; ``None`` when unset."""
+    if value is None:
+        return None
+    numbers: list[int] = []
+    for part in str(value).split(","):
+        text = part.strip()
+        if not text.isascii() or not text.isdigit() or int(text) < 1:
+            raise _cfg_flag("--pr", f"must be comma-separated positive integers, got {value!r}")
+        if int(text) not in numbers:
+            numbers.append(int(text))
+    return numbers
 
 
 def _check_out(out: str) -> Path:
@@ -225,8 +266,100 @@ def _candidate_prs(forge: github.ForgeImpl, ref: PRRef, since: date | None, want
     return kept[:wanted]
 
 
-def _qualifying_labels(pr: dict, comments: Sequence[dict]) -> list[_Label]:
-    """The thread-root comments on a line by a human other than the PR's author, replies appended."""
+def _http_status(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _fetch_pr(forge: github.ForgeImpl, ref: PRRef, number: int) -> dict | None:
+    """One PR by number, or ``None`` with a warning when it cannot be read or is not merged."""
+    url = f"{forge._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{number}"
+    try:
+        pr = _get(forge, ref, url)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("%s/%s#%s: skipped: cannot read the pull request: %s", ref.owner, ref.repo, number, exc)
+        return None
+    if not isinstance(pr, dict) or _parse_time(pr.get("merged_at")) is None:
+        logger.warning("%s/%s#%s: skipped: not a merged pull request", ref.owner, ref.repo, number)
+        return None
+    return pr
+
+
+def _search_prs(forge: github.ForgeImpl, ref: PRRef, since: date | None, until: date, wanted: int,
+                qualifies: Any) -> list[dict]:
+    """Page the GitHub search API for PRs merged in ``[since, until]``; keep up to ``wanted`` qualifying ones.
+
+    Search returns issues, so each hit is fetched as a full PR before
+    ``qualifies`` sees it. Search is ordered by creation, newest first, and
+    reaches at most :data:`SEARCH_RESULT_CAP` hits. A 403 or 429 (search has
+    its own rate limit) stops the walk with what was kept.
+    """
+    url = f"{forge._api_base(ref)}/search/issues"
+    query = (f"repo:{ref.owner}/{ref.repo} is:pr is:merged "
+             f"merged:{since.isoformat() if since else '*'}..{until.isoformat()}")
+    kept: list[dict] = []
+    seen = 0
+    max_pages = SEARCH_RESULT_CAP // SEARCH_PAGE_SIZE
+    for page_number in range(1, max_pages + 1):
+        params = {"q": query, "sort": "created", "order": "desc", "per_page": str(SEARCH_PAGE_SIZE),
+                  "page": str(page_number)}
+        try:
+            body = _get(forge, ref, url, params=params)
+            items = body.get("items") if isinstance(body, dict) else None
+            if not isinstance(items, list):
+                raise ValueError("search answer has no items array")
+        except (requests.RequestException, ValueError) as exc:
+            if _http_status(exc) in (403, 429):
+                logger.warning("searching pull requests of %s/%s hit a rate limit and stopped: %s",
+                               ref.owner, ref.repo, exc)
+                break
+            if not seen:
+                raise ConfigError(
+                    f"--repo: cannot search the pull requests of {ref.owner}/{ref.repo} on {ref.host}: {exc}"
+                ) from exc
+            logger.warning("searching pull requests of %s/%s stopped early: %s", ref.owner, ref.repo, exc)
+            break
+        total = body.get("total_count")
+        if page_number == 1 and isinstance(total, int) and total > SEARCH_RESULT_CAP:
+            logger.warning(
+                "%s/%s: %d pull requests match the window, but search reaches only the %d newest-created; "
+                "narrow the window with a later --since to cover the rest",
+                ref.owner, ref.repo, total, SEARCH_RESULT_CAP,
+            )
+        seen += len(items)
+        for item in items:
+            number = github._as_int(item.get("number")) if isinstance(item, dict) else None
+            if number is None:
+                continue
+            pr = _fetch_pr(forge, ref, number)
+            if pr is not None and qualifies(pr):
+                kept.append(pr)
+                if len(kept) >= wanted:
+                    break
+        if len(kept) >= wanted or len(items) < SEARCH_PAGE_SIZE:
+            break
+    kept.sort(key=lambda pr: pr["merged_at"], reverse=True)
+    return kept[:wanted]
+
+
+def _listed_prs(forge: github.ForgeImpl, ref: PRRef, numbers: Sequence[int], qualifies: Any) -> list[dict]:
+    """The listed PRs that are merged and qualify, newest merge first."""
+    kept = []
+    for number in numbers:
+        pr = _fetch_pr(forge, ref, number)
+        if pr is not None and qualifies(pr):
+            kept.append(pr)
+    kept.sort(key=lambda pr: pr["merged_at"], reverse=True)
+    return kept
+
+
+def _qualifying_labels(pr: dict, comments: Sequence[dict], reviewers: str = "any") -> list[_Label]:
+    """The thread-root comments on a line by a human other than the PR's author, replies appended.
+
+    With ``reviewers == "maintainers"`` a root counts only when its
+    ``author_association`` is in :data:`MAINTAINER_ASSOCIATIONS`.
+    """
     author = str((pr.get("user") or {}).get("login") or "")
     replies: dict[int, list[dict]] = {}
     for item in comments:
@@ -239,6 +372,8 @@ def _qualifying_labels(pr: dict, comments: Sequence[dict]) -> list[_Label]:
         if comment_id is None or github._as_int(item.get("in_reply_to_id")) is not None:
             continue
         if _is_bot(item.get("user")) or (item.get("user") or {}).get("login") == author:
+            continue
+        if reviewers == "maintainers" and item.get("author_association") not in MAINTAINER_ASSOCIATIONS:
             continue
         line = github._as_int(item.get("original_line"))
         path, commit = item.get("path"), item.get("original_commit_id")
@@ -315,8 +450,57 @@ def _compare(forge: github.ForgeImpl, ref: PRRef, left: str, right: str) -> dict
     return data
 
 
+class _Bases:
+    """Where to measure a merge base: ``base.ref``, then the repo's default branch, then ``base.sha``.
+
+    An old PR's base branch may have been renamed (``master`` to ``main``) or
+    deleted. The default branch is read once per run and cached.
+    """
+
+    def __init__(self, forge: github.ForgeImpl, ref: PRRef) -> None:
+        self._forge, self._ref = forge, ref
+        self._default: str | None = None
+        self._read = False
+
+    def default_branch(self) -> str | None:
+        if not self._read:
+            self._read = True
+            url = f"{self._forge._api_base(self._ref)}/repos/{self._ref.owner}/{self._ref.repo}"
+            try:
+                data = _get(self._forge, self._ref, url)
+                name = data.get("default_branch") if isinstance(data, dict) else None
+                self._default = name if isinstance(name, str) and name else None
+            except (requests.RequestException, ValueError) as exc:
+                logger.warning("%s/%s: cannot read the default branch: %s", self._ref.owner, self._ref.repo, exc)
+        return self._default
+
+    def candidates(self, pr: dict) -> Iterator[str]:
+        base = pr.get("base") or {}
+        tried: set[str] = set()
+        for get in (lambda: base.get("ref"), self.default_branch, lambda: base.get("sha")):
+            name = get()
+            if isinstance(name, str) and name and name not in tried:
+                tried.add(name)
+                yield name
+
+
+def _merge_base_compare(forge: github.ForgeImpl, ref: PRRef, pr: dict, commit: str, bases: _Bases) -> dict:
+    """Compare ``commit`` against each base candidate until one exists; only a 404 or 422 moves on."""
+    last: requests.RequestException | None = None
+    for left in bases.candidates(pr):
+        try:
+            return _compare(forge, ref, left, commit)
+        except requests.HTTPError as exc:
+            if _http_status(exc) not in _FALLBACK_STATUSES:
+                raise
+            last = exc
+    if last is None:
+        raise _MineSkip("the pull request lists no base branch")
+    raise last
+
+
 def _build_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label], final_head: str,
-              base_ref: str) -> _PR:
+              bases: _Bases) -> _PR:
     mined = _PR(number=int(pr["number"]), merged_at=str(pr["merged_at"]))
     pr_url = str(pr.get("html_url") or f"https://{ref.host}/{ref.owner}/{ref.repo}/pull/{pr['number']}")
     by_commit: dict[str, list[_Label]] = {}
@@ -324,7 +508,8 @@ def _build_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label
         by_commit.setdefault(label.commit, []).append(label)
     for commit, group in by_commit.items():
         try:
-            merge_base = (_compare(forge, ref, base_ref, commit).get("merge_base_commit") or {}).get("sha")
+            comparison_to_base = _merge_base_compare(forge, ref, pr, commit, bases)
+            merge_base = (comparison_to_base.get("merge_base_commit") or {}).get("sha")
             if not isinstance(merge_base, str) or not merge_base:
                 raise _MineSkip("no merge base in the compare answer")
             merge_base = merge_base.lower()
@@ -350,13 +535,12 @@ def _build_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label
     return mined
 
 
-def _mine_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label]) -> _PR:
+def _mine_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label], bases: _Bases) -> _PR:
     base = pr.get("base") or {}
-    base_ref = str(base.get("ref") or "")
     final_head = str((pr.get("head") or {}).get("sha") or "").lower()
-    if not base_ref:
+    if not (base.get("ref") or base.get("sha")):
         raise _MineSkip("the pull request lists no base branch")
-    return _build_pr(forge, ref, pr, labels, final_head, base_ref)
+    return _build_pr(forge, ref, pr, labels, final_head, bases)
 
 
 def _comments(forge: github.ForgeImpl, ref: PRRef, number: int) -> list[dict]:
@@ -496,6 +680,9 @@ def _mine_json(args: Any, prs: Sequence[_PR], cases_bytes: bytes, requested: int
         "repo": args.repo,
         "host": args.host,
         "since": args.since or None,
+        "until": getattr(args, "until", None) or None,
+        "reviewers": getattr(args, "reviewers", None) or "any",
+        "pr_numbers": _parse_pr_numbers(getattr(args, "pr", None)),
         "prs_requested": requested,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "prxref_version": prxref.__version__,
@@ -534,6 +721,10 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
                        "" if host.lower() == "github.com" else " or PRXREF_GITHUB_ENTERPRISE_TOKEN")
     forge = github.ForgeImpl(session)
     since = _parse_since(args.since)
+    until = _parse_since(getattr(args, "until", None))
+    reviewers = getattr(args, "reviewers", None) or "any"
+    pr_numbers = _parse_pr_numbers(getattr(args, "pr", None))
+    bases = _Bases(forge, ref)
     cfg: Mapping[str, Any] = {}
     judge_model = (args.judge_model or "").strip()
     if judge_model and client is None:
@@ -547,10 +738,10 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
     def qualifies(pr: dict) -> bool:
         number = int(pr["number"])
         try:
-            labels = _qualifying_labels(pr, _comments(forge, ref, number))
+            labels = _qualifying_labels(pr, _comments(forge, ref, number), reviewers)
             if len(labels) < args.min_comments:
                 return False
-            built = _mine_pr(forge, ref, pr, labels)
+            built = _mine_pr(forge, ref, pr, labels, bases)
         except (_MineSkip, FeedReadError, requests.RequestException, ValueError) as exc:
             logger.warning("%s/%s#%s: skipped: %s", owner, name, number, exc)
             return False
@@ -559,7 +750,13 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
         mined[number] = (built, labels)
         return True
 
-    picked = _candidate_prs(forge, ref, since, args.prs, qualifies)
+    requested = len(pr_numbers) if pr_numbers is not None else args.prs
+    if pr_numbers is not None:
+        picked = _listed_prs(forge, ref, pr_numbers, qualifies)
+    elif until is not None:
+        picked = _search_prs(forge, ref, since, until, args.prs, qualifies)
+    else:
+        picked = _candidate_prs(forge, ref, since, args.prs, qualifies)
     prs = [mined[int(pr["number"])][0] for pr in picked]
     cases = [case for pr in prs for case in pr.cases]
     if judge_model:
@@ -570,7 +767,7 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
     out.mkdir(parents=True, exist_ok=True)
     cases_path = out / "cases.json"
     _atomic_write(cases_path, cases_bytes)
-    _atomic_write(out / "mine.json", _dump(_mine_json(args, prs, cases_bytes, args.prs)))
+    _atomic_write(out / "mine.json", _dump(_mine_json(args, prs, cases_bytes, requested)))
     _atomic_write(out / "severity-review.md", (severity_review_markdown(prs) + "\n").encode("utf-8"))
     if cases:
         load_cases(cases_path, source="--out")

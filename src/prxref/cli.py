@@ -694,6 +694,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--since", default=None, metavar="YYYY-MM-DD", help="only PRs merged on or after this date",
     )
     ev_mine.add_argument(
+        "--until", default=None, metavar="YYYY-MM-DD",
+        help="only PRs merged on or before this date (inclusive); candidates then come from GitHub search",
+    )
+    ev_mine.add_argument(
+        "--pr", default=None, metavar="N[,N...]",
+        help="mine exactly these PR numbers (merged ones only); cannot be combined with --since or --until",
+    )
+    ev_mine.add_argument(
+        "--reviewers", default="any", choices=("any", "maintainers"),
+        help="maintainers: only comments by an OWNER, MEMBER or COLLABORATOR count as labels (default any)",
+    )
+    ev_mine.add_argument(
         "--prs", type=int, default=50, metavar="N",
         help="the N most recently merged PRs that qualify (default 50)",
     )
