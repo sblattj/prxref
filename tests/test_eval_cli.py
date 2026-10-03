@@ -22,7 +22,7 @@ from prxref.llm import ConfigError
 
 README = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
 
-EVAL_ACTIONS = ("run", "score", "compare", "verdict")
+EVAL_ACTIONS = ("run", "score", "compare", "verdict", "campaign", "dashboard", "mine")
 
 
 def _parse(*argv: str) -> argparse.Namespace:
@@ -130,8 +130,33 @@ class TestEvalCompareArgs:
         assert "usage:" in capsys.readouterr().err.lower()
 
 
+class TestEvalCampaignFlags:
+    def test_the_required_flags_parse_and_every_other_flag_takes_its_default(self):
+        args = _parse("eval", "campaign", "--cases", "c.json", "--arms", "a.toml", "--out", "D")
+        assert (
+            args.cases, args.arms, args.out, args.repeats, args.prxref, args.folds, args.jobs, args.case_jobs,
+            args.judge_model, args.severity, args.resume, args.max_attempts,
+        ) == ("c.json", "a.toml", "D", 3, None, 1, 1, 1, None, None, False, 3)
+
+    @pytest.mark.parametrize("flag", ["--cases", "--arms", "--out"])
+    def test_a_missing_required_flag_exits_2_naming_it(self, flag, capsys):
+        argv = {"--cases": "c.json", "--arms": "a.toml", "--out": "D"}
+        rest = [part for name, value in argv.items() if name != flag for part in (name, value)]
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["eval", "campaign", *rest])
+        assert excinfo.value.code == 2
+        assert flag in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--repeats", "--folds", "--jobs", "--case-jobs", "--max-attempts"])
+    def test_a_count_that_is_not_an_integer_exits_2(self, flag, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["eval", "campaign", "--cases", "c", "--arms", "a", "--out", "D", flag, "two"])
+        assert excinfo.value.code == 2
+        assert flag in capsys.readouterr().err
+
+
 class TestEvalParserShape:
-    def test_eval_has_exactly_the_four_actions(self):
+    def test_eval_has_exactly_these_actions(self):
         ev = _subparser(cli._build_parser(), "eval")
         actions = next(a for a in ev._actions if isinstance(a, argparse._SubParsersAction))
         assert tuple(actions.choices) == EVAL_ACTIONS
@@ -140,7 +165,10 @@ class TestEvalParserShape:
         ev = _subparser(cli._build_parser(), "eval")
         assert _option_strings(ev) == {
             "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
-            "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity",
+            "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity", "--json",
+            "--precision", "--campaign", "--host", "--port", "--once", "--tail",
+            "--repo", "--since", "--prs", "--min-comments", "--rehash", "--allow-unconfirmed",
+            "--arms", "--repeats", "--prxref", "--folds", "--jobs", "--case-jobs", "--max-attempts",
         }
 
     def test_an_unknown_action_exits_2(self, capsys):
@@ -159,7 +187,7 @@ class TestBareEval:
 @pytest.fixture
 def recorders(monkeypatch):
     calls: dict[str, list[argparse.Namespace]] = {name: [] for name in EVAL_ACTIONS}
-    codes = {"run": 0, "score": 3, "compare": 5, "verdict": 7}
+    codes = {"run": 0, "score": 3, "compare": 5, "verdict": 7, "dashboard": 9, "mine": 11, "campaign": 13}
 
     def _recorder(name: str):
         def _record(args: argparse.Namespace, **_injected: object) -> int:
@@ -173,15 +201,26 @@ def recorders(monkeypatch):
     return calls
 
 
+def _routed(recorders: dict[str, list[argparse.Namespace]]) -> list[str]:
+    return [n for n in EVAL_ACTIONS for _ in recorders[n]]
+
+
 class TestDispatch:
     def test_verdict_routes_to_eval_verdict_and_returns_its_exit_code(self, recorders):
         code = cli.main(["eval", "verdict", "--baseline", "B1", "B2", "--candidate", "C1", "--severity", "error"])
         assert code == 7
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 0, 1]
+        assert _routed(recorders) == ["verdict"]
         args = recorders["verdict"][0]
         assert (args.eval_command, args.baseline, args.candidate, args.severity, args.out) == (
             "verdict", ["B1", "B2"], ["C1"], "error", "./prxref-eval/",
         )
+
+    def test_dashboard_routes_to_eval_dashboard_and_returns_its_exit_code(self, recorders):
+        code = cli.main(["eval", "dashboard", "--campaign", "C", "--port", "0", "--once", "--tail", "3"])
+        assert code == 9
+        assert _routed(recorders) == ["dashboard"]
+        args = recorders["dashboard"][0]
+        assert (args.campaign, args.host, args.port, args.once, args.tail) == ("C", "127.0.0.1", 0, True, 3)
 
     def test_run_routes_to_eval_run_with_its_parsed_args(self, recorders):
         code = cli.main([
@@ -189,7 +228,7 @@ class TestDispatch:
             "--out", "D", "--rules-file", "R.md", "--resume",
         ])
         assert code == 0
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [1, 0, 0, 0]
+        assert _routed(recorders) == ["run"]
         args = recorders["run"][0]
         assert (args.eval_command, args.cases, args.label, args.out, args.rules_file, args.resume) == (
             "run", "cases.json", "L", "D", "R.md", True,
@@ -198,7 +237,7 @@ class TestDispatch:
     def test_score_routes_to_eval_score_and_returns_its_exit_code(self, recorders):
         code = cli.main(["eval", "score", "--label", "L", "--judge-model", "judge-x"])
         assert code == 3
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 1, 0, 0]
+        assert _routed(recorders) == ["score"]
         args = recorders["score"][0]
         assert (args.eval_command, args.label, args.judge_model, args.out) == (
             "score", "L", "judge-x", "./prxref-eval/",
@@ -207,9 +246,31 @@ class TestDispatch:
     def test_compare_routes_to_eval_compare_and_returns_its_exit_code(self, recorders):
         code = cli.main(["eval", "compare", "A1", "B1", "--out", "D"])
         assert code == 5
-        assert [len(recorders[n]) for n in EVAL_ACTIONS] == [0, 0, 1, 0]
+        assert _routed(recorders) == ["compare"]
         args = recorders["compare"][0]
         assert (args.eval_command, args.run_a, args.run_b, args.out) == ("compare", "A1", "B1", "D")
+
+    def test_mine_routes_to_eval_mine_with_its_defaults(self, recorders):
+        code = cli.main(["eval", "mine", "--repo", "o/r", "--out", "D"])
+        assert code == 11
+        assert _routed(recorders) == ["mine"]
+        args = recorders["mine"][0]
+        assert (args.repo, args.out, args.host, args.since, args.prs, args.judge_model, args.min_comments,
+                args.rehash, args.allow_unconfirmed) == ("o/r", "D", "github.com", None, 50, None, 1, None, False)
+
+    def test_campaign_routes_to_eval_campaign_and_returns_its_exit_code(self, recorders):
+        code = cli.main([
+            "eval", "campaign", "--cases", "c.json", "--arms", "arms.toml", "--out", "D", "--repeats", "5",
+            "--prxref", "0.29.0", "--folds", "3", "--jobs", "4", "--case-jobs", "2", "--judge-model", "j",
+            "--severity", "error", "--resume", "--max-attempts", "6",
+        ])
+        assert code == 13
+        assert _routed(recorders) == ["campaign"]
+        args = recorders["campaign"][0]
+        assert (
+            args.eval_command, args.cases, args.arms, args.out, args.repeats, args.prxref, args.folds, args.jobs,
+            args.case_jobs, args.judge_model, args.severity, args.resume, args.max_attempts,
+        ) == ("campaign", "c.json", "arms.toml", "D", 5, "0.29.0", 3, 4, 2, "j", "error", True, 6)
 
     @pytest.mark.parametrize(
         "action, argv",
@@ -217,6 +278,7 @@ class TestDispatch:
             ("run", ["eval", "run", "--cases", "c.json", "--label", "L"]),
             ("score", ["eval", "score", "--label", "L"]),
             ("compare", ["eval", "compare", "A", "B"]),
+            ("campaign", ["eval", "campaign", "--cases", "c.json", "--arms", "a.toml", "--out", "D"]),
         ],
     )
     def test_a_config_error_exits_2_printed_as_review_prints_one(self, action, argv, monkeypatch, capsys):

@@ -11,14 +11,17 @@ grades the findings prxref produced against the labels, and puts two such
 runs side by side. Given repeats of each, it decides whether a candidate
 beats the current setup by more than run-to-run noise.
 
-It has four actions:
+It has seven actions:
 
 | Action | What it does | What it writes |
 |---|---|---|
 | `prxref eval run` | reviews every case, never posting | the run directory `<out>/<label>/` |
 | `prxref eval score` | grades one run against its labels | `score.json` and `score.md` in the run directory |
 | `prxref eval compare` | prints two scored runs side by side | standard output only |
-| `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output only |
+| `prxref eval verdict` | decides whether candidate runs beat baseline runs beyond their noise | standard output, and `--json` |
+| `prxref eval campaign` | runs arms × repeats of `eval run` in parallel, resumably, and scores every pass | the campaign directory `<out>/` |
+| `prxref eval dashboard` | shows the live progress of a campaign directory | standard output, or a local web page |
+| `prxref eval mine` | builds a dataset from a GitHub repo's merged PRs | `cases.json`, `mine.json` and `severity-review.md` in `--out` |
 
 ```bash
 prxref eval run --cases tests/evals --label base
@@ -36,6 +39,9 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - [`prxref eval score`](#prxref-eval-score)
 - [`prxref eval compare`](#prxref-eval-compare)
 - [`prxref eval verdict`](#prxref-eval-verdict)
+- [`prxref eval campaign`](#prxref-eval-campaign)
+- [`prxref eval dashboard`](#prxref-eval-dashboard)
+- [`prxref eval mine`](#prxref-eval-mine)
 - [Worked example: two arms](#worked-example-two-arms)
 - [The judge prompt](#the-judge-prompt)
 - [Where runs are kept](#where-runs-are-kept)
@@ -45,11 +51,13 @@ reads the same `PRXREF_*` settings `prxref review` does (see
 - `0`: the action finished. `eval run` exits `0` however its cases went. A
   case whose review fails is recorded as a failed case and the run moves on
   to the next one. `PRXREF_FAIL_ON` does not apply to `prxref eval`.
-- `1`: only from `eval verdict`, when the candidate is not `better`.
+- `1`: only from `eval verdict`, when the candidate is not `better` (a campaign: when the decision is `do not adopt`).
+  `eval campaign` exits `0` however its passes went.
 - `2`: a configuration error, printed to standard error as
   `configuration error: <message>`. The message names what supplied the bad
   value: a flag (`--cases`, `--label`, `--out`, `--rules-file`,
-  `--scoped-rules`, `--prompts-dir`, `--judge-model`), the
+  `--scoped-rules`, `--prompts-dir`, `--judge-model`, and for `mine` `--repo`, `--since`, `--prs`,
+  `--min-comments`, `--rehash`), the
   argument `A` or `B` of `compare`, a run of `verdict`'s `--baseline` or
   `--candidate`, or an environment variable. Every
   exit-`2` check of `eval run` happens before any case runs and before
@@ -338,12 +346,16 @@ prxref-eval/                        --out
   each unit's `.system.md`, `.user.md`, `.response.json` and `.meta.json`
   files (`chunk0`, ..., `sweep`). `eval score` adds the judge's `judge.*`
   files after a live judge call.
+- **`cases/<id>/diff.patch`** is the unified diff the review read, moved
+  out of `trace/` when the review got as far as fetching it. `eval score
+  --precision` shows its hunks to the judge.
 
 `run.json` holds, in this order:
 
 | Key | Value |
 |---|---|
 | `version` | `1` |
+| `prxref_version` | the prxref version that wrote the run, like `0.30.1` |
 | `label` | `--label` |
 | `cases_path` | `--cases` as given |
 | `created_at` | when this invocation started, in UTC, like `2026-09-24T10:30:00Z`; a `--resume` rewrites it |
@@ -398,13 +410,14 @@ even when `--cases` has changed since.
 ## `prxref eval score`
 
 ```bash
-prxref eval score --label NAME [--judge-model MODEL] [--out DIR]
+prxref eval score --label NAME [--judge-model MODEL] [--precision] [--out DIR]
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--label NAME` | The run to score, under `--out`. Required. |
 | `--judge-model MODEL` | The one model that grades every label without `must_match`. Required when any label of the run lacks `must_match`. |
+| `--precision` | Also grade the active AI findings that no label credited, as `valid`, `nit`, `invalid`, `duplicate` or `unverifiable`. Requires `--judge-model`. See [Precision](#precision). |
 | `--out DIR` | The directory that holds the runs. Default `./prxref-eval/`. |
 
 It reads `<out>/<label>/run.json` and the cases its `case_ids` list; the
@@ -426,7 +439,9 @@ It exits `2` on a `--label` that is not a safe name; a run with no
 `run.json` (write it with `eval run`, or finish an interrupted one with
 `--resume`); a run file that cannot be read; a case with neither
 `record.json` nor `error.json`; a malformed environment; and a missing or
-unusable `--judge-model`, all before any judge call.
+unusable `--judge-model`, all before any judge call; and `--precision`
+without `--judge-model`, which is reported as a configuration error
+naming `--precision`.
 
 ### Two tiers of grading
 
@@ -488,6 +503,67 @@ label of the case is `none` and counts in the denominator. A failed case is
 listed under `failed` and in the `Failed cases` section of `score.md`, and
 its verdict reads `failed` in the case table. Its review cost is unknown,
 which makes the run's review-cost total unknown too.
+
+### Precision
+
+Recall rewards finding what humans found; it says nothing about the rest of
+what the reviewer posted. `--precision` grades that rest. Without the flag
+no precision call is made and `metrics.precision` and every case row's
+`precision` are `null`.
+
+**What is graded.** Each active AI finding (no `drop_reason`) that no
+credited label names: the same set `unmatched_ai` counts. A grouped finding
+is one unit, however many locations it has. A case with no such finding
+makes no call; every other case makes one single-shot JSON call with the
+packaged `prompts/precision.md`, on the judge client and under the same
+`PRXREF_LLM_PARSE_RETRIES` as the label judge.
+
+**What the judge sees.** The finding (file, line, severity, title, body),
+the case's `context_file` text when it has one, up to 8000 characters, the
+credited findings as context (so it can recognise a restatement), and the
+hunks of the diff for the file each finding names, up to 60000 characters.
+The diff is the case's `diff_file`, else `cases/<id>/diff.patch` in the run
+directory, which `eval run` keeps for every case whose review fetched its
+diff (so a case replayed from a pinned commit range has one too); with
+neither, the judge is told no diff was available and should answer
+`unverifiable` where the findings alone cannot settle it. A run recorded
+before 0.31.0 has no `diff.patch`.
+
+**The five verdicts.**
+
+| Verdict | Meaning |
+|---|---|
+| `valid` | Correct about the changed code and worth a reviewer's attention. |
+| `nit` | Correct but trivial: style, naming, a comment, a preference. |
+| `invalid` | Wrong, contradicted by the diff or ticket, about code the diff does not touch, or too vague to check. |
+| `duplicate` | Restates another AI finding of the same case, or one a label already credited. |
+| `unverifiable` | The diff and ticket shown cannot settle it. |
+
+**The formulas.** `matched` is the number of active AI findings some
+credited label names (a grouped finding counts once). With `valid`, `nit`,
+`invalid` and `duplicate` the counts of the graded units:
+
+```text
+strict  = (matched + valid)       / (matched + valid + nit + invalid + duplicate)
+lenient = (matched + valid + nit) / (matched + valid + nit + invalid + duplicate)
+```
+
+A finding a label credited counts as correct without a precision call.
+`unverifiable` findings and `judge_error` units are in neither the
+numerator nor the denominator, and both rates are `null` when the
+denominator is 0. `graded` counts the units that got one of the five
+verdicts, so it excludes `judge_error`.
+
+**Failures and caching.** A call that fails, or a reply still rejected
+after the retries (not JSON, no `verdicts` list, an unknown verdict, or a
+missing, repeated or unknown `ai_ref`), makes every unit of that case
+`judge_error`: it is never cached and never counted, and the case shows
+under `judge_error` in `metrics.precision`, not in `judge.errors`. Replies
+are cached in `judge-cache/`, keyed on the precision prompt's sha256, the
+judge model, the findings, the ticket and the diff text, so a rescore with
+nothing changed makes no call. The precision calls' cost, calls, parse
+retries and cache hits are added to `judge`, and their cost to each case's
+`judge_cost_usd`; the traces are `trace/precision.*`.
 
 ### The judge
 
@@ -571,7 +647,12 @@ The keys, in order:
   `judge_error`, `ai_findings`, `unmatched_ai`, `severity_compared`,
   `severity_agreed`, `chunks_failed`, `elapsed_ms`, `review_cost_usd`,
   `review_cost_estimated`, `judge_cost_usd`, `judge_cost_estimated` and
-  `findings`. Each `findings` entry is one label, sorted by id: `human_id`,
+  `findings` and `precision` (`null` without `--precision`, otherwise
+  `verdicts`, a list of `{"ai_ref", "verdict", "reason"}` with `ai_ref` the
+  index of the finding in the record's `findings` and `reason` the judge's
+  one sentence, or the error for a `judge_error`), then the same counts as
+  `metrics.precision` without `strict` and `lenient`). Each `findings`
+  entry is one label, sorted by id: `human_id`,
   `file`, `line`, `severity`, `category`, `accepted`, `grade`, `credit`
   (`null` for `judge_error`), `ai_ref` (the index of the crediting row in
   the record's `findings`, dropped rows included), `ai_line` (the line of
@@ -601,8 +682,8 @@ The keys, in order:
 - **`unmatched_ai`**: `total`, the active AI findings that credit no label;
   `ai_findings`, all active AI findings; and `per_pr`, `total` divided by
   `case_count`. Labels are a floor, not an exhaustive list, so an unmatched
-  finding is not necessarily wrong: read this as noise per PR, not as
-  precision.
+  finding is not necessarily wrong: read this as noise per PR, and grade
+  it with `--precision` to learn how much of it is wrong.
 - **`severity_agreement`**: over the credited labels, whether the crediting
   AI finding has the label's severity, both lowercased and a `minor` read
   as `warning` on either side. It holds `compared`, `agreed`, `rate`
@@ -619,6 +700,10 @@ The keys, in order:
   every judge call raised is unpriced, so it can be `null` while
   `judge.cost_usd`, which skips such a case, is a number. A case whose
   retry raised after a rejected reply is priced by that reply.
+- **`precision`**: `null` without `--precision`, otherwise `graded`,
+  `matched`, `valid`, `nit`, `invalid`, `duplicate`, `unverifiable`,
+  `judge_error`, `strict` and `lenient`, summed over the cases as defined
+  in [Precision](#precision).
 
 ### `score.md`
 
@@ -626,7 +711,7 @@ The same result for a reader. It opens with `# prxref eval score: <label>`,
 the headline, and the self-judging note when stamped, then these sections,
 in order: `## Failed cases`, `## Cases` (one row per case), `## Recall by
 severity`, `## Recall by category`, `## Accepted labels`, `## Unmatched AI
-findings`, `## Severity agreement`, `## Chunks failed`, `## Elapsed`,
+findings`, `## Precision`, `## Severity agreement`, `## Chunks failed`, `## Elapsed`,
 `## Cost` and `## Judge`. An empty section reads `None.` (or `No labels.`
 for a recall table), an unknown value reads `unknown`, and a recall with
 nothing scored reads `n/a`. The judge's cost line names its parse retries
@@ -677,6 +762,10 @@ Recall over accepted labels: 100.0% (credit 1 of 1 scored labels).
 ## Unmatched AI findings
 
 1 of 3 active AI findings matched no label: 0.33 per PR.
+
+## Precision
+
+Not graded: run `prxref eval score --precision` to grade the unmatched AI findings.
 
 ## Severity agreement
 
@@ -738,7 +827,8 @@ Standard output is Markdown, in this order:
   `Cases`, `Recall (micro)`, `Judge errors`, one `Recall, severity` row per
   severity and one `Recall, category` row per category found in either run
   (each sorted), `Recall, accepted labels`, `Unmatched AI per PR`,
-  `Severity agreement`, `Chunks failed`, `Elapsed`, `Review cost` and
+  `Strict precision`, `Lenient precision` (`n/a` on a side that was not
+  scored with `--precision`), `Severity agreement`, `Chunks failed`, `Elapsed`, `Review cost` and
   `Judge cost`. A severity or category only one run has reads `n/a` on the
   other side.
 - `## Stable-id reuse` (#71): printed between `## Metrics` and
@@ -814,7 +904,7 @@ a report can be kept in a repository and diffed.
 ## `prxref eval verdict`
 
 ```bash
-prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]
+prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--json PATH] [--out DIR]
 ```
 
 One run is not evidence. Two runs of the same setup on the same cases can
@@ -828,10 +918,10 @@ example `error`, the labels a reviewer would block a merge on), or the
 micro recall without it. The candidate is:
 
 - `better` when its mean gate is above the **best** baseline run's gate,
-  its mean micro recall is not below the worst baseline run's, and its mean
-  unmatched AI findings per PR is not above the worst baseline run's. A
-  candidate that finds more must-fix problems by raising far more findings,
-  or by missing everything else, is not better.
+  its mean micro recall is not below the worst baseline run's, and the
+  precision guard holds (below). A candidate that finds more must-fix
+  problems by raising far more findings, or by missing everything else, is
+  not better.
 - `worse` when its mean gate is below the **worst** baseline run's gate.
 - `within noise` otherwise.
 
@@ -877,6 +967,8 @@ prxref eval verdict --baseline base-r1 base-r2 --candidate cand-r1 cand-r2 --sev
 ## Verdict
 
 **better**: the candidate's mean gate 75.0% is above the best baseline run's 50.0%, with micro recall and unmatched AI findings per PR no worse than the worst baseline run.
+
+strict precision is missing from at least one run, so the guard is unmatched AI findings per PR
 ```
 
 The report opens with `# prxref eval verdict` and the runs of each side.
@@ -885,6 +977,115 @@ The report opens with `# prxref eval verdict` and the runs of each side.
 gives each side's mean and range and the change of the means in the table
 `| Metric | Baseline mean (range) | Candidate mean (range) | Change |`.
 `## Verdict` names the verdict and the one comparison that decided it.
+
+### The precision guard
+
+The second guard keeps a candidate from buying recall with noise.
+
+- When **every** baseline and candidate run has `metrics.precision.strict`
+  (a run scored with `eval score --precision`), the guard is strict
+  precision: the candidate's mean strict precision must not be below the
+  **worst** baseline run's. The report adds a `Strict precision` column to
+  `## Runs` and a row to `## Summary`.
+- Otherwise the guard is the mean unmatched AI findings per PR, which must
+  not be above the worst baseline run's, and the report ends its verdict
+  with `strict precision is missing from at least one run, so the guard is
+  unmatched AI findings per PR`. One run scored without `--precision` is
+  enough to switch the whole comparison back.
+
+### `--json PATH`
+
+`--json PATH` also writes the verdict to `PATH` (parent directories are
+created) as indented JSON with a trailing newline, through a temporary file
+and an atomic rename; a path that cannot be written exits `2` naming
+`--json`. Standard output is unchanged.
+
+```json
+{
+  "version": 1,
+  "mode": "runs",
+  "severity": "error",
+  "guard": "unmatched_per_pr",
+  "decision": "adopt",
+  "exit_code": 0,
+  "arms": [
+    {
+      "arm": null,
+      "role": null,
+      "verdict": "better",
+      "reason": "the candidate's mean gate 75.0% is above ...",
+      "baseline": {
+        "runs": ["prxref-eval/base-r1", "prxref-eval/base-r2"],
+        "gate": {"mean": 0.375, "min": 0.25, "max": 0.5, "values": [0.25, 0.5]},
+        "recall": {"mean": 0.4375, "min": 0.375, "max": 0.5, "values": [0.375, 0.5]},
+        "precision": null,
+        "unmatched_per_pr": {"mean": 0.5, "min": 0.0, "max": 1.0, "values": [0.0, 1.0]}
+      },
+      "candidate": {"runs": ["..."], "gate": {}, "recall": {}, "precision": null, "unmatched_per_pr": {}}
+    }
+  ]
+}
+```
+
+(`candidate` carries the same five keys as `baseline`; its statistics are
+abbreviated above.)
+
+- `mode` is `runs` or `campaign`; `severity` is the `--severity` value or
+  `null`.
+- `guard` is `strict_precision` when every arm used the strict guard and
+  `unmatched_per_pr` otherwise.
+- `decision` is `adopt` (`exit_code` `0`) or `do not adopt` (`exit_code`
+  `1`). In `runs` mode `adopt` means the candidate is `better`.
+- Each arm has `verdict` (`better`, `worse` or `within noise`) and the
+  `reason` sentence printed under `## Verdict`. In `runs` mode there is one
+  arm and `arm` and `role` are `null`.
+- `baseline` and `candidate` list the `runs` (paths of the run
+  directories) and, for `gate`, `recall` (micro), `precision` (strict) and
+  `unmatched_per_pr`, an object `{"mean", "min", "max", "values"}` with the
+  values in run order. `precision` is `null` unless every run of that side
+  has strict precision.
+
+### Campaign mode
+
+`prxref eval verdict --baseline CAMPAIGN_A --candidate CAMPAIGN_B` compares
+two campaign directories, each the output of `prxref eval campaign` (a
+directory holding `campaign.json` and `runs/<arm>/r<k>/score.json`; a label
+under `--out` works as for runs). `--baseline` and `--candidate` must each
+be exactly one such directory; mixing a campaign with run directories exits
+`2`.
+
+- Arms are matched by `name`. An arm only one campaign has, an arm with no
+  scored `runs/<arm>/r<k>`, a `campaign.json` that cannot be read or lists
+  no arms, and a run with no label of the gated severity all exit `2`, the
+  first three naming `--candidate` or `--baseline`.
+- An arm's repeats are its `runs/<arm>/r<k>` directories that hold a
+  `score.json`, in order of `k`. Each arm is judged exactly as in runs mode,
+  against its own baseline repeats, including the precision guard.
+- An arm's role comes from the candidate campaign's `campaign.json`:
+  `no-rules` when `rules_file` is `""` and it has no `scoped_rules` and no
+  `mine_rules`, else `rules`.
+- **Adopt rule.** The decision is `adopt` (exit `0`) only when every `rules`
+  arm is `better` **and** no `no-rules` arm is `worse`. A rules arm within
+  noise blocks adoption: the rules did not help beyond noise. A no-rules arm
+  within noise does not block it, but one that is `worse` does: the
+  candidate regressed with rules off. A campaign with no rules arm is
+  adopted only when every arm is `better`. Otherwise the decision is `do not
+  adopt` (exit `1`).
+
+The report prints one `## Arm <name>` block per arm, with its `Role` and
+`### Runs`, `### Summary` and `### Verdict`, then `## Decision`.
+
+Gate an upgrade in CI on the exit code, and keep the JSON as an artifact:
+
+```bash
+prxref eval verdict --baseline campaigns/main --candidate campaigns/pr \
+  --severity error --json verdict.json
+case $? in
+  0) echo "adopt" ;;
+  1) echo "do not adopt"; exit 1 ;;
+  *) echo "bad input"; exit 2 ;;
+esac
+```
 
 ## Worked example: two arms
 
@@ -936,6 +1137,8 @@ result of the commands above:
 | Recall, category `style` | 0.0% (0 of 1) | 0.0% (0 of 1) | 0.0 pp |
 | Recall, accepted labels | 100.0% (1 of 1) | 0.0% (0 of 1) | -100.0 pp |
 | Unmatched AI per PR | 0.00 (0 of 3) | 0.50 (1 of 2) | +0.50 |
+| Strict precision | n/a | n/a | unknown |
+| Lenient precision | n/a | n/a | unknown |
 | Severity agreement | 66.7% (2 of 3) | 100.0% (1 of 1) | +33.3 pp |
 | Chunks failed | 0 | 1 | +1 |
 | Elapsed | 3.0 s | 3.5 s | +0.5 s |
@@ -965,6 +1168,296 @@ Reading it:
 - B's review cost is `unknown` because one of its cases could not be priced,
   so the change is `unknown` too, not a misleading number.
 - B failed a chunk that A did not, which alone can explain missing findings.
+
+## `prxref eval campaign`
+
+```bash
+prxref eval campaign --cases PATH --arms TOML --out DIR [--repeats N] [--prxref VERSION|PATH]
+  [--folds K] [--jobs J] [--case-jobs C] [--judge-model MODEL] [--severity SEV] [--resume]
+  [--max-attempts A]
+```
+
+`eval verdict` needs repeats of each side, and a fair comparison needs every
+side run the same way. `eval campaign` does that bookkeeping: it runs every
+arm of an arms file `--repeats` times, each pass an `eval run` over the whole
+dataset, in parallel and resumably, then merges and scores each pass. It
+never posts, and never exits `1`: it exits `0` once every pass is scored or
+has failed (a failed pass is reported, not fatal), and `2` for a
+configuration error, before anything runs.
+
+- `--cases PATH` — the labelled cases, as for `eval run`. Required.
+- `--arms TOML` — the arms to compare (see [The arms file](#the-arms-file)). Required.
+- `--out DIR` — the campaign directory. Required, and it must be empty or
+  missing unless `--resume` is given.
+- `--repeats N` — passes per arm (default `3`).
+- `--folds K` — the number of folds for arms that mine their rules (default
+  `1`). Mining needs at least `2`, and no more than the dataset has PR groups.
+- `--jobs J` — passes run at once (default `1`).
+- `--case-jobs C` — `eval run` processes per pass (default `1`): each pass
+  splits its cases into `C` shards, round-robin, and runs them at once. At most
+  `J × C` `eval run` processes run at the same time.
+- `--judge-model MODEL` — the judge for every label without `must_match`, as
+  for `eval score`, and the default model for mining rules. Required when any
+  label lacks `must_match`. With it, every pass is also scored with
+  `--precision`, so `eval verdict` guards on strict precision.
+- `--severity SEV` — adds the recall of labels of that severity to the
+  summary. A severity no label has exits `2`.
+- `--prxref VERSION|PATH` — run every pass with another prxref (see
+  [Running another prxref](#running-another-prxref)).
+- `--resume` — continue the campaign in `--out` (see
+  [Resuming and retries](#resuming-and-retries)).
+- `--max-attempts A` — tries per case before it counts as failed (default `3`).
+
+Every check happens before the first pass runs: a count below `1`, a bad
+dataset, a bad arms file, an arm's rules file, scoped rules or prompts
+directory that `eval run` would refuse, a missing `--judge-model`, too few or
+too many folds, and an `--out` that holds something else. Each exits `2`
+naming the flag (`--cases`, `--arms`, `--out`, `--repeats`, `--folds`,
+`--jobs`, `--case-jobs`, `--max-attempts`, `--judge-model`, `--severity`,
+`--resume` or `--prxref`).
+
+### The arms file
+
+```toml
+[[arm]]
+name = "no-rules"
+rules_file = ""
+scoped_rules = []
+
+[[arm]]
+name = "team-rules"
+rules_file = "rules/TEAM.md"
+prompts_dir = "prompts/"
+
+[[arm]]
+name = "mined"
+[arm.mine_rules]
+judge_model = "example-judge-model"
+```
+
+Each `[[arm]]` table is one arm, in the order the summary lists them:
+
+- `name` — the arm's id: letters, digits, `.`, `_` and `-`, unique. Required.
+- `rules_file` — passed as `--rules-file`. `""` turns team rules off; leaving
+  the key out keeps whatever the environment sets.
+- `scoped_rules` — a list of paths, each passed as `--scoped-rules`. `[]`
+  turns scoped rules off; leaving the key out keeps the environment's.
+- `prompts_dir` — passed as `--prompts-dir`.
+- `[arm.mine_rules]` — mine the arm's team rules from the labels instead of
+  reading a file. The cases are split into `--folds` folds (cases of one PR
+  share a fold), and fold `j`'s cases are reviewed with rules mined from the
+  labels of every other fold only, so no case is reviewed with rules that saw
+  its own labels. Its one key, `judge_model`, is the mining model (default
+  `--judge-model`). It cannot be combined with a non-empty `rules_file`.
+
+Relative paths are relative to the arms file. Any other key exits `2`.
+
+### The campaign directory
+
+```text
+<out>/
+  campaign.json                 the inputs, written once
+  progress.json                 the state of every pass
+  logs/<arm>-r<k>.log           every eval run and scoring of a pass
+  rules/<arm>/f<j>.md           rules mined for fold j
+  units/<arm>/r<k>/f<j>-s<i>/   the eval run of fold j, shard i of pass k
+  runs/<arm>/r<k>/              the merged and scored pass: run.json, cases/, score.json, score.md
+  envs/<version>/               the environment --prxref installed
+```
+
+`campaign.json` holds `version`, `created_at`, `cases_path`, `cases_sha256`
+(the SHA-256 of the loaded cases, so an edited dataset is noticed),
+`repeats`, `folds`, `severity`, `judge_model`, `prxref` (`requested`,
+`version`, `python`) and `arms` (each `name`, `rules_file`, `scoped_rules`,
+`prompts_dir`, `mine_rules`).
+
+`progress.json` holds `version`, `started_at`, `updated_at` and `passes`, one
+entry per arm and repeat: `arm`, `repeat`, `state` (`pending`, `running`,
+`scoring`, `scored` or `failed`), `units_total`, `units_ok`, `units_failed`,
+`units_rate_limited`, `attempt`, `started_at`, `finished_at`, `log` and
+`error`. It is rewritten atomically on every change, so another process can
+watch it; each change of state is also printed as
+`<arm> r<k>: <state> (<ok>/<total> units)`.
+
+Each pass is scored by one scorer, `eval score` with `--judge-model` and
+`--precision` (or with neither, when no `--judge-model` was given), one pass
+at a time, so every pass of every arm is graded the same way. At the end the
+campaign prints recall per arm, the mean and each pass, and the line to
+compare it with another campaign.
+
+### Resuming and retries
+
+A case whose review was rate limited or failed is reset and run again with
+`eval run --resume`, up to `--max-attempts` tries in all; before a retry
+after a rate limit the campaign sleeps 30 seconds times the attempt, at most
+300. A case still failing after the last try is recorded as a failed case
+(a rate-limited record is kept as `record.rejected.json`), and `eval score`
+counts it as a miss. An `eval run` that exits `2` fails its pass at once.
+
+`--resume` continues the campaign in `--out`: passes already scored are kept,
+every other pass restarts from its unit directories, keeping each case that
+finished, and mined rules files are reused. The dataset, the arms,
+`--repeats`, `--folds` and `--prxref` must match `campaign.json`, or it exits
+`2`. Interrupt a campaign at any time and run the same command with
+`--resume`.
+
+### Running another prxref
+
+Without `--prxref`, every pass runs this prxref. With `--prxref 0.29.0` the
+passes run that release, and with `--prxref ../prxref` that checkout: it is
+installed once with `uv` into `<out>/envs/`, and its version and Python are
+recorded in `campaign.json`. It exits `2` when `uv` is missing, the install
+fails, the installed version is not the one asked for, or its `eval run`
+lacks a flag the arms need. A unit written by any other version fails its
+pass. Mining and scoring always run this prxref, so two campaigns of two
+versions are graded alike.
+
+### Example: gate an upgrade in CI
+
+```bash
+prxref eval campaign --cases tests/evals --arms arms.toml --out camp-old \
+  --prxref 0.29.0 --repeats 3 --jobs 2 --case-jobs 2
+prxref eval campaign --cases tests/evals --arms arms.toml --out camp-new \
+  --repeats 3 --jobs 2 --case-jobs 2
+prxref eval verdict --baseline camp-old --candidate camp-new --severity error
+```
+
+The two campaigns exit `0` however their passes went; the `eval verdict`
+exits `1` unless the new prxref is `better`, which fails the CI job.
+
+## `prxref eval dashboard`
+
+```bash
+prxref eval dashboard --campaign DIR [--host HOST] [--port PORT] [--once] [--tail N]
+```
+
+A read-only live view of one campaign directory. It reads `progress.json` and
+the pass logs under `logs/` (and `campaign.json`, when present), never writes
+to the directory and never starts a review.
+
+- `--campaign DIR`: the campaign output directory. Required. A directory with
+  no `progress.json` exits `2`, naming `--campaign`.
+- `--once`: print one plain-text table and exit `0`. It has one row per pass
+  (`arm`, `repeat`, `state`, `ok/total`, `pct`, `eta`, `rate-limit`) and an
+  `overall:` line. This is the form for CI and scripts.
+- `--host HOST` and `--port PORT`: without `--once`, serve on
+  `127.0.0.1:8765`. `--port 0` picks a free port. The first line printed is
+  `dashboard: http://HOST:PORT/` with the real port. A port already in use
+  exits `2`, naming `--port`. A `--host` that is not loopback logs a
+  `WARNING`, because the page shows log tails to anyone who can reach it.
+  Ctrl-C exits `0`.
+- `--tail N`: the log lines shown per pass (default `20`).
+
+The server answers `GET /` (one self-contained page, no external assets, that
+polls `/status.json` every two seconds), `GET /status.json`, and `404` for
+anything else. Every log line is HTML-escaped. An unreadable `progress.json`
+(the runner writes it atomically, but a read can still land mid-write) serves
+the last good status.
+
+`/status.json` is `{"campaign", "updated_at", "passes", "overall"}`. Each pass
+is its `progress.json` entry plus `pct`, `eta_s`, `log_tail` and
+`rate_limit_lines`, the number of lines of the whole log that match a
+rate-limit pattern (`429`, `rate limit`, `too many requests`, `quota`,
+`session cap`, `session limit`). `overall` holds `units_total`, `units_done`
+(ok plus failed), `pct`, `elapsed_s`, `eta_s` and `rate_limited_passes`. An
+ETA is the remaining units over the rate observed since `started_at`, and is
+`null` until a unit is done.
+
+## `prxref eval mine`
+
+```bash
+prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--prs N] [--judge-model MODEL] [--min-comments K]
+prxref eval mine --rehash DIR [--allow-unconfirmed]
+```
+
+Hand-labelling cases is the slow part of an evaluation, and a repository's
+history already holds labels: the review comments human reviewers left on
+merged pull requests. `eval mine` turns them into a dataset `eval run`
+replays. It reads GitHub only (github.com or a GitHub Enterprise Server
+host) and posts nothing.
+
+- `--repo OWNER/NAME` is the repository. Required, except with `--rehash`.
+- `--out DIR` receives the dataset. Required, except with `--rehash`. A
+  directory that exists and is not empty exits `2` naming `--out`, so a
+  confirmed dataset is never overwritten.
+- `--host HOST` is the GitHub host (default `github.com`). An Enterprise host
+  uses the API base `https://HOST/api/v3` and the token the review would use,
+  `PRXREF_GITHUB_ENTERPRISE_TOKEN` else `PRXREF_GITHUB_TOKEN`.
+- `--since YYYY-MM-DD` keeps only PRs merged on or after that date.
+- `--prs N` is the number of PRs to mine (default 50): the most recently
+  merged PRs that qualify.
+- `--min-comments K` is how many qualifying comments a PR needs to qualify
+  (default 1).
+- `--judge-model MODEL` drafts each label's severity on the review's own LLM
+  backend. Without it every label is `warning`.
+- `--rehash DIR` and `--allow-unconfirmed` record a human review, below.
+
+A repository without a token still mines, within GitHub's unauthenticated
+rate limit; the command logs a warning that says so. A read that fails for
+one PR logs a warning and skips that PR. A repository that cannot be listed
+at all (not found, bad credentials) exits `2` naming `--repo`.
+
+### What becomes a case
+
+A comment is a label when it is a review comment on a line, starts its
+thread, was left by someone who is neither a bot (`user.type` is `Bot`, or
+the login ends in `[bot]`) nor the PR's author, and has a body. The bodies
+of the replies in its thread are appended to its `text`.
+
+One case is written per commit the qualifying comments were left on:
+
+- `id` is `pr<number>-<first 7 characters of the commit>` and `pr_url` is the
+  PR's URL.
+- `head_sha` is the reviewed commit. `base_sha` is its merge base with the
+  head of the PR's base branch, so the range is what the reviewer saw. A
+  commit already contained in the base branch, or one GitHub no longer has
+  (a force-push), is skipped with a warning.
+- Each label has `id` `c<comment id>`, the comment's `file` and `line`
+  (the line it was left on), `category` `null`, the comment as `text`, a
+  `severity` and `accepted`.
+- `accepted` is `true` when the PR's final head changed that file within 3
+  lines of the label's line after the reviewed commit, `false` when the file
+  did not change after it, and `null` when that cannot be told (the comparison
+  fails, the history was rewritten, or GitHub withheld the patch).
+- `severity` is one of the human severities with `--judge-model`: one
+  single-shot call per case reads all its comments (prompt
+  `mine_severity.md`, not overridable) and gives each one severity. A call or
+  reply that fails after `PRXREF_LLM_PARSE_RETRIES` retries leaves the case's
+  labels at `warning`, recorded as `judge_error`.
+
+Standard output is one line per PR written, `#<number>: <K> cases, <L> labels`,
+then `cases: <path>`. The exit code is `0`.
+
+### The output directory
+
+- `cases.json` loads with `--cases` as it is: the case loader refuses fields
+  it does not know, so nothing else lives in it.
+- `mine.json` holds the provenance: `version` (1), `repo`, `host`, `since`,
+  `prs_requested`, `created_at`, `prxref_version`, `judge_model`,
+  `cases_sha256` (the SHA-256 of the `cases.json` bytes), `prs` (each with
+  `number`, `merged_at` and its `cases` ids) and `labels` (each with
+  `case_id`, `label_id`, `severity`, `severity_source`, `confirmed` and
+  `comment_url`). `severity_source` is `judge`, `default` (no judge) or
+  `judge_error`. `confirmed` starts `false`.
+- `severity-review.md` is a table per case of every label: its id, file and
+  line, drafted severity, source, the first 120 characters of its text and a
+  link to the comment.
+
+### Confirming the severities
+
+A drafted severity is a guess, and the must-fix recall `eval verdict` gates on
+depends on it. Read `severity-review.md`, edit each wrong `severity` in
+`cases.json`, set `confirmed` to `true` for each label you checked in
+`mine.json`, then record the new hash:
+
+```bash
+prxref eval mine --rehash DIR
+```
+
+`--rehash` recomputes `cases_sha256` from the edited `cases.json`, after
+checking that it still loads. While any label in `mine.json` is
+`confirmed: false` it exits `2` naming `--rehash`; `--allow-unconfirmed`
+records the hash anyway. It prints `cases_sha256: <hex>`.
 
 ## The judge prompt
 

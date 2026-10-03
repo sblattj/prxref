@@ -74,6 +74,12 @@ auto-detects the forge.
   test files under different names; `grep -rl RUN_CONFIG_KEYS tests` lists the
   run-config ones. The doc-count tests (pass counts, key-word counts) live in
   `tests/test_rule_cap_config.py`.
+- A new file in the review trace dir (`orchestrate_review(trace_dir=...)`)
+  moves the pinned trace hashes built by `_units()` in
+  `tests/test_orchestrator_grouping.py` (imported by
+  `test_orchestrator_rule_cap.py`) and the file sets in
+  `tests/test_trace_dir.py`; skip it in `_units()` as `diff.patch` is. Only
+  the full suite shows this.
 - The numbered quality-pass list is the `quality.py` module docstring.
 - `cli.py` reaches `orchestrate_review` through `importlib`, so
   `grep 'orchestrate_review('` finds no CLI caller.

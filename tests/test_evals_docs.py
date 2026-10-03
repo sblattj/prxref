@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from prxref import cli, evals
+from prxref import cli, eval_precision, evals
 from prxref.eval_cases import HUMAN_SEVERITIES, EvalCase, ExpectedFinding, case_to_json
 from prxref.eval_judge import JudgeOutcome
 from prxref.eval_metrics import MAX_CREDITS_PER_FINDING, PARTIAL_CREDIT, GradedCase, score_cases
@@ -57,7 +57,16 @@ JUDGE_ERROR = JudgeOutcome(case_id="c1", cache_key="k", grades=None, error="judg
                            cached=False, llm_calls=1, ref_index={})
 JUDGE = evals._judge_block(SimpleNamespace(models=["judge-m"], temperature=0.0, seed=1), "judge-m", False,
                            [JUDGE_ERROR], None)
-SCORE = evals._score_json("L", {}, [FAILED], score_cases([GRADED]), JUDGE)
+PRECISION_BLOCK = eval_precision.case_block(
+    eval_precision.PrecisionOutcome(
+        case_id="c1", cache_key="k", cached=False, llm_calls=1,
+        verdicts=(eval_precision.Verdict(1, "valid", "ok"),), error=None,
+    ),
+    [1], 1,
+)
+SCORE = evals._score_json(
+    "L", {}, [FAILED], evals._with_precision(score_cases([GRADED]), {"c1": PRECISION_BLOCK}), JUDGE,
+)
 
 
 def _code(name: str) -> str:
@@ -116,7 +125,7 @@ class TestScoreJsonIsDocumented:
     def test_every_metric_key_is_named(self):
         metrics = SCORE["metrics"]
         nested = ("recall", "unmatched_ai", "severity_agreement", "chunks_failed", "elapsed_ms", "review_cost",
-                  "judge_cost")
+                  "judge_cost", "precision")
         names = [*metrics, *(key for block in nested for key in metrics[block])]
         assert _undocumented(names) == []
 
@@ -127,7 +136,7 @@ class TestScoreJsonIsDocumented:
 
     def test_every_case_row_and_label_entry_key_is_named(self):
         row = SCORE["cases"][0]
-        assert _undocumented([*row, *row["findings"][0]]) == []
+        assert _undocumented([*row, *row["findings"][0], *row["precision"], *row["precision"]["verdicts"][0]]) == []
 
     def test_the_stated_constants_are_the_code_s(self):
         assert f"within {DEFAULT_LINE_TOLERANCE} lines" in FLAT
@@ -141,7 +150,7 @@ class TestTheRenderedOutputIsDocumented:
         markdown = evals._score_markdown(SCORE)
         title = markdown.splitlines()[0].replace(": L", ": <label>")
         headings = [line for line in markdown.splitlines() if line.startswith("## ")]
-        assert len(headings) == 11
+        assert len(headings) == 12
         assert _undocumented([title, *headings]) == []
 
     def test_the_no_judge_lines_are_quoted(self):
@@ -191,7 +200,7 @@ class TestTheInputsAreDocumented:
     def test_the_human_severities_are_listed_in_order(self):
         assert ", ".join(_code(severity) for severity in HUMAN_SEVERITIES) in FLAT
 
-    @pytest.mark.parametrize("action", ["run", "score", "compare", "verdict"])
+    @pytest.mark.parametrize("action", ["run", "score", "compare", "verdict", "dashboard", "mine"])
     def test_every_action_has_a_section(self, action):
         assert f"\n## `prxref eval {action}`\n" in DOC
 

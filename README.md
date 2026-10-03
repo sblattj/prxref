@@ -466,7 +466,7 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
-`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its four actions:
+`prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its seven actions:
 
 - `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]` replays every case and writes the run to `DIR/NAME/`:
   - `--cases PATH` — the labelled cases: a `cases.json` file, or a directory of `case-*/` directories. Required. A bad case exits `2`, naming `--cases`, the case id, and the field.
@@ -478,12 +478,31 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
   - Each of the three is checked once, before the first case runs: a file or directory that fails its checks exits `2`, naming the flag, or the variable when the flag is not given. The run's `run.json` and `score.json` record the scoped rules in force, as `review` records them.
   - `--resume` — continue an existing `--label` run instead of refusing it.
   - `--config PATH` / `--no-config` — the [repository config file](docs/config-file.md) every case reviews with, as for `review`: without either, `PRXREF_CONFIG_FILE`, else `.prxref.toml` in the working directory. The file is resolved and checked once, before the first case runs; a missing or invalid one exits `2`. The run's `run.json` `config` reflects it.
-- `prxref eval score --label NAME [--judge-model MODEL] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
+- `prxref eval score --label NAME [--judge-model MODEL] [--precision] [--out DIR]` grades the run against its labels and writes `score.json` and `score.md`:
   - `--judge-model MODEL` — the model that grades every label without a `must_match` predicate, on the review's own LLM backend. Required when any label lacks one; leaving it out then exits `2`. A judge model the review itself used logs a warning.
+  - `--precision` — also grade the active AI findings no label credited as `valid`, `nit`, `invalid`, `duplicate` or `unverifiable`, and report strict and lenient precision in `score.json`, `score.md` and `eval compare`. Requires `--judge-model`; without it the command exits `2`.
 - `prxref eval compare A B [--out DIR]` prints two scored runs side by side, then every label whose credit changed and the cases and labels only one run has. `A` and `B` are each a label under `--out` or a run directory. It warns when the runs are not like for like.
-- `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`:
+- `prxref eval verdict --baseline RUN [RUN ...] --candidate RUN [RUN ...] [--severity SEV] [--json PATH] [--out DIR]` decides whether repeated candidate runs beat repeated baseline runs by more than the baseline's run-to-run noise. It prints `better`, `worse` or `within noise` and exits `0` only for `better`. When every run has strict precision the second guard is strict precision; otherwise it is unmatched AI findings per PR:
   - `--baseline RUN [RUN ...]` / `--candidate RUN [RUN ...]`: scored runs of each side, each a label under `--out` or a run directory. Both required; repeat each side so the baseline has a noise range.
   - `--severity SEV`: gate on recall of the labels of that severity (e.g. `error` for must-fix). Without it the gate is micro recall. A run with no label of that severity exits `2`.
+  - `--json PATH`: also write the verdict as JSON (`verdict.json`) to `PATH`. With a campaign directory per side (see [docs/evals.md](docs/evals.md#prxref-eval-verdict)) the arms are compared one by one and the exit code is `0` only to adopt.
+- `prxref eval dashboard --campaign DIR [--host HOST] [--port PORT] [--once] [--tail N]` shows the live progress of a campaign directory (its `progress.json` and `logs/`), read-only:
+  - `--campaign DIR`: the campaign output directory. Required. A directory with no `progress.json` exits `2`, naming `--campaign`.
+  - `--host HOST` / `--port PORT`: where to serve the page (default `127.0.0.1:8765`; `--port 0` picks a free port, printed as `dashboard: http://HOST:PORT/`). A non-loopback host logs a warning, because the page shows log tails. A port already in use exits `2`, naming `--port`.
+  - `--once`: print a plain-text status table, one row per pass, and exit `0` instead of serving.
+  - `--tail N`: log lines shown per pass (default `20`).
+- `prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--prs N] [--judge-model MODEL] [--min-comments K]` builds a dataset from a GitHub repository's merged PRs, with the human review comments as labels, and writes `cases.json`, `mine.json` and `severity-review.md` to `DIR`:
+  - `--repo OWNER/NAME` / `--out DIR` — the repository and the new or empty directory. Required. A non-empty `--out` exits `2`.
+  - `--host HOST` — the GitHub host (default `github.com`); a GitHub Enterprise Server host reads `PRXREF_GITHUB_ENTERPRISE_TOKEN`, else `PRXREF_GITHUB_TOKEN`.
+  - `--since YYYY-MM-DD` — only PRs merged on or after the date. `--prs N` — the N most recently merged qualifying PRs (default 50). `--min-comments K` — comments a PR needs (default 1).
+  - `--judge-model MODEL` — drafts each label's severity; without it every label is `warning`. The drafts are for a human to confirm.
+  - `--rehash DIR [--allow-unconfirmed]` — after you edit `cases.json`, recomputes `cases_sha256` in `mine.json`; exits `2` while a label is unconfirmed unless `--allow-unconfirmed` is given.
+- `prxref eval campaign --cases PATH --arms TOML --out DIR [--repeats N] [--prxref VERSION|PATH] [--folds K] [--jobs J] [--case-jobs C] [--judge-model MODEL] [--severity SEV] [--resume] [--max-attempts A]` runs every arm of `TOML` `N` times as `eval run` passes, in parallel and resumably, merges and scores each pass under `DIR/runs/<arm>/r<k>/`, and prints recall per arm. It exits `0` once every pass is scored or failed, and `2` for a bad flag, arms file or dataset; feed two campaign directories to `eval verdict` to gate on them:
+  - `--arms TOML` — one `[[arm]]` table per arm: `name`, and optionally `rules_file`, `scoped_rules`, `prompts_dir` and `[arm.mine_rules]`, which mines the arm's rules per fold from the other folds' labels. Required.
+  - `--repeats N` — passes per arm (default `3`). `--folds K` — folds for mined rules (default `1`; mining needs `2` or more).
+  - `--jobs J` / `--case-jobs C` — passes run at once (default `1`) and `eval run` processes per pass (default `1`), so at most `J × C` at once.
+  - `--prxref VERSION|PATH` — run every pass with that released prxref or checkout, installed once into `DIR/envs/` with `uv`. Without it the passes run this prxref.
+  - `--resume` — continue a campaign in `--out`: scored passes are kept and only unfinished cases rerun. `--max-attempts A` — tries per case, with a pause after rate limits (default `3`).
 
 The whole reference, from the case format to every `score.json` key: [docs/evals.md](docs/evals.md).
 
