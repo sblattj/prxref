@@ -39,9 +39,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -83,10 +85,92 @@ SEARCH_PAGE_SIZE = 100
 SEARCH_RESULT_CAP = 1000
 _FALLBACK_STATUSES = (404, 422)
 _PR_STATE_PARAMS = {"state": "closed", "sort": "updated", "direction": "desc"}
+RATE_LIMIT_STATUSES = (403, 429)
+RATE_LIMIT_MARGIN_S = 2
+RATE_LIMIT_MAX_WAIT_S = 3700
+RATE_LIMIT_MAX_WAITS = 3
+STOPPED_RATE_LIMIT = "rate_limit"
+_sleep = time.sleep
+_now = time.time
 
 
 class _MineSkip(Exception):
     """A pull request or case that cannot be mined and is skipped with a warning."""
+
+
+class _RateLimited(Exception):
+    """GitHub's rate limit answered and no bounded wait clears it; the walk stops and writes what it has."""
+
+
+def _header(resp: Any, name: str) -> str | None:
+    headers = getattr(resp, "headers", None)
+    if not isinstance(headers, Mapping):
+        return None
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value).strip()
+    return None
+
+
+def _is_rate_limited(resp: Any) -> bool:
+    """A 403 or 429 that carries ``X-RateLimit-Remaining: 0``, a ``Retry-After``, or a "rate limit" body."""
+    if getattr(resp, "status_code", None) not in RATE_LIMIT_STATUSES:
+        return False
+    if _header(resp, "X-RateLimit-Remaining") == "0" or _header(resp, "Retry-After") is not None:
+        return True
+    text = getattr(resp, "text", "")
+    return isinstance(text, str) and "rate limit" in text.lower()
+
+
+def _rate_limit_wait(resp: Any) -> float | None:
+    """Seconds to wait out a rate limit, from ``Retry-After`` or ``X-RateLimit-Reset``; ``None`` when unknown."""
+    retry = _header(resp, "Retry-After")
+    if retry is not None:
+        try:
+            return max(0.0, float(retry))
+        except ValueError:
+            pass
+    reset = _header(resp, "X-RateLimit-Reset")
+    if reset is not None:
+        try:
+            return max(0.0, float(reset) - _now()) + RATE_LIMIT_MARGIN_S
+        except ValueError:
+            pass
+    return None
+
+
+class _WaitingSession:
+    """Wraps a session so every GET waits out a GitHub rate limit and retries the same request.
+
+    The shared session's retry policy has no 403 (GitHub's rate-limit
+    status) and serves the review path too, so the wait lives here, on the
+    mining path only. :class:`_RateLimited` is raised when the wait cannot be
+    told, exceeds :data:`RATE_LIMIT_MAX_WAIT_S`, or recurs
+    :data:`RATE_LIMIT_MAX_WAITS` times for one request.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        waits = 0
+        while True:
+            resp = self._inner.get(*args, **kwargs)
+            if not _is_rate_limited(resp):
+                return resp
+            wait = _rate_limit_wait(resp)
+            if wait is None or wait > RATE_LIMIT_MAX_WAIT_S or waits >= RATE_LIMIT_MAX_WAITS:
+                raise _RateLimited(
+                    f"HTTP {resp.status_code} rate limit, "
+                    + ("no reset time given" if wait is None else f"wait of {math.ceil(wait)} s not taken")
+                )
+            waits += 1
+            logger.warning("GitHub rate limit reached; waiting %d s until it resets", math.ceil(wait))
+            _sleep(wait)
 
 
 @dataclass
@@ -292,8 +376,9 @@ def _search_prs(forge: github.ForgeImpl, ref: PRRef, since: date | None, until: 
 
     Search returns issues, so each hit is fetched as a full PR before
     ``qualifies`` sees it. Search is ordered by creation, newest first, and
-    reaches at most :data:`SEARCH_RESULT_CAP` hits. A 403 or 429 (search has
-    its own rate limit) stops the walk with what was kept.
+    reaches at most :data:`SEARCH_RESULT_CAP` hits. Search has its own rate
+    limit; it is waited out like any other (see :class:`_WaitingSession`). A
+    403 or 429 that is no rate limit stops the walk with what was kept.
     """
     url = f"{forge._api_base(ref)}/search/issues"
     query = (f"repo:{ref.owner}/{ref.repo} is:pr is:merged "
@@ -311,7 +396,7 @@ def _search_prs(forge: github.ForgeImpl, ref: PRRef, since: date | None, until: 
                 raise ValueError("search answer has no items array")
         except (requests.RequestException, ValueError) as exc:
             if _http_status(exc) in (403, 429):
-                logger.warning("searching pull requests of %s/%s hit a rate limit and stopped: %s",
+                logger.warning("searching pull requests of %s/%s was refused and stopped: %s",
                                ref.owner, ref.repo, exc)
                 break
             if not seen:
@@ -674,7 +759,8 @@ def severity_review_markdown(prs: Sequence[_PR]) -> str:
     return "\n".join(lines)
 
 
-def _mine_json(args: Any, prs: Sequence[_PR], cases_bytes: bytes, requested: int) -> dict[str, Any]:
+def _mine_json(args: Any, prs: Sequence[_PR], cases_bytes: bytes, requested: int,
+               stopped: str | None = None) -> dict[str, Any]:
     return {
         "version": MINE_VERSION,
         "repo": args.repo,
@@ -684,6 +770,7 @@ def _mine_json(args: Any, prs: Sequence[_PR], cases_bytes: bytes, requested: int
         "reviewers": getattr(args, "reviewers", None) or "any",
         "pr_numbers": _parse_pr_numbers(getattr(args, "pr", None)),
         "prs_requested": requested,
+        "stopped": stopped,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "prxref_version": prxref.__version__,
         "judge_model": (args.judge_model or "").strip() or None,
@@ -703,7 +790,9 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
     ``session`` and ``client`` are test seams: the HTTP session handed to the
     GitHub forge and the severity judge client. Prints one ``#N: K cases, L
     labels`` line per PR written, then ``cases: <path>``, and returns 0. A
-    PR whose reads fail is skipped with a WARNING. A repository that cannot
+    PR whose reads fail is skipped with a WARNING. A rate limit is waited out;
+    one that cannot be stops the walk, writes what was mined and records
+    ``"stopped": "rate_limit"`` in ``mine.json``. A repository that cannot
     be listed, a refused ``--out`` or a bad flag raises ``ConfigError``.
     """
     if getattr(args, "rehash", None):
@@ -719,7 +808,7 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
         logger.warning("no GitHub token set for %s (PRXREF_GITHUB_TOKEN%s): unauthenticated requests are "
                        "rate limited and private repositories are unreachable", host,
                        "" if host.lower() == "github.com" else " or PRXREF_GITHUB_ENTERPRISE_TOKEN")
-    forge = github.ForgeImpl(session)
+    forge = github.ForgeImpl(_WaitingSession(session or github._create_default_session()))
     since = _parse_since(args.since)
     until = _parse_since(getattr(args, "until", None))
     reviewers = getattr(args, "reviewers", None) or "any"
@@ -737,6 +826,9 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
 
     def qualifies(pr: dict) -> bool:
         number = int(pr["number"])
+        listed = pr.get("review_comments")
+        if isinstance(listed, int) and not isinstance(listed, bool) and listed < args.min_comments:
+            return False
         try:
             labels = _qualifying_labels(pr, _comments(forge, ref, number), reviewers)
             if len(labels) < args.min_comments:
@@ -751,13 +843,21 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
         return True
 
     requested = len(pr_numbers) if pr_numbers is not None else args.prs
-    if pr_numbers is not None:
-        picked = _listed_prs(forge, ref, pr_numbers, qualifies)
-    elif until is not None:
-        picked = _search_prs(forge, ref, since, until, args.prs, qualifies)
-    else:
-        picked = _candidate_prs(forge, ref, since, args.prs, qualifies)
-    prs = [mined[int(pr["number"])][0] for pr in picked]
+    stopped: str | None = None
+    try:
+        if pr_numbers is not None:
+            picked = _listed_prs(forge, ref, pr_numbers, qualifies)
+        elif until is not None:
+            picked = _search_prs(forge, ref, since, until, args.prs, qualifies)
+        else:
+            picked = _candidate_prs(forge, ref, since, args.prs, qualifies)
+        prs = [mined[int(pr["number"])][0] for pr in picked]
+    except _RateLimited as exc:
+        stopped = STOPPED_RATE_LIMIT
+        held = sorted((built for built, _ in mined.values()), key=lambda built: built.merged_at, reverse=True)
+        prs = held[:requested]
+        logger.warning("%s/%s: the walk stopped on the GitHub rate limit (%s) with %d PRs mined; "
+                       "re-run later with a narrower window for the rest", owner, name, exc, len(prs))
     cases = [case for pr in prs for case in pr.cases]
     if judge_model:
         _draft_severities(cases, client, judge_model, cfg)
@@ -767,7 +867,7 @@ def mine(args: Any, *, session: requests.Session | None = None, client: Any = No
     out.mkdir(parents=True, exist_ok=True)
     cases_path = out / "cases.json"
     _atomic_write(cases_path, cases_bytes)
-    _atomic_write(out / "mine.json", _dump(_mine_json(args, prs, cases_bytes, requested)))
+    _atomic_write(out / "mine.json", _dump(_mine_json(args, prs, cases_bytes, requested, stopped)))
     _atomic_write(out / "severity-review.md", (severity_review_markdown(prs) + "\n").encode("utf-8"))
     if cases:
         load_cases(cases_path, source="--out")
