@@ -8,6 +8,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Fixed
+
+- `prxref eval mine` now decides `accepted` for comments on a commit that a
+  force-push replaced (#91), which left most labels of amend-and-force-push
+  repositories `null` (93 of 122 on django). When the commented commit is not
+  an ancestor of the final head, the PR's diff at that commit is compared with
+  its final diff (`pulls/{n}/files`, read once per PR and only when needed).
+  The lines within 3 lines of the comment (added or context) are anchors. An
+  added anchor gone from the final diff, a new line the final diff adds within
+  3 lines of a matched anchor (a fix that only inserts), or the file dropped
+  from the PR is `true`; anchors found with nothing new near them is `false`;
+  no anchor found, or a withheld patch, stays `null`. Ancestor cases are
+  unchanged.
+- The `[Unreleased]` link in this changelog compares from `v0.32.1`, and
+  links for 0.31.0, 0.32.0 and 0.32.1 are added.
+
 ## [0.32.1] — 2026-10-03
 
 ### Fixed
@@ -3191,7 +3209,10 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.30.1...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.32.1...HEAD
+[0.32.1]: https://github.com/sblattj/prxref/releases/tag/v0.32.1
+[0.32.0]: https://github.com/sblattj/prxref/releases/tag/v0.32.0
+[0.31.0]: https://github.com/sblattj/prxref/releases/tag/v0.31.0
 [0.30.1]: https://github.com/sblattj/prxref/releases/tag/v0.30.1
 [0.30.0]: https://github.com/sblattj/prxref/releases/tag/v0.30.0
 [0.29.0]: https://github.com/sblattj/prxref/releases/tag/v0.29.0
