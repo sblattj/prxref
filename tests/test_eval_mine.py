@@ -14,6 +14,7 @@ from prxref import eval_mine, evals
 from prxref.eval_cases import load_cases
 from prxref.eval_mine import (
     _accepted,
+    _accepted_by_content,
     _changed_positions,
     mine,
     parse_severities,
@@ -65,7 +66,7 @@ class FakeSession:
     def get(self, url, headers=None, params=None, timeout=None):
         self.urls.append(url)
         self.params.append(dict(params or {}))
-        page = (params or {}).get("page", 1)
+        page = int((params or {}).get("page", 1))
         route = self.routes.get(url)
         if route is None:
             return FakeResponse(404, {"message": "Not Found"})
@@ -232,6 +233,98 @@ class TestAccepted:
 
     def test_changed_positions_reads_removals_and_insertions(self):
         assert _changed_positions(A_PATCH) == [10.0, 10.5, 10.5]
+
+
+FINAL30 = "e" * 40
+REWRITTEN = "f" * 40
+AT_COMMENT = "@@ -8,3 +8,4 @@\n ctx\n ctx\n+handle(x)\n ctx\n"
+B_AT_COMMENT = "@@ -1,2 +1,3 @@\n ctx\n+    rename_me = 1\n ctx\n"
+FINAL_KEPT = "@@ -8,3 +8,4 @@\n ctx\n ctx\n+  handle(x)  \n ctx\n"
+FINAL_CHANGED = "@@ -8,3 +8,4 @@\n ctx\n ctx\n+handle(x, empty=True)\n ctx\n"
+
+
+class TestAcceptedByContent:
+    def test_a_changed_added_line_is_accepted(self):
+        assert _accepted_by_content(10, {"patch": AT_COMMENT}, {"patch": FINAL_CHANGED}) is True
+
+    def test_an_untouched_added_line_is_not_accepted_whitespace_aside(self):
+        assert _accepted_by_content(10, {"patch": AT_COMMENT}, {"patch": FINAL_KEPT}) is False
+
+    def test_a_file_the_pr_dropped_is_accepted(self):
+        assert _accepted_by_content(10, {"patch": AT_COMMENT}, None) is True
+
+    def test_no_added_line_in_the_window_is_undeterminable(self):
+        assert _accepted_by_content(20, {"patch": AT_COMMENT}, {"patch": FINAL_CHANGED}) is None
+        assert _accepted_by_content(9, {"patch": "@@ -8,3 +8,3 @@\n ctx\n+\n ctx\n"}, {"patch": ""}) is None
+
+    def test_the_window_is_three_new_side_lines(self):
+        got = [_accepted_by_content(n, {"patch": AT_COMMENT}, {"patch": FINAL_CHANGED}) for n in (6, 7, 13, 14)]
+        assert got == [None, True, True, None]
+
+    def test_a_withheld_patch_on_either_side_is_undeterminable(self):
+        assert _accepted_by_content(10, {"patch": AT_COMMENT}, {"filename": "a.py"}) is None
+        assert _accepted_by_content(10, {"filename": "a.py"}, {"patch": FINAL_CHANGED}) is None
+        assert _accepted_by_content(10, None, {"patch": FINAL_CHANGED}) is None
+
+
+def _rewritten_routes(final_files) -> dict:
+    """PR #30: comments on C1 and C3, both replaced by a force-push, so each compare to the final head diverged."""
+    routes = {
+        f"{API}/pulls/30": _pr(30, "2026-09-20T00:00:00Z", head=FINAL30),
+        f"{API}/pulls/30/comments": [
+            _comment(301, "bob", "a.py", 10, C1, "Handle the empty case."),
+            _comment(302, "bob", "b.py", 2, C1, "Rename this."),
+            _comment(303, "bob", "a.py", 10, C3, "Still the empty case."),
+        ],
+        f"{API}/pulls/30/files": final_files,
+    }
+    for commit in (C1, C3):
+        url, body = _compare("main", commit, MERGE_BASE, [
+            {"filename": "a.py", "status": "modified", "patch": AT_COMMENT},
+            {"filename": "b.py", "status": "modified", "patch": B_AT_COMMENT},
+        ])
+        routes[url] = body
+        url, body = _compare(commit, FINAL30, REWRITTEN, [{"filename": "a.py", "patch": A_PATCH}])
+        routes[url] = body
+    return routes
+
+
+class TestAcceptedAfterRewrite:
+    def _accepted(self, tmp_path, capsys, final_files):
+        session = FakeSession(_rewritten_routes(final_files))
+        args, code, _ = _run(tmp_path, capsys, session=session, pr="30")
+        assert code == 0
+        return {lb["id"]: lb["accepted"] for c in _cases(args) for lb in c["expected"]}, session
+
+    def test_a_rewritten_history_falls_back_to_the_prs_own_change_once_per_pr(self, tmp_path, capsys):
+        got, session = self._accepted(tmp_path, capsys, [
+            {"filename": "a.py", "status": "modified", "patch": FINAL_CHANGED},
+            {"filename": "b.py", "status": "modified", "patch": B_AT_COMMENT},
+        ])
+        assert got == {"c301": True, "c302": False, "c303": True}
+        assert session.urls.count(f"{API}/pulls/30/files") == 1
+
+    def test_an_added_line_kept_to_the_end_is_not_accepted(self, tmp_path, capsys):
+        got, _ = self._accepted(tmp_path, capsys, [{"filename": "a.py", "patch": FINAL_KEPT}])
+        assert got == {"c301": False, "c302": True, "c303": False}
+
+    def test_the_final_files_are_paged_by_100(self, tmp_path, capsys):
+        filler = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n+x\n"} for i in range(99)]
+        _, session = self._accepted(tmp_path, capsys, [{"filename": "a.py", "patch": FINAL_KEPT}, *filler])
+        pages = [p for u, p in zip(session.urls, session.params, strict=True) if u == f"{API}/pulls/30/files"]
+        assert pages == [{"per_page": "100", "page": "1"}, {"per_page": "100", "page": "2"}]
+
+    def test_a_failed_final_files_read_leaves_none_with_a_warning(self, tmp_path, capsys, caplog):
+        with caplog.at_level(logging.WARNING):
+            got, session = self._accepted(tmp_path, capsys, (500, {"message": "boom"}))
+        assert got == {"c301": None, "c302": None, "c303": None}
+        assert session.urls.count(f"{API}/pulls/30/files") == 1
+        assert any("#30" in r.getMessage() and "final files" in r.getMessage() for r in caplog.records)
+
+    def test_no_rewritten_history_never_reads_the_final_files(self, tmp_path, capsys):
+        session = FakeSession(_routes())
+        _run(tmp_path, capsys, session=session)
+        assert not [u for u in session.urls if u.endswith("/files")]
 
 
 class TestSeverity:

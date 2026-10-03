@@ -8,6 +8,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Fixed
+
+- `prxref eval mine` now decides `accepted` for comments on a commit that a
+  force-push replaced (#91), which left most labels of amend-and-force-push
+  repositories `null` (93 of 122 on django). When the commented commit is not
+  an ancestor of the final head, the lines the PR added within 3 lines of the
+  comment are compared, whitespace-stripped, with the added lines of the PR's
+  final diff (`pulls/{n}/files`, read once per PR and only when needed): one
+  gone, or the file dropped from the PR, is `true`; all kept is `false`; no
+  added line nearby or a withheld patch stays `null`. Ancestor cases are
+  unchanged.
+
 ## [0.32.1] — 2026-10-03
 
 ### Fixed
