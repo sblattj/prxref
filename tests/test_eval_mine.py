@@ -49,9 +49,11 @@ class FakeSession:
     def __init__(self, routes: dict) -> None:
         self.routes = routes
         self.urls: list[str] = []
+        self.params: list[dict] = []
 
     def get(self, url, headers=None, params=None, timeout=None):
         self.urls.append(url)
+        self.params.append(dict(params or {}))
         page = (params or {}).get("page", 1)
         route = self.routes.get(url)
         if route is None:
@@ -71,8 +73,9 @@ def _pr(number, merged_at, author="alice", head=FINAL10, updated=None, merged=Tr
     }
 
 
-def _comment(cid, user, path, line, commit, body="fix this", parent=None, utype="User"):
+def _comment(cid, user, path, line, commit, body="fix this", parent=None, utype="User", assoc=None):
     return {
+        "author_association": assoc,
         "id": cid, "user": {"login": user, "type": utype}, "path": path, "original_line": line,
         "original_commit_id": commit, "body": body, "in_reply_to_id": parent,
         "html_url": f"https://github.com/o/r/pull/x#discussion_r{cid}",
@@ -118,8 +121,8 @@ def _routes() -> dict:
 
 
 def _args(tmp_path, **over):
-    base = dict(repo="o/r", out=str(tmp_path / "out"), host="github.com", since=None, prs=50, judge_model=None,
-                min_comments=1, rehash=None, allow_unconfirmed=False)
+    base = dict(repo="o/r", out=str(tmp_path / "out"), host="github.com", since=None, until=None, pr=None,
+                reviewers="any", prs=50, judge_model=None, min_comments=1, rehash=None, allow_unconfirmed=False)
     base.update(over)
     return SimpleNamespace(eval_command="mine", **base)
 
@@ -266,8 +269,10 @@ class TestOutputs:
         assert len(loaded) == 4 and all(case.pr_url and case.base_sha and case.head_sha for case in loaded)
         meta = json.loads((out / "mine.json").read_text())
         assert meta["cases_sha256"] == hashlib.sha256((out / "cases.json").read_bytes()).hexdigest()
-        assert list(meta) == ["version", "repo", "host", "since", "prs_requested", "created_at", "prxref_version",
-                              "judge_model", "cases_sha256", "prs", "labels"]
+        assert list(meta) == [
+            "version", "repo", "host", "since", "until", "reviewers", "pr_numbers", "prs_requested", "created_at",
+            "prxref_version", "judge_model", "cases_sha256", "prs", "labels",
+        ]
         assert [pr["number"] for pr in meta["prs"]] == [10, 9, 8]
         assert meta["prs"][0]["cases"] == [f"pr10-{C1[:7]}", f"pr10-{C2[:7]}"]
         assert {lb["confirmed"] for lb in meta["labels"]} == {False}
@@ -326,7 +331,10 @@ class TestOutputs:
 
     @pytest.mark.parametrize("over, flag", [
         ({"repo": "nope"}, "--repo"), ({"repo": None}, "--repo"), ({"out": None}, "--out"),
-        ({"since": "yesterday"}, "--since"), ({"prs": 0}, "--prs"), ({"min_comments": 0}, "--min-comments"),
+        ({"since": "yesterday"}, "--since"), ({"until": "yesterday"}, "--until"),
+        ({"since": "2026-02-01", "until": "2026-01-01"}, "--until"), ({"reviewers": "all"}, "--reviewers"),
+        ({"pr": "10,x"}, "--pr"), ({"pr": "0"}, "--pr"), ({"pr": "10", "since": "2026-01-01"}, "--pr"),
+        ({"pr": "10", "until": "2026-01-01"}, "--pr"), ({"prs": 0}, "--prs"), ({"min_comments": 0}, "--min-comments"),
         ({"judge_model": "a,b"}, "--judge-model"), ({"allow_unconfirmed": True}, "--allow-unconfirmed"),
     ])
     def test_bad_flags_name_themselves(self, tmp_path, over, flag):
@@ -376,3 +384,162 @@ class TestRehash:
     def test_rehash_cannot_be_combined_with_repo(self, tmp_path):
         with pytest.raises(ConfigError, match="--rehash"):
             mine(_args(tmp_path, rehash=str(tmp_path)), session=FakeSession({}))
+
+
+SEARCH = "https://api.github.com/search/issues"
+
+
+def _hits(*numbers, total=None):
+    return {"total_count": total if total is not None else len(numbers), "items": [{"number": n} for n in numbers]}
+
+
+def _window_routes() -> dict:
+    routes = _routes()
+    del routes[f"{API}/pulls"]
+    routes[SEARCH] = _hits(8, 9, 10, 12)
+    routes[f"{API}/pulls/10"] = _pr(10, "2026-09-20T00:00:00Z")
+    routes[f"{API}/pulls/9"] = _pr(9, "2026-08-01T00:00:00Z", head=C9)
+    routes[f"{API}/pulls/8"] = _pr(8, "2026-07-01T00:00:00Z")
+    routes[f"{API}/pulls/12"] = _pr(12, None, merged=False)
+    return routes
+
+
+class TestUntilSearch:
+    def test_until_pages_the_search_api_and_fetches_each_pr(self, tmp_path, capsys):
+        session = FakeSession(_window_routes())
+        args, code, out = _run(tmp_path, capsys, session=session, since="2026-07-01", until="2026-09-30")
+        assert code == 0
+        assert [line.split(":")[0] for line in out.splitlines()[:-1]] == ["#10", "#9", "#8"]
+        assert f"{API}/pulls" not in session.urls
+        assert session.urls[0] == SEARCH
+        assert session.params[0] == {
+            "q": "repo:o/r is:pr is:merged merged:2026-07-01..2026-09-30", "sort": "created", "order": "desc",
+            "per_page": "100", "page": "1",
+        }
+        assert {f"{API}/pulls/{n}" for n in (8, 9, 10, 12)} <= set(session.urls)
+        meta = json.loads((Path(args.out) / "mine.json").read_text())
+        assert (meta["since"], meta["until"], meta["reviewers"], meta["pr_numbers"]) == (
+            "2026-07-01", "2026-09-30", "any", None)
+
+    def test_without_since_the_window_opens_with_a_star(self, tmp_path, capsys):
+        session = FakeSession(_window_routes())
+        _run(tmp_path, capsys, session=session, until="2026-09-30", prs=1)
+        assert session.params[0]["q"] == "repo:o/r is:pr is:merged merged:*..2026-09-30"
+        assert f"{API}/pulls/9" not in session.urls
+
+    def test_a_window_over_the_search_cap_warns(self, tmp_path, capsys, caplog):
+        routes = _window_routes()
+        routes[SEARCH] = _hits(10, total=1500)
+        with caplog.at_level(logging.WARNING):
+            _, code, out = _run(tmp_path, capsys, session=FakeSession(routes), until="2026-09-30")
+        assert code == 0 and out.startswith("#10:")
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "1500" in text and "1000 newest-created" in text and "--since" in text
+
+    def test_a_search_rate_limit_stops_with_what_was_kept(self, tmp_path, capsys, caplog):
+        routes = _window_routes()
+        routes[SEARCH] = (403, {"message": "rate limit"})
+        with caplog.at_level(logging.WARNING):
+            _, code, out = _run(tmp_path, capsys, session=FakeSession(routes), until="2026-09-30")
+        assert code == 0 and out.startswith("cases: ")
+        assert any("rate limit" in r.getMessage() for r in caplog.records)
+
+    def test_a_search_that_cannot_run_exits_2_naming_repo(self, tmp_path):
+        routes = _window_routes()
+        routes[SEARCH] = (422, {"message": "Validation Failed"})
+        with pytest.raises(ConfigError, match="--repo"):
+            mine(_args(tmp_path, until="2026-09-30"), session=FakeSession(routes))
+
+
+class TestReviewers:
+    def _routes(self):
+        routes = _routes()
+        routes[f"{API}/pulls/10/comments"] = [
+            _comment(101, "bob", "a.py", 10, C1, "Handle the empty case.", assoc="MEMBER"),
+            _comment(102, "dan", "a.py", 10, C1, "Done.", parent=101, assoc="NONE"),
+            _comment(106, "carol", "b.py", 5, C1, "Rename this.", assoc="CONTRIBUTOR"),
+            _comment(107, "erin", "a.py", 30, C1, "Drive-by.", assoc="NONE"),
+            _comment(108, "frank", "a.py", 20, C2, "Owner note.", assoc="OWNER"),
+            _comment(109, "gina", "a.py", 21, C2, "Collab note.", assoc="COLLABORATOR"),
+        ]
+        return routes
+
+    def test_maintainers_drops_contributor_and_none_roots_but_keeps_replies_on_a_kept_root(self, tmp_path, capsys):
+        args, _, _ = _run(tmp_path, capsys, session=FakeSession(self._routes()), reviewers="maintainers", prs=1)
+        labels = {lb["id"]: lb["text"] for c in _cases(args) for lb in c["expected"]}
+        assert set(labels) == {"c101", "c108", "c109"}
+        assert labels["c101"].endswith("Reply from dan: Done.")
+        meta = json.loads((Path(args.out) / "mine.json").read_text())
+        assert meta["reviewers"] == "maintainers"
+
+    def test_any_keeps_every_human_root(self, tmp_path, capsys):
+        args, _, _ = _run(tmp_path, capsys, session=FakeSession(self._routes()), prs=1)
+        assert {lb["id"] for c in _cases(args) for lb in c["expected"]} == {
+            "c101", "c106", "c107", "c108", "c109"}
+
+    def test_min_comments_counts_only_maintainer_roots(self, tmp_path, capsys):
+        _, _, out = _run(tmp_path, capsys, session=FakeSession(self._routes()), reviewers="maintainers",
+                         min_comments=4, prs=1)
+        assert out.startswith("cases: ")
+
+
+class TestPrList:
+    def test_pr_mines_the_listed_prs_and_skips_an_unmerged_one(self, tmp_path, capsys, caplog):
+        session = FakeSession(_window_routes())
+        with caplog.at_level(logging.WARNING):
+            args, code, out = _run(tmp_path, capsys, session=session, pr="8, 12,10,10")
+        assert code == 0
+        assert [line.split(":")[0] for line in out.splitlines()[:-1]] == ["#10", "#8"]
+        assert SEARCH not in session.urls and f"{API}/pulls" not in session.urls
+        assert any("#12" in r.getMessage() and "not a merged" in r.getMessage() for r in caplog.records)
+        meta = json.loads((Path(args.out) / "mine.json").read_text())
+        assert (meta["pr_numbers"], meta["prs_requested"]) == ([8, 12, 10], 3)
+
+    def test_min_comments_still_applies_to_listed_prs(self, tmp_path, capsys):
+        _, _, out = _run(tmp_path, capsys, session=FakeSession(_window_routes()), pr="10,8", min_comments=2)
+        assert [line.split(":")[0] for line in out.splitlines()[:-1]] == ["#10"]
+
+    def test_pr_with_since_exits_2_naming_pr(self, tmp_path):
+        with pytest.raises(ConfigError, match="--pr.*--since"):
+            mine(_args(tmp_path, pr="10", since="2026-01-01"), session=FakeSession(_window_routes()))
+
+
+class TestBaseFallback:
+    def _routes(self, *, default_ok=True):
+        routes = _routes()
+        gone = _pr(10, "2026-09-20T00:00:00Z", updated="2026-09-24T00:00:00Z")
+        gone["base"] = {"ref": "master", "sha": "a" * 40}
+        routes[f"{API}/pulls"] = [gone]
+        routes[f"{API}/compare/master...{C1}"] = (404, {"message": "Not Found"})
+        routes[f"{API}/compare/master...{C2}"] = (404, {"message": "Not Found"})
+        if default_ok:
+            routes[API] = {"default_branch": "main"}
+        return routes
+
+    def test_a_renamed_base_falls_back_to_the_default_branch_read_once(self, tmp_path, capsys):
+        session = FakeSession(self._routes())
+        args, _, out = _run(tmp_path, capsys, session=session)
+        assert out.startswith("#10: 2 cases, 4 labels")
+        assert {c["base_sha"] for c in _cases(args)} == {MERGE_BASE}
+        assert session.urls.count(API) == 1
+
+    def test_the_base_sha_is_the_last_resort(self, tmp_path, capsys):
+        routes = self._routes(default_ok=False)
+        for commit in (C1, C2):
+            routes[f"{API}/compare/{'a' * 40}...{commit}"] = {"merge_base_commit": {"sha": MERGE_BASE}, "files": []}
+        _, _, out = _run(tmp_path, capsys, session=FakeSession(routes))
+        assert out.startswith("#10: 2 cases, 4 labels")
+
+    def test_every_base_missing_skips_the_commit_with_a_warning(self, tmp_path, capsys, caplog):
+        routes = self._routes(default_ok=False)
+        with caplog.at_level(logging.WARNING):
+            _, code, out = _run(tmp_path, capsys, session=FakeSession(routes))
+        assert code == 0 and out.startswith("cases: ")
+        assert any("skipping commit" in r.getMessage() for r in caplog.records)
+
+    def test_a_server_error_does_not_fall_back(self, tmp_path, capsys):
+        routes = self._routes()
+        routes[f"{API}/compare/master...{C1}"] = (500, {"message": "boom"})
+        session = FakeSession(routes)
+        _run(tmp_path, capsys, session=session)
+        assert f"{API}/compare/main...{C1}" not in session.urls

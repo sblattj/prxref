@@ -1366,7 +1366,7 @@ ETA is the remaining units over the rate observed since `started_at`, and is
 ## `prxref eval mine`
 
 ```bash
-prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--prs N] [--judge-model MODEL] [--min-comments K]
+prxref eval mine --repo OWNER/NAME --out DIR [--host HOST] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--pr N[,N...]] [--reviewers any|maintainers] [--prs N] [--judge-model MODEL] [--min-comments K]
 prxref eval mine --rehash DIR [--allow-unconfirmed]
 ```
 
@@ -1384,6 +1384,25 @@ host) and posts nothing.
   uses the API base `https://HOST/api/v3` and the token the review would use,
   `PRXREF_GITHUB_ENTERPRISE_TOKEN` else `PRXREF_GITHUB_TOKEN`.
 - `--since YYYY-MM-DD` keeps only PRs merged on or after that date.
+- `--until YYYY-MM-DD` keeps only PRs merged on or before that date,
+  inclusive; with `--since` it makes a window (`--until` earlier than
+  `--since` exits `2` naming `--until`). Without `--until` the command walks
+  the closed PRs newest-updated first. With it, candidates come from the
+  GitHub search API, `repo:OWNER/NAME is:pr is:merged merged:<since or
+  *>..<until>`, newest created first, 100 per page; each hit is fetched as a
+  full PR before it is checked. Search reaches at most 1000 results per
+  query: when more match, a warning says only the 1000 newest-created are
+  reachable and suggests a later `--since`. Search has its own rate limit
+  (30 requests a minute with a token); a 403 or 429 from it logs a warning
+  and stops with the PRs kept so far.
+- `--pr N[,N...]` mines exactly these PR numbers and ignores `--prs`. A PR
+  that is not merged, or cannot be read, is skipped with a warning.
+  `--min-comments` and `--reviewers` still apply. Combining it with
+  `--since` or `--until` exits `2` naming `--pr`.
+- `--reviewers any|maintainers` (default `any`). `maintainers` counts only
+  thread-root comments whose `author_association` is `OWNER`, `MEMBER` or
+  `COLLABORATOR`, which drops drive-by comments from contributors; replies
+  are still appended to a kept root whoever wrote them.
 - `--prs N` is the number of PRs to mine (default 50): the most recently
   merged PRs that qualify.
 - `--min-comments K` is how many qualifying comments a PR needs to qualify
@@ -1411,7 +1430,11 @@ One case is written per commit the qualifying comments were left on:
 - `head_sha` is the reviewed commit. `base_sha` is its merge base with the
   head of the PR's base branch, so the range is what the reviewer saw. A
   commit already contained in the base branch, or one GitHub no longer has
-  (a force-push), is skipped with a warning.
+  (a force-push), is skipped with a warning. An old PR's base branch may no
+  longer exist (a `master` renamed `main`): when the comparison against
+  `base.ref` answers 404 or 422, it is retried against the repository's
+  default branch (read once per run), then against the PR's `base.sha`, and
+  only then skipped. Any other error does not fall back.
 - Each label has `id` `c<comment id>`, the comment's `file` and `line`
   (the line it was left on), `category` `null`, the comment as `text`, a
   `severity` and `accepted`.
@@ -1433,7 +1456,8 @@ then `cases: <path>`. The exit code is `0`.
 - `cases.json` loads with `--cases` as it is: the case loader refuses fields
   it does not know, so nothing else lives in it.
 - `mine.json` holds the provenance: `version` (1), `repo`, `host`, `since`,
-  `prs_requested`, `created_at`, `prxref_version`, `judge_model`,
+  `until`, `reviewers`, `pr_numbers` (a list, or `null`), `prs_requested` (the
+  number of PRs listed with `--pr`, else `--prs`), `created_at`, `prxref_version`, `judge_model`,
   `cases_sha256` (the SHA-256 of the `cases.json` bytes), `prs` (each with
   `number`, `merged_at` and its `cases` ids) and `labels` (each with
   `case_id`, `label_id`, `severity`, `severity_source`, `confirmed` and
