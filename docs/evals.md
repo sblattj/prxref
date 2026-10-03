@@ -1402,7 +1402,11 @@ host) and posts nothing.
 - `--reviewers any|maintainers` (default `any`). `maintainers` counts only
   thread-root comments whose `author_association` is `OWNER`, `MEMBER` or
   `COLLABORATOR`, which drops drive-by comments from contributors; replies
-  are still appended to a kept root whoever wrote them.
+  are still appended to a kept root whoever wrote them. GitHub reports a
+  private organisation member as `CONTRIBUTOR` or `NONE`, so on a repository
+  whose maintainers keep their membership private (react, and partly rust,
+  pandas and cpython) `maintainers` keeps few comments and a window can scan
+  up to the search cap of 1000 PRs before it fills; use `any` there.
 - `--prs N` is the number of PRs to mine (default 50): the most recently
   merged PRs that qualify.
 - `--min-comments K` is how many qualifying comments a PR needs to qualify
@@ -1412,9 +1416,23 @@ host) and posts nothing.
 - `--rehash DIR` and `--allow-unconfirmed` record a human review, below.
 
 A repository without a token still mines, within GitHub's unauthenticated
-rate limit; the command logs a warning that says so. A read that fails for
+rate limit; the command logs a warning that says so. When a read hits the
+rate limit (a 403 or 429 with `X-RateLimit-Remaining: 0`, a `Retry-After`
+header or a "rate limit" body), the command waits until the limit resets
+(`Retry-After`, else `X-RateLimit-Reset`, at most 3700 s per wait and 3 waits
+per request), logs a warning and retries the same request. If the wait cannot
+be told or is too long, the walk stops, writes the PRs mined so far and records
+`"stopped": "rate_limit"` in `mine.json` (`null` otherwise); the exit code is
+still `0`. A PR object that carries a `review_comments` count below
+`--min-comments` (the `--until` and `--pr` paths fetch full PR objects) is
+dropped before its comments are fetched. A read that fails for
 one PR logs a warning and skips that PR. A repository that cannot be listed
 at all (not found, bad credentials) exits `2` naming `--repo`.
+
+Runs that share a token share its quota (5000 core requests an hour, 30
+searches a minute), so mine one repository at a time rather than in parallel.
+To see what is left, read the `X-RateLimit-Remaining` and `X-RateLimit-Used`
+headers of a real API response.
 
 ### What becomes a case
 

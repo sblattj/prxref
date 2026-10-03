@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from prxref import evals
+from prxref import eval_mine, evals
 from prxref.eval_cases import load_cases
 from prxref.eval_mine import (
     _accepted,
@@ -29,7 +29,8 @@ API = "https://api.github.com/repos/o/r"
 
 
 class FakeResponse:
-    def __init__(self, status: int, body) -> None:
+    def __init__(self, status: int, body, headers=None) -> None:
+        self.headers = headers or {}
         self.status_code = status
         self.ok = status < 400
         self._body = body
@@ -41,6 +42,16 @@ class FakeResponse:
     def raise_for_status(self) -> None:
         if not self.ok:
             raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+
+class Replies:
+    """A route that answers each request with the next ``(status, body[, headers])``; the last repeats."""
+
+    def __init__(self, *replies) -> None:
+        self.replies = list(replies)
+
+    def next(self):
+        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
 
 
 class FakeSession:
@@ -58,10 +69,12 @@ class FakeSession:
         route = self.routes.get(url)
         if route is None:
             return FakeResponse(404, {"message": "Not Found"})
-        status, body = route if isinstance(route, tuple) else (200, route)
+        if isinstance(route, Replies):
+            route = route.next()
+        status, body, *rest = route if isinstance(route, tuple) else (200, route)
         if isinstance(body, list) and page > 1:
             body = []
-        return FakeResponse(status, body)
+        return FakeResponse(status, body, rest[0] if rest else None)
 
 
 def _pr(number, merged_at, author="alice", head=FINAL10, updated=None, merged=True):
@@ -138,6 +151,15 @@ class StubJudge:
         if self.error is not None:
             raise self.error
         return SimpleNamespace(text=self.replies.pop(0) if self.replies else "{}")
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """No real sleeping: the miner's sleeper records each wait; the clock is frozen at 1_000_000."""
+    waits: list[float] = []
+    monkeypatch.setattr(eval_mine, "_sleep", waits.append, raising=False)
+    monkeypatch.setattr(eval_mine, "_now", lambda: 1_000_000.0, raising=False)
+    return waits
 
 
 @pytest.fixture(autouse=True)
@@ -270,8 +292,8 @@ class TestOutputs:
         meta = json.loads((out / "mine.json").read_text())
         assert meta["cases_sha256"] == hashlib.sha256((out / "cases.json").read_bytes()).hexdigest()
         assert list(meta) == [
-            "version", "repo", "host", "since", "until", "reviewers", "pr_numbers", "prs_requested", "created_at",
-            "prxref_version", "judge_model", "cases_sha256", "prs", "labels",
+            "version", "repo", "host", "since", "until", "reviewers", "pr_numbers", "prs_requested", "stopped",
+            "created_at", "prxref_version", "judge_model", "cases_sha256", "prs", "labels",
         ]
         assert [pr["number"] for pr in meta["prs"]] == [10, 9, 8]
         assert meta["prs"][0]["cases"] == [f"pr10-{C1[:7]}", f"pr10-{C2[:7]}"]
@@ -543,3 +565,103 @@ class TestBaseFallback:
         session = FakeSession(routes)
         _run(tmp_path, capsys, session=session)
         assert f"{API}/compare/main...{C1}" not in session.urls
+
+
+NOW = 1_000_000
+RATE_BODY = {"message": "API rate limit exceeded"}
+
+
+def _limit(status=403, **headers):
+    return (status, RATE_BODY, headers)
+
+
+class TestRateLimit:
+    def _pr10_routes(self, first):
+        routes = _routes()
+        routes[f"{API}/pulls/10"] = Replies(first, (200, _pr(10, "2026-09-20T00:00:00Z")))
+        return routes
+
+    def test_a_rate_limited_pr_fetch_waits_until_reset_and_is_mined(self, tmp_path, capsys, caplog, _no_sleep):
+        routes = self._pr10_routes(_limit(**{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(NOW + 30)}))
+        with caplog.at_level(logging.WARNING):
+            args, code, out = _run(tmp_path, capsys, session=FakeSession(routes), pr="10")
+        assert code == 0 and _no_sleep == [32]
+        assert out.startswith("#10: 2 cases")
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "GitHub rate limit reached; waiting 32 s until it resets" in text and "skipped" not in text
+        assert json.loads((Path(args.out) / "mine.json").read_text())["stopped"] is None
+
+    def test_a_403_without_rate_limit_signals_is_an_ordinary_skip(self, tmp_path, capsys, caplog, _no_sleep):
+        routes = self._pr10_routes((403, {"message": "Resource not accessible"}, {"X-RateLimit-Remaining": "4000"}))
+        with caplog.at_level(logging.WARNING):
+            args, code, out = _run(tmp_path, capsys, session=FakeSession(routes), pr="10")
+        assert code == 0 and out.startswith("cases: ") and _no_sleep == []
+        assert any("skipped: cannot read the pull request" in r.getMessage() for r in caplog.records)
+        assert json.loads((Path(args.out) / "mine.json").read_text())["stopped"] is None
+
+    def test_a_429_waits_for_retry_after(self, tmp_path, capsys, _no_sleep):
+        routes = self._pr10_routes(_limit(429, **{"Retry-After": "5"}))
+        _, _, out = _run(tmp_path, capsys, session=FakeSession(routes), pr="10")
+        assert _no_sleep == [5] and out.startswith("#10:")
+
+    def test_an_unknown_wait_stops_the_walk_and_keeps_what_was_mined(self, tmp_path, capsys, caplog, _no_sleep):
+        routes = _routes()
+        routes[f"{API}/pulls/9"] = (403, RATE_BODY)
+        routes[f"{API}/pulls/10"] = _pr(10, "2026-09-20T00:00:00Z")
+        with caplog.at_level(logging.WARNING):
+            args, code, out = _run(tmp_path, capsys, session=FakeSession(routes), pr="10,9,8")
+        assert code == 0 and _no_sleep == []
+        lines = out.splitlines()
+        assert lines[0].startswith("#10:") and "#8:" not in out and lines[-1].startswith("cases: ")
+        meta = json.loads((Path(args.out) / "mine.json").read_text())
+        assert meta["stopped"] == "rate_limit" and [pr["number"] for pr in meta["prs"]] == [10]
+        assert (Path(args.out) / "severity-review.md").exists() and len(_cases(args)) == 2
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "stopped on the GitHub rate limit" in text and "1 PRs mined" in text
+
+    def test_a_wait_over_the_cap_stops_instead_of_sleeping(self, tmp_path, capsys, _no_sleep):
+        routes = self._pr10_routes(_limit(**{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(NOW + 7200)}))
+        args, code, _ = _run(tmp_path, capsys, session=FakeSession(routes), pr="10")
+        assert code == 0 and _no_sleep == []
+        assert json.loads((Path(args.out) / "mine.json").read_text())["stopped"] == "rate_limit"
+
+    def test_the_fourth_consecutive_wait_for_one_request_stops(self, tmp_path, capsys, _no_sleep):
+        routes = _routes()
+        routes[f"{API}/pulls/10"] = _limit(429, **{"Retry-After": "1"})
+        args, code, _ = _run(tmp_path, capsys, session=FakeSession(routes), pr="10")
+        assert code == 0 and _no_sleep == [1, 1, 1]
+        assert json.loads((Path(args.out) / "mine.json").read_text())["stopped"] == "rate_limit"
+
+    def test_a_rate_limit_inside_the_comments_page_walk_is_waited_out(self, tmp_path, capsys, _no_sleep):
+        routes = _routes()
+        routes[f"{API}/pulls/10/comments"] = Replies(
+            _limit(**{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(NOW + 1)}),
+            (200, _routes()[f"{API}/pulls/10/comments"]),
+        )
+        _, _, out = _run(tmp_path, capsys, session=FakeSession(routes))
+        assert _no_sleep == [3] and "#10: 2 cases, 4 labels" in out
+
+    def test_a_walk_stopped_by_the_limit_keeps_the_newest_up_to_prs(self, tmp_path, capsys):
+        routes = _routes()
+        routes[f"{API}/pulls/8/comments"] = _limit()
+        args, code, out = _run(tmp_path, capsys, session=FakeSession(routes), prs=2)
+        assert code == 0 and "#10:" in out and "#9:" in out and "#8:" not in out
+
+    def test_review_comments_below_min_comments_never_requests_the_comments(self, tmp_path, capsys):
+        routes = _routes()
+        full = _pr(10, "2026-09-20T00:00:00Z")
+        full["review_comments"] = 1
+        routes[f"{API}/pulls/10"] = full
+        session = FakeSession(routes)
+        _, code, out = _run(tmp_path, capsys, session=session, pr="10", min_comments=3)
+        assert code == 0 and out.startswith("cases: ")
+        assert f"{API}/pulls/10/comments" not in session.urls
+
+    def test_review_comments_at_or_above_min_comments_still_fetches(self, tmp_path, capsys):
+        routes = _routes()
+        full = _pr(10, "2026-09-20T00:00:00Z")
+        full["review_comments"] = 3
+        routes[f"{API}/pulls/10"] = full
+        session = FakeSession(routes)
+        _, _, out = _run(tmp_path, capsys, session=session, pr="10", min_comments=3)
+        assert f"{API}/pulls/10/comments" in session.urls and out.startswith("#10:")
