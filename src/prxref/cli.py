@@ -4,10 +4,12 @@ Provides these subcommands:
   * ``review --pr-url URL`` — one-shot PR/MR review from a Bitbucket, GitHub,
     GitLab, Gitea/Forgejo, or Azure DevOps URL (Cloud or self-hosted).
   * ``serve [--port N] [--host H] [--config PATH]`` — webhook listener daemon.
-  * ``eval run|score|compare|verdict`` — replay labelled cases, score the
-    findings against the human labels, compare two scored runs, and decide
-    whether candidate runs beat baseline runs beyond their noise
-    (``prxref.evals``).
+    * ``eval run|score|compare|verdict|campaign|dashboard|mine`` — replay
+      labelled cases, score the findings against the human labels, compare
+      two scored runs, decide whether candidate runs beat baseline runs beyond
+      their noise, run a campaign of repeated runs per rules arm, watch its
+      progress, and mine a GitHub repo's merged PRs into a dataset
+      (``prxref.evals``).
   * ``trace render FILE`` — a JSONL run trace to a standalone HTML view.
   * ``prompts export DIR [--force]`` — the packaged prompt templates, written
     to ``DIR`` as the starting point for a ``PRXREF_PROMPTS_DIR`` override.
@@ -545,6 +547,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     ev_score.add_argument(
+        "--precision",
+        action="store_true",
+        help=(
+            "also grade the AI findings no label matched as valid, nit, invalid, "
+            "duplicate or unverifiable, with --judge-model; adds strict and lenient precision"
+        ),
+    )
+    ev_score.add_argument(
         "--out",
         default=eval_out,
         metavar="DIR",
@@ -586,6 +596,122 @@ def _build_parser() -> argparse.ArgumentParser:
         default=eval_out,
         metavar="DIR",
         help=f"directory that holds the runs (default {eval_out})",
+    )
+    ev_verdict.add_argument(
+        "--json", dest="json_path", metavar="PATH",
+        help="also write the verdict as JSON (verdict.json) to PATH",
+    )
+    ev_campaign = ev_sub.add_parser(
+        "campaign",
+        help="run arms x repeats of eval run in parallel, resumably, and score every pass",
+    )
+    ev_campaign.add_argument(
+        "--cases", required=True, metavar="PATH",
+        help="the labelled cases: a cases.json file or a directory of case-*/ directories",
+    )
+    ev_campaign.add_argument(
+        "--arms", required=True, metavar="TOML",
+        help="arms.toml: one [[arm]] table per rules configuration to compare",
+    )
+    ev_campaign.add_argument(
+        "--repeats", type=int, default=3, metavar="N", help="passes per arm (default 3)",
+    )
+    ev_campaign.add_argument(
+        "--out", required=True, metavar="DIR",
+        help="the campaign directory; a non-empty one is refused unless --resume is given",
+    )
+    ev_campaign.add_argument(
+        "--prxref", default=None, metavar="VERSION|PATH",
+        help="review with this prxref version (or local checkout), installed once with uv into DIR/envs/",
+    )
+    ev_campaign.add_argument(
+        "--folds", type=int, default=1, metavar="K",
+        help="folds for arms that mine rules leave-fold-out (default 1; mining needs at least 2)",
+    )
+    ev_campaign.add_argument(
+        "--jobs", type=int, default=1, metavar="J", help="passes run at once (default 1)",
+    )
+    ev_campaign.add_argument(
+        "--case-jobs", type=int, default=1, metavar="C",
+        help="eval run subprocesses at once within one pass, each over a shard of the cases (default 1)",
+    )
+    ev_campaign.add_argument(
+        "--judge-model", default=None, metavar="MODEL",
+        help="model that scores labels without must_match and mines rules; enables precision grading",
+    )
+    ev_campaign.add_argument(
+        "--severity", metavar="SEV",
+        help="also report recall of the human labels of this severity, e.g. error",
+    )
+    ev_campaign.add_argument(
+        "--resume", action="store_true",
+        help="continue the campaign in --out: scored passes are kept, finished units are not re-run",
+    )
+    ev_campaign.add_argument(
+        "--max-attempts", type=int, default=3, metavar="A",
+        help="attempts per pass at units that failed or were rate limited (default 3)",
+    )
+    ev_dash = ev_sub.add_parser(
+        "dashboard",
+        help="show the live progress of a campaign directory as a table or a local web page",
+    )
+    ev_dash.add_argument(
+        "--campaign", required=True, metavar="DIR",
+        help="the campaign output directory (holds progress.json and logs/)",
+    )
+    ev_dash.add_argument(
+        "--host", default="127.0.0.1", metavar="HOST",
+        help="address to bind (default 127.0.0.1; a non-loopback host exposes the log tails)",
+    )
+    ev_dash.add_argument(
+        "--port", type=int, default=8765, metavar="PORT",
+        help="port to listen on (default 8765; 0 picks a free one)",
+    )
+    ev_dash.add_argument(
+        "--once", action="store_true",
+        help="print one plain-text status table and exit instead of serving",
+    )
+    ev_dash.add_argument(
+        "--tail", type=int, default=20, metavar="N",
+        help="log lines shown per pass (default 20)",
+    )
+    ev_mine = ev_sub.add_parser(
+        "mine",
+        help="build an eval dataset from a GitHub repo's merged PRs, with human review comments as labels",
+    )
+    ev_mine.add_argument(
+        "--repo", metavar="OWNER/NAME", help="the GitHub repository to mine (required unless --rehash)",
+    )
+    ev_mine.add_argument(
+        "--out", default=None, metavar="DIR",
+        help="new or empty directory for cases.json, mine.json and severity-review.md (required unless --rehash)",
+    )
+    ev_mine.add_argument(
+        "--host", default="github.com", metavar="HOST",
+        help="GitHub host, a GitHub Enterprise Server host included (default github.com)",
+    )
+    ev_mine.add_argument(
+        "--since", default=None, metavar="YYYY-MM-DD", help="only PRs merged on or after this date",
+    )
+    ev_mine.add_argument(
+        "--prs", type=int, default=50, metavar="N",
+        help="the N most recently merged PRs that qualify (default 50)",
+    )
+    ev_mine.add_argument(
+        "--judge-model", default=None, metavar="MODEL",
+        help="model that drafts each label's severity on the review's LLM backend (default: every label is warning)",
+    )
+    ev_mine.add_argument(
+        "--min-comments", type=int, default=1, metavar="K",
+        help="a PR needs at least K qualifying human review comments (default 1)",
+    )
+    ev_mine.add_argument(
+        "--rehash", default=None, metavar="DIR",
+        help="recompute cases_sha256 in DIR/mine.json after editing cases.json; refuses while a label is unconfirmed",
+    )
+    ev_mine.add_argument(
+        "--allow-unconfirmed", action="store_true",
+        help="with --rehash, accept labels whose severity is still unconfirmed",
     )
 
     tr = sub.add_parser("trace", help="work with a JSONL run trace")
@@ -2166,7 +2292,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    """Route ``eval run|score|compare|verdict`` to ``prxref.evals`` and return its exit code.
+    """Route ``eval run|score|compare|verdict|campaign|dashboard|mine`` to ``prxref.evals`` and return its exit code.
 
     ``prxref.evals`` is imported here rather than at module top, because the
     eval modules must never import the CLI back. For the same reason ``run``
@@ -2182,6 +2308,9 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         "score": evals.eval_score,
         "compare": evals.eval_compare,
         "verdict": evals.eval_verdict,
+        "campaign": evals.eval_campaign,
+        "dashboard": evals.eval_dashboard,
+        "mine": evals.eval_mine,
     }[args.eval_command]
     try:
         return action(args)
@@ -2286,7 +2415,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point dispatching ``review``, ``serve``, ``eval run|score|compare|verdict``,
+    """CLI entry point dispatching ``review``, ``serve``, ``eval <action>``,
     ``trace render``, ``prompts export``, ``config check``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)

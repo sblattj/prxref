@@ -324,13 +324,14 @@ def pipeline(rig, tmp_path, capsys, caplog):
     return p
 
 
-RUN_KEYS = ["version", "label", "cases_path", "created_at", "case_ids", "prompts", "sampling", "review_rules",
-            "scoped_rules", "config"]
+RUN_KEYS = ["version", "prxref_version", "label", "cases_path", "created_at", "case_ids", "prompts", "sampling",
+            "review_rules", "scoped_rules", "config"]
 SCORE_KEYS = ["version", "label", "run", "judge", "failed", "metrics", "cases"]
 JUDGE_KEYS = ["model", "sampling", "prompt_version", "prompt_sha256", "self_judged", "cost_usd", "cost_estimated",
               "llm_calls", "parse_retries", "cached", "errors"]
 METRIC_KEYS = ["case_count", "recall", "recall_by_severity", "recall_by_category", "recall_accepted",
-               "unmatched_ai", "severity_agreement", "chunks_failed", "elapsed_ms", "review_cost", "judge_cost"]
+               "unmatched_ai", "severity_agreement", "chunks_failed", "elapsed_ms", "review_cost", "judge_cost",
+               "precision"]
 CASE_IDS = ["case-001-mcp-protocol-upgrade", "case-002-session-token-logging", "case-003-config-schema-pin",
             "case-pinned", "case-grouped"]
 LIVE_DESCRIPTION = (
@@ -361,6 +362,8 @@ COMPARE_GOLDEN = """\
 | Recall, category `style` | 0.0% (0 of 1) | 100.0% (1 of 1) | +100.0 pp |
 | Recall, accepted labels | 100.0% (1 of 1) | 100.0% (1 of 1) | 0.0 pp |
 | Unmatched AI per PR | 0.00 (0 of 3) | 0.00 (0 of 4) | 0.00 |
+| Strict precision | n/a | n/a | unknown |
+| Lenient precision | n/a | n/a | unknown |
 | Severity agreement | 100.0% (5 of 5) | 100.0% (6 of 6) | 0.0 pp |
 | Chunks failed | 0 | 0 | 0 |
 | Elapsed | 7.5 s | 7.5 s | 0.0 s |

@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+import prxref
 from prxref import cli, config, evals
 from prxref.eval_cases import (
     EvalCase,
@@ -467,10 +468,11 @@ class TestRunJson:
 
         run = _read(tmp_path / "out" / "L" / "run.json")
         assert list(run) == [
-            "version", "label", "cases_path", "created_at", "case_ids", "prompts",
-            "sampling", "review_rules", "scoped_rules", "config",
+            "version", "prxref_version", "label", "cases_path", "created_at", "case_ids",
+            "prompts", "sampling", "review_rules", "scoped_rules", "config",
         ]
         assert run["version"] == evals.RUN_VERSION == 1
+        assert run["prxref_version"] == prxref.__version__
         assert run["label"] == "L"
         assert run["cases_path"] == str(cases)
         assert ISO_Z.fullmatch(run["created_at"])
@@ -834,6 +836,10 @@ class TestThroughTheCli:
                 "description": "file", "as_of": None, "as_of_source": None,
             }
             assert {"chunk0.user.md", "sweep.user.md"} <= {p.name for p in (case_dir / "trace").iterdir()}
+            assert not (case_dir / "trace" / "diff.patch").exists()
+            assert (case_dir / "diff.patch").read_text(encoding="utf-8") == (
+                dataset / case_id / "diff.patch"
+            ).read_text(encoding="utf-8")
             assert _read(case_dir / "case.json")["expected"][0]["must_match"] == "print"
             assert not (case_dir / "error.json").exists()
             prompts = "".join(p.read_text(encoding="utf-8") for p in (case_dir / "trace").glob("*.md"))
