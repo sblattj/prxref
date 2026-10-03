@@ -8,6 +8,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Added
+
+- `prxref eval mine --until YYYY-MM-DD` bounds the merge date from above and
+  reads candidates from the GitHub search API, so an older window can be
+  mined without paging through years of PRs. A query reaches at most 1000
+  results; a wider window logs a warning.
+- `prxref eval mine --reviewers maintainers` counts only comments by an
+  OWNER, MEMBER or COLLABORATOR as labels.
+- `prxref eval mine --pr N[,N...]` mines exactly the listed merged PRs.
+- `mine.json` records `until`, `reviewers` and `pr_numbers`.
+
+### Fixed
+
+- `prxref eval mine` mines PRs whose base branch was later renamed or
+  deleted: the merge base falls back from `base.ref` to the repository's
+  default branch, then to `base.sha`, before the commit is skipped.
+
 ## [0.31.0] — 2026-10-03
 
 ### Added
