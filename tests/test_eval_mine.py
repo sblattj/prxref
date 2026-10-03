@@ -258,8 +258,22 @@ class TestAcceptedByContent:
         assert _accepted_by_content(9, {"patch": "@@ -8,3 +8,3 @@\n ctx\n+\n ctx\n"}, {"patch": ""}) is None
 
     def test_the_window_is_three_new_side_lines(self):
-        got = [_accepted_by_content(n, {"patch": AT_COMMENT}, {"patch": FINAL_CHANGED}) for n in (6, 7, 13, 14)]
+        got = [_accepted_by_content(n, {"patch": AT_COMMENT}, {"patch": FINAL_CHANGED}) for n in (4, 5, 14, 15)]
         assert got == [None, True, True, None]
+
+    def test_a_fix_that_only_inserts_lines_near_the_comment_is_accepted(self):
+        at_comment = "@@ -121,3 +121,8 @@\n a\n b\n c\n+\n+.. module:: x\n+\n+Common\n+======\n"
+        inserted = at_comment + "+\n+.. versionadded:: 3.2\n"
+        assert _accepted_by_content(129, {"patch": at_comment}, {"patch": inserted}) is True
+        assert _accepted_by_content(129, {"patch": at_comment}, {"patch": at_comment}) is False
+
+    def test_an_insertion_far_from_every_anchor_is_not_accepted(self):
+        far = FINAL_KEPT + "@@ -40,2 +41,3 @@\n ctx2\n+unrelated()\n ctx3\n"
+        assert _accepted_by_content(10, {"patch": AT_COMMENT}, {"patch": far}) is False
+
+    def test_anchors_missing_from_the_final_patch_are_undeterminable(self):
+        elsewhere = "@@ -50,2 +50,3 @@\n other\n+different()\n other\n"
+        assert _accepted_by_content(14, {"patch": AT_COMMENT}, {"patch": elsewhere}) is None
 
     def test_a_withheld_patch_on_either_side_is_undeterminable(self):
         assert _accepted_by_content(10, {"patch": AT_COMMENT}, {"filename": "a.py"}) is None
