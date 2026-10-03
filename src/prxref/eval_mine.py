@@ -19,12 +19,13 @@ PR's author. Its replies are appended to its label text. A label is
 ``False`` when the file was not changed afterwards, and ``None`` when that
 cannot be told (an unreachable commit, a withheld patch). When the history
 was rewritten (the commented commit is not an ancestor of the final head, as
-after a force-push), the PR's own change is compared instead: the lines the
-PR added within :data:`ACCEPT_WINDOW` lines of the comment at the commented
-commit, against the added lines of the PR's final diff (``pulls/{n}/files``,
-read at most once per PR and only when needed). One of them gone, or the
-file no longer in the PR, is ``True``; all still there ``False``; no added
-line near the comment, or a withheld patch, ``None``.
+after a force-push), the PR's own change is compared instead: its diff at the
+commented commit against its final diff (``pulls/{n}/files``, read at most
+once per PR and only when needed), anchored on the lines within
+:data:`ACCEPT_WINDOW` lines of the comment. An added anchor gone, a new line
+added near a matched anchor, or the file no longer in the PR is ``True``;
+anchors found with nothing new near them ``False``; no anchor found, or a
+withheld patch, ``None`` (see :func:`_accepted_by_content`).
 Severities are drafted by one single-shot judge call per case with
 ``--judge-model``, else ``warning``. ``--rehash DIR`` recomputes the hash
 after a human has edited ``cases.json``.
@@ -544,9 +545,9 @@ def _rewritten(comparison: Mapping[str, Any] | None, commit: str) -> bool:
     return isinstance(merge_base, str) and merge_base.lower() != commit
 
 
-def _added_lines(patch: str) -> list[tuple[int, str]]:
-    """New-side line number and whitespace-stripped text of each ``+`` line of a unified-diff patch."""
-    added: list[tuple[int, str]] = []
+def _new_side_lines(patch: str) -> list[tuple[int, bool, str]]:
+    """New-side line number, whether added, and whitespace-stripped text of each ``+`` and context line."""
+    lines: list[tuple[int, bool, str]] = []
     new_no = 0
     in_hunk = False
     for raw in patch.splitlines():
@@ -554,14 +555,11 @@ def _added_lines(patch: str) -> list[tuple[int, str]]:
         if hunk:
             new_no, in_hunk = int(hunk.group(3)), True
             continue
-        if not in_hunk or raw.startswith("\\"):
+        if not in_hunk or raw.startswith(("\\", "-")):
             continue
-        if raw.startswith("+"):
-            added.append((new_no, raw[1:].strip()))
-            new_no += 1
-        elif not raw.startswith("-"):
-            new_no += 1
-    return added
+        lines.append((new_no, raw.startswith("+"), raw[1:].strip()))
+        new_no += 1
+    return lines
 
 
 def _file_entry(files: Any, file: str) -> dict | None:
@@ -581,10 +579,14 @@ def _accepted_by_content(line: int, commented: Mapping[str, Any] | None,
     ``commented`` is the file's entry in the PR's diff at the commented
     commit (``None`` when absent) and ``final`` its entry in the PR's final
     diff (``None`` when the PR no longer touches the file, which is ``True``).
-    The non-blank lines the PR added within :data:`ACCEPT_WINDOW` lines of
-    ``line`` (new side) are compared, whitespace-stripped, with the final
-    diff's added lines: one missing is ``True``, all present ``False``. No
-    such line, or a withheld patch on either side, is ``None``.
+    The anchors are the non-blank lines, added or context, the commented
+    diff shows within :data:`ACCEPT_WINDOW` lines of ``line`` (new side),
+    whitespace-stripped. An added anchor missing from the final diff's added
+    lines is ``True``. So is a line the final diff adds within the window of
+    a line matching an anchor when the commented diff shows that text
+    nowhere, a fix that only inserts lines. Otherwise a matched anchor is
+    ``False``; no anchor, none matched, or a withheld patch on either side
+    is ``None``.
     """
     patch = (commented or {}).get("patch")
     if not isinstance(patch, str) or not patch:
@@ -594,11 +596,23 @@ def _accepted_by_content(line: int, commented: Mapping[str, Any] | None,
     final_patch = final.get("patch")
     if not isinstance(final_patch, str) or not final_patch:
         return None
-    near = {text for number, text in _added_lines(patch) if text and abs(number - line) <= ACCEPT_WINDOW}
-    if not near:
+    before = _new_side_lines(patch)
+    after = _new_side_lines(final_patch)
+    anchors = {(added, text) for number, added, text in before if text and abs(number - line) <= ACCEPT_WINDOW}
+    if not anchors:
         return None
-    kept = {text for _, text in _added_lines(final_patch)}
-    return not near <= kept
+    final_added = {text for _, added, text in after if added}
+    if any(added and text not in final_added for added, text in anchors):
+        return True
+    anchor_texts = {text for _, text in anchors}
+    matches = [number for number, _, text in after if text in anchor_texts]
+    if not matches:
+        return None
+    shown = {text for _, _, text in before}
+    for number, added, text in after:
+        if added and text and text not in shown and any(abs(number - m) <= ACCEPT_WINDOW for m in matches):
+            return True
+    return False
 
 
 def _pr_files(forge: github.ForgeImpl, ref: PRRef, number: int) -> list[dict]:

@@ -1462,16 +1462,19 @@ One case is written per commit the qualifying comments were left on:
   fails, or GitHub withheld the patch).
 - When the history was rewritten (the reviewed commit is not an ancestor of
   the PR's final head, as after an amend, squash or force-push), `accepted`
-  compares the PR's own change instead of raw history. The non-blank lines the
-  PR added within 3 lines of the label's line, in its diff at the reviewed
-  commit, are compared with whitespace stripped against the lines added in the
-  PR's final diff (`GET /repos/{owner}/{repo}/pulls/{n}/files`, 100 a page,
-  read at most once per PR and only when some label needs it). It is `true`
-  when one of those lines is gone or the PR no longer touches the file,
-  `false` when all of them are still there, and `null` when no line was added
-  near the comment, a patch is withheld, or the final diff cannot be read (a
-  warning). A comment answered only by adding new lines beside unchanged
-  ones reads as `false`.
+  compares the PR's own change instead of raw history: its diff at the
+  reviewed commit against its final diff
+  (`GET /repos/{owner}/{repo}/pulls/{n}/files`, 100 a page, read at most once
+  per PR and only when some label needs it). The anchors are the non-blank
+  lines, added or context, that the first diff shows within 3 lines of the
+  label's line, compared with whitespace stripped. It is `true` when an added
+  anchor is gone from the final diff's added lines, when the final diff adds
+  a line within 3 lines of a line matching an anchor and that text appears
+  nowhere in the first diff (a fix that only inserts lines), or when the PR no
+  longer touches the file. It is `false` when anchors are found and nothing
+  new was added near them, and `null` when there is no anchor, no anchor is
+  found in the final diff, a patch is withheld, or the final diff cannot be
+  read (a warning).
 - `severity` is one of the human severities with `--judge-model`: one
   single-shot call per case reads all its comments (prompt
   `mine_severity.md`, not overridable) and gives each one severity. A call or
