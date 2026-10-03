@@ -8,6 +8,26 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Fixed
+
+- `prxref eval mine` no longer drops every PR once GitHub's rate limit is hit
+  (#88). A 403 or 429 that carries `X-RateLimit-Remaining: 0`, a
+  `Retry-After` header or a "rate limit" body is waited out (until
+  `X-RateLimit-Reset`, or for `Retry-After`) with a WARNING, and the same
+  request is retried; it is never a per-PR skip. A wait that cannot be told,
+  exceeds 3700 s or recurs 3 times for one request stops the walk: the PRs
+  mined so far are written and `mine.json` records `"stopped": "rate_limit"`.
+  The exit code stays 0.
+
+### Changed
+
+- `prxref eval mine` skips the comments fetch of a PR whose `review_comments`
+  count is below `--min-comments` (#88), which saves a request per PR seen
+  through `--until` and `--pr`.
+- `mine.json` gains the key `stopped` (`null`, or `"rate_limit"`).
+
 ## [0.32.0] — 2026-10-03
 
 ### Added
