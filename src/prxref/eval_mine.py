@@ -17,7 +17,15 @@ PR's author. Its replies are appended to its label text. A label is
 ``accepted`` when the PR's final head changed the file within
 :data:`ACCEPT_WINDOW` lines of the comment after the commented commit,
 ``False`` when the file was not changed afterwards, and ``None`` when that
-cannot be told (an unreachable commit, a rewritten history, a withheld patch).
+cannot be told (an unreachable commit, a withheld patch). When the history
+was rewritten (the commented commit is not an ancestor of the final head, as
+after a force-push), the PR's own change is compared instead: its diff at the
+commented commit against its final diff (``pulls/{n}/files``, read at most
+once per PR and only when needed), anchored on the lines within
+:data:`ACCEPT_WINDOW` lines of the comment. An added anchor gone, a new line
+added near a matched anchor, or the file no longer in the PR is ``True``;
+anchors found with nothing new near them ``False``; no anchor found, or a
+withheld patch, ``None`` (see :func:`_accepted_by_content`).
 Severities are drafted by one single-shot judge call per case with
 ``--judge-model``, else ``warning``. ``--rehash DIR`` recomputes the hash
 after a human has edited ``cases.json``.
@@ -77,6 +85,8 @@ SOURCE_DEFAULT = "default"
 SOURCE_JUDGE_ERROR = "judge_error"
 REVIEW_TEXT_CHARS = 120
 _COMPARE_FILE_CAP = 300
+_PR_FILES_PAGE = 100
+_PR_FILES_CAP = 3000
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAINTAINER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
@@ -527,6 +537,98 @@ def _accepted(line: int, file: str, comparison: Mapping[str, Any] | None, commit
     return False
 
 
+def _rewritten(comparison: Mapping[str, Any] | None, commit: str) -> bool:
+    """Whether ``comparison`` shows ``commit`` is not an ancestor of the final head (a rewritten history)."""
+    if comparison is None:
+        return False
+    merge_base = (comparison.get("merge_base_commit") or {}).get("sha")
+    return isinstance(merge_base, str) and merge_base.lower() != commit
+
+
+def _new_side_lines(patch: str) -> list[tuple[int, bool, str]]:
+    """New-side line number, whether added, and whitespace-stripped text of each ``+`` and context line."""
+    lines: list[tuple[int, bool, str]] = []
+    new_no = 0
+    in_hunk = False
+    for raw in patch.splitlines():
+        hunk = _HUNK_RE.match(raw)
+        if hunk:
+            new_no, in_hunk = int(hunk.group(3)), True
+            continue
+        if not in_hunk or raw.startswith(("\\", "-")):
+            continue
+        lines.append((new_no, raw.startswith("+"), raw[1:].strip()))
+        new_no += 1
+    return lines
+
+
+def _file_entry(files: Any, file: str) -> dict | None:
+    """The entry of ``files`` whose ``filename`` or ``previous_filename`` is ``file``."""
+    if not isinstance(files, list):
+        return None
+    for entry in files:
+        if isinstance(entry, dict) and file in (entry.get("filename"), entry.get("previous_filename")):
+            return entry
+    return None
+
+
+def _accepted_by_content(line: int, commented: Mapping[str, Any] | None,
+                         final: Mapping[str, Any] | None) -> bool | None:
+    """Whether a comment was acted on, read from the PR's own change when its history was rewritten.
+
+    ``commented`` is the file's entry in the PR's diff at the commented
+    commit (``None`` when absent) and ``final`` its entry in the PR's final
+    diff (``None`` when the PR no longer touches the file, which is ``True``).
+    The anchors are the non-blank lines, added or context, the commented
+    diff shows within :data:`ACCEPT_WINDOW` lines of ``line`` (new side),
+    whitespace-stripped. An added anchor missing from the final diff's added
+    lines is ``True``. So is a line the final diff adds within the window of
+    a line matching an anchor when the commented diff shows that text
+    nowhere, a fix that only inserts lines. Otherwise a matched anchor is
+    ``False``; no anchor, none matched, or a withheld patch on either side
+    is ``None``.
+    """
+    patch = (commented or {}).get("patch")
+    if not isinstance(patch, str) or not patch:
+        return None
+    if final is None:
+        return True
+    final_patch = final.get("patch")
+    if not isinstance(final_patch, str) or not final_patch:
+        return None
+    before = _new_side_lines(patch)
+    after = _new_side_lines(final_patch)
+    anchors = {(added, text) for number, added, text in before if text and abs(number - line) <= ACCEPT_WINDOW}
+    if not anchors:
+        return None
+    final_added = {text for _, added, text in after if added}
+    if any(added and text not in final_added for added, text in anchors):
+        return True
+    anchor_texts = {text for _, text in anchors}
+    matches = [number for number, _, text in after if text in anchor_texts]
+    if not matches:
+        return None
+    shown = {text for _, _, text in before}
+    for number, added, text in after:
+        if added and text and text not in shown and any(abs(number - m) <= ACCEPT_WINDOW for m in matches):
+            return True
+    return False
+
+
+def _pr_files(forge: github.ForgeImpl, ref: PRRef, number: int) -> list[dict]:
+    """The PR's final diff, one entry per file, read 100 a page up to GitHub's cap of 3000 files."""
+    url = f"{forge._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{number}/files"
+    files: list[dict] = []
+    for page in range(1, _PR_FILES_CAP // _PR_FILES_PAGE + 1):
+        data = _get(forge, ref, url, params={"per_page": str(_PR_FILES_PAGE), "page": str(page)})
+        if not isinstance(data, list):
+            raise ValueError(f"pull request files returned {type(data).__name__}, not a list")
+        files.extend(item for item in data if isinstance(item, dict))
+        if len(data) < _PR_FILES_PAGE:
+            break
+    return files
+
+
 def _compare(forge: github.ForgeImpl, ref: PRRef, left: str, right: str) -> dict:
     url = f"{forge._api_base(ref)}/repos/{ref.owner}/{ref.repo}/compare/{quote(left, safe='')}...{right}"
     data = _get(forge, ref, url)
@@ -589,6 +691,8 @@ def _build_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label
     mined = _PR(number=int(pr["number"]), merged_at=str(pr["merged_at"]))
     pr_url = str(pr.get("html_url") or f"https://{ref.host}/{ref.owner}/{ref.repo}/pull/{pr['number']}")
     by_commit: dict[str, list[_Label]] = {}
+    final_files: list[dict] | None = None
+    final_read = False
     for label in labels:
         by_commit.setdefault(label.commit, []).append(label)
     for commit, group in by_commit.items():
@@ -614,6 +718,20 @@ def _build_pr(forge: github.ForgeImpl, ref: PRRef, pr: dict, labels: list[_Label
                                ref.owner, ref.repo, pr["number"], commit[:7], exc)
         for label in group:
             label.accepted = _accepted(label.line, label.file, comparison, commit)
+        if _rewritten(comparison, commit):
+            if not final_read:
+                final_read = True
+                try:
+                    final_files = _pr_files(forge, ref, int(pr["number"]))
+                except (requests.RequestException, ValueError) as exc:
+                    logger.warning("%s/%s#%s: cannot read the final files after a rewritten history: %s",
+                                   ref.owner, ref.repo, pr["number"], exc)
+            if final_files is not None:
+                for label in group:
+                    label.accepted = _accepted_by_content(
+                        label.line, _file_entry(comparison_to_base.get("files"), label.file),
+                        _file_entry(final_files, label.file),
+                    )
         mined.cases.append(_Case(
             id=f"pr{pr['number']}-{commit[:7]}", pr_url=pr_url, base_sha=merge_base, head_sha=commit, labels=group,
         ))

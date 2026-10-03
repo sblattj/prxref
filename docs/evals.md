@@ -1459,7 +1459,22 @@ One case is written per commit the qualifying comments were left on:
 - `accepted` is `true` when the PR's final head changed that file within 3
   lines of the label's line after the reviewed commit, `false` when the file
   did not change after it, and `null` when that cannot be told (the comparison
-  fails, the history was rewritten, or GitHub withheld the patch).
+  fails, or GitHub withheld the patch).
+- When the history was rewritten (the reviewed commit is not an ancestor of
+  the PR's final head, as after an amend, squash or force-push), `accepted`
+  compares the PR's own change instead of raw history: its diff at the
+  reviewed commit against its final diff
+  (`GET /repos/{owner}/{repo}/pulls/{n}/files`, 100 a page, read at most once
+  per PR and only when some label needs it). The anchors are the non-blank
+  lines, added or context, that the first diff shows within 3 lines of the
+  label's line, compared with whitespace stripped. It is `true` when an added
+  anchor is gone from the final diff's added lines, when the final diff adds
+  a line within 3 lines of a line matching an anchor and that text appears
+  nowhere in the first diff (a fix that only inserts lines), or when the PR no
+  longer touches the file. It is `false` when anchors are found and nothing
+  new was added near them, and `null` when there is no anchor, no anchor is
+  found in the final diff, a patch is withheld, or the final diff cannot be
+  read (a warning).
 - `severity` is one of the human severities with `--judge-model`: one
   single-shot call per case reads all its comments (prompt
   `mine_severity.md`, not overridable) and gives each one severity. A call or
