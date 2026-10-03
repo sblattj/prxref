@@ -167,7 +167,8 @@ class TestEvalParserShape:
             "--cases", "--label", "--out", "--rules-file", "--scoped-rules", "--prompts-dir", "--resume",
             "--judge-model", "--config", "--no-config", "--baseline", "--candidate", "--severity", "--json",
             "--precision", "--campaign", "--host", "--port", "--once", "--tail",
-            "--repo", "--since", "--prs", "--min-comments", "--rehash", "--allow-unconfirmed",
+            "--repo", "--since", "--until", "--pr", "--reviewers", "--prs", "--min-comments", "--rehash",
+            "--allow-unconfirmed",
             "--arms", "--repeats", "--prxref", "--folds", "--jobs", "--case-jobs", "--max-attempts",
         }
 
