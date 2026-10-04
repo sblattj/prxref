@@ -8,6 +8,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [0.32.3] — 2026-10-04
+
+### Fixed
+
+- A finding whose `file` lost the token `json` (`package.` for
+  `package.json`, `src/librustdoc//mod.rs` for `src/librustdoc/json/mod.rs`)
+  or a leading directory is now repaired to the one diff path that explains
+  it instead of being dropped as a malformed location. Zero or several
+  candidates still drop (#94).
+
 ## [0.32.2] — 2026-10-03
 
 ### Fixed
@@ -3209,7 +3219,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.32.2...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.32.3...HEAD
+[0.32.3]: https://github.com/sblattj/prxref/releases/tag/v0.32.3
 [0.32.2]: https://github.com/sblattj/prxref/releases/tag/v0.32.2
 [0.32.1]: https://github.com/sblattj/prxref/releases/tag/v0.32.1
 [0.32.0]: https://github.com/sblattj/prxref/releases/tag/v0.32.0
