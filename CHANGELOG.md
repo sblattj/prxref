@@ -8,6 +8,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Fixed
+
+- A finding whose `file` lost the token `json` (`package.` for
+  `package.json`, `src/librustdoc//mod.rs` for `src/librustdoc/json/mod.rs`)
+  or a leading directory is now repaired to the one diff path that explains
+  it instead of being dropped as a malformed location. Zero or several
+  candidates still drop (#94).
+
 ## [0.32.2] — 2026-10-03
 
 ### Fixed
