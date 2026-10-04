@@ -90,6 +90,32 @@ class TestApplyLocationValidation:
         result = apply_location_validation([_f(file="src/ghost.py")], ["src/app.py"])
         assert result[0].drop_reason == "malformed location: 'src/ghost.py'"
 
+    @pytest.mark.parametrize("mangled, full", [
+        ("packages/react-devtools/package.", "packages/react-devtools/package.json"),
+        ("src/librustdoc//mod.rs", "src/librustdoc/json/mod.rs"),
+        ("src/test/rustdoc-/compare.py", "src/test/rustdoc-json/compare.py"),
+        ("src/server/tsconfig.", "src/server/tsconfig.json"),
+        ("react-reconciler/src/ReactFiberCommitWork.js",
+         "packages/react-reconciler/src/ReactFiberCommitWork.js"),
+    ])
+    def test_a_mangled_path_is_repaired_to_the_one_diff_path(self, mangled, full):
+        result = apply_location_validation(
+            [_f(file=mangled)], ["src/app.py", full],
+        )
+        assert result[0].file == full
+        assert result[0].drop_reason is None
+
+    def test_an_ambiguous_repair_still_drops(self):
+        result = apply_location_validation(
+            [_f(file="package.")], ["a/package.json", "b/package.json"],
+        )
+        assert result[0].file == "package."
+        assert result[0].drop_reason == "malformed location: 'package.'"
+
+    def test_a_bare_word_never_matches_a_suffix(self):
+        result = apply_location_validation([_f(file="x")], ["src/x"])
+        assert result[0].drop_reason == "malformed location: 'x'"
+
     def test_already_dropped_findings_keep_their_reason(self):
         finding = _f(file="src/ghost.py", drop_reason="confidence 0.10 below floor 0.60")
         result = apply_location_validation([finding], ["src/app.py"])

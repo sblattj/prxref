@@ -1806,6 +1806,18 @@ class TestMalformedLocationsAreDropped:
         assert "- 1 × malformed location: 'package.'" in rendered
         assert "Bad location" in rendered
 
+    def test_a_path_that_lost_json_is_repaired_end_to_end(self):
+        forge = FakeForge(diff=_added_file_diff("package.json", 20))
+        res = orchestrate_review(
+            forge, REF,
+            FakeLLM(findings_by_path={"package.json": [
+                {"file": "package.", "line": 3, "severity": "warning",
+                 "confidence": 0.9, "title": "Mangled", "body": "data"},
+            ]}),
+        )
+        assert [f.file for f in res["findings_active"]] == ["package.json"]
+        assert res["findings_dropped"] == []
+
     def test_an_empty_file_field_is_dropped_too(self):
         forge = FakeForge(diff=_added_file_diff("src/app.py", 20))
         res = orchestrate_review(

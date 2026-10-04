@@ -44,7 +44,9 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
 4. ``apply_location_validation``: drop findings whose ``file`` names no
    path of the parsed diff — an empty, non-path, or invented location is
    retained with ``drop_reason`` for the audit instead of rendering a
-   bullet anchored to nothing.
+   bullet anchored to nothing. A path that lost a ``json`` token or a
+   leading directory is first repaired when exactly one diff path
+   explains it (#94).
 5. ``apply_manifest_claim_check``: for findings on a manifest or
    npm-family lockfile (``package.json``, ``bun.lock``, ...), drop a
    claim whose named dependency is not the key on the anchored line
@@ -344,6 +346,13 @@ def apply_location_validation(
     retained with ``drop_reason="malformed location: '<file>'"`` for the
     dropped-findings audit. A file that IS in the diff is never dropped,
     and findings already carrying a ``drop_reason`` keep it.
+
+    Before dropping, a path some models mangle is repaired when exactly
+    one diff path explains it (#94): the diff path with one ``json``
+    occurrence deleted equals ``file`` (``package.`` for
+    ``package.json``), or the diff path ends with ``"/" + file`` (a lost
+    leading directory; ``file`` must hold a ``/`` or ``.`` and not start
+    with ``/``). Zero or several candidates drop as above.
     """
     known = set(diff_paths)
     result: list[Finding] = []
@@ -351,8 +360,31 @@ def apply_location_validation(
         if f.drop_reason is not None or f.file in known:
             result.append(f)
             continue
+        candidates = _repair_candidates(f.file, known)
+        if len(candidates) == 1:
+            result.append(replace(f, file=candidates[0]))
+            continue
         result.append(replace(f, drop_reason=f"malformed location: {f.file!r}"))
     return result
+
+
+def _repair_candidates(file: str, diff_paths: Iterable[str]) -> list[str]:
+    """Diff paths that a mangled ``file`` could have been, in sorted order."""
+    if not file:
+        return []
+    suffix_ok = not file.startswith("/") and ("/" in file or "." in file)
+    found: list[str] = []
+    for p in sorted(set(diff_paths)):
+        if suffix_ok and p.endswith("/" + file):
+            found.append(p)
+            continue
+        start = p.find("json")
+        while start != -1:
+            if p[:start] + p[start + 4:] == file:
+                found.append(p)
+                break
+            start = p.find("json", start + 1)
+    return found
 
 
 # Manifests and npm-family lockfiles whose diff lines are dependency
