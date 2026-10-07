@@ -33,8 +33,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install prxref
-        # Install published package from PyPI, or install directly from GitHub if not yet published:
-        # pip install git+https://github.com/sblattj/prxref.git
+        # Installs the published package from PyPI. Pin it with `prxref==X.Y.Z`, or install
+        # unreleased changes with `pip install git+https://github.com/sblattj/prxref.git`.
+        # The composite action `uses: sblattj/prxref@v0.34.0` does the same in one step.
         run: pip install --no-cache-dir prxref
 
       - name: Run prxref review
