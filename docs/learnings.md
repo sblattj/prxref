@@ -60,8 +60,8 @@ order, that passes all three checks:
    entry with a rule never matches a finding that has none.
 3. **Claim:** the finding's title and body share content tokens with the
    `claim`. The pass uses the settled-thread gate's tokenizer and its threshold
-   of 4 shared tokens. A claim with fewer than 4 tokens must appear in the
-   finding in full.
+   of 4 shared tokens. For a claim with fewer than 4 tokens, every one of its
+   tokens must be shared.
 
 The pass only ever drops findings. It never adds a finding, never brings a
 dropped finding back, and never changes an earlier drop reason.
