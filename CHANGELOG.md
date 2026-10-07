@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-10-07
+
 ### Added
 
 - `PRXREF_REVIEW_DEPTH` (`review_depth` in `.prxref.toml`, `--review-depth`
@@ -3231,7 +3233,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.32.3...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/sblattj/prxref/releases/tag/v0.33.0
 [0.32.3]: https://github.com/sblattj/prxref/releases/tag/v0.32.3
 [0.32.2]: https://github.com/sblattj/prxref/releases/tag/v0.32.2
 [0.32.1]: https://github.com/sblattj/prxref/releases/tag/v0.32.1
