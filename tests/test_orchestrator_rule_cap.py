@@ -627,7 +627,7 @@ class TestOffPathMatchesBase:
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-            "review_depth", "failed_chunks", *CHUNK_KEYS,
+            "review_depth", "learnings", "failed_chunks", *CHUNK_KEYS,
         }
         assert res["rule_counts"] is None
         assert res["rule_scope_cleared"] is None  # no section scope: #75's check never ran
@@ -639,7 +639,7 @@ class TestOffPathMatchesBase:
                            "repo_context", "parse_retries", "context_followup", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
                            "metadata_rules", "config_file", "review_depth",
-                           "sampling"]
+                           "learnings", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

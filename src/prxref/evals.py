@@ -228,7 +228,9 @@ def eval_run(
             "prompts_dir": "--prompts-dir",
         },
     )
-    load_path_inputs(cfg, layers, config_file=config_file, ticket=False, evidence=False)
+    load_path_inputs(
+        cfg, layers, config_file=config_file, ticket=False, evidence=False, learnings=False,
+    )
     created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     run_dir = Path(args.out) / args.label
     if run_dir.exists() and not args.resume:

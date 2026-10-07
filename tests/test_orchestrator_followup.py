@@ -508,7 +508,7 @@ class TestTheCli:
         assert keys[keys.index("parse_retries") + 1:] == [
             "context_followup", "suggestions", "incremental", "ci_wiring", "evidence",
             "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
-            "sampling", "replay",
+            "learnings", "sampling", "replay",
         ]
         assert cli._build_json_result({"context_followup": record})["context_followup"] == record
 

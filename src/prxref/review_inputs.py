@@ -3,7 +3,8 @@
 ``review``, ``eval run`` and ``config check`` all open the same inputs the
 same way, through :func:`load_path_inputs`: the team rules file, the
 path-scoped rules, the ticket-context file, the prompt-template
-directory, the execution-evidence files and the PR-metadata rules file.
+directory, the execution-evidence files, the PR-metadata rules file and
+the team learnings file.
 An unusable one is a
 :class:`~prxref.llm.ConfigError`, so every command that opens them exits 2
 with the same ``configuration error: ...`` line, before any forge or LLM
@@ -29,6 +30,7 @@ from typing import Any
 
 from . import evidence as evidence_mod
 from .config import _ENV_PREFIX, _display_path
+from .learnings import LEARNINGS_FILE_MAX_CHARS, load_learnings
 from .llm import ConfigError
 from .metadata_rules import RULES_FILE_MAX_CHARS, load_metadata_rules
 from .prompt_templates import load_prompt_templates
@@ -48,7 +50,7 @@ PATH_INPUT_FLAGS: Mapping[str, str] = {
 
 @dataclass(frozen=True)
 class PathLoaders:
-    """The six loaders :func:`load_path_inputs` calls.
+    """The seven loaders :func:`load_path_inputs` calls.
 
     The defaults are the real loaders. The CLI passes the names it imported,
     looked up at call time, so a caller that replaces one on :mod:`prxref.cli`
@@ -61,6 +63,7 @@ class PathLoaders:
     prompt_templates: Callable[..., Any] = load_prompt_templates
     evidence: Callable[..., Any] = evidence_mod.load_evidence
     metadata: Callable[..., Any] = load_metadata_rules
+    learnings: Callable[..., Any] = load_learnings
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,7 @@ class PathInputs:
     prompts: Any
     evidence: Any
     metadata: Any = None
+    learnings: Any = None
 
 
 def path_input_source(key: str, layers: Mapping[str, str], *, config_file: Path | None) -> str:
@@ -144,6 +148,7 @@ def load_path_inputs(
     config_file: Path | None,
     ticket: bool = True,
     evidence: bool = True,
+    learnings: bool = True,
     loaders: PathLoaders | None = None,
 ) -> PathInputs:
     """Open the rules files, the ticket file and the prompts directory ``cfg`` names.
@@ -151,12 +156,14 @@ def load_path_inputs(
     ``cfg`` and ``layers`` are what
     :func:`prxref.config.load_config_with_sources` returned for
     ``config_file``. The inputs are loaded in order (rules, scoped rules,
-    ticket, prompts, evidence, metadata rules file), and the scoped rules are checked against the
+    ticket, prompts, evidence, metadata rules file, learnings file), and the scoped rules are checked against the
     always-on file, so one team word mapped to two tiers across them is a
     ``ConfigError`` too. Each failure names :func:`path_input_source`.
     ``ticket=False`` skips the ticket file (``eval run`` names one per
     case) and ``evidence=False`` skips the evidence files (the environment
-    cannot leak evidence into a case), each leaving that field ``None``.
+    cannot leak evidence into a case), and ``learnings=False`` skips the
+    learnings file (an eval case never inherits the environment's), each
+    leaving that field ``None``.
     """
     use = loaders or PathLoaders()
 
@@ -190,7 +197,13 @@ def load_path_inputs(
         use.metadata, cfg["metadata_rules"],
         max_chars=RULES_FILE_MAX_CHARS, source=source("metadata_rules"),
     )
+    loaded_learnings = None
+    if learnings:
+        loaded_learnings = load_text_input(
+            use.learnings, cfg["learnings_file"],
+            max_chars=LEARNINGS_FILE_MAX_CHARS, source=source("learnings_file"),
+        )
     return PathInputs(
         rules=rules, scoped=scoped, ticket=loaded_ticket, prompts=prompts,
-        evidence=loaded_evidence, metadata=metadata,
+        evidence=loaded_evidence, metadata=metadata, learnings=loaded_learnings,
     )

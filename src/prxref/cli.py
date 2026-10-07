@@ -16,6 +16,10 @@ Provides these subcommands:
   * ``config check [--config PATH | --no-config] [--format text|json]`` —
     validate the repository config file and the environment, and print every
     setting with the layer that supplied it (credentials only as set/unset).
+  * ``learnings harvest --pr-url URL [--out FILE]`` — candidate
+    ``PRXREF_LEARNINGS_FILE`` entries, one per prxref comment a reviewer
+    closed as won't fix, printed as TOML for a human to edit and commit
+    (prxref never writes them into the repository itself).
 
 ``review``, ``eval run`` and ``config check`` read a repository config file
 (#38): ``--config PATH``, else ``PRXREF_CONFIG_FILE``, else ``.prxref.toml``
@@ -769,6 +773,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="overwrite templates already in DIR (without it, an existing one is refused and nothing is written)",
     )
 
+    lr = sub.add_parser("learnings", help="work with the team learnings file (PRXREF_LEARNINGS_FILE)")
+    lr_sub = lr.add_subparsers(dest="learnings_command")
+    lr_harvest = lr_sub.add_parser(
+        "harvest",
+        help=(
+            "print candidate learnings, as TOML, for each prxref comment on the PR "
+            "that a reviewer closed as won't fix"
+        ),
+    )
+    lr_harvest.add_argument("--pr-url", required=True, help="the pull/merge request to read threads from")
+    lr_harvest.add_argument(
+        "--out", help="write the TOML to FILE instead of stdout (an existing FILE is replaced)",
+    )
+
     cf = sub.add_parser(
         "config", help="check the repository config file (.prxref.toml) and the settings in force",
     )
@@ -1189,10 +1207,11 @@ def _build_json_result(result: Any) -> dict:
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
-    ``config_file``, ``review_depth``, then ``sampling`` and ``replay`` when
-    present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH`` value the run
-    used (``"standard"`` or ``"thorough"``), ``null`` only when the result
-    carries none.
+    ``config_file``, ``review_depth``, ``learnings``, then ``sampling`` and
+    ``replay`` when present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH``
+    value the run used (``"standard"`` or ``"thorough"``), ``null`` only
+    when the result carries none. ``learnings`` is the learnings-file record
+    (#33), ``null`` when no ``PRXREF_LEARNINGS_FILE`` was loaded.
     ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
     ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
@@ -1299,6 +1318,7 @@ def _build_json_result(result: Any) -> dict:
         "metadata_rules": result.get("metadata_rules"),
         "config_file": result.get("config_file"),
         "review_depth": result.get("review_depth"),
+        "learnings": result.get("learnings"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1990,6 +2010,7 @@ def _run_review(
         evidence=evidence,
         evidence_max_chars=cfg["evidence_max_chars"],
         verdict_store=cfg["verdict_store"],
+        learnings=inputs.learnings,
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
@@ -2396,6 +2417,42 @@ def _cmd_prompts_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_learnings_harvest(args: argparse.Namespace) -> int:
+    """Print candidate learnings for the won't-fix prxref threads of ``--pr-url`` (#33).
+
+    Reads the PR's existing threads through the forge's ``list_threads``
+    and keeps each one :func:`prxref.learnings.harvest_candidates` takes as
+    rooted in a prxref comment and closed as won't fix. The TOML goes to
+    stdout, or to ``--out``; prxref never writes it into the repository.
+    An unrecognised URL or an unwritable ``--out`` is a configuration error
+    (exit 2); a forge failure prints ``error: ...`` and exits 1.
+    """
+    from prxref.learnings import harvest_candidates, render_toml
+
+    ref = detect_forge(args.pr_url)
+    if ref is None:
+        print(f"configuration error: --pr-url: unrecognised PR URL {args.pr_url!r}", file=sys.stderr)
+        return 2
+    try:
+        threads = make_forge(ref).list_threads(ref)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - a forge failure is reported, not raised
+        print(f"error: cannot read threads of {args.pr_url}: {exc}", file=sys.stderr)
+        return 1
+    text = render_toml(harvest_candidates(threads, args.pr_url), args.pr_url)
+    if args.out:
+        try:
+            Path(args.out).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"configuration error: --out: cannot write {args.out!r}: {exc}", file=sys.stderr)
+            return 2
+        return 0
+    sys.stdout.write(text)
+    return 0
+
+
 def _config_value_text(value: Any) -> str:
     """One ``config check`` text value: JSON for a list or dict, ``str`` otherwise."""
     if isinstance(value, (list, dict)):
@@ -2454,7 +2511,8 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point dispatching ``review``, ``serve``, ``eval <action>``,
-    ``trace render``, ``prompts export``, ``config check``, or ``--version``."""
+    ``trace render``, ``prompts export``, ``config check``,
+    ``learnings harvest``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -2485,6 +2543,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prompts":
         if args.prompts_command == "export":
             return _cmd_prompts_export(args)
+        parser.print_help(sys.stderr)
+        return 2
+    if args.command == "learnings":
+        if args.learnings_command == "harvest":
+            return _cmd_learnings_harvest(args)
         parser.print_help(sys.stderr)
         return 2
     if args.command == "config":
