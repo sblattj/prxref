@@ -574,6 +574,39 @@ model finding, and leaves its confidence untouched; the finding itself stays
 active and the gate judges it as it would any other, and the only trace is
 the field, in `--format json` after `locations`.
 
+## Review depth
+
+`PRXREF_REVIEW_DEPTH` (or `--review-depth`, or `review_depth` in
+`.prxref.toml`) picks the chunk worker's system prompt. `standard`, the
+default, sends the packaged `worker.md` unchanged. `thorough` sends a variant
+derived from it at load time: it keeps the "prefer zero findings" bar for
+`error` and `warning` only, asks the worker to also report the minor points a
+maintainer would raise (naming, simpler constructs, consistency with the
+surrounding code, missing tests or docs, design questions; at most three per
+chunk) as `outofscope` findings, adds a `## Reviewer suggestions` section
+(`src/prxref/prompts/reviewer_suggestions.md`), and drops the "no style-guide
+nits" clause. The user half of the prompt, the systemic sweep, the summary and
+every quality pass are the same at both depths.
+
+The trade-off, measured on a 233-PR benchmark with 600 labelled reviewer
+comments and `glm-5.3` as the worker model:
+
+| | `standard` | `thorough` |
+|---|---|---|
+| Recall (labelled comments matched) | 6.1% | 15.2% |
+| Strict precision | 71% | 46% |
+| Findings posted | 1× | about 3× |
+
+Most of the extra findings that miss a label are nits: real points, but minor
+ones. Use `thorough` when a team wants the bot to raise what a careful human
+reviewer would, and accepts more comments for it. Keep `standard` when the
+bot's comments must stay few and serious. `PRXREF_MAX_OUTOFSCOPE_FINDINGS`
+caps the minor findings if `thorough` is too noisy.
+
+A custom `worker.md` from `PRXREF_PROMPTS_DIR` always wins: at `thorough` it
+is sent as-is, and prxref logs one warning naming `PRXREF_REVIEW_DEPTH`. The
+run record and `--format json` carry `review_depth`, the configured value.
+
 ## What is and is not tunable
 
 - `PRXREF_CONFIDENCE_FLOOR` and `PRXREF_MAX_ERROR_FINDINGS` move

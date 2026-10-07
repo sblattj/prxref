@@ -60,6 +60,9 @@ max_inline_comments = 10
 post_verdict = true
 group_findings = true
 suggestions = "on"
+# standard | thorough: thorough raises ~2.5x the recall at lower precision
+# (docs/quality.md#review-depth).
+# review_depth = "thorough"
 # Finding glyphs and the bullet separator (#59). Unset keeps the defaults.
 # severity_markers = "error=🔴,warning=🟡"
 # summary_bullet_separator = ": "
