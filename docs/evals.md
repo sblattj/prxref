@@ -364,10 +364,11 @@ prxref-eval/                        --out
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
 | `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
-| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads`, `routing_probe`, `ci_wiring` |
+| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads`, `routing_probe`, `ci_wiring`, `review_depth` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
-only under `prompts.prompt_templates`. `prompt_templates`, `sampling`,
+only under `prompts.prompt_templates`, and a `PRXREF_REVIEW_DEPTH=thorough`
+run only under `config.review_depth`. `prompt_templates`, `sampling`,
 `review_rules` and `scoped_rules` are copied from the first case, in dataset
 order, whose record's verdict is not `Error`. They are `null` when there is
 none, and `review_rules`, `scoped_rules` and `prompt_templates` are `null`
@@ -377,7 +378,7 @@ when their input is off.
 always read `off`, `off` and `[]`: every case is reviewed with those features
 pinned off, and `config` records the values that ran, not the environment's.
 
-**No credential is ever written.** `config` is an allowlist of the twenty-five
+**No credential is ever written.** `config` is an allowlist of the twenty-six
 settings above, and a record carries no credential. The traces do hold the
 prompts, and the prompts hold the diff, so treat a run directory like the
 code it reviewed.

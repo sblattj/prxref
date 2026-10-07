@@ -8,6 +8,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Issue numbers in entries before 0.14.0 refer to the project's previous issue
 tracker.
 
+## [Unreleased]
+
+### Added
+
+- `PRXREF_REVIEW_DEPTH` (`review_depth` in `.prxref.toml`, `--review-depth`
+  on the CLI): `standard` (the default, prompts unchanged) or `thorough`, an
+  opt-in worker prompt that also asks for the minor points a maintainer would
+  raise. On a 233-PR, 600-label benchmark with `glm-5.3` it raised recall from
+  6.1% to 15.2% and cut strict precision from 71% to 46%, mostly with nits,
+  posting about 3x the findings. A custom `worker.md` wins and logs a warning.
+  The run record and `--format json` carry `review_depth`.
+
 ## [0.32.3] — 2026-10-04
 
 ### Fixed

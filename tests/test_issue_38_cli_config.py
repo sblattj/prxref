@@ -222,7 +222,7 @@ class TestNoFileInvariant:
             '"incremental": null, "degraded": null}',
             '"incremental": null, "ci_wiring": null, "evidence": null, '
             '"stable_ids": null, "degraded": null, "metadata_rules": null, '
-            '"config_file": null}',
+            '"config_file": null, "review_depth": null}',
         )
         assert capsys.readouterr().out == expected
 

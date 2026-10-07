@@ -279,7 +279,8 @@ class TestJsonKey:
         assert keys.index("repo_context") == keys.index("rule_scope_cleared") + 1
         assert keys[keys.index("repo_context") + 1:] == [
             "parse_retries", "context_followup", "suggestions", "incremental", "ci_wiring",
-            "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "sampling", "replay",
+            "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
+            "sampling", "replay",
         ]
 
     @pytest.mark.parametrize("result", [{}, None, {"verdict": "Approved"}, {"repo_context": None}])
@@ -403,9 +404,9 @@ class TestEvalWiring:
         assert stub_llm.calls == 0
 
     def test_run_config_keys_end_with_the_six_settings_then_the_read_caps(self):
-        assert evals.RUN_CONFIG_KEYS[-10:-2] == SIX + READ_CAPS
-        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 10
-        assert evals.RUN_CONFIG_KEYS[-2:] == ("routing_probe", "ci_wiring")
+        assert evals.RUN_CONFIG_KEYS[-11:-3] == SIX + READ_CAPS
+        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 11
+        assert evals.RUN_CONFIG_KEYS[-3:] == ("routing_probe", "ci_wiring", "review_depth")
 
 
 class TestFixtureEvalEndToEnd:
@@ -432,7 +433,7 @@ class TestFixtureEvalEndToEnd:
         assert [entry for entry in entries if entry["kind"] == "contract"] != []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        assert list(run["config"])[-10:-2] == list(SIX + READ_CAPS)
+        assert list(run["config"])[-11:-3] == list(SIX + READ_CAPS)
         assert run["config"]["repo_context"] == "repo"
         assert run["config"]["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
         # The eval harness pins standards discovery off (OD2), whatever the default.

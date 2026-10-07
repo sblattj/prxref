@@ -333,6 +333,19 @@ LLM / pipeline:
                                 failure is a configuration error.
                                 ``--prompts-dir DIR`` wins. Unset (the
                                 default) = the packaged templates
+  PRXREF_REVIEW_DEPTH           Review depth: "standard" (the default)
+                                renders the packaged worker.md byte for
+                                byte. "thorough" adds a "Reviewer
+                                suggestions" section asking each chunk
+                                worker for maintainer-style outofscope
+                                suggestions (naming, simpler constructs,
+                                missing tests or docs, design questions):
+                                higher recall, lower precision, about three
+                                times the findings. A custom worker.md from
+                                PRXREF_PROMPTS_DIR wins and is used as-is,
+                                with one WARNING per run. Matched exactly;
+                                any other value is a configuration error.
+                                ``--review-depth`` wins
   PRXREF_TICKET_CONTEXT_FILE    Path to a text file holding the ticket this
                                 PR implements; each finding is then marked
                                 in, out of, or of unknown ticket scope. An
@@ -848,6 +861,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
     "suggestions": "off",
+    "review_depth": "standard",
     "routing_probe": "on",
     "incremental": "off",
     "fallback": "auto",
@@ -979,6 +993,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "context_followup": frozenset({"off", "on"}),
     "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
+    "review_depth": frozenset({"standard", "thorough"}),
     "routing_probe": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "fallback": frozenset({"auto", "off"}),
@@ -1136,7 +1151,7 @@ FILE_KEYS = frozenset({
     "size_warn_lines", "size_warn_files", "size_ignore_globs",
     "spec_sources", "spec_max_chars", "spec_digest_tokens",
     "review_rules", "review_rules_max_chars",
-    "scoped_rules", "scoped_rules_max_chars", "prompts_dir",
+    "scoped_rules", "scoped_rules_max_chars", "prompts_dir", "review_depth",
     "ticket_context_file", "ticket_context_max_chars",
     "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",

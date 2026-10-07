@@ -281,6 +281,7 @@ class TestHappyPath:
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "review_depth",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -755,6 +756,7 @@ class TestMaxTokensThreading:
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "review_depth",
         }
 
 
@@ -1072,6 +1074,7 @@ class TestQualityGateKnobsAreThreaded:
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "review_depth",
         }
 
 
@@ -1084,6 +1087,7 @@ RESULT_KEYS = {
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
     "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+    "review_depth",
 }
 
 

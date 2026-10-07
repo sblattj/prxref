@@ -132,6 +132,7 @@ its `PRXREF_` name.
 | `scoped_rules_max_chars` | integer | Characters of scoped-rules text one review unit receives ([more](env-vars.md#llm--pipeline)). |
 | `max_findings_per_rule` | integer | Most findings one team rule may produce; `0` turns the cap off ([more](env-vars.md#llm--pipeline)). |
 | `prompts_dir` | string | Directory of replacement prompt templates ([more](env-vars.md#llm--pipeline)). |
+| `review_depth` | string | `thorough` adds maintainer-style reviewer suggestions to the worker prompt: more findings, lower precision ([more](env-vars.md#llm--pipeline)). |
 | `ticket_context_file` | string | File holding the ticket this PR implements ([more](env-vars.md#llm--pipeline)). |
 | `ticket_context_max_chars` | integer | Characters of ticket text kept in the prompt ([more](env-vars.md#llm--pipeline)). |
 | `evidence_files` | array of strings | Execution evidence files to review against ([more](env-vars.md#llm--pipeline)). |
