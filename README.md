@@ -31,7 +31,7 @@ jobs:
 
 3. Open a pull request. prxref posts inline comments and a summary, and exits 0 on every review error, so it never blocks a merge.
 
-**Fork safety.** `pull_request_target` hands the job secrets and a write token even for a fork's pull request. That is safe only because prxref reads the diff over the GitHub API from the PR URL and the job never checks out or runs the pull request's code, so do not add an `actions/checkout` of the PR head to this job. The action honours that: it checks out nothing. Pin a release with `version: "0.33.0"` for reproducible reviews; the other inputs are in [action.yml](action.yml). On GitLab, Bitbucket, Gitea, Azure DevOps, or your own server, see [Quickstart](#quickstart) and [docs/forges.md](docs/forges.md).
+**Fork safety.** `pull_request_target` hands the job secrets and a write token even for a fork's pull request. That is safe only because prxref reads the diff over the GitHub API from the PR URL and the job never checks out or runs the pull request's code, so do not add an `actions/checkout` of the PR head to this job. The action honours that: it checks out nothing. Pin the prxref release with `version: "0.34.0"` (keep it in step with the action tag) for reproducible reviews; the other inputs are in [action.yml](action.yml). On GitLab, Bitbucket, Gitea, Azure DevOps, or your own server, see [Quickstart](#quickstart) and [docs/forges.md](docs/forges.md).
 
 ```
                   ┌──────────────────────┐
