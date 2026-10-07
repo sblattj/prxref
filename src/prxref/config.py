@@ -588,6 +588,23 @@ LLM / pipeline:
                                 decision. A missing file reads as empty;
                                 an unreadable or malformed one is a
                                 configuration error (exit 2)
+  PRXREF_LEARNINGS_FILE         Team learnings (#33): path to the TOML
+                                learnings file ([[learning]] entries:
+                                id, paths globs, claim, optional rule,
+                                reason, source, added, expires). An
+                                active finding whose path the paths
+                                select, whose rule matches (any, when
+                                the entry names none) and whose text
+                                shares the claim's tokens is dropped
+                                with drop_reason "suppressed by
+                                learning: <id>"; an entry past its
+                                expires date suppresses nothing. The
+                                run record's "learnings" names what was
+                                suppressed. Unset (the default) = off.
+                                A missing, unreadable or malformed file
+                                is a configuration error (exit 2). The
+                                review never writes it; "prxref
+                                learnings harvest" proposes entries
   PRXREF_RULE_SCOPING           Rule scope check (#75): "on" (the default)
                                 leaves a scoped rules section out of every
                                 chunk whose files it does not cover, and
@@ -929,6 +946,9 @@ _DEFAULTS: dict[str, object] = {
     "stable_ids": True,
     "rule_scoping": "on",
     "verdict_store": None,
+    # Team learnings (#33): path to the glob-scoped TOML learnings file the
+    # suppression pass reads; None = off, and nothing about the run changes.
+    "learnings_file": None,
     "branch_patterns": [],
     "commit_reference": "",
     "area_globs": [],
@@ -1162,7 +1182,7 @@ FILE_KEYS = frozenset({
     "metadata_rules", "branch_patterns", "commit_reference",
     "area_globs", "max_areas_per_pr",
     "ci_wiring", "ci_wiring_globs",
-    "stable_ids", "verdict_store", "rule_scoping",
+    "stable_ids", "verdict_store", "rule_scoping", "learnings_file",
 })
 
 _ENV_ONLY_REASONS: dict[str, str] = {
@@ -1207,6 +1227,7 @@ ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 _FILE_PATH_KEYS = frozenset({
     "review_rules", "scoped_rules", "prompts_dir", "ticket_context_file",
     "spec_sources", "evidence_files", "verdict_store", "metadata_rules",
+    "learnings_file",
 })
 
 
