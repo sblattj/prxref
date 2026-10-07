@@ -82,6 +82,7 @@ RUN_CONFIG_KEYS = (
     "repo_context_max_chunk_reads",
     "routing_probe",
     "ci_wiring",
+    "review_depth",
 )
 EVAL_PINS: Mapping[str, Any] = {
     "ci_wiring": "off",

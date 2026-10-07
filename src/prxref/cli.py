@@ -48,6 +48,12 @@ network call, so a bad one exits 2 naming its source; the webhook daemon
 reads it from its own environment on every webhook. The run record's
 ``prompt_templates`` stamps each override's sha256.
 
+``--review-depth standard|thorough`` (``PRXREF_REVIEW_DEPTH``) picks the
+chunk worker prompt: ``standard`` (the default) is the packaged
+``worker.md``; ``thorough`` adds maintainer-style reviewer suggestions,
+trading precision for recall. A custom ``worker.md`` from ``--prompts-dir``
+wins. The run record's ``review_depth`` names the depth used.
+
 The replay flags review a pinned, reproducible input for evaluation:
 ``--base-sha`` / ``--head-sha`` a commit range in the ``--pr-url``
 repository, ``--diff-file PATH`` a diff on disk (``--pr-url`` is then
@@ -309,6 +315,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "export DIR'); overrides PRXREF_PROMPTS_DIR, and '' turns it off "
             "for this run; read it from a trusted checkout, never from the PR "
             "under review"
+        ),
+    )
+    rev.add_argument(
+        "--review-depth",
+        choices=("standard", "thorough"),
+        default=None,
+        help=(
+            "chunk worker prompt depth for this run (PRXREF_REVIEW_DEPTH does "
+            "the same; standard is the default): thorough also asks for "
+            "maintainer-style reviewer suggestions, finding more at lower "
+            "precision; a custom worker.md from --prompts-dir wins"
         ),
     )
     rev.add_argument(
@@ -1172,7 +1189,10 @@ def _build_json_result(result: Any) -> dict:
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
-    ``config_file``, then ``sampling`` and ``replay`` when present.
+    ``config_file``, ``review_depth``, then ``sampling`` and ``replay`` when
+    present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH`` value the run
+    used (``"standard"`` or ``"thorough"``), ``null`` only when the result
+    carries none.
     ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
     ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
@@ -1278,6 +1298,7 @@ def _build_json_result(result: Any) -> dict:
         "degraded": result.get("degraded"),
         "metadata_rules": result.get("metadata_rules"),
         "config_file": result.get("config_file"),
+        "review_depth": result.get("review_depth"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1740,6 +1761,7 @@ def _run_review(
     scoped_rules: list[str] | None = None,
     context_file: str | None = None,
     prompts_dir: str | None = None,
+    review_depth: str | None = None,
     base_sha: str | None = None,
     head_sha: str | None = None,
     no_threads: bool = False,
@@ -1801,6 +1823,7 @@ def _run_review(
         scoped_rules=scoped_rules,
         ticket_context_file=context_file,
         prompts_dir=prompts_dir,
+        review_depth=review_depth,
         ci_wiring=ci_wiring,
         ci_wiring_globs=ci_wiring_globs,
         evidence_files=evidence_files,
@@ -1817,6 +1840,7 @@ def _run_review(
             "scoped_rules": "--scoped-rules",
             "ticket_context_file": "--context-file",
             "prompts_dir": "--prompts-dir",
+            "review_depth": "--review-depth",
             "ci_wiring": "--ci-wiring",
             "ci_wiring_globs": "--ci-wiring-globs",
             "evidence_files": "--evidence-file",
@@ -1955,6 +1979,7 @@ def _run_review(
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
         rule_scoping=cfg["rule_scoping"],
+        review_depth=cfg["review_depth"],
         suggestions=cfg["suggestions"],
         routing_probe=cfg["routing_probe"],
         incremental=incremental,
@@ -2207,6 +2232,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             scoped_rules=args.scoped_rules,
             context_file=args.context_file,
             prompts_dir=args.prompts_dir,
+            review_depth=args.review_depth,
             base_sha=args.base_sha,
             head_sha=args.head_sha,
             no_threads=args.no_threads,

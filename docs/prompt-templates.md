@@ -57,6 +57,10 @@ Each review template is split at its first `## Review Context` line:
   input. Its placeholders are filled in one pass, so a PR title or a diff that
   contains `{diff}` or any other placeholder is never filled a second time.
 
+A custom `worker.md` also replaces the `thorough` variant of
+[`PRXREF_REVIEW_DEPTH`](quality.md#review-depth): the override is sent as-is,
+and prxref logs one warning saying the depth had no effect.
+
 | Placeholder | Filled with | Template |
 |---|---|---|
 | `{pr_title}` | the PR title, or `(untitled)` | both |

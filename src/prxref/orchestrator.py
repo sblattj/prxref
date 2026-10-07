@@ -281,11 +281,13 @@ from .markers import (
 from .metadata_rules import MetadataNote, run_metadata_checks
 from .prompt_templates import (
     CONTEXT_MARKER,
+    REVIEW_DEPTHS,
     REVIEW_TEMPLATES,
     SUMMARY_GROUP_PLACEHOLDERS,
     PromptTemplates,
     packaged_text,
     placeholders,
+    thorough_worker_text,
     uncovered_summary_groups,
 )
 from .quality import (
@@ -576,6 +578,7 @@ def orchestrate_review(
     scoped_rules_max_chars: int = 24000,
     group_findings: bool = False,
     rule_scoping: str = "on",
+    review_depth: str = "standard",
     max_warning_findings: int | None = None,
     max_outofscope_findings: int | None = None,
     max_findings_per_rule: int = 2,
@@ -615,7 +618,8 @@ def orchestrate_review(
     output_tokens, posted, sampling, cost_usd, cost_estimated, review_rules, ticket_context,
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
-    suggestions, incremental, ci_wiring, evidence, stable_ids, degraded}``, plus
+    suggestions, incremental, ci_wiring, evidence, stable_ids, degraded,
+    review_depth}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
     :func:`_run_record`, so the last sixteen keys are always present and are
@@ -859,6 +863,14 @@ def orchestrate_review(
     The example-finding titles of the worker and sweep templates the units
     rendered, overridden or packaged, are what
     :func:`quality.apply_example_echo_check` drops echoes of.
+
+    ``review_depth`` (``PRXREF_REVIEW_DEPTH``) is ``"standard"`` (the
+    default: the packaged ``worker.md``) or ``"thorough"`` (the worker
+    template :func:`prompt_templates.thorough_worker_text` derives from it,
+    which adds maintainer-style reviewer suggestions); any other value is a
+    ``ValueError``. A ``worker`` override in ``prompts`` wins over either and
+    logs one WARNING at ``thorough``. Only the chunk worker changes, and the
+    run record's ``review_depth`` echoes the value on every exit.
 
     ``scoped_rules`` is the loaded path-scoped review rules
     (:class:`prxref.rules.ScopedRules`, as
@@ -1190,6 +1202,8 @@ def orchestrate_review(
         )
     if rule_scoping not in ("on", "off"):
         raise ValueError(f"rule_scoping must be 'on' or 'off', got {rule_scoping!r}")
+    if review_depth not in REVIEW_DEPTHS:
+        raise ValueError(f"review_depth must be one of {REVIEW_DEPTHS}, got {review_depth!r}")
     if context_followup not in FOLLOWUP_MODES:
         raise ValueError(
             f"context_followup must be one of {FOLLOWUP_MODES}, got {context_followup!r}"
@@ -1244,6 +1258,7 @@ def orchestrate_review(
         "evidence": None,
         "stable_ids": None,
         "degraded": None,
+        "review_depth": review_depth,
         "chunks_over_budget": 0,
         "largest_chunk_tokens": 0,
         "overflow_files": 0,
@@ -1727,7 +1742,7 @@ def orchestrate_review(
         ticket_scope=ticket.scope_block() if ticket_active else "",
         ticket_context=ticket.prompt_block() if ticket_active else "",
         spec_digest=injected,
-        worker_template=prompts.override("worker") if prompts is not None else "",
+        worker_template=_worker_template(prompts, review_depth),
         systemic_template=prompts.override("systemic") if prompts is not None else "",
         rule_request=reviewer.RULE_REQUEST if rule_active else "",
         suggestion_request=reviewer.SUGGESTION_REQUEST if suggestions == "on" else "",
@@ -2513,6 +2528,26 @@ def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
         rule = normalize_rule(f.rule) if active else None
         out.append(f if rule == f.rule else replace(f, rule=rule))
     return out
+
+
+def _worker_template(prompts: PromptTemplates | None, review_depth: str) -> str:
+    """The ``PromptContext.worker_template`` for a run at ``review_depth``.
+
+    An operator's ``worker.md`` override always wins and is used as-is; at
+    ``thorough`` that logs one WARNING naming ``PRXREF_REVIEW_DEPTH``,
+    since the depth then changes nothing. Otherwise ``thorough`` gives
+    :func:`prompt_templates.thorough_worker_text` and ``standard`` gives
+    ``""``, which renders the packaged ``worker.md`` byte for byte.
+    """
+    override = prompts.override("worker") if prompts is not None else ""
+    if override:
+        if review_depth == "thorough":
+            logger.warning(
+                "PRXREF_REVIEW_DEPTH=thorough has no effect: the custom worker.md from "
+                "PRXREF_PROMPTS_DIR is used as-is"
+            )
+        return override
+    return thorough_worker_text() if review_depth == "thorough" else ""
 
 
 def _example_titles(prompt_context: PromptContext) -> tuple[str, ...]:
