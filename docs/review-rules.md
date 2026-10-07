@@ -36,6 +36,10 @@ export PRXREF_REVIEW_RULES=/etc/prxref/rules.md
   each still turn the cap on, so every review unit is asked for a rule. See
   [docs/env-vars.md](env-vars.md) and [docs/quality.md](quality.md).
 
+Starting from scratch? [`docs/rulepacks/`](rulepacks/README.md) holds curated,
+cited rule packs (the first covers API evolution) that load through the same
+flags.
+
 **Read the rules from a trusted checkout, never from the pull request under
 review.** See [CI safety](#ci-safety-read-the-rules-from-something-the-pr-cannot-change).
 
