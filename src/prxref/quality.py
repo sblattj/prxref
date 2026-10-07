@@ -1,20 +1,20 @@
 """Deterministic quality passes over worker findings.
 
-Twenty passes run before posting, in the order ``orchestrate_review``
+Twenty-one passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
-severity map, pass 14 only when
+severity map, pass 15 only when
 the loaded rules file declares at least
-one section scope, pass 15 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on, and pass 16 only when a team rules file is loaded
-and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 17
+one section scope, pass 16 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 17 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 18
 (``apply_anchor_snap`` and ``apply_location_verification``) do only what
 the head-file reader can serve: without one they change nothing. A
-twenty-first deterministic check, the release-shaped-PR heuristic, and a
-twenty-second, the pinned-toggle heuristic, are not passes at all:
+twenty-second deterministic check, the release-shaped-PR heuristic, and a
+twenty-third, the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
 before pass 1, and each then flows through every pass below like a model
-finding, except that pass 11 leaves it out. Every ``drop_reason`` prefix
+finding, except that pass 12 leaves it out. Every ``drop_reason`` prefix
 these passes emit is tabulated for operators in ``docs/quality.md``.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
@@ -110,26 +110,38 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     — so the ids inherit their verdict — and before severity consistency,
     so a refuted finding is counted, raised and grouped by nothing
     downstream.
-11. ``apply_severity_consistency``: findings sharing one normalized title —
+11. ``apply_learning_suppression`` (issue #33): only with a learnings file
+    loaded (``PRXREF_LEARNINGS_FILE``). Drop an active finding a team
+    learning already dismissed: the learning's ``paths`` globs select the
+    finding's file, its ``rule`` matches (any rule when it names none), and
+    the finding's title and body share the learning's claim tokens, the
+    settled-thread gate's threshold capped at the claim's own token count
+    (``suppressed by learning: <id>``). An expired learning suppresses
+    nothing. It runs right after the ids are stamped, so the run record
+    names each suppressed finding's id, and before severity consistency,
+    grouping and the caps, so a suppressed finding counts toward none of
+    them. It only sets ``drop_reason`` on an active finding: it never adds
+    or un-drops one.
+12. ``apply_severity_consistency``: findings sharing one normalized title —
     within a file or across sibling files — are all raised to the group's
     maximum severity, so per-chunk workers cannot disagree about how
     serious the same pattern is. Findings phrased differently but bound
     by a shared rare code token, with a shared problem class or file,
     join the same group (issue #30). A deterministic finding joins no
     group, so it keeps the severity its check gave it.
-12. ``apply_removal_claim_check``: drop findings whose removal verb governs
+13. ``apply_removal_claim_check``: drop findings whose removal verb governs
     a path — ``removed src/app.py``, ``src/app.py was removed`` — when every
     path the claim names is still present in the diff's post-image — the false positive a ``copy from``/``copy to``
     header produces when a worker reads a copy as a move (issue #03).
     Only a claim that NAMES a diff path is judged, so a finding about a
     removed guard or constant is untouched.
-13. ``apply_hedge_gate``: drop findings whose title or body conditions the
+14. ``apply_hedge_gate``: drop findings whose title or body conditions the
     defect on a precondition the worker never established from the diff
     ("If X still leases a client", "unless the backfill already ran"),
     with ``drop_reason`` ``hedged: "<matched span>"``. A body's
     ``Spec: "..."`` quote is not read for the text it copies verbatim from
     the spec digest the workers were shown.
-14. ``apply_rule_scope_check``: clear ``rule`` on a finding whose
+15. ``apply_rule_scope_check``: clear ``rule`` on a finding whose
      scoped section of the loaded team rules does not cover its path (#75) —
      the label names an ATX section (by heading or rule line) whose scope —
      a ``scope:`` line, or the language nouns of its heading — misses the
@@ -144,7 +156,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
      right after on every section of the loaded rules, scoped or not, and
      clears a label whose rule names another kind of defect than the
      finding's title (``rules.claim_kinds``), keeping it on any ambiguity.
-15. ``apply_rule_grouping``: fold chunk findings in one file that name the
+16. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -152,7 +164,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-16. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+17. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
     chunk findings per ``rule`` (casefolded), or per normalized title for
     findings that name none, across every file of the review. The kept
     findings are the most severe, then the most confident; the rest are
@@ -163,7 +175,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     it on: a team rules file is loaded and the cap is above 0. It runs
     after grouping, so a group counts once, and before the gate, so the
     severity caps count what it kept.
-17. ``apply_location_verification``: grouping and the cap list a folded
+18. ``apply_location_verification``: grouping and the cap list a folded
     member's location on their representative without ever checking the
     site against a source (issue #74). This pass re-runs pass 7's search
     for the representative's own quoted snippets within
@@ -175,7 +187,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     snippet parseable keep every site; nothing is dropped from the review.
     It runs once, after grouping and the cap (``locations`` is final
     there) and before the gate.
-18. ``apply_quality_gate``: drop findings below the confidence floor
+19. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -184,7 +196,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-19. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+20. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -199,7 +211,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
     the tier does not run.
-20. ``apply_containment_note``: a finding that asserts a throw, panic,
+21. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -207,7 +219,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     changes ``drop_reason`` or severity.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
-runs after pass 16 (after line alignment, anchor snapping and every fold, so
+runs after pass 17 (after line alignment, anchor snapping and every fold, so
 ``locations`` is final) and before the gate. It drops nothing: a code
 suggestion (#30) that fails one of its rules is cleared and the finding is
 kept, so it posts as a plain comment.
@@ -234,6 +246,7 @@ from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
 
 if TYPE_CHECKING:
+    from .learnings import Learning
     from .rules import RuleSection
 
 SEVERITIES: frozenset[str] = frozenset({"error", "warning", "spec", "outofscope"})
@@ -1440,6 +1453,67 @@ def apply_settled_thread_suppression(
             result.append(replace(f, drop_reason=f"settled in thread: {author}"))
         else:
             result.append(f)
+    return result
+
+
+LEARNING_MIN_SHARED_TOKENS = SETTLED_MIN_SHARED_TOKENS
+
+
+def apply_learning_suppression(
+    findings: Sequence[Finding],
+    learnings: Sequence[Learning],
+    min_shared_tokens: int = LEARNING_MIN_SHARED_TOKENS,
+) -> list[Finding]:
+    """Drop findings a team learning already dismissed (#33).
+
+    ``learnings`` are the NON-EXPIRED entries of the loaded learnings file
+    (:attr:`prxref.learnings.Learnings.active`). An active finding is
+    dropped with ``drop_reason`` ``suppressed by learning: <id>`` by the
+    first learning, in file order, that matches all three ways:
+
+    - its ``paths`` globs select the finding's file
+      (:func:`prxref.rules.match_globs`, after a leading ``./`` is removed);
+    - its ``rule`` equals the finding's, compared after stripping and
+      ``casefold()`` — a learning with no rule matches any finding, and a
+      learning with one never matches a finding that names none;
+    - the finding's title and body share at least
+      ``min(min_shared_tokens, len(claim tokens))`` distinct content tokens
+      with the learning's ``claim`` — the settled-thread gate's tokenizer
+      and threshold, except that a claim shorter than the threshold must be
+      contained whole.
+
+    It only ever SETS ``drop_reason`` on an active finding: a dropped
+    finding passes through with its reason untouched, nothing is added,
+    nothing un-dropped, and order is preserved.
+    """
+    if not learnings:
+        return list(findings)
+    from .rules import match_globs
+
+    result: list[Finding] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            result.append(f)
+            continue
+        path = _normalised_path(f.file)
+        rule = (f.rule or "").strip().casefold()
+        finding_tokens: set[str] | None = None
+        hit = None
+        for learning in learnings:
+            if learning.rule is not None and learning.rule.strip().casefold() != rule:
+                continue
+            if not match_globs(path, learning.paths):
+                continue
+            if finding_tokens is None:
+                finding_tokens = _tokens(f"{f.title} {f.body}")
+            needed = min(min_shared_tokens, len(learning.claim_tokens))
+            if needed and len(finding_tokens & learning.claim_tokens) >= needed:
+                hit = learning
+                break
+        if hit is None:
+            result.append(f)
+        else:
+            result.append(replace(f, drop_reason=f"suppressed by learning: {hit.id}"))
     return result
 
 
@@ -3002,7 +3076,7 @@ def apply_location_verification(
 ) -> list[Finding]:
     """Verify every ``Also at:`` site of a representative against the head file (#74).
 
-    Grouping (pass 15) and the per-rule cap (pass 16) list a folded
+    Grouping (pass 16) and the per-rule cap (pass 17) list a folded
     member's location on their representative without ever checking the
     site against any source, so a member whose own anchor drifted posts a
     location its evidence does not hold. This pass re-runs the

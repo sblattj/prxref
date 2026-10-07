@@ -111,7 +111,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    subject an existing open, current thread already argued out,
    line-independently; resolved or outdated threads skipped here too,
    and a surviving finding that matches one is stamped with a
-   previously-raised note instead) →
+   previously-raised note instead) → ``apply_learning_suppression`` (#33,
+   only with a learnings file loaded, after the stable ids are stamped: a
+   finding a non-expired team learning matches by path glob, rule and
+   claim tokens is dropped as ``suppressed by learning: <id>``) →
    ``apply_severity_consistency`` (findings sharing a normalized title
    are raised to the group's max severity — the sweep's corroborating
    title counts toward its group) → ``apply_removal_claim_check`` (a
@@ -269,6 +272,7 @@ from .forges.base import (
 )
 from .forges.repo_dir import RepoDir
 from .formatter import SUGGESTION_STYLE_GITHUB, format_suggestion_block, suggestion_range
+from .learnings import DROP_PREFIX as LEARNING_DROP_PREFIX
 from .llm import LLMClient
 from .markers import (
     active_severity_markers,
@@ -302,6 +306,7 @@ from .quality import (
     apply_evidence_drops,
     apply_example_echo_check,
     apply_hedge_gate,
+    apply_learning_suppression,
     apply_line_align,
     apply_location_validation,
     apply_location_verification,
@@ -538,6 +543,30 @@ def _write_trace_diff(trace_dir: str | None, raw: str) -> None:
         logger.warning("trace dump of the diff to %s failed: %s", trace_dir, e)
 
 
+def _apply_learnings(
+    findings: list[Finding], learnings: Any, run_inputs: dict[str, Any], tracer: Tracer,
+) -> list[Finding]:
+    """Run the learning-suppression pass and record what it dropped (#33)."""
+    after = apply_learning_suppression(findings, learnings.active)
+    suppressed = [
+        {
+            "learning_id": new.drop_reason.removeprefix(LEARNING_DROP_PREFIX),
+            "finding_id": new.id,
+            "title": new.title,
+        }
+        for old, new in zip(findings, after, strict=True)
+        if old.drop_reason is None and new.drop_reason is not None
+    ]
+    run_inputs["learnings"]["suppressed"] = suppressed
+    if suppressed:
+        logger.info("learnings: suppressed %d finding(s)", len(suppressed))
+    tracer.event(
+        "learnings", "ok", loaded=run_inputs["learnings"]["loaded"],
+        expired=run_inputs["learnings"]["expired"], suppressed=len(suppressed),
+    )
+    return after
+
+
 def orchestrate_review(
     forge: Forge,
     ref: PRRef,
@@ -609,6 +638,7 @@ def orchestrate_review(
     evidence_max_chars: int = 8000,
     stable_ids: bool = True,
     verdict_store: str | None = None,
+    learnings: Any = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -619,7 +649,7 @@ def orchestrate_review(
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
     suggestions, incremental, ci_wiring, evidence, stable_ids, degraded,
-    review_depth}``, plus
+    review_depth, learnings}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
     :func:`_run_record`, so the last sixteen keys are always present and are
@@ -982,6 +1012,16 @@ def orchestrate_review(
     findings' ids with it, only on a run that exits before the pass (a
     summary-only or error run).
 
+    ``learnings`` (#33) is a loaded :class:`prxref.learnings.Learnings`
+    (``PRXREF_LEARNINGS_FILE``) or ``None``, the default, which changes
+    nothing. When set, right after the stable ids are stamped,
+    :func:`prxref.quality.apply_learning_suppression` drops each active
+    finding a non-expired entry matches as ``suppressed by learning:
+    <id>``. The run record's ``learnings`` is ``None`` when off, else
+    ``{"file", "sha256", "loaded", "expired", "suppressed"}``, where
+    ``suppressed`` lists ``{"learning_id", "finding_id", "title"}`` per
+    dropped finding (empty on a run that exits before the pass).
+
     ``repo_context`` is the repository-context level
     (``PRXREF_REPO_CONTEXT``): ``"off"`` (the default), ``"diff"`` or
     ``"repo"`` (:data:`prxref.repo_unit.MODES`). Any other value raises
@@ -1259,6 +1299,7 @@ def orchestrate_review(
         "stable_ids": None,
         "degraded": None,
         "review_depth": review_depth,
+        "learnings": learnings.record() if learnings is not None else None,
         "chunks_over_budget": 0,
         "largest_chunk_tokens": 0,
         "overflow_files": 0,
@@ -2133,6 +2174,8 @@ def orchestrate_review(
         "collisions": len(collisions),
     }
     tracer.event("stableids", "ok", **run_inputs["stable_ids"])
+    if learnings is not None:
+        findings = _apply_learnings(findings, learnings, run_inputs, tracer)
     consistent = apply_severity_consistency(findings)
     rewrites = sum(
         1

@@ -450,7 +450,7 @@ def _check_arm_paths(arm: Arm, config_file: Path | None) -> None:
             source_labels={"review_rules": "rules_file", "scoped_rules": "scoped_rules",
                            "prompts_dir": "prompts_dir"},
         )
-        load_path_inputs(cfg, layers, config_file=config_file, ticket=False, evidence=False)
+        load_path_inputs(cfg, layers, config_file=config_file, ticket=False, evidence=False, learnings=False)
     except ConfigError as exc:
         raise ConfigError(f"--arms: arm {arm.name!r}: {exc}") from exc
 

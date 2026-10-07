@@ -58,11 +58,12 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through eighteen more deterministic passes: the example-echo check, location validation, `package.json` claim
+through nineteen more deterministic passes: the example-echo check, location validation, `package.json` claim
 checks, line alignment, anchor snapping (verifying a finding's line against
 the code it quotes in the head file), thread dedup, settled-thread
 suppression, stable finding ids (always on; see
-[docs/env-vars.md](docs/env-vars.md)), severity
+[docs/env-vars.md](docs/env-vars.md)), team-learning suppression (only with
+`PRXREF_LEARNINGS_FILE`; see [docs/learnings.md](docs/learnings.md)), severity
 consistency, the removal-claim check, the hedge gate, the rule-scope check
 (clearing a `rule` label no scoped team-rules section covers, or whose rule names another kind of defect), finding grouping (opt-in
 with `PRXREF_GROUP_FINDINGS`), the per-rule cap (on by default when review
@@ -446,6 +447,7 @@ A run reviews every file on a first review, when the forge cannot read its summa
   - `metadata_rules`: the deterministic PR-metadata checks' tally (#70). Always present, and `null` while `PRXREF_METADATA_RULES` is `off`; when it is `on` or names a rules file, `{branch_pattern, commit_reference, area_globs, violations}`, each check `pass`, `fail` or `skipped: <reason>`, and `violations` one `{check, title, detail}` row per violation (violations are summary notes, never `findings` rows). See [docs/env-vars.md](docs/env-vars.md);
   - `config_file`: the repository config file the run read (#38). Always present, and `null` when no file was read; otherwise `{"path", "sha256", "keys"}`: the file as its errors name it (relative to the working directory when inside it), the sha256 of its bytes, and the sorted keys it sets, including any that the environment or a flag then overrode. With `-v` in text mode, one log line `config: <path> (<n> keys)` says the same. See [docs/config-file.md](docs/config-file.md);
   - `review_depth`: the `PRXREF_REVIEW_DEPTH` the run used, `standard` or `thorough`. Always present; a custom `worker.md` override still records the configured value.
+  - `learnings`: the team-learnings tally (#33). Always present, and `null` while no `PRXREF_LEARNINGS_FILE` was loaded; otherwise `{"file", "sha256", "loaded", "expired", "suppressed"}`, where `suppressed` lists one `{"learning_id", "finding_id", "title"}` per finding a learning dropped. See [docs/learnings.md](docs/learnings.md).
   - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
   - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`, `description`, `as_of`, `as_of_source`), on replay runs only.
 
@@ -467,6 +469,8 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 `prxref config check [--config PATH | --no-config] [--format {text,json}]` checks the [repository config file](docs/config-file.md) and the environment without reading a pull request or calling a model. It resolves the file exactly as `review` does, then prints `config file: <path>` (or `config file: none`), one `<key> = <value>  (<source>)` line per setting, sorted, whose source is `default`, `file` or `env PRXREF_<NAME>`, and `ok`. Credentials and webhook secrets print only as `<set>` or `<unset>`. `--format json` prints one object, `{"config_file": <path or null>, "values": {"<key>": {"value", "source"}}}`. It exits `0` when the configuration is valid, and `2` with the `configuration error: ...` line a review would print when it is not; with `--format json`, an error leaves stdout empty. A bare `prxref config` prints the top-level help and exits `2`.
 
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
+
+`prxref learnings harvest --pr-url URL [--out FILE]` reads the PR's threads and prints one candidate `[[learning]]` entry, as TOML, for each prxref comment a human closed as won't fix. It goes to stdout, or to `FILE`. prxref never writes the learnings file into the repository; a human edits the candidates and commits the ones the team keeps. It exits `2` for an unrecognised URL or an unwritable `--out`, and `1` when the forge cannot be read. See [docs/learnings.md](docs/learnings.md).
 
 `prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its seven actions:
 
