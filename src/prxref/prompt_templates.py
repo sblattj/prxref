@@ -374,6 +374,85 @@ def _packaged_text(name: str) -> str:
     return resources.files("prxref").joinpath("prompts").joinpath(f"{name}.md").read_text(encoding="utf-8")
 
 
+#: ``PRXREF_REVIEW_DEPTH`` values: ``standard`` renders the packaged
+#: ``worker.md``; ``thorough`` renders :func:`thorough_worker_text`.
+REVIEW_DEPTHS: tuple[str, ...] = ("standard", "thorough")
+
+#: The packaged file holding the ``## Reviewer suggestions`` section that
+#: ``thorough`` adds to ``worker.md``. Not a template: never overridable,
+#: exported or listed in :data:`TEMPLATE_NAMES`.
+REVIEWER_SUGGESTIONS_FILE = "reviewer_suggestions.md"
+
+_THOROUGH_MISSION = (
+    "You also review the way an experienced maintainer of this project does: beyond "
+    "defects, they comment on how the change is written. After checking for defects, "
+    "read the added code again for the reviewer suggestions described under "
+    '"Reviewer suggestions" below.'
+)
+
+
+def _thorough_edits(section: str) -> tuple[tuple[str, str], ...]:
+    """The ``(anchor, replacement)`` pairs turning ``worker.md`` into the thorough worker template."""
+    return (
+        (
+            "Prefer zero findings over one speculative finding.\n\n## Severity Vocabulary\n",
+            "For `error` and `warning`, prefer zero findings over one speculative finding.\n\n"
+            f"{_THOROUGH_MISSION}\n\n## Severity Vocabulary\n",
+        ),
+        (
+            "- `outofscope` — minor: misleading naming,",
+            '- `outofscope` — minor: a reviewer suggestion about code the diff adds or changes '
+            '(see "Reviewer suggestions"), misleading naming,',
+        ),
+        (
+            "\n## Spec-grounded rules\n",
+            f"\n{section.strip()}\n\n## Spec-grounded rules\n",
+        ),
+        (
+            "No praise, no restating what the diff does, no style-guide nits that change "
+            "neither behavior nor risk.",
+            "No praise, no restating what the diff does.",
+        ),
+    )
+
+
+def derive_thorough_worker(worker: str, section: str) -> str:
+    """Apply the ``thorough`` edits to ``worker`` text, adding ``section`` as ``## Reviewer suggestions``.
+
+    Each edit replaces one anchor string that must occur exactly once in
+    ``worker``; a missing or repeated anchor raises ``RuntimeError`` naming
+    it, so a ``worker.md`` edit that breaks the derivation fails loudly
+    instead of silently shipping a partial thorough prompt.
+    """
+    text = worker
+    for anchor, replacement in _thorough_edits(section):
+        found = text.count(anchor)
+        if found != 1:
+            raise RuntimeError(
+                f"PRXREF_REVIEW_DEPTH=thorough: packaged worker.md must contain the anchor "
+                f"{anchor!r} exactly once, found {found}; update prompt_templates._thorough_edits"
+            )
+        text = text.replace(anchor, replacement, 1)
+    return text
+
+
+def thorough_worker_text() -> str:
+    """The worker template ``PRXREF_REVIEW_DEPTH=thorough`` renders.
+
+    The packaged ``worker.md`` with :data:`REVIEWER_SUGGESTIONS_FILE`'s
+    ``## Reviewer suggestions`` section and three wording edits applied by
+    :func:`derive_thorough_worker`: the mission confines "prefer zero
+    findings" to ``error`` and ``warning`` and asks for reviewer
+    suggestions, ``outofscope`` names them, and the style rule no longer
+    forbids nits.
+    """
+    section = (
+        resources.files("prxref").joinpath("prompts").joinpath(REVIEWER_SUGGESTIONS_FILE)
+        .read_text(encoding="utf-8")
+    )
+    return derive_thorough_worker(_packaged_text("worker"), section)
+
+
 def _require_name(name: str) -> None:
     if name not in TEMPLATE_NAMES:
         raise ValueError(f"template name must be one of {', '.join(TEMPLATE_NAMES)}, got {name!r}")
