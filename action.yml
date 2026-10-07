@@ -48,7 +48,7 @@ inputs:
     default: ${{ github.event.pull_request.html_url }}
   version:
     description: >-
-      prxref version to install from PyPI, such as `0.33.0`. Empty installs the
+      prxref version to install from PyPI, such as `0.34.0`. Empty installs the
       latest release. Pin it for reproducible reviews.
     required: false
     default: ""

@@ -160,8 +160,8 @@ pip install prxref           # into the current environment
 prxref review --pr-url https://github.com/org/repo/pull/123
 
 # Pin a version
-uvx prxref==0.33.0 review --pr-url https://github.com/org/repo/pull/123
-pipx install prxref==0.33.0
+uvx prxref==0.34.0 review --pr-url https://github.com/org/repo/pull/123
+pipx install prxref==0.34.0
 
 # Optional litellm backend extra
 pipx install 'prxref[litellm]'
