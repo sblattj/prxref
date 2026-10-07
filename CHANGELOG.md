@@ -10,6 +10,35 @@ tracker.
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-10-07
+
+### Added
+
+- Team learnings (#33): `PRXREF_LEARNINGS_FILE` (`learnings_file` in
+  `.prxref.toml`) names a TOML file of `[[learning]]` entries (`id`, `paths`
+  globs, `claim`, optional `rule`, `reason`, `source`, `added`, `expires`). A
+  new deterministic quality pass, run right after stable ids are assigned,
+  drops a finding a non-expired entry matches by path, rule and claim tokens
+  as `suppressed by learning: <id>`. Expired entries are skipped and counted;
+  entries added more than 180 days ago are logged as a warning. A malformed
+  file exits 2. The run record and `--format json` gain a `learnings` key
+  (`null` when off). See docs/learnings.md, including the trust caveat that
+  the file is read from the PR checkout.
+- `prxref learnings harvest --pr-url URL [--out FILE]` prints candidate
+  learnings as TOML, one per prxref comment a human closed as won't fix.
+  prxref never writes them into the repository (#33).
+- A root `action.yml` composite action (`uses: sblattj/prxref@v0.34.0`) that
+  installs prxref from PyPI and reviews the triggering PR without checking out
+  its code, plus a README "Quick start" for GitHub (#39).
+- Curated review rule packs in `docs/rulepacks/`, starting with
+  `api-evolution`. Each is a plain rules file loaded with `--rules-file` or
+  `--scoped-rules`; a test loads every pack through the real loaders (#47).
+
+### Changed
+
+- Install docs cover `pipx`, `uvx`, `pip`, version pinning and the `litellm`
+  extra; the stale "before the first PyPI release" wording is gone (#49).
+
 ## [0.33.0] — 2026-10-07
 
 ### Added
@@ -3233,7 +3262,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/sblattj/prxref/releases/tag/v0.34.0
 [0.33.0]: https://github.com/sblattj/prxref/releases/tag/v0.33.0
 [0.32.3]: https://github.com/sblattj/prxref/releases/tag/v0.32.3
 [0.32.2]: https://github.com/sblattj/prxref/releases/tag/v0.32.2
