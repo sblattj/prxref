@@ -280,7 +280,7 @@ class TestJsonKey:
         assert keys[keys.index("repo_context") + 1:] == [
             "parse_retries", "context_followup", "suggestions", "incremental", "ci_wiring",
             "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
-            "sampling", "replay",
+            "learnings", "sampling", "replay",
         ]
 
     @pytest.mark.parametrize("result", [{}, None, {"verdict": "Approved"}, {"repo_context": None}])
