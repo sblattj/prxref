@@ -1,0 +1,93 @@
+name: prxref review
+description: >-
+  Fast automated AI code review for a pull request. Installs prxref from PyPI,
+  reviews the PR over the forge API, and posts inline comments and a summary.
+author: sblattj
+branding:
+  icon: eye
+  color: blue
+
+# This action never checks out code. prxref reads the diff over the GitHub API
+# from the PR URL alone, so it is safe under `pull_request_target`, where the
+# job holds secrets and a write token even for a fork's pull request. Do not add
+# an `actions/checkout` of the pull request's head to the calling job.
+
+inputs:
+  llm-base-url:
+    description: OpenAI-compatible endpoint, e.g. https://openrouter.ai/api/v1. Required.
+    required: true
+  llm-api-key:
+    description: API key for the endpoint (pass a secret).
+    required: true
+  github-token:
+    description: Token that may read the PR and post comments. The workflow needs `pull-requests: write`.
+    required: false
+    default: ${{ github.token }}
+  llm-models:
+    description: Comma-separated fallback chain of model ids, e.g. z-ai/glm-5.3-flash. Required, prxref has no default chain.
+    required: true
+  llm-backend:
+    description: LLM backend, `http` (zero-dependency default).
+    required: false
+    default: http
+  llm-max-tokens:
+    description: Per-worker-chunk completion budget. Reasoning models need headroom.
+    required: false
+    default: "32000"
+  llm-reasoning-effort:
+    description: Reasoning effort passed to the model. Empty leaves it unset.
+    required: false
+    default: ""
+  llm-seed:
+    description: Sampling seed. Empty leaves it unset.
+    required: false
+    default: ""
+  pr-url:
+    description: URL of the pull request to review. Defaults to the triggering pull request.
+    required: false
+    default: ${{ github.event.pull_request.html_url }}
+  version:
+    description: >-
+      prxref version to install from PyPI, such as `0.33.0`. Empty installs the
+      latest release. Pin it for reproducible reviews.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install prxref from PyPI
+      shell: bash
+      env:
+        PRXREF_ACTION_VERSION: ${{ inputs.version }}
+      run: |
+        if [ -n "$PRXREF_ACTION_VERSION" ]; then
+          case "$PRXREF_ACTION_VERSION" in
+            *[!0-9A-Za-z.+!_-]*) echo "::error::invalid version input" >&2; exit 2 ;;
+          esac
+          spec="prxref==$PRXREF_ACTION_VERSION"
+        else
+          spec="prxref"
+        fi
+        python -m venv "$RUNNER_TEMP/prxref-venv"
+        "$RUNNER_TEMP/prxref-venv/bin/pip" install --quiet --no-cache-dir "$spec"
+
+    - name: Run prxref review
+      shell: bash
+      env:
+        PRXREF_GITHUB_TOKEN: ${{ inputs.github-token }}
+        PRXREF_LLM_BACKEND: ${{ inputs.llm-backend }}
+        PRXREF_LLM_BASE_URL: ${{ inputs.llm-base-url }}
+        PRXREF_LLM_API_KEY: ${{ inputs.llm-api-key }}
+        PRXREF_LLM_MODELS: ${{ inputs.llm-models }}
+        PRXREF_LLM_MAX_TOKENS: ${{ inputs.llm-max-tokens }}
+        PRXREF_LLM_REASONING_EFFORT: ${{ inputs.llm-reasoning-effort }}
+        PRXREF_LLM_SEED: ${{ inputs.llm-seed }}
+        PRXREF_ACTION_PR_URL: ${{ inputs.pr-url }}
+      run: |
+        "$RUNNER_TEMP/prxref-venv/bin/prxref" review --pr-url "$PRXREF_ACTION_PR_URL" -v

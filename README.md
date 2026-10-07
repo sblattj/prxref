@@ -4,6 +4,35 @@ Fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and 
 
 prxref reviews pull and merge requests on Bitbucket, GitHub, GitLab, Gitea/Forgejo (including Codeberg), and Azure DevOps in sub-minute review cycles. It parses unified diffs, partitions changes into risk-ranked chunks, gives each worker the dependency pins and out-of-hunk definitions its chunk references when the forge can serve file content, fans out parallel single-shot LLM reviews across a cheap-first model fallback chain, filters findings through deterministic quality gates, and publishes inline comments alongside an executive summary. Give it the spec or ticket a change implements with `--spec` (a web page, a local file or directory, or a Jira ticket URL) and the review also checks the diff against that spec.
 
+## Quick start (GitHub, five minutes)
+
+1. In the repository, add the secret `PRXREF_LLM_API_KEY` and the variables `PRXREF_LLM_BASE_URL` (any OpenAI-compatible endpoint, e.g. `https://openrouter.ai/api/v1`) and `PRXREF_LLM_MODELS` (e.g. `z-ai/glm-5.3-flash`). The forge token is the workflow's own `GITHUB_TOKEN`; no other secret is needed.
+2. Save this as `.github/workflows/prxref.yml`:
+
+```yaml
+name: prxref review
+on:
+  pull_request_target:        # runs in the base repo, so fork PRs get secrets too
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:                    # no actions/checkout of the PR: see the note below
+      - uses: sblattj/prxref@v0.34.0
+        with:
+          llm-base-url: ${{ vars.PRXREF_LLM_BASE_URL }}
+          llm-api-key: ${{ secrets.PRXREF_LLM_API_KEY }}
+          llm-models: ${{ vars.PRXREF_LLM_MODELS }}
+```
+
+3. Open a pull request. prxref posts inline comments and a summary, and exits 0 on every review error, so it never blocks a merge.
+
+**Fork safety.** `pull_request_target` hands the job secrets and a write token even for a fork's pull request. That is safe only because prxref reads the diff over the GitHub API from the PR URL and the job never checks out or runs the pull request's code, so do not add an `actions/checkout` of the PR head to this job. The action honours that: it checks out nothing. Pin the prxref release with `version: "0.34.0"` (keep it in step with the action tag) for reproducible reviews; the other inputs are in [action.yml](action.yml). On GitLab, Bitbucket, Gitea, Azure DevOps, or your own server, see [Quickstart](#quickstart) and [docs/forges.md](docs/forges.md).
+
 ```
                   ┌──────────────────────┐
                   │    Pull / MR URL     │
@@ -117,17 +146,26 @@ violation (#70) prints the same way, as one `pr metadata:` line each.
 
 ## Quickstart
 
-Run reviews instantly without local installation using `uvx`, or install the CLI globally:
+prxref is on [PyPI](https://pypi.org/project/prxref/). Run reviews without installing anything using `uvx` or `pipx run`, or install the CLI:
 
 ```bash
-# Run one-shot review via uvx
+# Run one-shot review without installing
 uvx prxref review --pr-url https://github.com/org/repo/pull/123
+pipx run prxref review --pr-url https://github.com/org/repo/pull/123
 
-# Or install tool globally
-uv tool install prxref
+# Or install the tool
+pipx install prxref          # or: uv tool install prxref
+pip install prxref           # into the current environment
 prxref review --pr-url https://github.com/org/repo/pull/123
 
-# Or install straight from source (works before the first PyPI release)
+# Pin a version
+uvx prxref==0.33.0 review --pr-url https://github.com/org/repo/pull/123
+pipx install prxref==0.33.0
+
+# Optional litellm backend extra
+pipx install 'prxref[litellm]'
+
+# Or install straight from source (unreleased changes)
 uv tool install git+https://github.com/sblattj/prxref
 ```
 
