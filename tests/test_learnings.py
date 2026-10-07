@@ -9,7 +9,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from prxref import cli
+from prxref import cli, orchestrator
 from prxref import learnings as learnings_mod
 from prxref.forges.base import ATTRIBUTION_MARKER, PRRef, Thread, says_wont_fix
 from prxref.learnings import (
@@ -238,6 +238,16 @@ class TestHarvest:
         assert parse_inline_header(self.HEADER) == (
             "Raw SQL string built by concatenation", "src/legacy/db.py",
         )
+
+    @pytest.mark.parametrize("severity, scope", [
+        ("error", "in"), ("warning", "out"), ("spec", "unknown"), ("outofscope", "in"),
+    ])
+    def test_the_posted_comment_body_parses_through_a_forge_snippet(self, severity, scope):
+        f = _finding(severity=severity, scope=scope)
+        body = orchestrator._format_finding(f, "model-x")
+        for cut in (120, 200):
+            title, _ = parse_inline_header(body[:cut])
+            assert title == f.title
 
     def test_an_out_of_ticket_header_parses(self):
         f = _finding(severity="warning", scope="out")

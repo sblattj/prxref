@@ -1479,8 +1479,8 @@ def apply_learning_suppression(
     - the finding's title and body share at least
       ``min(min_shared_tokens, len(claim tokens))`` distinct content tokens
       with the learning's ``claim`` — the settled-thread gate's tokenizer
-      and threshold, except that a claim shorter than the threshold must be
-      contained whole.
+      and threshold, except that a claim with fewer tokens than the
+      threshold must have every one of its tokens shared.
 
     It only ever SETS ``drop_reason`` on an active finding: a dropped
     finding passes through with its reason untouched, nothing is added,
