@@ -22,7 +22,9 @@ Actions job "prxref review"; the gate's is the app check `sdlc-review`.
 | Where the gate lives | Inside prxref as `prxref gate …`, new package `src/prxref/gate/` | User choice 2026-10-08. Reuses `webhooks.py` verification, the orchestrator, tests, release machinery. |
 | "sdlc as CODEOWNER" | Not possible; replaced by an app-pinned required check | GitHub docs: CODEOWNERS entries must be users or teams with write access. A ruleset `required_status_checks` entry carries an `integration_id`, which pins the check to the app. |
 | Model | `us.anthropic.claude-opus-4-6-v1`, one model, no fallback, medium effort | Opus 5.5, 5, 4.8, 4.7, Sonnet 5.x, Haiku 5.5 and Fable return "not available for this account, contact AWS Sales" on this account. Opus 4.6 answered after the Anthropic use-case form and agreement landed (2026-10-08 16:19 PT). |
-| Bedrock route | prxref's existing `litellm` backend, `bedrock/us.anthropic.claude-opus-4-6-v1`, `AWS_BEARER_TOKEN_BEDROCK`, region `us-west-2` | Bedrock's OpenAI-compatible endpoint returns 404 `model_not_found` for every Claude id, so the `http` backend cannot be used. litellm authenticated with the bearer key. `seed` is rejected by Bedrock, so `PRXREF_LLM_SEED=off`. Thinking needs temperature 1, so `PRXREF_LLM_TEMPERATURE=1`; prxref sends 0 by default. |
+| Bedrock route | prxref's existing `litellm` backend, `bedrock/us.anthropic.claude-opus-4-6-v1`, `AWS_BEARER_TOKEN_BEDROCK`, region `us-west-2` | Bedrock's OpenAI-compatible endpoint returns 404 `model_not_found` for every Claude id, so the `http` backend cannot be used. litellm authenticated with the bearer key. `seed` is rejected by Bedrock, so `PRXREF_LLM_SEED=off`. Thinking needs temperature 1, so `PRXREF_LLM_TEMPERATURE=1`; prxref sends 0 by default. Verified 2026-10-08: `reasoning_effort=medium` through litellm returned a reasoning block (367 chars) and 415 completion tokens where the plain call returned 240, so the effort setting is honoured, not merely accepted. |
+| Request budget | `PRXREF_LLM_TIMEOUT=900` and `PRXREF_LLM_MAX_TOKENS=32000` set explicitly in the gate env | The prompt-scaled deadline covers the openai-compat family; the gate does not rely on it for litellm. The advisory workflow already hit `finish_reason=length` at the 4096 default on a reasoning model. |
+| Webhook loss | A reconciler that lists open PRs is load-bearing, not a backstop | GitHub docs: "GitHub does not automatically redeliver failed deliveries." A push during sleep, shutdown or tunnel loss produces no delivery at all. |
 | Version pin | The release that ships the gate (0.35.0); the sandbox pins it | Issue text says 0.31.0, which has none of the gate code. |
 | Sandbox | New public repo `sblattj/sdlc-sandbox`; second write identity is a new machine user | Free plan: rulesets work on public repos only. The stealth account must not appear on a public repo. |
 | Tunnel | `cloudflared` named tunnel as a launchd service | Installed; stable hostname; survives restarts. |
@@ -109,7 +111,9 @@ publications(generation_id PK, kind, github_id, posted_at)
   worker holds, and the store refuses a state transition from a holder whose token is
   not current. A second `prxref gate serve` on the same file cannot publish.
 - Restart recovery is a query: on start the worker re-queues any `in_progress`
-  generation whose lease expired, after re-reading the live PR.
+  generation whose lease expired, after re-reading the live PR. The re-run reuses the
+  stored `check_run_id`, so the same check moves from `in_progress` to its conclusion
+  instead of leaving an orphaned in-progress check beside a new one.
 
 ### `worker.py`: review execution
 
@@ -139,12 +143,18 @@ publications(generation_id PK, kind, github_id, posted_at)
 ### `checks.py`: publisher
 
 - Does: creates and updates the `sdlc-review` check run with `external_id = generation
-  id`, `details_url` to the run record location, and a summary that names the model id,
+  id`, `details_url` set to the PR's checks tab URL (GitHub requires http(s); the local
+  run record path goes in the summary text), and a summary that names the model id,
   effort, token counts, verdict, chunk counts and the base and head SHAs reviewed.
   Actionable inline findings are posted as a pull request review from `sdlc[bot]` with
   event `COMMENT`, never `APPROVE` or `REQUEST_CHANGES`, so the app never satisfies or
   blocks the human-approval rule. File-level findings become check annotations (max 50
   per update, batched).
+- Comment bodies come from prxref's own `formatter` and `markers`, so the next run's
+  thread dedup and "Previously raised" logic recognise the gate's comments exactly as
+  they recognise the advisory lane's. The executive summary is posted as the check
+  output and also as the usual prxref summary comment (same marker), so a reader sees
+  one summary per head, authored by `sdlc[bot]`.
 - Uncertain replies: on a timeout or 5xx while creating a check or review, the publisher
   first lists check runs for the head SHA filtered by `app_id` and `external_id`, and
   reviews by the bot login, before retrying, so a duplicate is never created.
@@ -157,16 +167,27 @@ publications(generation_id PK, kind, github_id, posted_at)
   only if the live head SHA, base SHA and base ref equal the generation's, the PR is
   open, and no newer generation exists for the PR. Otherwise the generation becomes
   `stale` and the check is left as is (a newer generation owns the new head).
-- Retarget window: a base-only change arrives as `pull_request.edited`; the guard treats
-  a base mismatch like a head mismatch. The runbook documents that a retarget requires a
-  fresh head push or a rerequest before a success can publish.
+- Retarget window: a base-only change arrives as `pull_request.edited`; the receiver
+  has already queued a new generation for the same head with the new base, so the guard
+  marks the old generation `stale` and the new one publishes a fresh check on that head
+  (GitHub shows the latest check run of a name per SHA). The ruleset's strict policy
+  also demands the head be up to date with the new base, so in practice a retarget needs
+  a fresh head before merge; the runbook says so and bounds the window to one watchdog
+  interval.
 
-### `watchdog.py`: repair
+### `watchdog.py`: repair and reconciliation
 
-- Does: every `PRXREF_GATE_WATCHDOG_SECONDS` (default 60), re-queues `in_progress`
-  generations past the deadline whose lease is not live, reconciles `queued` generations
-  older than `PRXREF_GATE_RECONCILE_MINUTES` (default 10) against the live PR, and
-  bounds reconciliation polling to one GitHub read per PR per interval.
+- Does, every `PRXREF_GATE_WATCHDOG_SECONDS` (default 60): re-queues `in_progress`
+  generations past the deadline whose lease is not live; and, every
+  `PRXREF_GATE_RECONCILE_MINUTES` (default 10) and on start, lists open PRs on every
+  allowlisted repository and enqueues a generation for any PR whose live head has no
+  generation in the store. This is the recovery path for a push that happened while the
+  Mac slept, was shut down, or the tunnel was down, because GitHub never redelivers on
+  its own. Polling is bounded to one list call per repo per interval plus one PR read
+  per discrepancy.
+- Optionally (`PRXREF_GATE_REDELIVER=on`), walks `GET /app/hook/deliveries` for
+  deliveries with a non-2xx status since the last successful one and calls the
+  redeliver endpoint, which replays through the receiver's normal dedup.
 
 ### `rulesets.py`: manifest and ruleset renderer
 
@@ -212,6 +233,24 @@ publications(generation_id PK, kind, github_id, posted_at)
 - Rotation (runbook): webhook secret via the previous-secret grace window; app private
   key by generating a second key in the App settings, swapping the file, restarting, and
   deleting the old key; Bedrock key by replacing the env line and restarting.
+- Bedrock key lifetime: the key used for this design's probes is a 12-hour short-term
+  key. The daemon needs a long-term Bedrock API key (an IAM user with
+  `AmazonBedrockLimitedAccess`, created in the Bedrock console) as an operator
+  prerequisite. An expired key surfaces as an `Error` verdict and a failed check, which
+  fails closed; `/health` and `prxref gate status` also report the last Bedrock
+  authentication failure so the runbook's "key expired" entry is observable before the
+  next PR.
+
+## Operator prerequisites (user-owned, before phase 1)
+
+- Cloudflare: a zone on a Cloudflare account and `cloudflared tunnel login` on this Mac
+  (`~/.cloudflared/cert.pem` does not exist today, and `cloudflared tunnel list` fails on
+  it). Then `cloudflared tunnel create sdlc` and a DNS route for the webhook hostname.
+- A long-term Bedrock API key for the daemon, as above.
+- A new GitHub machine-user account with write access to `sblattj/sdlc-sandbox`, used
+  only as the second pusher and the foreign-status author in phase 1.
+- Registering the `sdlc` GitHub App from the rendered manifest and installing it on the
+  sandbox only; downloading its private key to the mode-0600 path.
 
 ## Operations
 
@@ -272,9 +311,8 @@ with the commit SHAs, ruleset id, app id and check run id.
 
 ## Open assumptions
 
-- litellm forwards `reasoning_effort=medium` to Bedrock as a thinking budget. The call
-  is accepted; whether thinking tokens are actually spent is confirmed on the first
-  real diff by reading `output_tokens` in the run record.
-- GitHub retries failed webhook deliveries for up to a bounded period; the exact window
-  is read from the App's delivery log during the live proof and written into the runbook.
-- `cloudflared` named tunnel requires a domain on Cloudflare; the operator supplies one.
+- The litellm backend's per-request deadline is taken from `PRXREF_LLM_TIMEOUT` as set;
+  the implementation plan includes reading `LiteLLMClient` to confirm no lower internal
+  cap applies, and a test that a 900 s setting reaches the litellm call.
+- Opus 4.6 remains the model until Opus 5.5 access is granted by AWS Sales; the swap is
+  a one-variable change and a re-run of the live proof's phase 2.
