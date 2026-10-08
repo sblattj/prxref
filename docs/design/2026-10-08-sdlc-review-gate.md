@@ -184,10 +184,8 @@ publications(generation_id PK, kind, github_id, posted_at)
   generation in the store. This is the recovery path for a push that happened while the
   Mac slept, was shut down, or the tunnel was down, because GitHub never redelivers on
   its own. Polling is bounded to one list call per repo per interval plus one PR read
-  per discrepancy.
-- Optionally (`PRXREF_GATE_REDELIVER=on`), walks `GET /app/hook/deliveries` for
-  deliveries with a non-2xx status since the last successful one and calls the
-  redeliver endpoint, which replays through the receiver's normal dedup.
+  per discrepancy. No webhook-redelivery walker: the reconciler covers every missed
+  delivery, and the manual "Redeliver" button in the App's delivery log covers the rest.
 
 ### `rulesets.py`: manifest and ruleset renderer
 
