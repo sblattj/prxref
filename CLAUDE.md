@@ -93,7 +93,11 @@ auto-detects the forge.
   `config_file=`. An orchestrator probe needs the `contract_stubs` fixture
   (`tests/conftest.py`), or `FakeLLM` sees a non-JSON prompt; append the probe
   to a copy of the owning test module instead of importing from it.
+  `contract_stubs` replaces the real prompts, so request it per test: a
+  module-wide `pytestmark` also stubs that module's real-prompt tests.
 - A red-proof on a `/tmp` copy of the tree needs `PYTHONPATH=<copy>/src`, or
-  the editable install keeps importing the worktree.
+  the editable install keeps importing the worktree. Copy `README.md` too:
+  `uv run --directory <copy>` builds the package, and hatchling fails
+  without it.
 - `docs/env-vars.md` rows are single long lines; read diffs with
   `git diff -U0 -- docs/env-vars.md | cut -c1-300`.
