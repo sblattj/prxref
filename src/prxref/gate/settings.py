@@ -15,6 +15,7 @@ from prxref.llm import ConfigError
 WEBHOOK_SECRET_ENV = "PRXREF_GATE_WEBHOOK_SECRET"
 WEBHOOK_SECRET_PREVIOUS_ENV = "PRXREF_GATE_WEBHOOK_SECRET_PREVIOUS"
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_DIGITS_RE = re.compile(r"[0-9]+")
 _ENV_LINE_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
@@ -48,7 +49,7 @@ def _require_private(path: Path, name: str) -> None:
 def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
     """Validate the gate keys of a loaded ``cfg``; raise ``ConfigError`` naming the variable."""
     app_id = str(cfg["gate_app_id"]).strip()
-    if not app_id.isdigit():
+    if not _DIGITS_RE.fullmatch(app_id):
         raise ConfigError("PRXREF_GATE_APP_ID must be the app's numeric id")
     key_file = str(cfg["gate_private_key_file"]).strip()
     if not key_file:
@@ -56,7 +57,7 @@ def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
     key_path = Path(key_file).expanduser()
     _require_private(key_path, "PRXREF_GATE_PRIVATE_KEY_FILE")
     raw_ids = list(cfg["gate_installation_ids"])
-    if not raw_ids or not all(v.strip().isdigit() for v in raw_ids):
+    if not raw_ids or not all(_DIGITS_RE.fullmatch(v.strip()) for v in raw_ids):
         raise ConfigError("PRXREF_GATE_INSTALLATION_IDS must list one or more numeric installation ids")
     repos = [v.strip() for v in cfg["gate_repos"]]
     if not repos or not all(_REPO_RE.match(r) for r in repos):
@@ -69,7 +70,7 @@ def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
     return GateSettings(
         app_id=int(app_id),
         private_key_file=key_path,
-        installation_ids=frozenset(int(v) for v in raw_ids),
+        installation_ids=frozenset(int(v.strip()) for v in raw_ids),
         repos=frozenset(r.lower() for r in repos),
         secret_grace_minutes=int(cfg["gate_secret_grace_minutes"]),
         state_file=Path(str(cfg["gate_state_file"])).expanduser(),
@@ -84,7 +85,11 @@ def load_env_file(path: Path) -> dict[str, str]:
     """Parse ``KEY=VALUE`` lines of a mode-0600 file; ``#`` comments, blanks and ``export`` allowed."""
     _require_private(path, "--env-file")
     pairs: dict[str, str] = {}
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"--env-file {path}: cannot read it as UTF-8 text: {e}") from e
+    for number, line in enumerate(lines, start=1):
         text = line.strip()
         if not text or text.startswith("#"):
             continue

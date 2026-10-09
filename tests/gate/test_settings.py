@@ -135,3 +135,29 @@ def test_apply_env_file_returns_names_not_values(monkeypatch, tmp_path):
     names = settings.apply_env_file(env)
     assert names == ["PRXREF_GATE_WEBHOOK_SECRET"]
     assert os.environ["PRXREF_GATE_WEBHOOK_SECRET"] == "topsecret"
+
+
+@pytest.mark.parametrize("name, value", [
+    ("PRXREF_GATE_APP_ID", "²"),
+    ("PRXREF_GATE_INSTALLATION_IDS", "777,²"),
+])
+def test_a_non_ascii_digit_is_a_config_error_not_a_value_error(monkeypatch, tmp_path, name, value):
+    _env(monkeypatch, tmp_path, **{name: value})
+    with pytest.raises(ConfigError, match=name):
+        settings.settings_from_config(config.load_config())
+
+
+def test_env_file_that_is_a_directory_is_a_config_error(tmp_path):
+    env = tmp_path / "envdir"
+    env.mkdir(mode=0o700)
+    env.chmod(0o700)
+    with pytest.raises(ConfigError, match="envdir"):
+        settings.load_env_file(env)
+
+
+def test_env_file_with_undecodable_bytes_is_a_config_error(tmp_path):
+    env = tmp_path / "env"
+    env.write_bytes(b"A=\xff\xfe\n")
+    env.chmod(0o600)
+    with pytest.raises(ConfigError, match="env"):
+        settings.load_env_file(env)
