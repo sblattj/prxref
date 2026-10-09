@@ -3533,7 +3533,10 @@ def _plan_repo_context(
     reader or a missing listing logs the run's one WARNING naming
     ``PRXREF_REPO_CONTEXT``. With ``rules_source="base"`` and no ``repo_dir``,
     standards documents are listed and read at the PR's base sha
-    (``pr.target_sha``); everything else still reads the head.
+    (``pr.target_sha``); everything else still reads the head. When no base
+    reader can be built there (an empty ``target_sha``, or ``repo_dir``
+    given), no standards documents are selected and one WARNING says so; it
+    never falls back to the head.
     """
     exclude = exclude_predicate(initial["exclude_globs"])
     caps = {"run_cap": initial["max_reads"], "chunk_cap": initial["max_chunk_reads"]}
@@ -3544,16 +3547,29 @@ def _plan_repo_context(
             forge, ref, getattr(pr, "source_sha", "") or "", exclude=exclude, **caps,
         )
     standards_reader = None
-    if rules_source == "base" and repo_dir is None:
-        standards_reader = repo_reader.forge_reader(
-            forge, ref, getattr(pr, "target_sha", "") or "", exclude=exclude, **caps,
-        )
+    standards_blocked = False
+    if rules_source == "base":
+        if repo_dir is None:
+            standards_reader = repo_reader.forge_reader(
+                forge, ref, getattr(pr, "target_sha", "") or "", exclude=exclude, **caps,
+            )
+        # Fail closed (#102): never fall back to the head for standards under "base".
+        standards_blocked = standards_reader is None
+        if standards_blocked:
+            logger.warning(
+                "rules_source=base but %s; standards documents are disabled for this run",
+                "a repository directory was given (a head checkout)" if repo_dir is not None
+                else "the PR has no base SHA or the forge cannot read files at it",
+            )
     listing_source = standards_reader if standards_reader is not None else reader
     diff_paths = frozenset(f.path for f in files)
     if mode != "repo":
         budget = initial["standards_max_chars"]
         standards_paths: tuple[str, ...] = ()
-        if listing_source is not None and initial["standards_globs"] and budget > 0:
+        if (
+            listing_source is not None and not standards_blocked
+            and initial["standards_globs"] and budget > 0
+        ):
             listing = listing_source.listing()
             standards_paths = tuple(repo_contracts.select_contract_files(
                 list(initial["standards_globs"]),
@@ -3587,6 +3603,7 @@ def _plan_repo_context(
     globs = list(initial["contract_globs"])
     standards_globs = list(initial["standards_globs"])
     standards_listing = standards_reader.listing() if standards_reader is not None else listing
+    standards_select = [] if standards_blocked else standards_globs
     return _RepoPlan(
         mode, reader, initial["max_chars"], exclude, diff_paths,
         listing_paths=frozenset(listing.paths) if listing is not None else None,
@@ -3597,7 +3614,7 @@ def _plan_repo_context(
         )),
         contract_priority=tuple(repo_contracts.literal_contract_paths(globs)),
         standards_paths=tuple(repo_contracts.select_contract_files(
-            standards_globs,
+            standards_select,
             listing=standards_listing.paths if standards_listing is not None else None,
             diff_paths=[f.path for f in files if f.status != "removed"],
         )),

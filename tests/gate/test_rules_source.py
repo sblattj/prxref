@@ -114,6 +114,7 @@ def test_standards_document_is_read_at_the_rules_sha(tmp_path, source, shown, hi
     )
     prompt = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])["app/middleware.py"][0]
     assert shown in prompt
+    assert "Standards every ACME service" in prompt
     assert hidden not in prompt
 
 
@@ -132,3 +133,40 @@ def test_run_review_uses_the_given_forge_and_passes_rules_source(monkeypatch):
     cli._run_review("https://github.com/acme/widget/pull/7", forge=given)
     assert seen["forge"] is given
     assert seen["rules_source"] == "base"
+
+
+def _base_run(forge, caplog, **extra):
+    llm = _RecordingLLM()
+    with caplog.at_level("WARNING", logger="prxref.orchestrator"):
+        result = orchestrator.orchestrate_review(
+            forge, REF, llm, post=False, repo_context="repo", max_files_per_chunk=1,
+            context_standards_globs=STANDARD_GLOBS, rules_source="base", **extra,
+        )
+    return result, llm
+
+
+def test_base_without_a_base_sha_reads_no_standards_from_head(tmp_path, caplog):
+    head_root = tmp_path / "head"
+    _write(head_root, STANDARDS_DOC, WEB_SECURITY)
+    forge = _ShaForge(TWO_CHUNK_DIFF, {HEAD_SHA: head_root})
+    forge.pr.target_sha = ""
+    result, llm = _base_run(forge, caplog)
+    assert result["verdict"] != "Error"
+    assert forge.content_calls[STANDARDS_DOC] == 0
+    prompt = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])["app/middleware.py"][0]
+    assert "Standards every ACME service" not in prompt
+    assert "rules_source=base but the PR has no base SHA" in caplog.text
+
+
+def test_base_with_a_repo_dir_reads_no_standards_from_the_checkout(tmp_path, caplog):
+    from prxref.forges.repo_dir import RepoDir
+
+    head_root = tmp_path / "head"
+    _write(head_root, STANDARDS_DOC, WEB_SECURITY)
+    forge = _ShaForge(TWO_CHUNK_DIFF, {HEAD_SHA: head_root, BASE_SHA: head_root})
+    result, llm = _base_run(forge, caplog, repo_dir=RepoDir(head_root))
+    assert result["verdict"] != "Error"
+    assert forge.content_calls[STANDARDS_DOC] == 0
+    prompt = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])["app/middleware.py"][0]
+    assert "Standards every ACME service" not in prompt
+    assert "a repository directory was given" in caplog.text
