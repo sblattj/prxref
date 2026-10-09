@@ -46,19 +46,27 @@ def _list_open(client: Any, repo: str) -> list[dict]:
     return pulls
 
 
+def _covers(row: Generation | None) -> bool:
+    """True when ``row`` means the head has been (or will be) reviewed.
+
+    A ``failed`` row with no check run never published anything, and a
+    ``cancelled`` row was dropped by a close; neither covers its head.
+    """
+    if row is None:
+        return False
+    if row.state == "cancelled":
+        return False
+    return not (row.state == "failed" and row.check_run_id is None)
+
+
 def reconcile(client: Any, store: Store, repos: Sequence[str]) -> list[Generation]:
-    """Enqueue every open PR whose live head has no generation in the store.
+    """Enqueue every open PR whose live head has no covering generation in the store.
 
     Heads only: a moved base is not noticed here (spec "watchdog.py").
     """
     made: list[Generation] = []
     for repo in repos:
-        try:
-            pulls = _list_open(client, repo)
-        except GitHubError as exc:
-            logger.error("reconcile %s: %s status=%s", repo, type(exc).__name__, exc.status)
-            continue
-        for pull in pulls:
+        for pull in _list_open(client, repo):
             try:
                 number, head, base, base_ref = (
                     pull["number"],
@@ -69,7 +77,7 @@ def reconcile(client: Any, store: Store, repos: Sequence[str]) -> list[Generatio
             except (KeyError, TypeError) as exc:
                 logger.error("reconcile %s: malformed pull (%s), skipped", repo, type(exc).__name__)
                 continue
-            if store.latest_generation_for_head(repo, head) is None:
+            if not _covers(store.latest_generation_for_head(repo, head)):
                 made.append(store.enqueue(repo, number, head, base, base_ref, "reconcile"))
     return made
 

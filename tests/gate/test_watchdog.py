@@ -99,9 +99,12 @@ def test_reconcile_caps_pages_and_warns(store, caplog):
 
 def test_reconcile_enqueues_pr_whose_delivery_was_recorded_without_a_generation(store):
     assert store.record_delivery("d-1", "pull_request", "opened", "acme/a", 7)
+    assert store.latest_generation("acme/a", 7) is None
     client = _Client({"acme/a": [_pull(7, H1)]})
     made = watchdog.reconcile(client, store, ["acme/a"])
     assert [(g.pr_number, g.head_sha, g.reason) for g in made] == [(7, H1, "reconcile")]
+    stored = store.latest_generation("acme/a", 7)
+    assert stored is not None and stored.id == made[0].id and stored.state == "queued"
 
 
 def test_reconcile_ignores_a_moved_base(store):
@@ -161,15 +164,37 @@ def test_run_ticks_repeatedly_survives_errors_and_stops(store, monkeypatch, capl
     assert "watchdog tick failed" in caplog.text
 
 
-@pytest.mark.parametrize("state", ["failed", "completed"])
-def test_reconcile_does_not_reenqueue_a_finished_head(store, state):
+def _finished(store, state, *, check_run_id):
     gen = store.enqueue("acme/a", 1, H1, BASE, "main", "opened")
     token = store.acquire_lease("w", 60)
     store.start(gen.id, token)
+    if check_run_id is not None:
+        store.set_check_run(gen.id, token, check_run_id)
     store.finish(gen.id, token, state)
     assert store.get(gen.id).state == state
+    return gen
+
+
+@pytest.mark.parametrize("state", ["failed", "completed"])
+def test_reconcile_does_not_reenqueue_a_finished_head_with_a_check_run(store, state):
+    _finished(store, state, check_run_id=99)
     client = _Client({"acme/a": [_pull(1, H1)]})
     assert watchdog.reconcile(client, store, ["acme/a"]) == []
+
+
+def test_reconcile_requeues_a_failed_head_whose_check_never_published(store):
+    gen = _finished(store, "failed", check_run_id=None)
+    assert store.get(gen.id).check_run_id is None
+    made = watchdog.reconcile(_Client({"acme/a": [_pull(1, H1)]}), store, ["acme/a"])
+    assert [(g.pr_number, g.head_sha, g.reason, g.state) for g in made] == [(1, H1, "reconcile", "queued")]
+
+
+def test_reconcile_requeues_a_cancelled_head(store):
+    gen = store.enqueue("acme/a", 1, H1, BASE, "main", "opened")
+    assert store.cancel_pr("acme/a", 1) == 1
+    assert store.get(gen.id).state == "cancelled"
+    made = watchdog.reconcile(_Client({"acme/a": [_pull(1, H1)]}), store, ["acme/a"])
+    assert [(g.pr_number, g.head_sha, g.state) for g in made] == [(1, H1, "queued")]
 
 
 def test_tick_reconciles_at_start_then_on_the_interval(store):
