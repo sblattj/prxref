@@ -275,6 +275,20 @@ The service exposes:
 - `POST /webhook` — verifies HMAC or token signatures per forge (for Gitea and Forgejo, the `X-Forgejo-Signature` or `X-Gitea-Signature` HMAC against `PRXREF_GITEA_WEBHOOK_SECRET`, checked before the GitHub-compatible headers those forges also send; for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
+## Review Gate (GitHub App)
+
+`prxref review` and `prxref serve` advise; they never block a merge. To make a prxref
+review a **required check**, run the gate: a GitHub App (`sdlc`) that publishes a check
+run named `sdlc-review`, required by a repository ruleset bound to that app, with the
+review rules read from the PR's base commit.
+
+```bash
+pip install 'prxref[github-app,litellm]'
+prxref gate serve --env-file ~/.config/prxref-gate/env
+```
+
+Setup, launchd services, rotation and rollback: [docs/gate.md](docs/gate.md).
+
 ## Review Against a Spec or Ticket
 
 Give prxref the spec or ticket a change implements, and the review also checks the diff against it. A source is a public web page, a local file, a local directory (up to 20 `.md`, `.markdown`, `.txt` or `.adoc` files directly inside it), or a Jira ticket URL:
