@@ -128,3 +128,52 @@ def test_no_token_text_reaches_an_error_message(keypair):
     assert "REQ1" in str(info.value)
     assert "returned 500" in str(info.value)
     assert session.calls[1][2]["headers"]["Authorization"].split()[1] not in str(info.value)
+
+
+class _BadJson(_Resp):
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1")
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        [_Resp(200, {"no_id": 1})],
+        [_Resp(200, {"id": "not-a-number"})],
+        [_Resp(200, ["a", "list"])],
+        [_BadJson(200, None)],
+        [_Resp(200, {"id": 777}), _Resp(201, {"expires_at": "1970-01-12T14:46:40Z"})],
+        [_Resp(200, {"id": 777}), _Resp(201, {"token": "ghs_one", "expires_at": "yesterday"})],
+        [_Resp(200, {"id": 777}), _Resp(201, {"token": "ghs_one"})],
+    ],
+)
+def test_a_malformed_github_reply_is_a_gate_auth_error(keypair, replies):
+    auth = _auth(keypair, _Session(replies), clock=lambda: 1_000_000.0)
+    with pytest.raises(app_auth.GateAuthError) as info:
+        auth.token_for("acme/widget")
+    assert "ghs_one" not in str(info.value)
+
+
+def test_a_repo_without_an_owner_is_a_gate_auth_error(keypair):
+    auth = _auth(keypair, _Session([_Resp(200, {"id": 777})]), clock=lambda: 1_000_000.0)
+    with pytest.raises(app_auth.GateAuthError):
+        auth.token_for("widget")
+
+
+def test_a_malformed_app_reply_is_a_gate_auth_error(keypair):
+    auth = _auth(keypair, _Session([_Resp(200, {"id": 12345})]), clock=lambda: 1_000_000.0)
+    with pytest.raises(app_auth.GateAuthError):
+        auth.bot_login()
+
+
+def test_a_minted_token_is_registered_for_redaction(keypair):
+    from prxref.gate import worker
+
+    session = _Session(
+        [
+            _Resp(200, {"id": 777}),
+            _Resp(201, {"token": "opaque-minted-AbC123xyz", "expires_at": "1970-01-12T14:46:40Z"}),
+        ]
+    )
+    _auth(keypair, session, clock=lambda: 1_000_000.0).token_for("acme/widget")
+    assert "opaque-minted-AbC123xyz" not in worker._redact("401 for opaque-minted-AbC123xyz")

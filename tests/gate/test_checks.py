@@ -157,7 +157,6 @@ def _complete(gh, store, gen, lease, result, captured=None):
         result,
         captured,
         effort="high",
-        run_dir="/runs/1",
     )
 
 
@@ -264,8 +263,8 @@ def test_summary_names_model_effort_tokens_and_shas(gen):
         "chunks_failed": 0,
         "sampling": {"models": ["bedrock/us.anthropic.claude-opus"]},
     }
-    text = checks.summary_text(gen, result, "success", "approved", effort="high", run_dir="/runs/1")
-    for needle in ("bedrock/us.anthropic.claude-opus", "high", "1200", "300", "Approved", "3/3", HEAD, BASE, "/runs/1"):
+    text = checks.summary_text(gen, result, "success", "approved", effort="high")
+    for needle in ("bedrock/us.anthropic.claude-opus", "high", "1200", "300", "Approved", "3/3", HEAD, BASE, "`runs/"):
         assert needle in text
 
 
@@ -314,9 +313,7 @@ def test_guard_runs_before_each_complete_write(store, gen, lease):
     gh = _GitHub([])
     publisher = checks.Publisher(checks.GitHubClient(_Auth(), gh), store, app_id=99, bot_login="sdlc[bot]", guard=guard)
     with pytest.raises(checks.Stale):
-        publisher.complete(
-            store.get(gen.id), lease, {"verdict": "Approved"}, checks.Captured(), effort="high", run_dir="/r"
-        )
+        publisher.complete(store.get(gen.id), lease, {"verdict": "Approved"}, checks.Captured(), effort="high")
     assert gh.calls == []
 
 
@@ -378,7 +375,6 @@ def test_the_lease_is_renewed_and_guarded_before_every_write(store, gen, lease):
         {"verdict": "Approved", "findings_active": findings},
         checks.Captured(summary="s", comments=(InlineComment(path="a.py", line=3, body="x"),)),
         effort="high",
-        run_dir="/r",
     )
     assert events.count("W") == 6
     assert events.count("R") == 6
@@ -444,7 +440,6 @@ def test_the_retry_posts_are_fenced_again(store, gen, lease):
             {"verdict": "Approved"},
             checks.Captured(comments=(comment,)),
             effort="",
-            run_dir="",
         )
     assert len(gh.sent("POST", r"/reviews$")) == 1
 
@@ -480,7 +475,41 @@ def test_complete_with_no_check_creates_one_first_and_runs_the_guard(store, gen,
     publisher = checks.Publisher(
         checks.GitHubClient(_Auth(), gh), store, app_id=99, bot_login="b", guard=lambda g: seen.append(1)
     )
-    publisher.complete(gen, lease, {"verdict": "Approved"}, checks.Captured(), effort="", run_dir="")
+    publisher.complete(gen, lease, {"verdict": "Approved"}, checks.Captured(), effort="")
     assert not gh.sent("PATCH", r"/check-runs/None")
     assert gh.sent("PATCH", r"/check-runs/888$")[-1][3]["conclusion"] == "success"
     assert len(seen) >= 2
+
+
+def test_the_summary_names_the_run_record_relative_to_the_runs_dir(gen):
+    text = checks.summary_text(gen, {"verdict": "Approved"}, "success", "approved", effort="high")
+    assert f"run record: `runs/{gen.external_id}`" in text
+    assert "/Users/" not in text and "/home/" not in text
+
+
+class _FailingAuth(_Auth):
+    def token_for(self, repo):
+        from prxref.gate.app_auth import GateAuthError
+
+        raise GateAuthError("POST /app/installations/1/access_tokens returned 401 (request id R)")
+
+
+@pytest.mark.parametrize("auth, reply", [(_FailingAuth(), None), (_Auth(), requests.exceptions.InvalidURL("bad"))])
+def test_an_auth_or_transport_failure_is_an_uncertain_reply(auth, reply):
+    gh = _GitHub([("GET", r"/pulls/7$", [reply or _Resp(200, {})])])
+    client = checks.GitHubClient(auth, gh)
+    with pytest.raises(checks.UncertainReply):
+        client.request("GET", REPO, "/pulls/7")
+
+
+def test_every_minted_token_is_registered_for_redaction():
+    from prxref.gate import worker
+
+    gh = _GitHub([("GET", r"/pulls/7$", [_Resp(200, {})])])
+
+    class _LongAuth(_Auth):
+        def token_for(self, repo):
+            return "opaque-installation-token-QWERTY"
+
+    checks.GitHubClient(_LongAuth(), gh).request("GET", REPO, "/pulls/7")
+    assert worker._redact("x opaque-installation-token-QWERTY y") == "x [redacted] y"

@@ -2,7 +2,7 @@
 
 :func:`run_generation` starts a generation (fenced by the lease), checks
 its binding to the live PR, opens the check, runs the review in a
-one-thread pool bounded by ``deadline_s``, and publishes. A deadline hit
+daemon thread bounded by ``deadline_s``, and publishes. A deadline hit
 or a crash is a ``failure``. A generation whose head, base or base ref
 moved goes ``stale`` and, when nothing live covers the PR's current head
 and base, queues a ``repair`` generation for them, which repairs a
@@ -10,7 +10,13 @@ delivery that arrived out of order. A closed PR is ``cancelled``.
 
 A deadline cannot stop the review thread; it runs on in the background,
 and :meth:`CapturingForge.seal` makes its late posts no-ops, so it can
-never publish.
+never publish. The thread is a daemon, so a runaway review never keeps the
+process alive after the worker stops.
+
+Every stored, logged or recorded text passes through :func:`_redact`, which
+masks GitHub token shapes and every value given to :func:`register_secret`
+(the installation tokens as they are minted; ``serve`` adds the webhook
+secrets and the Bedrock key).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ import tempfile
 import threading
 import traceback
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -33,7 +39,7 @@ from typing import Any
 from prxref import cli
 from prxref.forges.github import ForgeImpl
 from prxref.gate.binding import check_binding, read_live_pr
-from prxref.gate.checks import Captured, GitHubError, Lease, Publisher, Stale
+from prxref.gate.checks import Captured, Lease, Publisher, Stale
 from prxref.gate.rules_source import materialize_rules, rules_sha
 from prxref.gate.store import Generation, LeaseLost, Store, holder_alive
 
@@ -42,10 +48,25 @@ logger = logging.getLogger(__name__)
 TTL_PAD_S = 120
 _DRIFT = frozenset({"head moved", "base moved", "retargeted"})
 _SECRET = re.compile(r"github_pat_[A-Za-z0-9_]+|gh[a-z]_[A-Za-z0-9]+|(?i:(?:bearer|token)\s+\S+)")
+_MIN_SECRET_LEN = 8
+_ERROR_LINE = "The review could not complete:"
+_registered: set[str] = set()
+_registered_lock = threading.Lock()
+
+
+def register_secret(value: str) -> None:
+    """Have :func:`_redact` mask ``value`` wherever it appears; values under 8 characters are ignored."""
+    if isinstance(value, str) and len(value) >= _MIN_SECRET_LEN:
+        with _registered_lock:
+            _registered.add(value)
 
 
 def _redact(text: str) -> str:
-    """Mask GitHub tokens and ``Bearer``/``token`` credentials before text is stored or logged."""
+    """Mask registered secrets, GitHub tokens and ``Bearer``/``token`` credentials before text is stored or logged."""
+    with _registered_lock:
+        values = sorted(_registered, key=len, reverse=True)
+    for value in values:
+        text = text.replace(value, "[redacted]")
     return _SECRET.sub("[redacted]", text)
 
 
@@ -63,14 +84,24 @@ class InstallationForge(ForgeImpl):
         self._token_source = token_source
 
     def _headers(self, host: str, extra: dict[str, str] | None = None) -> dict[str, str]:
-        headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self._token_source()}"}
+        token = self._token_source()
+        register_secret(token)
+        headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
         if extra:
             headers.update(extra)
         return headers
 
 
+_WRITE_PREFIXES = ("post_", "prune_", "delete_", "create_", "dismiss_")
+
+
 class CapturingForge:
-    """Reads through ``inner`` at the generation's SHAs; captures both posts."""
+    """Reads through ``inner`` at the generation's SHAs; captures both posts.
+
+    Any other write-shaped method (a name starting with one of
+    :data:`_WRITE_PREFIXES`) is refused rather than forwarded, so a forge
+    method added later can never write to the PR from inside a review.
+    """
 
     def __init__(self, inner: Any, gen: Generation) -> None:
         self._inner = inner
@@ -81,6 +112,8 @@ class CapturingForge:
         self._lock = threading.Lock()
 
     def __getattr__(self, name: str) -> Any:
+        if name.startswith(_WRITE_PREFIXES):
+            raise AttributeError(f"{type(self).__name__} does not forward the write method {name!r}")
         return getattr(self._inner, name)
 
     def get_pr(self, ref):
@@ -161,20 +194,32 @@ def review_with_prxref(
     finally:
         capture.seal()
     record = cli._build_json_result(result) if isinstance(result, dict) else {"verdict": None}
-    (run_dir / "result.json").write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+    (run_dir / "result.json").write_text(_redact(json.dumps(record, indent=2, default=str)), encoding="utf-8")
     run_record = result if isinstance(result, dict) else {"error": type(result).__name__}
-    (run_dir / "run_record.json").write_text(json.dumps(run_record, indent=2, default=str), encoding="utf-8")
+    (run_dir / "run_record.json").write_text(_redact(json.dumps(run_record, indent=2, default=str)), encoding="utf-8")
     return ReviewOutcome(result, capture.captured(), run_dir)
 
 
 def _not_bound(gen: Generation, reason: str, *, store: Store, publisher: Publisher, client: Any, lease: Lease) -> str:
     if reason == "closed":
-        publisher.cancel(gen, lease, "PR closed")
+        try:
+            publisher.cancel(gen, lease, "PR closed")
+        except LeaseLost:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return _publish_failed(gen, exc, store=store, publisher=publisher, lease=lease)
         store.finish(gen.id, lease.token, "cancelled", "cancelled", reason)
         return "cancelled"
     store.finish(gen.id, lease.token, "stale", None, reason)
     if reason in _DRIFT:
-        live = read_live_pr(client, gen.repo, gen.pr_number)
+        # The row is already final; a failed read only skips the repair, which reconcile covers.
+        try:
+            live = read_live_pr(client, gen.repo, gen.pr_number)
+        except LeaseLost:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _log_failure(f"generation {gen.id}: the live PR could not be re-read for a repair: {exc}", exc)
+            return "stale"
         if live.state == "open" and not store.has_live_generation(
             gen.repo,
             gen.pr_number,
@@ -185,7 +230,7 @@ def _not_bound(gen: Generation, reason: str, *, store: Store, publisher: Publish
     return "stale"
 
 
-def _fail_publish(gen: Generation, lease: Lease, why: str, *, store: Store, publisher: Publisher) -> None:
+def _fail_publish(gen: Generation, lease: Lease, why: str, *, publisher: Publisher) -> None:
     """Try to close the check as failed; a failure here is logged and swallowed (a lost lease is not)."""
     try:
         publisher.fail(gen, lease, why)
@@ -208,6 +253,37 @@ def _publish_failed(gen: Generation, exc: Exception, *, store: Store, publisher:
     return "failed"
 
 
+def _start_review(review: Callable[..., ReviewOutcome], gen: Generation, register: Callable) -> Future:
+    """Run ``review`` on a daemon thread; the returned future carries its outcome or exception."""
+    future: Future = Future()
+
+    def target() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            future.set_result(review(gen, register=register))
+        except BaseException as exc:  # noqa: BLE001 - delivered to the waiter, never swallowed
+            future.set_exception(exc)
+
+    threading.Thread(target=target, name=f"gate-review-{gen.id}", daemon=True).start()
+    return future
+
+
+def _error_reason(outcome: ReviewOutcome) -> str | None:
+    """For an ``Error`` verdict, the posted "could not complete" line (already redacted for posting).
+
+    Stored in the row's ``error`` column so ``last_auth_failure`` (status and
+    ``/health``) can see an expired model key. ``None`` for any other verdict.
+    """
+    result = outcome.result
+    if not isinstance(result, dict) or result.get("verdict") != "Error":
+        return None
+    for line in (outcome.captured.summary or "").splitlines():
+        if line.startswith(_ERROR_LINE):
+            return _redact(line)[:500]
+    return "review error: the review posted no reason"
+
+
 def run_generation(
     gen: Generation,
     *,
@@ -223,7 +299,9 @@ def run_generation(
     gen = store.start(gen.id, lease.token)
     try:
         live = read_live_pr(client, gen.repo, gen.pr_number)
-    except GitHubError as exc:  # includes UncertainReply
+    except LeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an auth failure or a malformed reply must not strand the row
         return _publish_failed(gen, exc, store=store, publisher=publisher, lease=lease)
     reason = check_binding(gen, live, store)
     if reason is not None:
@@ -238,14 +316,13 @@ def run_generation(
         return _publish_failed(gen, exc, store=store, publisher=publisher, lease=lease)
     gen = store.get(gen.id)
     captures: list[CapturingForge] = []
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"gate-review-{gen.id}")
     try:
-        outcome = pool.submit(review, gen, register=captures.append).result(timeout=deadline_s)
+        outcome = _start_review(review, gen, captures.append).result(timeout=deadline_s)
     except FuturesTimeout:
         why = f"deadline: review exceeded {deadline_s:g}s"
         for capture in captures:
             capture.seal()
-        _fail_publish(gen, lease, why, store=store, publisher=publisher)
+        _fail_publish(gen, lease, why, publisher=publisher)
         store.finish(gen.id, lease.token, "failed", "failure", why)
         return "failed"
     except Exception as exc:  # noqa: BLE001
@@ -253,22 +330,18 @@ def run_generation(
         _log_failure(f"generation {gen.id}: {why}: {exc}", exc)
         for capture in captures:
             capture.seal()
-        _fail_publish(gen, lease, why, store=store, publisher=publisher)
+        _fail_publish(gen, lease, why, publisher=publisher)
         store.finish(gen.id, lease.token, "failed", "failure", _redact(f"{why}: {exc}")[:500])
         return "failed"
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
     try:
-        conclusion = publisher.complete(
-            gen, lease, outcome.result, outcome.captured, effort=effort, run_dir=str(outcome.run_dir)
-        )
+        conclusion = publisher.complete(gen, lease, outcome.result, outcome.captured, effort=effort)
     except Stale as stale:
         return _not_bound(gen, stale.reason, store=store, publisher=publisher, client=client, lease=lease)
     except LeaseLost:
         raise
     except Exception as exc:  # noqa: BLE001
         return _publish_failed(gen, exc, store=store, publisher=publisher, lease=lease)
-    store.finish(gen.id, lease.token, "completed", conclusion)
+    store.finish(gen.id, lease.token, "completed", conclusion, _error_reason(outcome))
     return "completed"
 
 
@@ -328,7 +401,10 @@ class Worker:
         )
 
     def run(self, stop: threading.Event) -> None:
-        """Loop until ``stop`` is set; a lost lease is re-acquired, never published through."""
+        """Loop until ``stop`` is set; a lost lease is re-acquired, never published through.
+
+        A clean stop releases the lease, so the next start need not wait out its TTL.
+        """
         lease: Lease | None = None
         while not stop.is_set():
             if lease is None:
@@ -347,3 +423,5 @@ class Worker:
                 state = None
             if state is None:
                 stop.wait(self.poll_s)
+        if lease is not None:
+            self.store.release_lease(lease.holder, lease.token)

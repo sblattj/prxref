@@ -17,6 +17,7 @@ from typing import Any
 import requests
 
 from prxref.forges.base import SUMMARY_MARKER, InlineComment, with_summary_marker
+from prxref.gate.app_auth import GateAuthError
 from prxref.gate.receiver import CHECK_NAME
 from prxref.gate.store import Generation, LeaseLost, Store
 from prxref.triage import Finding
@@ -137,9 +138,13 @@ def summary_text(
     reason: str,
     *,
     effort: str,
-    run_dir: str,
 ) -> str:
-    """The check output summary: model, effort, tokens, verdict, chunks, SHAs, run record."""
+    """The check output summary: model, effort, tokens, verdict, chunks, SHAs, run record.
+
+    The run record is named relative to ``PRXREF_GATE_RUNS_DIR`` (the worker
+    writes it to ``<runs dir>/<generation id>``, and the external id is that
+    id), so the operator's home path is never posted to the PR.
+    """
     r = result if isinstance(result, dict) else {}
     models = ", ".join((r.get("sampling") or {}).get("models") or []) or "unknown"
     lines = [
@@ -151,7 +156,7 @@ def summary_text(
         f"- Chunks reviewed: {r.get('chunks_reviewed', 0)}/{r.get('chunk_count', 0)}"
         f" ({r.get('chunks_failed', 0)} failed)",
         f"- Base: `{gen.base_sha}` ({gen.base_ref}); head: `{gen.head_sha}`",
-        f"- Generation {gen.external_id}; run record: `{run_dir}`",
+        f"- Generation {gen.external_id}; run record: `runs/{gen.external_id}`",
     ]
     return "\n".join(lines)[:SUMMARY_LIMIT]
 
@@ -165,8 +170,18 @@ class GitHubClient:
         self.api = api.rstrip("/")
 
     def _send(self, method: str, repo: str, path: str, json: dict | None, params: dict | None):
+        """One HTTP call; a failed mint or any transport error is an :class:`UncertainReply`."""
+        from prxref.gate.worker import register_secret  # worker imports this module; import late
+
+        try:
+            token = self.auth.token_for(repo)
+        except GateAuthError as exc:
+            raise UncertainReply(
+                f"{method} {path}: installation credential unavailable ({type(exc).__name__}: {exc})"
+            ) from None
+        register_secret(token)
         headers = {
-            "Authorization": f"token {self.auth.token_for(repo)}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
@@ -179,7 +194,7 @@ class GitHubClient:
                 json=json,
                 params=params,
             )
-        except (requests.Timeout, requests.ConnectionError) as exc:
+        except requests.RequestException as exc:
             raise UncertainReply(f"{method} {path}: {type(exc).__name__}") from None
 
     def request(
@@ -365,9 +380,7 @@ class Publisher:
                     },
                 )
 
-    def complete(
-        self, gen: Generation, lease: Lease, result: object, captured: Captured, *, effort: str, run_dir: str
-    ) -> str:
+    def complete(self, gen: Generation, lease: Lease, result: object, captured: Captured, *, effort: str) -> str:
         """Post the review and summary comment, then close the check; returns the conclusion."""
         gen = self.store.get(gen.id)
         if gen.check_run_id is None:
@@ -386,7 +399,7 @@ class Publisher:
         if captured.summary:
             self._fence(lease, gen)
             self._upsert_summary(gen, captured.summary)
-        details = summary_text(gen, result, conclusion, reason, effort=effort, run_dir=run_dir)
+        details = summary_text(gen, result, conclusion, reason, effort=effort)
         if captured.summary:
             sep = "\n\n---\n\n"
             text = captured.summary[: max(SUMMARY_LIMIT - len(sep) - len(details), 0)] + sep + details

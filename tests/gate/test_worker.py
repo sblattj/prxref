@@ -3,6 +3,7 @@
 import json
 import sys
 import threading
+import time
 import types
 from types import SimpleNamespace
 
@@ -157,7 +158,7 @@ class _Publisher:
         self.store.set_check_run(gen.id, lease.token, 1)
         return 1
 
-    def complete(self, gen, lease, result, captured, *, effort, run_dir):
+    def complete(self, gen, lease, result, captured, *, effort):
         self.calls.append("complete")
         if self.complete_raises:
             raise self.complete_raises
@@ -433,5 +434,183 @@ def test_a_token_in_a_forge_error_reaches_no_stored_or_logged_text(store, gen, l
     assert SECRET not in (row.error or "")
     assert all(SECRET not in reason for reason in publisher.reasons)
     assert SECRET not in caplog.text
-    for path in (tmp_path / "runs").rglob("*.json"):
-        assert SECRET not in path.read_text()
+    assert list((tmp_path / "runs").rglob("*.json")) == []
+
+
+class _RaisingAuth:
+    """An app auth whose every mint fails, as when GitHub's app endpoint refuses the JWT."""
+
+    def token_for(self, repo):
+        from prxref.gate.app_auth import GateAuthError
+
+        raise GateAuthError("POST /app/installations/1/access_tokens returned 401 (request id R)")
+
+    def invalidate(self, repo):
+        pass
+
+
+class _NoSession:
+    def request(self, *args, **kwargs):
+        raise AssertionError("no request may be sent without a token")
+
+
+def test_an_auth_failure_reading_the_live_pr_fails_the_generation(store, gen, lease):
+    client = checks.GitHubClient(_RaisingAuth(), _NoSession())
+    publisher = checks.Publisher(client, store, app_id=99, bot_login="sdlc[bot]")
+    state = worker.run_generation(
+        gen,
+        store=store,
+        publisher=publisher,
+        client=client,
+        lease=lease,
+        review=lambda g, register=None: pytest.fail("no"),
+        deadline_s=5.0,
+        effort="high",
+    )
+    row = store.get(gen.id)
+    assert (state, row.state, row.conclusion) == ("failed", "failed", "failure")
+    assert row.error.startswith("publish failed: UncertainReply") and "GateAuthError" in row.error
+
+
+def test_a_malformed_live_pull_fails_the_generation(store, gen, lease):
+    client = _Client()
+    client.pull = {"state": "open"}
+    state, calls, row = _run(store, gen, lease, lambda g, register=None: pytest.fail("no"), client=client)
+    assert (state, row.state, row.conclusion) == ("failed", "failed", "failure")
+    assert calls == ["fail:publish failed: KeyError"]
+
+
+def test_a_failed_cancel_fails_the_generation_instead_of_escaping(store, gen, lease):
+    class _BrokenCancel(_Publisher):
+        def cancel(self, gen, lease, reason):
+            self.calls.append("cancel-attempt")
+            raise ValueError("bad json")
+
+    publisher = _BrokenCancel(store)
+    state, calls, row = _run(
+        store,
+        gen,
+        lease,
+        lambda g, register=None: pytest.fail("no"),
+        client=_Client(state="closed"),
+        publisher=publisher,
+    )
+    assert (state, row.state, row.conclusion) == ("failed", "failed", "failure")
+    assert calls == ["cancel-attempt", "fail:publish failed: ValueError"]
+
+
+def test_an_unreadable_pr_after_drift_still_ends_stale(store, gen, lease):
+    class _OnceThenDown(_Client):
+        def __init__(self):
+            super().__init__(head="c" * 40)
+            self.reads = 0
+
+        def request(self, method, repo, path, **kwargs):
+            self.reads += 1
+            if self.reads > 1:
+                raise RuntimeError("down")
+            return super().request(method, repo, path, **kwargs)
+
+    state, _calls, row = _run(store, gen, lease, lambda g, register=None: pytest.fail("no"), client=_OnceThenDown())
+    assert (state, row.state, row.error) == ("stale", "stale", "head moved")
+
+
+def test_an_error_verdict_stores_its_reason_for_status_and_health(store, gen, lease, tmp_path):
+    summary = (
+        "\U0001f916 **prxref review — Error**\n\n"
+        "The review could not complete: litellm.AuthenticationError: BedrockException - token ghs_LEAKED123 expired\n\n"
+        "No findings were produced."
+    )
+    outcome = worker.ReviewOutcome({"verdict": "Error"}, checks.Captured(summary=summary), tmp_path)
+    state, _calls, row = _run(store, gen, lease, lambda g, register=None: outcome)
+    assert (state, row.conclusion) == ("completed", "failure")
+    failure = store.last_auth_failure()
+    assert failure is not None and failure.startswith("The review could not complete: litellm.AuthenticationError")
+    assert "ghs_LEAKED123" not in failure and len(failure) <= 500
+
+
+def test_an_error_verdict_with_no_summary_still_stores_a_reason(store, gen, lease, tmp_path):
+    state, _calls, row = _run(store, gen, lease, lambda g, register=None: _outcome({"verdict": "Error"}, tmp_path))
+    assert (state, row.conclusion) == ("completed", "failure")
+    assert row.error and row.error.startswith("review error")
+
+
+def test_the_review_runs_on_a_daemon_thread_and_the_deadline_returns_promptly(store, gen, lease):
+    seen = []
+    release = threading.Event()
+
+    def slow(g, register=None):
+        seen.append(threading.current_thread().daemon)
+        release.wait(2)
+
+    started = time.monotonic()
+    state, _calls, row = _run(store, gen, lease, slow, deadline_s=0.2)
+    elapsed = time.monotonic() - started
+    release.set()
+    assert (state, row.state) == ("failed", "failed")
+    assert seen == [True]
+    assert elapsed < 0.5
+
+
+def test_a_clean_stop_releases_the_worker_lease(store, tmp_path):
+    w = _worker(store, tmp_path)
+    stop = threading.Event()
+    live_during = []
+
+    def once(lease):
+        live_during.append(store.lease_info()["live"])
+        stop.set()
+        return None
+
+    w.run_once = once
+    w.run(stop)
+    assert live_during == [True]
+    info = store.lease_info()
+    assert info is None or info["live"] is False
+
+
+def test_capturing_forge_refuses_unknown_write_methods_but_forwards_reads(gen):
+    inner = FakeForge(diff=TWO_CHUNK_DIFF)
+    inner.get_commits = lambda ref: ["c1"]
+    for name in ("post_review", "prune_comments", "delete_comment", "create_check", "dismiss_review"):
+        setattr(inner, name, lambda *a, **k: pytest.fail("a write reached the real forge"))
+    cap = worker.CapturingForge(inner, gen)
+    for name in ("post_review", "prune_comments", "delete_comment", "create_check", "dismiss_review"):
+        with pytest.raises(AttributeError):
+            getattr(cap, name)
+        assert getattr(cap, name, None) is None
+    assert cap.get_commits(REF) == ["c1"]
+
+
+def test_register_secret_ignores_short_values():
+    worker.register_secret("short")
+    assert worker._redact("a short b") == "a short b"
+
+
+def test_a_registered_secret_reaches_no_record_row_or_log(store, gen, lease, tmp_path, caplog, monkeypatch):
+    value = "bedrock-key-Zq81LmP0xY"
+    worker.register_secret(value)
+    monkeypatch.setattr(
+        worker.cli,
+        "_run_review",
+        lambda url, **kw: {
+            "verdict": "Error",
+            "chunks_failed": 1,
+            "failed_chunks": [{"index": 1, "files": [], "error": f"auth with {value} refused"}],
+        },
+    )
+    inner = _PinnedForge(TWO_CHUNK_DIFF, _roots(tmp_path, "- a rule\n"))
+    publisher = _Publisher(store, complete_raises=checks.GitHubError(f"PATCH refused {value}", status=422))
+
+    def review(g, register=None):
+        return worker.review_with_prxref(g, inner, rules_source="base", runs_dir=tmp_path / "runs", register=register)
+
+    with caplog.at_level("DEBUG"):
+        state, _calls, row = _run(store, gen, lease, review, publisher=publisher)
+    assert state == "failed"
+    assert value not in (row.error or "") and "[redacted]" in (row.error or "")
+    assert value not in caplog.text and "[redacted]" in caplog.text
+    for name in ("result.json", "run_record.json"):
+        text = (tmp_path / "runs" / str(gen.id) / name).read_text()
+        assert value not in text, name
+        assert "[redacted]" in text, name

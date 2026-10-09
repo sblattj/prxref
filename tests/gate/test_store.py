@@ -228,3 +228,13 @@ def test_start_and_set_check_run_refuse_a_stale_token(db, clock):
         db.set_check_run(gen.id, old, 5)
     row = db.get(gen.id)
     assert (row.state, row.check_run_id, row.attempts) == ("queued", None, 0)
+
+
+def test_release_lease_expires_only_the_matching_holder_and_token(db):
+    token = db.acquire_lease("hostA:1", 60)
+    db.release_lease("hostA:1", token + 1)
+    db.release_lease("hostB:1", token)
+    assert db.lease_info()["live"] is True
+    db.release_lease("hostA:1", token)
+    assert db.lease_info()["live"] is False
+    assert db.acquire_lease("hostB:1", 60) == token + 1

@@ -229,6 +229,18 @@ class Store:
             )
             return cur.rowcount == 1
 
+    def release_lease(self, holder: str, token: int) -> None:
+        """Expire the worker lease if ``holder`` still holds it under ``token`` (a clean stop).
+
+        The row is expired, not deleted, so the next holder's fencing token
+        still counts up from this one.
+        """
+        with self._tx() as c:
+            c.execute(
+                "UPDATE leases SET expires_at=0 WHERE name='worker' AND holder=? AND token=?",
+                (holder, token),
+            )
+
     def lease_info(self) -> dict | None:
         with self._lock:
             row = self._conn.execute("SELECT holder, token, expires_at FROM leases WHERE name='worker'").fetchone()
