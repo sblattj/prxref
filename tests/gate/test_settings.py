@@ -10,10 +10,19 @@ from prxref.gate import settings
 from prxref.llm import ConfigError
 
 GATE_KEYS = {
-    "rules_source", "gate_app_id", "gate_private_key_file", "gate_installation_ids",
-    "gate_repos", "gate_webhook_secret", "gate_webhook_secret_previous",
-    "gate_secret_grace_minutes", "gate_state_file", "gate_runs_dir",
-    "gate_review_deadline", "gate_watchdog_seconds", "gate_reconcile_minutes",
+    "rules_source",
+    "gate_app_id",
+    "gate_private_key_file",
+    "gate_installation_ids",
+    "gate_repos",
+    "gate_webhook_secret",
+    "gate_webhook_secret_previous",
+    "gate_secret_grace_minutes",
+    "gate_state_file",
+    "gate_runs_dir",
+    "gate_review_deadline",
+    "gate_watchdog_seconds",
+    "gate_reconcile_minutes",
 }
 
 
@@ -78,18 +87,21 @@ def test_settings_from_a_complete_environment(monkeypatch, tmp_path):
     assert s.state_file == tmp_path / "gate.sqlite3"
 
 
-@pytest.mark.parametrize("name, value", [
-    ("PRXREF_GATE_APP_ID", ""),
-    ("PRXREF_GATE_APP_ID", "sdlc"),
-    ("PRXREF_GATE_INSTALLATION_IDS", ""),
-    ("PRXREF_GATE_INSTALLATION_IDS", "77x"),
-    ("PRXREF_GATE_REPOS", ""),
-    ("PRXREF_GATE_REPOS", "no-slash"),
-    ("PRXREF_GATE_WEBHOOK_SECRET", ""),
-    ("PRXREF_GATE_STATE_FILE", ""),
-    ("PRXREF_GATE_RUNS_DIR", ""),
-    ("PRXREF_GATE_PRIVATE_KEY_FILE", "/nonexistent/app.pem"),
-])
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("PRXREF_GATE_APP_ID", ""),
+        ("PRXREF_GATE_APP_ID", "sdlc"),
+        ("PRXREF_GATE_INSTALLATION_IDS", ""),
+        ("PRXREF_GATE_INSTALLATION_IDS", "77x"),
+        ("PRXREF_GATE_REPOS", ""),
+        ("PRXREF_GATE_REPOS", "no-slash"),
+        ("PRXREF_GATE_WEBHOOK_SECRET", ""),
+        ("PRXREF_GATE_STATE_FILE", ""),
+        ("PRXREF_GATE_RUNS_DIR", ""),
+        ("PRXREF_GATE_PRIVATE_KEY_FILE", "/nonexistent/app.pem"),
+    ],
+)
 def test_a_missing_or_malformed_value_names_its_variable(monkeypatch, tmp_path, name, value):
     _env(monkeypatch, tmp_path, **{name: value})
     with pytest.raises(ConfigError, match=name):
@@ -137,10 +149,13 @@ def test_apply_env_file_returns_names_not_values(monkeypatch, tmp_path):
     assert os.environ["PRXREF_GATE_WEBHOOK_SECRET"] == "topsecret"
 
 
-@pytest.mark.parametrize("name, value", [
-    ("PRXREF_GATE_APP_ID", "²"),
-    ("PRXREF_GATE_INSTALLATION_IDS", "777,²"),
-])
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("PRXREF_GATE_APP_ID", "²"),
+        ("PRXREF_GATE_INSTALLATION_IDS", "777,²"),
+    ],
+)
 def test_a_non_ascii_digit_is_a_config_error_not_a_value_error(monkeypatch, tmp_path, name, value):
     _env(monkeypatch, tmp_path, **{name: value})
     with pytest.raises(ConfigError, match=name):

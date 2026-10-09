@@ -32,8 +32,14 @@ def test_every_gate_key_is_in_the_runbook():
 
 def test_the_runbook_has_the_operator_sections():
     text = RUNBOOK.read_text(encoding="utf-8")
-    for heading in ("## Prerequisites", "## Install", "## Rotation", "## Local limits",
-                    "## Troubleshooting", "## Rollback"):
+    for heading in (
+        "## Prerequisites",
+        "## Install",
+        "## Rotation",
+        "## Local limits",
+        "## Troubleshooting",
+        "## Rollback",
+    ):
         assert heading in text, heading
     assert "key expired" in text.lower()
 

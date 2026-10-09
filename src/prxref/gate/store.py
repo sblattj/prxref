@@ -134,7 +134,8 @@ class Store:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT OR IGNORE INTO deliveries(delivery_id, received_at, event, action, repo, pr_number) "
-                "VALUES (?, ?, ?, ?, ?, ?)", (delivery_id, self._clock(), event, action, repo, pr_number),
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (delivery_id, self._clock(), event, action, repo, pr_number),
             )
             return cur.rowcount == 1
 
@@ -152,7 +153,8 @@ class Store:
             ).fetchone()[0]
             c.execute(
                 "UPDATE generations SET state='superseded', finished_at=? "
-                "WHERE repo=? AND pr_number=? AND state='queued'", (now, repo, pr_number),
+                "WHERE repo=? AND pr_number=? AND state='queued'",
+                (now, repo, pr_number),
             )
             cur = c.execute(
                 "INSERT INTO generations(repo, pr_number, head_sha, base_sha, base_ref, gen, reason, "
@@ -168,14 +170,16 @@ class Store:
         with self._tx() as c:
             cur = c.execute(
                 "UPDATE generations SET state='cancelled', finished_at=? WHERE repo=? AND pr_number=? "
-                "AND state='queued' AND check_run_id IS NULL", (self._clock(), repo, pr_number),
+                "AND state='queued' AND check_run_id IS NULL",
+                (self._clock(), repo, pr_number),
             )
             return cur.rowcount
 
     def next_queued(self) -> Generation | None:
         return self._one(
             "AS g WHERE state='queued' AND gen=(SELECT MAX(gen) FROM generations "
-            "WHERE repo=g.repo AND pr_number=g.pr_number) ORDER BY id LIMIT 1", (),
+            "WHERE repo=g.repo AND pr_number=g.pr_number) ORDER BY id LIMIT 1",
+            (),
         )
 
     def get(self, gen_id: int) -> Generation:
@@ -191,11 +195,14 @@ class Store:
         return self._one("WHERE repo=? AND head_sha=? ORDER BY id DESC LIMIT 1", (repo, head_sha))
 
     def has_live_generation(self, repo, pr_number, head_sha, base_sha) -> bool:
-        return self._one(
-            "WHERE repo=? AND pr_number=? AND head_sha=? AND base_sha=? "
-            "AND state IN ('queued','in_progress','completed','failed') LIMIT 1",
-            (repo, pr_number, head_sha, base_sha),
-        ) is not None
+        return (
+            self._one(
+                "WHERE repo=? AND pr_number=? AND head_sha=? AND base_sha=? "
+                "AND state IN ('queued','in_progress','completed','failed') LIMIT 1",
+                (repo, pr_number, head_sha, base_sha),
+            )
+            is not None
+        )
 
     def acquire_lease(self, holder, ttl_s, *, holder_alive=lambda h: True) -> int | None:
         """Take the worker lease and return its new fencing token, or None while another holds it."""
@@ -208,7 +215,8 @@ class Store:
             c.execute(
                 "INSERT INTO leases(name, holder, token, expires_at) VALUES ('worker', ?, ?, ?) "
                 "ON CONFLICT(name) DO UPDATE SET holder=excluded.holder, token=excluded.token, "
-                "expires_at=excluded.expires_at", (holder, token, now + ttl_s),
+                "expires_at=excluded.expires_at",
+                (holder, token, now + ttl_s),
             )
             return token
 
@@ -233,7 +241,8 @@ class Store:
             self._fence(c, token)
             cur = c.execute(
                 "UPDATE generations SET state='in_progress', started_at=?, attempts=attempts+1 "
-                "WHERE id=? AND state='queued'", (self._clock(), gen_id),
+                "WHERE id=? AND state='queued'",
+                (self._clock(), gen_id),
             )
             if cur.rowcount != 1:
                 raise StateError(f"generation {gen_id} is not queued")
@@ -294,14 +303,15 @@ class Store:
         with self._tx() as c:
             self._fence(c, token)
             c.execute(
-                "INSERT OR IGNORE INTO publications(generation_id, kind, github_id, posted_at) "
-                "VALUES (?, ?, ?, ?)", (gen_id, kind, github_id, self._clock()),
+                "INSERT OR IGNORE INTO publications(generation_id, kind, github_id, posted_at) VALUES (?, ?, ?, ?)",
+                (gen_id, kind, github_id, self._clock()),
             )
 
     def publication(self, gen_id: int) -> tuple[str, int] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT kind, github_id FROM publications WHERE generation_id=?", (gen_id,),
+                "SELECT kind, github_id FROM publications WHERE generation_id=?",
+                (gen_id,),
             ).fetchone()
         return (row[0], row[1]) if row else None
 
@@ -309,7 +319,8 @@ class Store:
         with self._tx() as c:
             c.execute(
                 "INSERT INTO leases(name, holder, token, expires_at) VALUES ('paused', 'operator', ?, 0) "
-                "ON CONFLICT(name) DO UPDATE SET token=excluded.token", (1 if paused else 0,),
+                "ON CONFLICT(name) DO UPDATE SET token=excluded.token",
+                (1 if paused else 0,),
             )
 
     def is_paused(self) -> bool:
@@ -324,7 +335,8 @@ class Store:
     def recent(self, limit: int = 10) -> list[Generation]:
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT {_COLUMNS} FROM generations ORDER BY id DESC LIMIT ?", (limit,),
+                f"SELECT {_COLUMNS} FROM generations ORDER BY id DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         return [Generation(*r) for r in rows]
 

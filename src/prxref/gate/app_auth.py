@@ -66,7 +66,11 @@ class AppAuth:
         }
         try:
             resp = self._session.request(
-                method, f"{self._api}{path}", headers=headers, timeout=_TIMEOUT_S, **kwargs,
+                method,
+                f"{self._api}{path}",
+                headers=headers,
+                timeout=_TIMEOUT_S,
+                **kwargs,
             )
         except requests.RequestException as e:
             raise GateAuthError(f"{method} {path} failed: {e.__class__.__name__}") from None
@@ -100,7 +104,8 @@ class AppAuth:
                 return cached[0]
         installation = self.installation_for(repo)
         data = self._call(
-            "POST", f"/app/installations/{installation}/access_tokens",
+            "POST",
+            f"/app/installations/{installation}/access_tokens",
             json={"repositories": [repo.split("/", 1)[1]], "permissions": TOKEN_PERMISSIONS},
         )
         expires = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")).timestamp()

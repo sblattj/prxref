@@ -41,9 +41,7 @@ def _require_private(path: Path, name: str) -> None:
     except OSError as e:
         raise ConfigError(f"{name}: cannot read {path}: {e.strerror}") from e
     if stat.S_IMODE(mode) & 0o077:
-        raise ConfigError(
-            f"{name}: {path} must be mode 0600 (it is {stat.S_IMODE(mode):04o}); run chmod 600 {path}"
-        )
+        raise ConfigError(f"{name}: {path} must be mode 0600 (it is {stat.S_IMODE(mode):04o}); run chmod 600 {path}")
 
 
 def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:

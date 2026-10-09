@@ -20,9 +20,16 @@ APP_ID = 12345
 
 def _settings(tmp_path):
     return GateSettings(
-        app_id=APP_ID, private_key_file=tmp_path / "k.pem", installation_ids=frozenset({777}),
-        repos=frozenset({"acme/widget"}), secret_grace_minutes=30, state_file=tmp_path / "g.sqlite3",
-        runs_dir=tmp_path / "runs", review_deadline=900, watchdog_seconds=60, reconcile_minutes=10,
+        app_id=APP_ID,
+        private_key_file=tmp_path / "k.pem",
+        installation_ids=frozenset({777}),
+        repos=frozenset({"acme/widget"}),
+        secret_grace_minutes=30,
+        state_file=tmp_path / "g.sqlite3",
+        runs_dir=tmp_path / "runs",
+        review_deadline=900,
+        watchdog_seconds=60,
+        reconcile_minutes=10,
     )
 
 
@@ -46,9 +53,11 @@ def rx(tmp_path, env, clock):
 
 def _pr_payload(action="opened", head="h1", base="b1", number=7, repo="acme/widget", installation=777, **extra):
     payload = {
-        "action": action, "number": number,
+        "action": action,
+        "number": number,
         "pull_request": {"number": number, "head": {"sha": head}, "base": {"sha": base, "ref": "main"}},
-        "repository": {"full_name": repo}, "installation": {"id": installation},
+        "repository": {"full_name": repo},
+        "installation": {"id": installation},
     }
     payload.update(extra)
     return payload
@@ -98,13 +107,16 @@ def test_previous_secret_is_refused_after_the_grace_window(rx, clock):
     assert _post(rx, _pr_payload(), secret=OLD)[0] == 401
 
 
-@pytest.mark.parametrize("raw", [
-    b"\xef\xbb\xbf" + json.dumps({"action": "opened"}).encode(),
-    b"\xff\xfe\x00not-utf8",
-    b"[1, 2, 3]",
-    b'{"action": "opened"',
-    b"",
-])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\xef\xbb\xbf" + json.dumps({"action": "opened"}).encode(),
+        b"\xff\xfe\x00not-utf8",
+        b"[1, 2, 3]",
+        b'{"action": "opened"',
+        b"",
+    ],
+)
 def test_signed_garbage_bodies_are_400_without_a_row(rx, raw):
     status, _ = _post(rx, None, raw=raw)
     assert status == 400
@@ -166,7 +178,9 @@ def test_closed_cancels_and_reopened_creates(rx):
 
 def _check_run(head="h1", prs=None, app_id=APP_ID, name="sdlc-review"):
     return {
-        "action": "rerequested", "repository": {"full_name": "acme/widget"}, "installation": {"id": 777},
+        "action": "rerequested",
+        "repository": {"full_name": "acme/widget"},
+        "installation": {"id": 777},
         "check_run": {"name": name, "head_sha": head, "app": {"id": app_id}, "pull_requests": prs or []},
     }
 
@@ -197,9 +211,14 @@ def test_rerequest_of_another_apps_check_is_ignored(rx):
 
 def test_check_suite_rerequest_creates_a_generation(rx):
     payload = {
-        "action": "rerequested", "repository": {"full_name": "acme/widget"}, "installation": {"id": 777},
-        "check_suite": {"head_sha": "h1", "app": {"id": APP_ID},
-                        "pull_requests": [{"number": 7, "base": {"sha": "b1", "ref": "main"}}]},
+        "action": "rerequested",
+        "repository": {"full_name": "acme/widget"},
+        "installation": {"id": 777},
+        "check_suite": {
+            "head_sha": "h1",
+            "app": {"id": APP_ID},
+            "pull_requests": [{"number": 7, "base": {"sha": "b1", "ref": "main"}}],
+        },
     }
     assert _post(rx, payload, event="check_suite")[0] == 202
     assert rx.store.next_queued().reason == "rerequest"
@@ -207,8 +226,9 @@ def test_check_suite_rerequest_creates_a_generation(rx):
 
 @pytest.mark.parametrize("event", ["ping", "installation", "issues"])
 def test_other_events_are_202_ignored(rx, event):
-    status, reply = _post(rx, {"zen": "x", "repository": {"full_name": "acme/widget"},
-                               "installation": {"id": 777}}, event=event)
+    status, reply = _post(
+        rx, {"zen": "x", "repository": {"full_name": "acme/widget"}, "installation": {"id": 777}}, event=event
+    )
     assert (status, reply["status"]) == (202, "ignored")
 
 
@@ -223,8 +243,7 @@ def test_health_reports_queue_lease_publish_and_pause(rx):
     rx.store.set_paused(True)
     status, body = rx.handle("GET", "/health", {}, b"")
     assert status == 200
-    assert body == {"queue_depth": 1, "lease": None, "last_publish": None, "paused": True,
-                    "last_auth_failure": None}
+    assert body == {"queue_depth": 1, "lease": None, "last_publish": None, "paused": True, "last_auth_failure": None}
 
 
 def test_real_socket_round_trip(rx):
@@ -235,9 +254,15 @@ def test_real_socket_round_trip(rx):
         port = server.server_address[1]
         body = json.dumps(_pr_payload()).encode()
         resp = requests.post(
-            f"http://127.0.0.1:{port}/webhook", data=body, timeout=5,
-            headers={"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": "sock1",
-                     "X-Hub-Signature-256": _sign(body), "Content-Type": "application/json"},
+            f"http://127.0.0.1:{port}/webhook",
+            data=body,
+            timeout=5,
+            headers={
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "sock1",
+                "X-Hub-Signature-256": _sign(body),
+                "Content-Type": "application/json",
+            },
         )
         assert (resp.status_code, resp.json()["delivery"]) == (202, "sock1")
         assert requests.get(f"http://127.0.0.1:{port}/health", timeout=5).json()["queue_depth"] == 1
@@ -289,8 +314,9 @@ def _raw(rx, request: str) -> bytes:
 @pytest.mark.parametrize("length", ["-1", "abc", ""])
 def test_bad_content_length_is_400_without_a_row(rx, length):
     header = f"Content-Length: {length}\r\n" if length else ""
-    reply = _raw(rx, "POST /webhook HTTP/1.1\r\nHost: x\r\nX-GitHub-Delivery: cl1\r\n"
-                     f"{header}Connection: close\r\n\r\n")
+    reply = _raw(
+        rx, f"POST /webhook HTTP/1.1\r\nHost: x\r\nX-GitHub-Delivery: cl1\r\n{header}Connection: close\r\n\r\n"
+    )
     assert reply.split(b"\r\n", 1)[0].endswith(b"400 Bad Request")
     assert rx.store.queue_depth() == 0
     assert rx.store.record_delivery("cl1", "x", None, None, None) is True

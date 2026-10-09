@@ -98,10 +98,13 @@ class _ShaForge(_RepoForge):
         return super().list_paths(ref, sha=sha)
 
 
-@pytest.mark.parametrize("source, shown, hidden", [
-    ("base", "max-age=63072000", "max-age=31536000"),
-    ("head", "max-age=31536000", "max-age=63072000"),
-])
+@pytest.mark.parametrize(
+    "source, shown, hidden",
+    [
+        ("base", "max-age=63072000", "max-age=31536000"),
+        ("head", "max-age=31536000", "max-age=63072000"),
+    ],
+)
 def test_standards_document_is_read_at_the_rules_sha(tmp_path, source, shown, hidden):
     base_root, head_root = tmp_path / "base", tmp_path / "head"
     _write(base_root, STANDARDS_DOC, WEB_SECURITY)
@@ -109,8 +112,14 @@ def test_standards_document_is_read_at_the_rules_sha(tmp_path, source, shown, hi
     forge = _ShaForge(TWO_CHUNK_DIFF, {HEAD_SHA: head_root, BASE_SHA: base_root})
     llm = _RecordingLLM()
     orchestrator.orchestrate_review(
-        forge, REF, llm, post=False, repo_context="repo", max_files_per_chunk=1,
-        context_standards_globs=STANDARD_GLOBS, rules_source=source,
+        forge,
+        REF,
+        llm,
+        post=False,
+        repo_context="repo",
+        max_files_per_chunk=1,
+        context_standards_globs=STANDARD_GLOBS,
+        rules_source=source,
     )
     prompt = _worker_prompts(llm, ["app/middleware.py", "tools/helper.py"])["app/middleware.py"][0]
     assert shown in prompt
@@ -139,8 +148,15 @@ def _base_run(forge, caplog, **extra):
     llm = _RecordingLLM()
     with caplog.at_level("WARNING", logger="prxref.orchestrator"):
         result = orchestrator.orchestrate_review(
-            forge, REF, llm, post=False, repo_context="repo", max_files_per_chunk=1,
-            context_standards_globs=STANDARD_GLOBS, rules_source="base", **extra,
+            forge,
+            REF,
+            llm,
+            post=False,
+            repo_context="repo",
+            max_files_per_chunk=1,
+            context_standards_globs=STANDARD_GLOBS,
+            rules_source="base",
+            **extra,
         )
     return result, llm
 

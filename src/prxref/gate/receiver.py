@@ -44,8 +44,9 @@ def _rerequest(head_sha: str, prs: list, *, repo: str, store: Store) -> Intent |
     if prs:
         pr = prs[0]
         base = pr.get("base") or {}
-        return Intent("enqueue", int(pr["number"]), head_sha, str(base.get("sha", "")),
-                      str(base.get("ref", "")), "rerequest")
+        return Intent(
+            "enqueue", int(pr["number"]), head_sha, str(base.get("sha", "")), str(base.get("ref", "")), "rerequest"
+        )
     known = store.latest_generation_for_head(repo, head_sha)
     if known is None:
         return None
@@ -80,8 +81,9 @@ def map_event(event: str, payload: dict, *, app_id: int, repo: str, store: Store
 class Receiver:
     """Pure request handling; :func:`serve_http` puts it on a socket."""
 
-    def __init__(self, store: Store, settings: GateSettings, *, started_at: float,
-                 clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, store: Store, settings: GateSettings, *, started_at: float, clock: Callable[[], float] = time.time
+    ) -> None:
         self.store = store
         self.settings = settings
         self._started_at = started_at
@@ -95,8 +97,9 @@ class Receiver:
         if grace_open:
             state, _ = _check_hmac(body, headers, "x-hub-signature-256", WEBHOOK_SECRET_PREVIOUS_ENV, "gate")
             if state == "ok":
-                logger.warning("delivery %s matched only the previous webhook secret",
-                               headers.get("x-github-delivery", "?"))
+                logger.warning(
+                    "delivery %s matched only the previous webhook secret", headers.get("x-github-delivery", "?")
+                )
                 return "previous"
         return "reject"
 
@@ -139,8 +142,9 @@ class Receiver:
             intent = map_event(event, payload, app_id=self.settings.app_id, repo=repo, store=self.store)
         except (KeyError, TypeError, ValueError):
             return 400, {"error": "payload is missing a required field"}
-        if not self.store.record_delivery(delivery, event, payload.get("action"), repo,
-                                          intent.pr_number if intent else None):
+        if not self.store.record_delivery(
+            delivery, event, payload.get("action"), repo, intent.pr_number if intent else None
+        ):
             return 202, {"status": "duplicate", "delivery": delivery}
         if intent is None:
             self.store.mark_delivery_handled(delivery)
@@ -149,8 +153,7 @@ class Receiver:
         if intent.kind == "cancel":
             self.store.cancel_pr(repo, intent.pr_number)
         else:
-            self.store.enqueue(repo, intent.pr_number, intent.head_sha, intent.base_sha,
-                               intent.base_ref, intent.reason)
+            self.store.enqueue(repo, intent.pr_number, intent.head_sha, intent.base_sha, intent.base_ref, intent.reason)
         self.store.mark_delivery_handled(delivery)
         return 202, {"status": "accepted", "delivery": delivery}
 

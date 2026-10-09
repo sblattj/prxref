@@ -12,7 +12,9 @@ from prxref.gate import app_auth
 def keypair():
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
     ).decode()
     return pem, key.public_key()
 
@@ -29,6 +31,7 @@ class _Resp:
     def raise_for_status(self):
         if self.status_code >= 400:
             import requests
+
             raise requests.HTTPError(f"{self.status_code}", response=self)
 
 
@@ -55,10 +58,12 @@ def test_jwt_is_rs256_with_backdated_iat_and_ten_minute_exp(keypair):
 
 
 def test_token_is_minted_scoped_to_one_repo_and_three_permissions(keypair):
-    session = _Session([
-        _Resp(200, {"id": 777}),
-        _Resp(201, {"token": "ghs_one", "expires_at": "1970-01-12T14:46:40Z"}),
-    ])
+    session = _Session(
+        [
+            _Resp(200, {"id": 777}),
+            _Resp(201, {"token": "ghs_one", "expires_at": "1970-01-12T14:46:40Z"}),
+        ]
+    )
     auth = _auth(keypair, session, clock=lambda: 1_000_000.0)
     assert auth.token_for("acme/widget") == "ghs_one"
     method, url, kwargs = session.calls[1]
@@ -70,11 +75,13 @@ def test_token_is_minted_scoped_to_one_repo_and_three_permissions(keypair):
 def test_token_is_cached_until_five_minutes_before_expiry(keypair):
     now = [1_000_000.0]
     expires = "1970-01-12T14:46:40Z"
-    session = _Session([
-        _Resp(200, {"id": 777}),
-        _Resp(201, {"token": "ghs_one", "expires_at": expires}),
-        _Resp(201, {"token": "ghs_two", "expires_at": "1970-01-12T15:46:40Z"}),
-    ])
+    session = _Session(
+        [
+            _Resp(200, {"id": 777}),
+            _Resp(201, {"token": "ghs_one", "expires_at": expires}),
+            _Resp(201, {"token": "ghs_two", "expires_at": "1970-01-12T15:46:40Z"}),
+        ]
+    )
     auth = _auth(keypair, session, clock=lambda: now[0])
     assert auth.token_for("acme/widget") == "ghs_one"
     now[0] = 1_000_000.0 + 3600 - 301
@@ -85,11 +92,13 @@ def test_token_is_cached_until_five_minutes_before_expiry(keypair):
 
 
 def test_invalidate_forces_a_new_token(keypair):
-    session = _Session([
-        _Resp(200, {"id": 777}),
-        _Resp(201, {"token": "ghs_one", "expires_at": "1970-01-12T14:46:40Z"}),
-        _Resp(201, {"token": "ghs_two", "expires_at": "1970-01-12T14:46:40Z"}),
-    ])
+    session = _Session(
+        [
+            _Resp(200, {"id": 777}),
+            _Resp(201, {"token": "ghs_one", "expires_at": "1970-01-12T14:46:40Z"}),
+            _Resp(201, {"token": "ghs_two", "expires_at": "1970-01-12T14:46:40Z"}),
+        ]
+    )
     auth = _auth(keypair, session, clock=lambda: 1_000_000.0)
     auth.token_for("acme/widget")
     auth.invalidate("acme/widget")
