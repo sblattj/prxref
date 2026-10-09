@@ -639,6 +639,7 @@ def orchestrate_review(
     stable_ids: bool = True,
     verdict_store: str | None = None,
     learnings: Any = None,
+    rules_source: str = "head",
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -669,6 +670,9 @@ def orchestrate_review(
     caller passing ``max_chunks=0`` gets an error run, not a ``ValueError``.
     The one exception is an unknown ``repo_context`` level, which raises
     ``ValueError`` before any forge call (see below).
+
+    ``rules_source`` (#102): ``"base"`` reads standards documents at the PR's
+    base sha; ``"head"``, the default, is the behavior before 0.35.0.
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists, and on
@@ -1801,7 +1805,7 @@ def orchestrate_review(
     if repo_context != "off":
         repo_plan = _plan_repo_context(
             repo_context, forge, ref, pr, review_files, run_inputs["repo_context"],
-            repo_dir=repo_dir,
+            repo_dir=repo_dir, rules_source=rules_source,
         )
         unit_records = [None] * len(chunks)
     elif context_standards_globs and context_standards_max_chars > 0:
@@ -1811,7 +1815,7 @@ def orchestrate_review(
         try:
             standards_plan = _plan_repo_context(
                 "standards", forge, ref, pr, review_files, standards_initial,
-                repo_dir=repo_dir,
+                repo_dir=repo_dir, rules_source=rules_source,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("standards discovery failed (continuing without it): %s", e)
@@ -3486,7 +3490,9 @@ class _RepoPlan:
     ``None``. ``diff_paths`` holds every PR diff file's path: a read of one
     goes to the shared, uncapped ``reader.read``. The listing, contract and
     standards fields are the ``"repo"`` level's once-per-run inputs, and stay
-    empty at ``"diff"`` or without a reader.
+    empty at ``"diff"`` or without a reader. ``standards_reader`` reads the
+    standards documents when they come from another commit than ``reader``
+    (``rules_source="base"``); ``None`` means ``reader``.
     """
 
     mode: str
@@ -3501,11 +3507,12 @@ class _RepoPlan:
     standards_paths: tuple[str, ...] = ()
     standards_priority: tuple[str, ...] = ()
     standards_max_chars: int = 6000
+    standards_reader: repo_reader.RepoReader | None = None
 
 
 def _plan_repo_context(
     mode: str, forge: Forge, ref: PRRef, pr: PRData, files: Sequence[Any],
-    initial: Mapping[str, Any], *, repo_dir: RepoDir | None,
+    initial: Mapping[str, Any], *, repo_dir: RepoDir | None, rules_source: str = "head",
 ) -> _RepoPlan:
     """Build the run's reader and its once-per-run inputs, for a level other than ``"off"``.
 
@@ -3524,7 +3531,9 @@ def _plan_repo_context(
     is taken here, once, for the standards files alone; ``"standards"``
     budgets each chunk at ``standards_max_chars``. At ``"repo"``, a missing
     reader or a missing listing logs the run's one WARNING naming
-    ``PRXREF_REPO_CONTEXT``.
+    ``PRXREF_REPO_CONTEXT``. With ``rules_source="base"`` and no ``repo_dir``,
+    standards documents are listed and read at the PR's base sha
+    (``pr.target_sha``); everything else still reads the head.
     """
     exclude = exclude_predicate(initial["exclude_globs"])
     caps = {"run_cap": initial["max_reads"], "chunk_cap": initial["max_chunk_reads"]}
@@ -3534,12 +3543,18 @@ def _plan_repo_context(
         reader = repo_reader.forge_reader(
             forge, ref, getattr(pr, "source_sha", "") or "", exclude=exclude, **caps,
         )
+    standards_reader = None
+    if rules_source == "base" and repo_dir is None:
+        standards_reader = repo_reader.forge_reader(
+            forge, ref, getattr(pr, "target_sha", "") or "", exclude=exclude, **caps,
+        )
+    listing_source = standards_reader if standards_reader is not None else reader
     diff_paths = frozenset(f.path for f in files)
     if mode != "repo":
         budget = initial["standards_max_chars"]
         standards_paths: tuple[str, ...] = ()
-        if reader is not None and initial["standards_globs"] and budget > 0:
-            listing = reader.listing()
+        if listing_source is not None and initial["standards_globs"] and budget > 0:
+            listing = listing_source.listing()
             standards_paths = tuple(repo_contracts.select_contract_files(
                 list(initial["standards_globs"]),
                 listing=listing.paths if listing is not None else None,
@@ -3553,6 +3568,7 @@ def _plan_repo_context(
                 repo_contracts.literal_contract_paths(list(initial["standards_globs"]))
             ),
             standards_max_chars=budget,
+            standards_reader=standards_reader,
         )
     if reader is None:
         logger.warning(
@@ -3570,6 +3586,7 @@ def _plan_repo_context(
         )
     globs = list(initial["contract_globs"])
     standards_globs = list(initial["standards_globs"])
+    standards_listing = standards_reader.listing() if standards_reader is not None else listing
     return _RepoPlan(
         mode, reader, initial["max_chars"], exclude, diff_paths,
         listing_paths=frozenset(listing.paths) if listing is not None else None,
@@ -3580,11 +3597,13 @@ def _plan_repo_context(
         )),
         contract_priority=tuple(repo_contracts.literal_contract_paths(globs)),
         standards_paths=tuple(repo_contracts.select_contract_files(
-            standards_globs, listing=listing.paths if listing is not None else None,
+            standards_globs,
+            listing=standards_listing.paths if standards_listing is not None else None,
             diff_paths=[f.path for f in files if f.status != "removed"],
         )),
         standards_priority=tuple(repo_contracts.literal_contract_paths(standards_globs)),
         standards_max_chars=initial["standards_max_chars"],
+        standards_reader=standards_reader,
     )
 
 
@@ -3604,6 +3623,19 @@ def _routed_read(reader: repo_reader.RepoReader, diff_paths: frozenset[str]) -> 
     return read
 
 
+def _standards_routed(
+    read: Callable[[str], str | None] | None, standards: repo_reader.RepoReader, paths: frozenset[str],
+) -> Callable[[str], str | None]:
+    """One chunk's ``read`` with the standards documents served by ``standards`` (#102)."""
+
+    def routed(path: str) -> str | None:
+        if path in paths:
+            return standards.read(path)
+        return read(path) if read is not None else None
+
+    return routed
+
+
 def _chunk_unit(
     plan: _RepoPlan, chunk, all_files, *, index: int, total: int,
 ) -> repo_unit.UnitContext:
@@ -3613,6 +3645,8 @@ def _chunk_unit(
     WARNING naming the chunk.
     """
     read = _routed_read(plan.reader, plan.diff_paths) if plan.reader is not None else None
+    if plan.standards_reader is not None and plan.standards_paths:
+        read = _standards_routed(read, plan.standards_reader, frozenset(plan.standards_paths))
     try:
         return repo_unit.build_unit_context(
             chunk, all_files if all_files is not None else chunk,

@@ -1798,6 +1798,7 @@ def _run_review(
     context_standards_globs: list[str] | None = None,
     routing_probe: str | None = None,
     metadata_rules: str | None = None,
+    forge: Any = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1907,7 +1908,7 @@ def _run_review(
             ),
         )
     else:
-        forge = make_forge(ref)
+        forge = forge if forge is not None else make_forge(ref)
         if replay is not None:
             forge = _replay_forge(forge, ref, replay)
     if not cfg["stable_ids"]:
@@ -2011,6 +2012,7 @@ def _run_review(
         evidence_max_chars=cfg["evidence_max_chars"],
         verdict_store=cfg["verdict_store"],
         learnings=inputs.learnings,
+        rules_source=cfg["rules_source"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
