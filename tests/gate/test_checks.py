@@ -324,3 +324,163 @@ def test_cancel_without_a_check_posts_nothing(store, gen, lease):
     gh = _GitHub([])
     _publisher(gh, store).cancel(gen, lease, "closed")
     assert gh.calls == []
+
+
+class _Ordered(_GitHub):
+    """A fake GitHub that logs writes into a shared event list."""
+
+    def __init__(self, routes, events):
+        super().__init__(routes)
+        self.events = events
+
+    def request(self, method, url, **kw):
+        if method != "GET":
+            self.events.append("W")
+        return super().request(method, url, **kw)
+
+
+class _CountingStore:
+    def __init__(self, store, events):
+        self._store, self._events = store, events
+
+    def renew_lease(self, *args):
+        self._events.append("R")
+        return self._store.renew_lease(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+def test_the_lease_is_renewed_and_guarded_before_every_write(store, gen, lease):
+    events = []
+    gh = _Ordered(
+        [
+            ("POST", r"/check-runs$", [_Resp(201, {"id": 555})]),
+            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
+            ("GET", r"/issues/7/comments$", [_Resp(200, [])]),
+            ("POST", r"/issues/7/comments$", [_Resp(201, {})]),
+            ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
+        ],
+        events,
+    )
+    publisher = checks.Publisher(
+        checks.GitHubClient(_Auth(), gh),
+        _CountingStore(store, events),
+        app_id=99,
+        bot_login="sdlc[bot]",
+        guard=lambda g: events.append("G"),
+    )
+    findings = [_finding(f"f{i}.py") for i in range(120)]
+    publisher.begin(gen, lease)
+    publisher.complete(
+        gen,
+        lease,
+        {"verdict": "Approved", "findings_active": findings},
+        checks.Captured(summary="s", comments=(InlineComment(path="a.py", line=3, body="x"),)),
+        effort="high",
+        run_dir="/r",
+    )
+    assert events.count("W") == 6
+    assert events.count("R") == 6
+    assert events.count("G") == 6
+    for i, e in enumerate(events):
+        if e == "W":
+            assert events[i - 2 : i] == ["R", "G"], events
+
+
+def test_details_survive_a_summary_over_the_limit(store, gen, lease):
+    gh = _GitHub(
+        [
+            ("GET", r"/issues/7/comments$", [_Resp(200, [])]),
+            ("POST", r"/issues/7/comments$", [_Resp(201, {})]),
+            ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
+        ]
+    )
+    _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(summary="x" * 70000))
+    summary = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["summary"]
+    assert len(summary) <= checks.SUMMARY_LIMIT and HEAD in summary and BASE in summary
+
+
+def test_a_422_on_the_retry_review_post_demotes_the_comments(store, gen, lease):
+    gh = _GitHub(
+        [
+            (
+                "POST",
+                r"/pulls/7/reviews$",
+                [_Resp(502, {"message": "Bad Gateway"}), _Resp(422, {"message": "line must be part of the diff"})],
+            ),
+            ("GET", r"/pulls/7/reviews$", [_Resp(200, [])]),
+            ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
+        ]
+    )
+    comment = InlineComment(path="a.py", line=3, body="x")
+    _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
+    assert len(gh.sent("POST", r"/reviews$")) == 2
+    annotation = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["annotations"][0]
+    assert annotation["path"] == "a.py"
+
+
+def test_the_retry_posts_are_fenced_again(store, gen, lease):
+    renewals = []
+
+    class _Once(_CountingStore):
+        def renew_lease(self, *args):
+            renewals.append(1)
+            return len(renewals) < 2  # the lease is lost during the first POST's hang
+
+    gh = _GitHub(
+        [
+            ("POST", r"/pulls/7/reviews$", [requests.Timeout("slow")]),
+            ("GET", r"/pulls/7/reviews$", [_Resp(200, [])]),
+        ]
+    )
+    store.set_check_run(gen.id, lease.token, 555)
+    publisher = checks.Publisher(checks.GitHubClient(_Auth(), gh), _Once(store, []), app_id=99, bot_login="b")
+    comment = InlineComment(path="a.py", line=3, body="x")
+    with pytest.raises(checks.LeaseLost):
+        publisher.complete(
+            store.get(gen.id),
+            lease,
+            {"verdict": "Approved"},
+            checks.Captured(comments=(comment,)),
+            effort="",
+            run_dir="",
+        )
+    assert len(gh.sent("POST", r"/reviews$")) == 1
+
+
+def test_the_check_create_retry_is_fenced_again(store, gen, lease):
+    renewals = []
+
+    class _Once(_CountingStore):
+        def renew_lease(self, *args):
+            renewals.append(1)
+            return len(renewals) < 2
+
+    gh = _GitHub(
+        [
+            ("POST", r"/check-runs$", [requests.Timeout("slow")]),
+            ("GET", rf"/commits/{HEAD}/check-runs$", [_Resp(200, {"check_runs": []})]),
+        ]
+    )
+    publisher = checks.Publisher(checks.GitHubClient(_Auth(), gh), _Once(store, []), app_id=99, bot_login="b")
+    with pytest.raises(checks.LeaseLost):
+        publisher.begin(gen, lease)
+    assert len(gh.sent("POST", r"/check-runs$")) == 1
+
+
+def test_complete_with_no_check_creates_one_first_and_runs_the_guard(store, gen, lease):
+    seen = []
+    gh = _GitHub(
+        [
+            ("POST", r"/check-runs$", [_Resp(201, {"id": 888})]),
+            ("PATCH", r"/check-runs/888$", [_Resp(200, {})]),
+        ]
+    )
+    publisher = checks.Publisher(
+        checks.GitHubClient(_Auth(), gh), store, app_id=99, bot_login="b", guard=lambda g: seen.append(1)
+    )
+    publisher.complete(gen, lease, {"verdict": "Approved"}, checks.Captured(), effort="", run_dir="")
+    assert not gh.sent("PATCH", r"/check-runs/None")
+    assert gh.sent("PATCH", r"/check-runs/888$")[-1][3]["conclusion"] == "success"
+    assert len(seen) >= 2

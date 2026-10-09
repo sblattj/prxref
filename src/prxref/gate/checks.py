@@ -260,6 +260,7 @@ class Publisher:
         except UncertainReply:
             check_id = self._find_check(gen)
             if check_id is None:
+                self._fence(lease, gen if guarded else None)
                 check_id = self.client.request("POST", gen.repo, "/check-runs", json=body)["id"]
         self.store.set_check_run(gen.id, lease.token, check_id)
         return check_id
@@ -273,7 +274,7 @@ class Publisher:
                 return review["id"]
         return None
 
-    def _post_review(self, gen: Generation, comments: Sequence[InlineComment]) -> int | None:
+    def _post_review(self, gen: Generation, lease: Lease, comments: Sequence[InlineComment]) -> int | None:
         """Post the ``COMMENT`` review; ``None`` when GitHub refuses its anchors (422)."""
         marker = REVIEW_MARKER.format(external_id=gen.external_id)
         payload = {
@@ -293,12 +294,14 @@ class Publisher:
         }
         path = f"/pulls/{gen.pr_number}/reviews"
         try:
-            return self.client.request("POST", gen.repo, path, json=payload)["id"]
-        except UncertainReply:
-            found = self._find_review(gen, marker)
-            if found is not None:
-                return found
-            return self.client.request("POST", gen.repo, path, json=payload)["id"]
+            try:
+                return self.client.request("POST", gen.repo, path, json=payload)["id"]
+            except UncertainReply:
+                found = self._find_review(gen, marker)
+                if found is not None:
+                    return found
+                self._fence(lease, gen)
+                return self.client.request("POST", gen.repo, path, json=payload)["id"]
         except GitHubError as exc:
             if exc.status == 422:
                 return None
@@ -367,12 +370,15 @@ class Publisher:
     ) -> str:
         """Post the review and summary comment, then close the check; returns the conclusion."""
         gen = self.store.get(gen.id)
+        if gen.check_run_id is None:
+            self._ensure_check(gen, lease, guarded=True)
+            gen = self.store.get(gen.id)
         conclusion, reason = conclusion_for(result)
         findings = result.get("findings_active") or [] if isinstance(result, dict) else []
         demoted: list[InlineComment] = []
         if captured.comments and self.store.publication(gen.id) is None:
             self._fence(lease, gen)
-            review_id = self._post_review(gen, captured.comments)
+            review_id = self._post_review(gen, lease, captured.comments)
             if review_id is None:
                 demoted = list(captured.comments)
             else:
@@ -381,8 +387,11 @@ class Publisher:
             self._fence(lease, gen)
             self._upsert_summary(gen, captured.summary)
         details = summary_text(gen, result, conclusion, reason, effort=effort, run_dir=run_dir)
-        text = f"{captured.summary}\n\n---\n\n{details}" if captured.summary else details
-        text = text[:SUMMARY_LIMIT]
+        if captured.summary:
+            sep = "\n\n---\n\n"
+            text = captured.summary[: max(SUMMARY_LIMIT - len(sep) - len(details), 0)] + sep + details
+        else:
+            text = details
         self._close_check(
             gen, lease, conclusion, f"sdlc review: {conclusion}", text, annotations_for(findings, demoted), guarded=True
         )
