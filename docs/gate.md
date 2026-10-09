@@ -92,7 +92,7 @@ in, and `chmod 600` it; the gate refuses an env file anyone else can read. It ho
 | `PRXREF_GATE_WEBHOOK_SECRET_PREVIOUS` | the previous secret, during a rotation only |
 | `PRXREF_GATE_SECRET_GRACE_MINUTES` | how long after start the previous secret is honored (30) |
 | `PRXREF_GATE_STATE_FILE` | the SQLite state file |
-| `PRXREF_GATE_RUNS_DIR` | where each review's run record is written (mode 0700) |
+| `PRXREF_GATE_RUNS_DIR` | where each review's run record is written (mode 0700); the check summary names it as `runs/<generation id>` relative to this directory |
 | `PRXREF_GATE_REVIEW_DEADLINE` | seconds a review may take before it fails closed (900) |
 | `PRXREF_GATE_WATCHDOG_SECONDS` | watchdog interval (60) |
 | `PRXREF_GATE_RECONCILE_MINUTES` | open-PR reconciliation interval (10) |

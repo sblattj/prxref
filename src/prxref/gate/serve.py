@@ -34,12 +34,7 @@ from prxref.gate.receiver import Receiver, serve_http
 from prxref.gate.settings import GateSettings, apply_env_file, settings_from_config
 from prxref.gate.store import Generation, Store
 from prxref.gate.watchdog import Watchdog
-from prxref.gate.worker import InstallationForge, ReviewOutcome, Worker
-
-try:  # TEMPORARY GUARD until seat A lands register_secret (#102); the controller removes it
-    from prxref.gate.worker import register_secret
-except ImportError:
-    register_secret = lambda v: None  # noqa: E731
+from prxref.gate.worker import InstallationForge, ReviewOutcome, Worker, register_secret
 from prxref.llm import ConfigError
 
 logger = logging.getLogger(__name__)

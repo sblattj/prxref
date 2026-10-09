@@ -282,10 +282,6 @@ def test_a_gate_auth_error_from_build_exits_2(tmp_path, monkeypatch, capsys):
     assert "prxref gate: GitHub rejected the app JWT" in capsys.readouterr().err
 
 
-_HAS_REGISTER = hasattr(worker, "register_secret")
-
-
-@pytest.mark.skipif(not _HAS_REGISTER, reason="register_secret not landed (ImportError guard active)")
 def test_build_registers_the_webhook_and_bedrock_secrets_for_redaction(tmp_path, monkeypatch):
     class FakeAuth:
         def __init__(self, *a, **k):
