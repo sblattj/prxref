@@ -257,9 +257,21 @@ class Store:
             if cur.rowcount != 1:
                 raise StateError(f"generation {gen_id} is already final")
 
-    @staticmethod
-    def _requeue_in_progress(c: sqlite3.Connection) -> list[int]:
-        """Return every in-progress generation to the queue; the caller holds the transaction and the right to do so."""
+    def _requeue_in_progress(self, c: sqlite3.Connection) -> list[int]:
+        """Recover every in-progress generation after its worker died; the caller holds the transaction.
+
+        A row that is its PR's newest generation goes back to ``queued`` and its id is returned.
+        A row a newer generation has overtaken would never be selected again, so it is finished
+        instead: ``stale`` when it already owns a check run, else ``superseded``. Those ids are
+        not returned.
+        """
+        c.execute(
+            "UPDATE generations SET finished_at=?, "
+            "state=CASE WHEN check_run_id IS NOT NULL THEN 'stale' ELSE 'superseded' END "
+            "WHERE state='in_progress' AND gen < (SELECT MAX(g.gen) FROM generations AS g "
+            "WHERE g.repo=generations.repo AND g.pr_number=generations.pr_number)",
+            (self._clock(),),
+        )
         ids = [r[0] for r in c.execute("SELECT id FROM generations WHERE state='in_progress' ORDER BY id")]
         c.execute("UPDATE generations SET state='queued' WHERE state='in_progress'")
         return ids

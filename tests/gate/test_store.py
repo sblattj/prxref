@@ -161,3 +161,70 @@ def test_state_survives_reopen(tmp_path, clock):
     finally:
         first.close()
         second.close()
+
+
+@pytest.mark.parametrize("recover", ["requeue_expired", "adopt_orphans"])
+@pytest.mark.parametrize(("check_run", "final"), [(99, "stale"), (None, "superseded")])
+def test_overtaken_in_progress_row_is_finished_not_stranded(tmp_path, clock, recover, check_run, final):
+    a = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+    b = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+    try:
+        g2 = _enqueue(a, "h2")
+        token = a.acquire_lease("hostA:1", 60)
+        a.start(g2.id, token)
+        if check_run:
+            a.set_check_run(g2.id, token, check_run)
+        g3 = _enqueue(a, "h3", reason="synchronize")
+        assert a.get(g2.id).state == "in_progress"
+        clock[0] += 61
+        if recover == "requeue_expired":
+            requeued = b.requeue_expired()
+            new = b.acquire_lease("hostB:2", 60)
+        else:
+            new = b.acquire_lease("hostB:2", 60)
+            requeued = b.adopt_orphans(new)
+        assert requeued == []
+        done = b.get(g2.id)
+        assert (done.state, done.finished_at) == (final, clock[0])
+        assert b.has_live_generation("acme/widget", 7, "h2", "b1") is False
+        assert b.queue_depth() == 1
+        assert b.next_queued().id == g3.id
+        b.start(g3.id, new)
+        b.finish(g3.id, new, "completed", "success")
+        assert b.next_queued() is None
+        assert b.queue_depth() == 0
+    finally:
+        a.close()
+        b.close()
+
+
+def test_two_store_objects_fence_each_other_on_one_file(tmp_path, clock):
+    a = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+    b = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+    try:
+        gen = _enqueue(a)
+        old = a.acquire_lease("hostA:1", 60)
+        a.start(gen.id, old)
+        clock[0] += 61
+        new = b.acquire_lease("hostB:2", 60)
+        assert new == old + 1
+        with pytest.raises(LeaseLost):
+            a.finish(gen.id, old, "completed", "success")
+        assert b.adopt_orphans(new) == [gen.id]
+        assert a.get(gen.id).state == "queued"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_start_and_set_check_run_refuse_a_stale_token(db, clock):
+    gen = _enqueue(db)
+    old = db.acquire_lease("hostA:1", 60)
+    clock[0] += 61
+    assert db.acquire_lease("hostB:2", 60) == old + 1
+    with pytest.raises(LeaseLost):
+        db.start(gen.id, old)
+    with pytest.raises(LeaseLost):
+        db.set_check_run(gen.id, old, 5)
+    row = db.get(gen.id)
+    assert (row.state, row.check_run_id, row.attempts) == ("queued", None, 0)
