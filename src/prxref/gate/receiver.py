@@ -159,6 +159,8 @@ def serve_http(receiver: Receiver, host: str, port: int) -> ThreadingHTTPServer:
     """Bind a threading HTTP server that hands every request to ``receiver.handle``."""
 
     class _Handler(BaseHTTPRequestHandler):
+        timeout = 30  # applied to the socket: a slow sender cannot hold a thread
+
         def _reply(self, status: int, body: dict) -> None:
             data = json.dumps(body).encode()
             self.send_response(status)
@@ -167,16 +169,34 @@ def serve_http(receiver: Receiver, host: str, port: int) -> ThreadingHTTPServer:
             self.end_headers()
             self.wfile.write(data)
 
+        def _dispatch(self, method: str, body: bytes) -> None:
+            try:
+                result = receiver.handle(method, self.path, dict(self.headers), body)
+            except Exception:
+                delivery = self.headers.get("X-GitHub-Delivery", "?")
+                logger.exception("handler failed: %s %s delivery=%s", method, self.path, delivery)
+                result = (500, {"error": "internal"})
+            self._reply(*result)
+
         def do_GET(self) -> None:  # noqa: N802
-            self._reply(*receiver.handle("GET", self.path, dict(self.headers), b""))
+            self._dispatch("GET", b"")
 
         def do_POST(self) -> None:  # noqa: N802
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                self.close_connection = True
+                self._reply(400, {"error": "missing or invalid Content-Length"})
+                return
+            if length < 0:
+                self.close_connection = True
+                self._reply(400, {"error": "invalid Content-Length"})
+                return
             if length > MAX_BODY_BYTES:
+                self.close_connection = True
                 self._reply(413, {"error": "body too large"})
                 return
-            body = self.rfile.read(length)
-            self._reply(*receiver.handle("POST", self.path, dict(self.headers), body))
+            self._dispatch("POST", self.rfile.read(length))
 
         def log_message(self, fmt: str, *args) -> None:
             logger.info("%s %s", self.address_string(), fmt % args)

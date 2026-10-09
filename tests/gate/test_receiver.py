@@ -268,3 +268,54 @@ def test_oversize_body_is_413_without_a_row(rx):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _raw(rx, request: str) -> bytes:
+    server = receiver.serve_http(rx, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as conn:
+            conn.sendall(request.encode())
+            reply = b""
+            while chunk := conn.recv(4096):
+                reply += chunk
+        return reply
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("length", ["-1", "abc", ""])
+def test_bad_content_length_is_400_without_a_row(rx, length):
+    header = f"Content-Length: {length}\r\n" if length else ""
+    reply = _raw(rx, "POST /webhook HTTP/1.1\r\nHost: x\r\nX-GitHub-Delivery: cl1\r\n"
+                     f"{header}Connection: close\r\n\r\n")
+    assert reply.split(b"\r\n", 1)[0].endswith(b"400 Bad Request")
+    assert rx.store.queue_depth() == 0
+    assert rx.store.record_delivery("cl1", "x", None, None, None) is True
+
+
+def test_handler_exception_is_500_and_server_stays_up(rx, monkeypatch, caplog):
+    real = rx.handle
+    calls = []
+
+    def boom(method, path, headers, body):
+        calls.append(path)
+        if len(calls) == 1:
+            raise RuntimeError("secret-bearing detail")
+        return real(method, path, headers, body)
+
+    monkeypatch.setattr(rx, "handle", boom)
+    server = receiver.serve_http(rx, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/health"
+        first = requests.get(url, timeout=5)
+        assert (first.status_code, first.json()) == (500, {"error": "internal"})
+        assert requests.get(url, timeout=5).status_code == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert any("handler failed" in r.getMessage() for r in caplog.records)
