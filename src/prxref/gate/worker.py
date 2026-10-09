@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 TTL_PAD_S = 120
 _DRIFT = frozenset({"head moved", "base moved", "retargeted"})
-_SECRET = re.compile(r"gh[a-z]_[A-Za-z0-9]+|(?i:(?:bearer|token)\s+\S+)")
+_SECRET = re.compile(r"github_pat_[A-Za-z0-9_]+|gh[a-z]_[A-Za-z0-9]+|(?i:(?:bearer|token)\s+\S+)")
 
 
 def _redact(text: str) -> str:
@@ -87,7 +87,7 @@ class CapturingForge:
         return replace(self._inner.get_pr(ref), source_sha=self._gen.head_sha, target_sha=self._gen.base_sha)
 
     def get_diff(self, ref) -> str:
-        return self._inner.get_diff(ref)
+        return self._inner.get_compare_diff(ref, base_sha=self._gen.base_sha, head_sha=self._gen.head_sha)
 
     def get_summary(self, ref) -> None:
         return None
@@ -185,6 +185,16 @@ def _not_bound(gen: Generation, reason: str, *, store: Store, publisher: Publish
     return "stale"
 
 
+def _fail_publish(gen: Generation, lease: Lease, why: str, *, store: Store, publisher: Publisher) -> None:
+    """Try to close the check as failed; a failure here is logged and swallowed (a lost lease is not)."""
+    try:
+        publisher.fail(gen, lease, why)
+    except LeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _log_failure(f"generation {gen.id}: the failure could not be published: {exc}", exc)
+
+
 def _publish_failed(gen: Generation, exc: Exception, *, store: Store, publisher: Publisher, lease: Lease) -> str:
     why = f"publish failed: {type(exc).__name__}"
     _log_failure(f"generation {gen.id}: {why}: {exc}", exc)
@@ -205,7 +215,7 @@ def run_generation(
     publisher: Publisher,
     client: Any,
     lease: Lease,
-    review: Callable[[Generation], ReviewOutcome],
+    review: Callable[..., ReviewOutcome],
     deadline_s: float,
     effort: str,
 ) -> str:
@@ -235,17 +245,15 @@ def run_generation(
         why = f"deadline: review exceeded {deadline_s:g}s"
         for capture in captures:
             capture.seal()
-        publisher.fail(gen, lease, why)
+        _fail_publish(gen, lease, why, store=store, publisher=publisher)
         store.finish(gen.id, lease.token, "failed", "failure", why)
         return "failed"
-    except (LeaseLost, Stale):
-        raise
     except Exception as exc:  # noqa: BLE001
         why = f"review crashed: {type(exc).__name__}"
         _log_failure(f"generation {gen.id}: {why}: {exc}", exc)
         for capture in captures:
             capture.seal()
-        publisher.fail(gen, lease, why)
+        _fail_publish(gen, lease, why, store=store, publisher=publisher)
         store.finish(gen.id, lease.token, "failed", "failure", _redact(f"{why}: {exc}")[:500])
         return "failed"
     finally:
@@ -272,7 +280,7 @@ class Worker:
         store: Store,
         publisher: Publisher,
         client: Any,
-        review: Callable[[Generation], ReviewOutcome],
+        review: Callable[..., ReviewOutcome],
         *,
         deadline_s: float,
         effort: str,
@@ -334,8 +342,8 @@ class Worker:
                 logger.error("worker lease lost; re-acquiring")
                 lease = None
                 continue
-            except Exception:  # noqa: BLE001
-                logger.exception("worker iteration failed")
+            except Exception as exc:  # noqa: BLE001
+                _log_failure("worker iteration failed", exc)
                 state = None
             if state is None:
                 stop.wait(self.poll_s)

@@ -16,6 +16,22 @@ from tests.gate.test_rules_source import _ShaForge
 from tests.test_issue_68_standards_context import TWO_CHUNK_DIFF, _RecordingLLM, _write
 from tests.test_orchestrator import REF, FakeForge
 
+
+class _PinnedForge(_ShaForge):
+    """_ShaForge whose pinned diff is the real one and whose unpinned ``get_diff`` is a trap."""
+
+    def __init__(self, diff, roots):
+        super().__init__(diff, roots)
+        self.compare_calls = []
+
+    def get_diff(self, ref):
+        return "UNPINNED"
+
+    def get_compare_diff(self, ref, *, base_sha, head_sha):
+        self.compare_calls.append((base_sha, head_sha))
+        return self.diff
+
+
 REPO, HEAD, BASE = "acme/widget", "a" * 40, "b" * 40
 SECRET = "ghs_SECRETVALUE123"
 
@@ -54,10 +70,19 @@ def test_installation_forge_ignores_the_env_token(monkeypatch):
 
 def test_capturing_forge_pins_shas_and_captures_posts(gen):
     inner = FakeForge(diff=TWO_CHUNK_DIFF)
+    inner.get_diff = lambda ref: pytest.fail("get_diff is unpinned")
+    compare = []
+
+    def get_compare_diff(ref, *, base_sha, head_sha):
+        compare.append((base_sha, head_sha))
+        return TWO_CHUNK_DIFF
+
+    inner.get_compare_diff = get_compare_diff
     cap = worker.CapturingForge(inner, gen)
     pr = cap.get_pr(REF)
     assert (pr.source_sha, pr.target_sha) == (gen.head_sha, gen.base_sha)
     assert cap.get_diff(REF) == TWO_CHUNK_DIFF and cap.get_summary(REF) is None
+    assert compare == [(gen.base_sha, gen.head_sha)]
     comment = InlineComment(path="a.py", line=1, body="x")
     cap.post_summary(REF, "summary")
     assert cap.post_inline_comments(REF, [comment]) == 1
@@ -73,7 +98,7 @@ def test_review_reads_the_repo_config_at_the_rules_sha(tmp_path, monkeypatch, ge
     llm = _RecordingLLM()
     monkeypatch.setattr(llm_backends, "create_llm_client", lambda cfg: llm)
     monkeypatch.setenv("PRXREF_RULES_SOURCE", source)
-    inner = _ShaForge(TWO_CHUNK_DIFF, _roots(tmp_path, "- RULE-SENTINEL: never log tokens.\n"))
+    inner = _PinnedForge(TWO_CHUNK_DIFF, _roots(tmp_path, "- RULE-SENTINEL: never log tokens.\n"))
     outcome = worker.review_with_prxref(gen, inner, rules_source=source, runs_dir=tmp_path / "runs")
     prompts = "\n".join(f"{system}\n{user}" for system, user in llm.calls)
     assert ("RULE-SENTINEL" in prompts) is present
@@ -101,7 +126,7 @@ def test_litellm_receives_the_configured_timeout_unscaled(tmp_path, monkeypatch,
     monkeypatch.setenv("PRXREF_LLM_MODELS", "bedrock/test-model")
     monkeypatch.setenv("PRXREF_LLM_TIMEOUT", "900")
     monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion))
-    inner = _ShaForge(TWO_CHUNK_DIFF, _roots(tmp_path, "- a rule\n"))
+    inner = _PinnedForge(TWO_CHUNK_DIFF, _roots(tmp_path, "- a rule\n"))
     worker.review_with_prxref(gen, inner, rules_source="base", runs_dir=tmp_path / "runs")
     assert captured
     assert {call["timeout"] for call in captured} == {900.0}
@@ -309,7 +334,8 @@ def test_a_publish_error_never_leaks_the_installation_token(store, gen, lease, t
 def test_redact_masks_tokens():
     text = worker._redact(f"x {SECRET} Bearer abc123 token xyz github_pat ghp_AAA")
     assert "SECRETVALUE" not in text and "abc123" not in text and "xyz" not in text
-    assert "ghp_AAA" not in text and "[redacted]" in text
+    assert "ghp_AAA" not in text
+    assert "github_pat_11AAAA_bbb" not in worker._redact("x github_pat_11AAAA_bbb y") and "[redacted]" in text
 
 
 def test_an_unreadable_live_pr_fails_the_generation_instead_of_stranding_it(store, gen, lease):
@@ -329,7 +355,7 @@ def test_a_rules_file_missing_at_base_fails_closed(tmp_path, monkeypatch, store,
     _write(base, ".prxref.toml", 'review_rules = "rules/team.md"\n')
     _write(head, ".prxref.toml", 'review_rules = "rules/team.md"\n')
     _write(head, "rules/team.md", "- HEAD-SENTINEL: only at head.\n")
-    inner = _ShaForge(TWO_CHUNK_DIFF, {BASE: base, HEAD: head})
+    inner = _PinnedForge(TWO_CHUNK_DIFF, {BASE: base, HEAD: head})
     publisher = _Publisher(store)
 
     def review(g, register=None):
@@ -339,3 +365,73 @@ def test_a_rules_file_missing_at_base_fails_closed(tmp_path, monkeypatch, store,
     assert (state, row.state, row.conclusion) == ("failed", "failed", "failure")
     assert calls[-1] == "fail:review crashed: ConfigError"
     assert "HEAD-SENTINEL" not in "\n".join(f"{system}\n{user}" for system, user in llm.calls)
+
+
+def test_a_failed_fail_publish_still_finishes_the_row_failed(store, gen, lease):
+    class _BrokenFail(_Publisher):
+        def fail(self, gen, lease, reason):
+            self.calls.append("fail-attempt")
+            raise checks.GitHubError("PATCH: HTTP 500", status=500)
+
+    release = threading.Event()
+
+    def slow(g, register=None):
+        release.wait(5)
+
+    publisher = _BrokenFail(store)
+    state, calls, row = _run(store, gen, lease, slow, deadline_s=0.05, publisher=publisher)
+    release.set()
+    assert (state, row.state, row.conclusion) == ("failed", "failed", "failure")
+    assert calls[-1] == "fail-attempt"
+
+
+def test_a_failed_fail_publish_after_a_crash_still_finishes_the_row(store, gen, lease):
+    class _BrokenFail(_Publisher):
+        def fail(self, gen, lease, reason):
+            raise checks.GitHubError("PATCH: HTTP 500", status=500)
+
+    def crash(g, register=None):
+        raise RuntimeError("boom")
+
+    state, _calls, row = _run(store, gen, lease, crash, publisher=_BrokenFail(store))
+    assert (state, row.state, row.conclusion) == ("failed", "failed", "failure")
+
+
+def test_the_worker_loop_logs_iteration_failures_redacted(store, caplog):
+    w = _worker(store, None)
+    stop = threading.Event()
+
+    def boom(lease):
+        stop.set()
+        raise RuntimeError(f"401 Bearer {SECRET}")
+
+    w.run_once = boom
+    with caplog.at_level("DEBUG"):
+        w.run(stop)
+    assert "worker iteration failed" in caplog.text
+    assert SECRET not in caplog.text
+
+
+def test_a_token_in_a_forge_error_reaches_no_stored_or_logged_text(store, gen, lease, tmp_path, caplog, monkeypatch):
+    monkeypatch.setattr(llm_backends, "create_llm_client", lambda cfg: _RecordingLLM())
+    forge = worker.InstallationForge(lambda: SECRET)
+    inner = _PinnedForge(TWO_CHUNK_DIFF, _roots(tmp_path, "- a rule\n"))
+
+    def get_file_content(ref, path, *, sha):
+        raise RuntimeError(f"401 for {forge._headers('github.com')['Authorization']}")
+
+    inner.get_file_content = get_file_content
+    publisher = _Publisher(store)
+
+    def review(g, register=None):
+        return worker.review_with_prxref(g, inner, rules_source="base", runs_dir=tmp_path / "runs", register=register)
+
+    with caplog.at_level("DEBUG"):
+        state, _calls, row = _run(store, gen, lease, review, publisher=publisher)
+    assert state == "failed"
+    assert "[redacted]" in (row.error or "")
+    assert SECRET not in (row.error or "")
+    assert all(SECRET not in reason for reason in publisher.reasons)
+    assert SECRET not in caplog.text
+    for path in (tmp_path / "runs").rglob("*.json"):
+        assert SECRET not in path.read_text()
