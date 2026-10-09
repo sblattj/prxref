@@ -299,6 +299,19 @@ instead, even when the value is empty.
 | `fail_on` | gate | The pipeline's exit-code policy. |
 | `dry_run` | gate | The switch that suppresses every forge write. |
 | `allow_unsigned` | gate | The webhook signature safety switch. |
+| `rules_source` | gate | Chooses whether repository rules come from the PR's base or its head. |
+| `gate_app_id` | credential | The gate app's identity. |
+| `gate_private_key_file` | credential | The gate app's private key. |
+| `gate_installation_ids` | gate | Which app installations the gate serves. |
+| `gate_repos` | gate | Which repositories the gate serves. |
+| `gate_webhook_secret` | credential | The gate app's webhook signing secret. |
+| `gate_webhook_secret_previous` | credential | The previous webhook secret during a rotation. |
+| `gate_secret_grace_minutes` | gate | How long the previous webhook secret stays valid. |
+| `gate_state_file` | local write | The gate's SQLite state file. |
+| `gate_runs_dir` | local write | Where the gate writes run records. |
+| `gate_review_deadline` | gate | How long a gate review may run before it fails. |
+| `gate_watchdog_seconds` | gate | The gate's repair interval. |
+| `gate_reconcile_minutes` | gate | The gate's open-PR reconcile interval. |
 
 ## Paths
 

@@ -719,6 +719,25 @@ Webhooks:
   PRXREF_ALLOW_UNSIGNED           literal "1" accepts unsigned
                                   webhooks (default off; insecure)
 
+Gate (prxref gate serve, #102):
+  PRXREF_RULES_SOURCE             where repository rules are read: head
+                                  (default for review and serve) or base
+                                  (the gate's default)
+  PRXREF_GATE_APP_ID              the sdlc GitHub App's numeric id
+  PRXREF_GATE_PRIVATE_KEY_FILE    the app's PEM private key (mode 0600)
+  PRXREF_GATE_INSTALLATION_IDS    comma-separated installation id allowlist
+  PRXREF_GATE_REPOS               comma-separated owner/name allowlist
+  PRXREF_GATE_WEBHOOK_SECRET      the app's webhook secret
+  PRXREF_GATE_WEBHOOK_SECRET_PREVIOUS
+                                  the old secret, accepted during rotation
+  PRXREF_GATE_SECRET_GRACE_MINUTES
+                                  minutes the old secret stays valid (30)
+  PRXREF_GATE_STATE_FILE          the gate's SQLite file
+  PRXREF_GATE_RUNS_DIR            directory for per-generation run records
+  PRXREF_GATE_REVIEW_DEADLINE     seconds one review may take (900)
+  PRXREF_GATE_WATCHDOG_SECONDS    watchdog interval in seconds (60)
+  PRXREF_GATE_RECONCILE_MINUTES   open-PR reconcile interval (10)
+
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
 PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS,
 PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS, PRXREF_AREA_GLOBS,
@@ -973,6 +992,19 @@ _DEFAULTS: dict[str, object] = {
     "gitea_webhook_secret": "",
     "azure_devops_webhook_secret": "",
     "allow_unsigned": False,
+    "rules_source": "head",
+    "gate_app_id": "",
+    "gate_private_key_file": "",
+    "gate_installation_ids": [],
+    "gate_repos": [],
+    "gate_webhook_secret": "",
+    "gate_webhook_secret_previous": "",
+    "gate_secret_grace_minutes": 30,
+    "gate_state_file": "",
+    "gate_runs_dir": "",
+    "gate_review_deadline": 900,
+    "gate_watchdog_seconds": 60,
+    "gate_reconcile_minutes": 10,
 }
 
 _INT_KEYS = frozenset({
@@ -987,6 +1019,8 @@ _INT_KEYS = frozenset({
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "max_areas_per_pr", "evidence_max_chars",
     "context_standards_max_chars",
+    "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
+    "gate_reconcile_minutes",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -999,7 +1033,7 @@ _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
     "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
-    "context_standards_globs",
+    "context_standards_globs", "gate_installation_ids", "gate_repos",
 })
 
 # An enum-valued key has no numeric interval to check, so its legal vocabulary
@@ -1008,6 +1042,7 @@ _LIST_KEYS = frozenset({
 # never a silent fall-back to the default, which would turn a typo'd
 # PRXREF_FAIL_ON=eror into an undetected "never".
 _CHOICE_KEYS: dict[str, frozenset[str]] = {
+    "rules_source": frozenset({"head", "base"}),
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
@@ -1101,6 +1136,10 @@ class _Range(NamedTuple):
 # TestPreExistingNumericRanges::test_every_numeric_key_declares_a_range fails
 # if a future key is added without a bound.
 _RANGES: dict[str, _Range] = {
+    "gate_secret_grace_minutes": _Range(0, low_inclusive=True),
+    "gate_review_deadline": _Range(0),
+    "gate_watchdog_seconds": _Range(0),
+    "gate_reconcile_minutes": _Range(0),
     "llm_max_tokens": _Range(0),
     "llm_timeout": _Range(0),
     "llm_timeout_per_1k": _Range(0),
@@ -1193,6 +1232,19 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "fail_on": "gate",
     "dry_run": "gate",
     "allow_unsigned": "gate",
+    "rules_source": "gate",
+    "gate_app_id": "credential",
+    "gate_private_key_file": "credential",
+    "gate_installation_ids": "gate",
+    "gate_repos": "gate",
+    "gate_webhook_secret": "credential",
+    "gate_webhook_secret_previous": "credential",
+    "gate_secret_grace_minutes": "gate",
+    "gate_state_file": "local write",
+    "gate_runs_dir": "local write",
+    "gate_review_deadline": "gate",
+    "gate_watchdog_seconds": "gate",
+    "gate_reconcile_minutes": "gate",
     "trace_file": "local write",
     "trace_dir": "local write",
     "fallback": "local write",

@@ -126,6 +126,26 @@ The replay flags of `prxref review` (`--base-sha`, `--head-sha`, `--no-threads`,
 | `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` | *(empty)* | Secret for Azure DevOps service hooks, compared in constant time with the **password** of the hook's Basic authentication (the user name is ignored). Empty rejects Azure DevOps webhooks with `401` unless `PRXREF_ALLOW_UNSIGNED` is `1`. |
 | `PRXREF_ALLOW_UNSIGNED` | `False` | Accepts webhooks without valid HMAC/token signatures (dev/testing only; logs a warning). Must be the literal string `1` — `true`/`yes`/`on` deliberately do **not** enable the bypass, so it cannot be switched on by a stray truthy value. |
 
+### Gate
+
+All env-only (see [config-file.md](config-file.md)); consumed by `prxref gate serve` (#102).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PRXREF_RULES_SOURCE` | `head` | Where repository rules (`PRXREF_REVIEW_RULES` and scoped rules) are read: `head` (default for `review` and `serve`) or `base` (the gate's default). Any other value is a configuration error. Env-only. |
+| `PRXREF_GATE_APP_ID` | *(empty)* | The sdlc GitHub App's numeric id. Required by `prxref gate serve`; must be all digits. Env-only. |
+| `PRXREF_GATE_PRIVATE_KEY_FILE` | *(empty)* | Path to the app's PEM private key. Required by `prxref gate serve`; the file must exist and be mode `0600`. Env-only. |
+| `PRXREF_GATE_INSTALLATION_IDS` | *(empty list)* | Comma-separated allowlist of numeric installation ids the gate serves. Required by `prxref gate serve`; every item must be an integer. Env-only. |
+| `PRXREF_GATE_REPOS` | *(empty list)* | Comma-separated allowlist of `owner/name` repositories the gate serves (compared case-insensitively). Required by `prxref gate serve`. Env-only. |
+| `PRXREF_GATE_WEBHOOK_SECRET` | *(empty)* | The app's webhook signing secret. Required by `prxref gate serve`; non-empty. Env-only. |
+| `PRXREF_GATE_WEBHOOK_SECRET_PREVIOUS` | *(empty)* | The previous webhook secret, still accepted for `PRXREF_GATE_SECRET_GRACE_MINUTES` during a rotation. Optional. Env-only. |
+| `PRXREF_GATE_SECRET_GRACE_MINUTES` | `30` | Integer minutes the previous webhook secret stays valid; `0` or more. Env-only. |
+| `PRXREF_GATE_STATE_FILE` | *(empty)* | Path of the gate's SQLite state file. Required by `prxref gate serve`; non-empty. Env-only. |
+| `PRXREF_GATE_RUNS_DIR` | *(empty)* | Directory the gate writes per-generation run records into. Required by `prxref gate serve`; non-empty. Env-only. |
+| `PRXREF_GATE_REVIEW_DEADLINE` | `900` | Integer seconds one gate review may run before it fails; must be greater than `0`. Env-only. |
+| `PRXREF_GATE_WATCHDOG_SECONDS` | `60` | Integer seconds between watchdog repair passes; must be greater than `0`. Env-only. |
+| `PRXREF_GATE_RECONCILE_MINUTES` | `10` | Integer minutes between open-PR reconcile passes; must be greater than `0`. Env-only. |
+
 ### Repository Config File
 
 | Variable | Default | Purpose |
@@ -201,11 +221,12 @@ The two knobs above, plus the four opt-in levers added in 0.15.0 (`PRXREF_MAX_WA
 
 ## Environment Cross-Check & Defaults
 
-The tables above define all **96** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
+The tables above define all **109** configuration keys in `src/prxref/config.py` (`_DEFAULTS`), and every one of them appears in `.env.example`:
 
 - **LLM / Pipeline (76):** `PRXREF_LLM_BACKEND`, `PRXREF_LLM_BASE_URL`, `PRXREF_LLM_API_KEY`, `PRXREF_LLM_MODELS`, `PRXREF_LLM_REASONING_EFFORT`, `PRXREF_LLM_MAX_TOKENS`, `PRXREF_LLM_TIMEOUT`, `PRXREF_LLM_TIMEOUT_PER_1K`, `PRXREF_LLM_TEMPERATURE`, `PRXREF_LLM_SEED`, `PRXREF_LLM_CLI_PATH`, `PRXREF_LLM_CLI_CONCURRENCY`, `PRXREF_LLM_PARSE_RETRIES`, `PRXREF_CONFIDENCE_FLOOR`, `PRXREF_MAX_ERROR_FINDINGS`, `PRXREF_MAX_WARNING_FINDINGS`, `PRXREF_MAX_OUTOFSCOPE_FINDINGS`, `PRXREF_MAX_FINDINGS_PER_RULE`, `PRXREF_GROUP_FINDINGS`, `PRXREF_DEDUP_SIMILARITY`, `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_TOKEN_BUDGET`, `PRXREF_CHUNK_MAX_FILES`, `PRXREF_CHUNK_CONTEXT_LINES`, `PRXREF_MAX_WORKERS`, `PRXREF_MAX_INLINE_COMMENTS`, `PRXREF_FAIL_ON`, `PRXREF_DRY_RUN`, `PRXREF_TRACE_FILE`, `PRXREF_TRACE_DIR`, `PRXREF_POST_MODE`, `PRXREF_POST_VERDICT`, `PRXREF_PRICE_TABLE`, `PRXREF_POST_COST`, `PRXREF_SEVERITY_MARKERS`, `PRXREF_SUMMARY_BULLET_SEPARATOR`, `PRXREF_SIZE_WARN_LINES`, `PRXREF_SIZE_WARN_FILES`, `PRXREF_SIZE_IGNORE_GLOBS`, `PRXREF_SPEC_SOURCES`, `PRXREF_SPEC_MAX_CHARS`, `PRXREF_SPEC_DIGEST_TOKENS`, `PRXREF_REVIEW_RULES`, `PRXREF_REVIEW_RULES_MAX_CHARS`, `PRXREF_SCOPED_RULES`, `PRXREF_SCOPED_RULES_MAX_CHARS`, `PRXREF_PROMPTS_DIR`, `PRXREF_REVIEW_DEPTH`, `PRXREF_TICKET_CONTEXT_FILE`, `PRXREF_TICKET_CONTEXT_MAX_CHARS`, `PRXREF_EVIDENCE_FILES`, `PRXREF_EVIDENCE_MAX_CHARS`, `PRXREF_REPO_CONTEXT`, `PRXREF_REPO_CONTEXT_MAX_CHARS`, `PRXREF_REPO_CONTEXT_MAX_READS`, `PRXREF_REPO_CONTEXT_MAX_CHUNK_READS`, `PRXREF_CONTEXT_FOLLOWUP`, `PRXREF_SUGGESTIONS`, `PRXREF_ROUTING_PROBE`, `PRXREF_INCREMENTAL`, `PRXREF_FALLBACK`, `PRXREF_CONTEXT_CONTRACT_GLOBS`, `PRXREF_CONTEXT_EXCLUDE_GLOBS`, `PRXREF_CONTEXT_STANDARDS_GLOBS`, `PRXREF_CONTEXT_STANDARDS_MAX_CHARS`, `PRXREF_METADATA_RULES`, `PRXREF_BRANCH_PATTERNS`, `PRXREF_COMMIT_REFERENCE`, `PRXREF_AREA_GLOBS`, `PRXREF_MAX_AREAS_PER_PR`, `PRXREF_CI_WIRING`, `PRXREF_CI_WIRING_GLOBS`, `PRXREF_STABLE_IDS`, `PRXREF_RULE_SCOPING`, `PRXREF_VERDICT_STORE`, `PRXREF_LEARNINGS_FILE`
 - **Per-Forge Auth (11):** `PRXREF_BITBUCKET_TOKEN`, `PRXREF_BITBUCKET_USER`, `PRXREF_BITBUCKET_APP_PASSWORD`, `PRXREF_BITBUCKET_SERVER_TOKEN`, `PRXREF_BITBUCKET_SERVER_USER`, `PRXREF_BITBUCKET_SERVER_PASSWORD`, `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`, `PRXREF_GITEA_TOKEN`, `PRXREF_AZURE_DEVOPS_TOKEN`
 - **Spec Sources / Jira (3):** `PRXREF_JIRA_BASE_URL`, `PRXREF_JIRA_EMAIL`, `PRXREF_JIRA_API_TOKEN`
 - **Webhooks (6):** `PRXREF_BITBUCKET_WEBHOOK_SECRET`, `PRXREF_GITHUB_WEBHOOK_SECRET`, `PRXREF_GITLAB_WEBHOOK_SECRET`, `PRXREF_GITEA_WEBHOOK_SECRET`, `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`, `PRXREF_ALLOW_UNSIGNED`
+- **Gate (13):** `PRXREF_RULES_SOURCE`, `PRXREF_GATE_APP_ID`, `PRXREF_GATE_PRIVATE_KEY_FILE`, `PRXREF_GATE_INSTALLATION_IDS`, `PRXREF_GATE_REPOS`, `PRXREF_GATE_WEBHOOK_SECRET`, `PRXREF_GATE_WEBHOOK_SECRET_PREVIOUS`, `PRXREF_GATE_SECRET_GRACE_MINUTES`, `PRXREF_GATE_STATE_FILE`, `PRXREF_GATE_RUNS_DIR`, `PRXREF_GATE_REVIEW_DEADLINE`, `PRXREF_GATE_WATCHDOG_SECONDS`, `PRXREF_GATE_RECONCILE_MINUTES`
 
-*(96 configuration keys, plus two deprecated aliases — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` and `PRXREF_EVIDENCE_MAX_CHUNK_CHARS` for `PRXREF_EVIDENCE_MAX_CHARS` — for 98 accepted variable names.)* `PRXREF_CONFIG_FILE` is not among them: it names the [repository config file](config-file.md) rather than setting a key, so it counts in no category and in neither total.
+*(109 configuration keys, plus two deprecated aliases — `PRXREF_MAX_ERRORS` for `PRXREF_MAX_ERROR_FINDINGS` and `PRXREF_EVIDENCE_MAX_CHUNK_CHARS` for `PRXREF_EVIDENCE_MAX_CHARS` — for 111 accepted variable names.)* `PRXREF_CONFIG_FILE` is not among them: it names the [repository config file](config-file.md) rather than setting a key, so it counts in no category and in neither total.
