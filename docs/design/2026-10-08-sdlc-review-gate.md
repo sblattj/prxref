@@ -29,6 +29,7 @@ Actions job "prxref review"; the gate's is the app check `sdlc-review`.
 | Sandbox | New public repo `sblattj/sdlc-sandbox`; second write identity is a new machine user | Free plan: rulesets work on public repos only. The stealth account must not appear on a public repo. |
 | Tunnel | `cloudflared` named tunnel as a launchd service | Installed; stable hostname; survives restarts. |
 | Rules source | Base SHA for `.prxref.toml`, rulepacks, standards; head SHA only for inert file context | Today `orchestrator` builds the forge reader at `pr.source_sha` (head). The issue requires base. prxref never executes repository content, so "no head code execution" already holds. |
+| Spec vs plan | Seven points above follow the plan's "Spec questions" section | docs/design/2026-10-08-sdlc-review-gate-plan.md, "## Spec questions" items 1, 2, 3, 8, 14, 21, 26 |
 
 ## Non-goals
 
@@ -45,7 +46,7 @@ Actions job "prxref review"; the gate's is the app check `sdlc-review`.
 GitHub ──webhook──▶ cloudflared ──▶ receiver (HTTP, <10 s) ──▶ SQLite (WAL)
                                                                    ▲   │
                                       watchdog ◀───────────────────┘   ▼
-GitHub ◀──checks/reviews (installation token)── publisher ◀── worker (lease) ──▶ orchestrate_review(post=False) ──▶ litellm ──▶ Bedrock
+GitHub ◀──checks/reviews (installation token)── publisher ◀── worker (lease) ──▶ orchestrate_review(CapturingForge) ──▶ litellm ──▶ Bedrock
 ```
 
 One process, `prxref gate serve`, hosts three threads: the receiver's HTTP server, the
@@ -66,15 +67,19 @@ or class, and a test file under `tests/gate/`.
   minutes before its one-hour expiry.
 - Used by: the publisher and the binding guard; exposes `token_for(repo_full_name)`.
 - Depends on: `pyjwt[crypto]` from the new optional extra `github-app`; `requests`.
-  Importing `prxref.gate` without the extra raises a clear error naming the extra.
+  `prxref gate serve` exits 2 naming the `github-app` extra when PyJWT is missing;
+  `render-manifest`, `render-ruleset`, `pause`, `resume`, `status` and `--help` work
+  without it.
 - Inputs: `PRXREF_GATE_APP_ID`, `PRXREF_GATE_PRIVATE_KEY_FILE` (PEM path, mode 0600
-  enforced at start), `PRXREF_GATE_INSTALLATION_IDS` (allowlist).
+  enforced at start), `PRXREF_GATE_INSTALLATION_IDS` (allowlist),
+  `PRXREF_GATE_REPOS` (required repository allowlist, an `owner/name` list).
 
 ### `receiver.py`: webhook intake
 
 - Does: `POST /webhook` reads the raw body, verifies `X-Hub-Signature-256` with
   `PRXREF_GATE_WEBHOOK_SECRET` (reusing `webhooks._check_hmac`), rejects any delivery
-  whose `installation.id` or `repository.full_name` is outside the allowlist, dedups on
+  whose `installation.id` is outside `PRXREF_GATE_INSTALLATION_IDS` or whose
+  `repository.full_name` is outside `PRXREF_GATE_REPOS`, dedups on
   `X-GitHub-Delivery`, maps the event to an intent, writes one row, and answers 202 with
   the delivery id. Every reply is sent within the receiver's own 5 s budget; no GitHub
   call and no inference happens here. `GET /health` reports queue depth, lease holder,
@@ -110,10 +115,12 @@ publications(generation_id PK, kind, github_id, posted_at)
 - The worker lease is a row with a fencing `token`; every publish carries the token the
   worker holds, and the store refuses a state transition from a holder whose token is
   not current. A second `prxref gate serve` on the same file cannot publish.
-- Restart recovery is a query: on start the worker re-queues any `in_progress`
-  generation whose lease expired, after re-reading the live PR. The re-run reuses the
-  stored `check_run_id`, so the same check moves from `in_progress` to its conclusion
-  instead of leaving an orphaned in-progress check beside a new one.
+- Restart recovery is a query: on start, a fresh worker that breaks a dead holder's
+  lease re-queues every `in_progress` generation under its own fencing token
+  (`Store.adopt_orphans`), because breaking the lease makes it live again and an
+  "expired lease" test would never fire. The re-run reuses the stored `check_run_id`,
+  so the same check moves from `in_progress` to its conclusion instead of leaving an
+  orphaned in-progress check beside a new one.
 
 ### `worker.py`: review execution
 
@@ -121,10 +128,13 @@ publications(generation_id PK, kind, github_id, posted_at)
   `in_progress`, creates the check (`queued` then `in_progress`), runs the review, and
   hands the result to the publisher. One review at a time; a `PRXREF_GATE_REVIEW_DEADLINE`
   (default 15 min) wraps the review, and a deadline hit is a failure.
-- Review call: `orchestrate_review(forge, ref, llm, post=False, …)` in-process, with the
-  forge adapter built on the installation token and the LLM client built by the existing
-  factory from the gate's environment. The result dict and `_run_record` are persisted
-  under `PRXREF_GATE_RUNS_DIR/<generation id>/` with token counts.
+- Review call: the review runs in-process with posting ON over a capturing forge adapter
+  (`CapturingForge`) that records the summary and inline-comment post calls and writes
+  nothing to GitHub; the publisher then posts from the captured bodies, so every GitHub
+  write still belongs to the publisher. The forge adapter is built on the installation
+  token and the LLM client by the existing factory from the gate's environment. The
+  result dict and `_run_record` are persisted under `PRXREF_GATE_RUNS_DIR/<generation
+  id>/` with token counts.
 - `prxref gate pause` writes a `paused` flag row; the worker finishes the current
   generation and stops dequeuing. `resume` clears it. This is the kill switch.
 
@@ -133,6 +143,9 @@ publications(generation_id PK, kind, github_id, posted_at)
 - Does: a second `forge_reader` at `pr.target_sha` used for `.prxref.toml`, rulepacks
   (`PRXREF_RULES_FILE` in-repo paths), standards documents and learnings. The head reader
   stays for out-of-hunk context and file content.
+- `.prxref.toml` and every in-repo path it names (`config._FILE_PATH_KEYS`, which
+  includes `learnings_file`) are fetched at the base SHA into a temporary directory,
+  because `load_config` reads only local paths; `prompts_dir` is forced off in the gate.
 - Surface: a new config key `PRXREF_RULES_SOURCE` with values `head` (today's behavior,
   default for `review` and `serve`) and `base` (the gate's default). Added to
   `config._DEFAULTS`, `_CHOICE_KEYS`, the docstring, `.env.example`, `docs/env-vars.md`,
@@ -172,16 +185,19 @@ publications(generation_id PK, kind, github_id, posted_at)
   marks the old generation `stale` and the new one publishes a fresh check on that head
   (GitHub shows the latest check run of a name per SHA). The ruleset's strict policy
   also demands the head be up to date with the new base, so in practice a retarget needs
-  a fresh head before merge; the runbook says so and bounds the window to one watchdog
-  interval.
+  a fresh head before merge; the runbook says so. The window after a concluded check is
+  closed by the ruleset's strict policy (a moved base forces an update push, which
+  starts a new generation) together with the receiver's `edited` handling; the watchdog
+  and reconciler compare heads only and do not notice a moved base after a check
+  concluded.
 
 ### `watchdog.py`: repair and reconciliation
 
 - Does, every `PRXREF_GATE_WATCHDOG_SECONDS` (default 60): re-queues `in_progress`
   generations past the deadline whose lease is not live; and, every
   `PRXREF_GATE_RECONCILE_MINUTES` (default 10) and on start, lists open PRs on every
-  allowlisted repository and enqueues a generation for any PR whose live head has no
-  generation in the store. This is the recovery path for a push that happened while the
+  allowlisted repository (from `PRXREF_GATE_REPOS`) and enqueues a generation for any
+  PR whose live head has no generation in the store. This is the recovery path for a push that happened while the
   Mac slept, was shut down, or the tunnel was down, because GitHub never redelivers on
   its own. Polling is bounded to one list call per repo per interval plus one PR read
   per discrepancy. No webhook-redelivery walker: the reconciler covers every missed
@@ -252,8 +268,9 @@ publications(generation_id PK, kind, github_id, posted_at)
 
 ## Operations
 
-- `launchd`: `dev.prxref.gate.plist` (`prxref gate serve --config ~/.config/prxref-gate/prxref.toml`)
+- `launchd`: `dev.prxref.gate.plist` (`prxref gate serve --env-file ~/.config/prxref-gate/env`)
   and `dev.prxref.cloudflared.plist` (`cloudflared tunnel run sdlc`). Both `KeepAlive`.
+  Every `PRXREF_GATE_*` key is env-only, so a `.prxref.toml` cannot carry them.
 - Local limits documented in the runbook: sleep, shutdown and tunnel loss pause intake;
   GitHub retries deliveries for a bounded time and the "Redeliver" button covers the
   rest; a missing required check blocks merge until the worker returns; the watchdog
