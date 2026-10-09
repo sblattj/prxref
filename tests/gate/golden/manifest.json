@@ -1,0 +1,13 @@
+{
+  "name": "sdlc",
+  "url": "https://github.com/sblattj/prxref",
+  "hook_attributes": {"url": "https://sdlc.example.dev/webhook", "active": true},
+  "public": false,
+  "default_permissions": {
+    "checks": "write",
+    "pull_requests": "write",
+    "contents": "read",
+    "metadata": "read"
+  },
+  "default_events": ["pull_request", "check_run", "check_suite"]
+}
