@@ -77,6 +77,13 @@ class _RedactingFilter(logging.Filter):
         clean = copy.copy(record)
         clean.msg = worker_module._redact(record.getMessage())
         clean.args = ()
+        if record.exc_info:
+            clean.exc_text = worker_module._redact(logging.Formatter().formatException(record.exc_info))
+            clean.exc_info = None
+        elif record.exc_text:
+            clean.exc_text = worker_module._redact(record.exc_text)
+        if record.stack_info:
+            clean.stack_info = worker_module._redact(record.stack_info)
         return clean
 
 
@@ -118,12 +125,16 @@ def build(settings: GateSettings, cfg: Mapping[str, Any], *, session: Any = None
 def run_gate(gate: Gate, host: str, port: int, *, stop: threading.Event | None = None) -> int:
     """Serve until SIGTERM/SIGINT or ``stop``; returns 0 after a clean shutdown."""
     stop = stop or threading.Event()
+    previous: dict[int, Any] = {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, signal.SIGINT):
+            previous[sig] = signal.getsignal(sig)
             signal.signal(sig, lambda *_: stop.set())
     try:
         return _serve_until_stopped(gate, host, port, stop)
     finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
         gate.store.close()
 
 
@@ -216,16 +227,21 @@ def run_command(args: argparse.Namespace) -> int:
             print(json.dumps(rulesets.render_ruleset(args.integration_id), indent=2, sort_keys=True))
             return 0
         if action == "apply-ruleset":
-            if args.diff:
-                diff = rulesets.diff_ruleset(args.repo, args.integration_id)
-                print(diff or "ruleset matches")
-                return 1 if diff else 0
-            print(f"ruleset {rulesets.RULESET_NAME} id {rulesets.apply_ruleset(args.repo, args.integration_id)}")
-            return 0
+            try:
+                if args.diff:
+                    diff = rulesets.diff_ruleset(args.repo, args.integration_id)
+                    print(diff or "ruleset matches")
+                    return 1 if diff else 0
+                print(f"ruleset {rulesets.RULESET_NAME} id {rulesets.apply_ruleset(args.repo, args.integration_id)}")
+                return 0
+            except (ValueError, TypeError, KeyError, FileNotFoundError) as e:
+                # gh output that is not JSON, the wrong shape, or no gh binary at all
+                print(f"prxref gate: {e}", file=sys.stderr)
+                return 1
     except (ConfigError, GateDependencyError) as e:
         print(f"prxref gate: {e}", file=sys.stderr)
         return 2
-    except (rulesets.RulesetError, ValueError, TypeError, KeyError, FileNotFoundError) as e:
+    except rulesets.RulesetError as e:
         print(f"prxref gate: {e}", file=sys.stderr)
         return 1
     raise AssertionError(f"unhandled gate action {action!r}")

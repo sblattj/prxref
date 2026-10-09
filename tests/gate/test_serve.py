@@ -196,29 +196,37 @@ def test_run_gate_runs_every_thread_then_closes_the_store(tmp_path):
     gate = SimpleNamespace(store=store, receiver=object(), worker=_Loop("worker"), watchdog=_Loop("watchdog"))
     stop = threading.Event()
     threading.Timer(0.3, stop.set).start()
+    import signal
+
+    before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
     assert serve.run_gate(gate, "127.0.0.1", 0, stop=stop) == 0
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
     assert sorted(ran) == ["watchdog", "worker"]
     with pytest.raises(sqlite3.ProgrammingError):
         store.queue_depth()
 
 
-def test_redacting_filter_masks_tokens_from_child_loggers():
+def test_installed_redaction_masks_messages_and_tracebacks_from_child_loggers():
     import io
     import logging
 
     buf = io.StringIO()
     handler = logging.StreamHandler(buf)
-    handler.addFilter(serve._RedactingFilter())
-    parent = logging.getLogger("prxref")
-    parent.addHandler(handler)
+    root = logging.getLogger()
+    root.addHandler(handler)
     try:
+        serve._install_redaction()
         logging.getLogger("prxref.orchestrator").error("get_pr failed: %s", "401 for token ghs_SECRETVALUE123")
+        try:
+            raise RuntimeError("401 for Bearer ghs_EXCSECRET2")
+        except RuntimeError:
+            logging.getLogger("prxref.orchestrator").exception("get_pr failed")
     finally:
-        parent.removeHandler(handler)
+        root.removeHandler(handler)
     out = buf.getvalue()
-    assert "ghs_SECRETVALUE123" not in out
-    assert "[redacted]" in out
-    assert "get_pr failed" in out
+    assert "ghs_SECRETVALUE123" not in out and "ghs_EXCSECRET2" not in out
+    assert "get_pr failed: 401 for [redacted]" in out
+    assert "RuntimeError: 401 for [redacted]" in out
 
 
 def test_serve_main_installs_the_filter_on_root_handlers(tmp_path, monkeypatch):
@@ -236,3 +244,14 @@ def test_serve_main_installs_the_filter_on_root_handlers(tmp_path, monkeypatch):
     finally:
         root.removeHandler(handler)
         handler.stream.close()
+
+
+def test_a_non_gh_error_in_status_is_not_reported_as_exit_1(tmp_path, monkeypatch):
+    env = _env_file(tmp_path, [f"PRXREF_GATE_STATE_FILE={tmp_path / 'g.db'}"])
+
+    def boom(store):
+        raise KeyError("id")
+
+    monkeypatch.setattr(serve, "status_text", boom)
+    with pytest.raises(KeyError):
+        cli.main(["gate", "status", "--env-file", str(env)])
