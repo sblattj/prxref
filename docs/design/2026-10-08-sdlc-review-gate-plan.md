@@ -4720,7 +4720,22 @@ closed: the check concludes `failure`, never `neutral` or `skipped`.
    `github-app`, `prxref gate serve` exits 2 naming the extra.
 2. **Tunnel:** a Cloudflare zone, `cloudflared tunnel login`, `cloudflared tunnel create sdlc`,
    and `cloudflared tunnel route dns sdlc <webhook-host>`. The webhook URL is
-   `https://<webhook-host>/webhook`.
+   `https://<webhook-host>/webhook`. The named tunnel needs an ingress rule that sends
+   that hostname to the gate; write `~/.cloudflared/config.yml` (`<tunnel-uuid>` is the
+   id `cloudflared tunnel create` printed, and its credentials file sits beside it):
+
+   ```yaml
+   tunnel: sdlc
+   credentials-file: /Users/<you>/.cloudflared/<tunnel-uuid>.json
+   ingress:
+     - hostname: <webhook-host>
+       service: http://127.0.0.1:8787
+     - service: http_status:404
+   ```
+
+   Check it with `cloudflared tunnel ingress validate` and
+   `cloudflared tunnel ingress rule https://<webhook-host>/webhook` (prints the
+   `http://127.0.0.1:8787` rule).
 3. **Model key:** a *long-term* Amazon Bedrock API key (an IAM user with
    `AmazonBedrockLimitedAccess`, created in the Bedrock console). A 12-hour short-term key
    expires under the daemon and every review after that fails closed.
@@ -5082,7 +5097,7 @@ The spec's "Live proof (sandbox)" section: four phases against a real GitHub rep
 
 **This task needs the operator.** Before Step 3, stop and ask the user to confirm each item of the spec's "Operator prerequisites"; do not attempt any of them yourself:
 
-1. `cloudflared tunnel login` done, `cloudflared tunnel create sdlc` done, and a DNS route to the webhook hostname (check: `cloudflared tunnel list` lists `sdlc`).
+1. `cloudflared tunnel login` done, `cloudflared tunnel create sdlc` done, a DNS route to the webhook hostname, and `~/.cloudflared/config.yml` with the ingress rule from `docs/gate.md` "Prerequisites" step 2 (checks: `cloudflared tunnel list` lists `sdlc`; `cloudflared tunnel ingress validate` prints `OK`; `cloudflared tunnel ingress rule https://<webhook-host>/webhook` names `http://127.0.0.1:8787`).
 2. A long-term Bedrock API key in `~/.config/prxref-gate/env` as `AWS_BEARER_TOKEN_BEDROCK` (check without printing it: `grep -c '^AWS_BEARER_TOKEN_BEDROCK=.' ~/.config/prxref-gate/env` prints `1`).
 3. A machine-user GitHub account with write access to `sblattj/sdlc-sandbox`, logged into `gh` (check: `gh auth status` lists it; the steps below call it `<machine-user>`).
 4. The `sdlc` app registered from `prxref gate render-manifest` output, installed on `sblattj/sdlc-sandbox` only, its key at `~/.config/prxref-gate/sdlc.pem` mode 0600, and `PRXREF_GATE_APP_ID` / `PRXREF_GATE_INSTALLATION_IDS` / `PRXREF_GATE_WEBHOOK_SECRET` filled in the env file.
@@ -5497,7 +5512,7 @@ git add pyproject.toml src/prxref/__init__.py uv.lock README.md action.yml examp
 git commit -m "release: 0.35.0" -m "Claude-Session-Id: <session UUID>"
 ```
 
-Then invoke the `cut-release` skill and follow it for the push, the annotated tag `v0.35.0` on the gated SHA, the GitHub Release (notes from the changelog entry, with "Fixes #102"), the PyPI publish, and the tag↔release set-diff. Do not hand-roll these steps.
+Steps 1 and 2 pre-stage the version bump; the `cut-release` skill owns the release and re-verifies the version set itself, so where it disagrees with Steps 1 and 2, the skill wins. Invoke the `cut-release` skill and follow it for the push, the annotated tag `v0.35.0` on the gated SHA, the GitHub Release (notes from the changelog entry, with "Fixes #102"), the PyPI publish, and the tag↔release set-diff. Do not hand-roll these steps.
 
 - [ ] **Step 4: Re-run phase 2 pinned to 0.35.0**
 
