@@ -50,7 +50,8 @@ _DRIFT = frozenset({"head moved", "base moved", "retargeted"})
 _SECRET = re.compile(r"github_pat_[A-Za-z0-9_]+|gh[a-z]_[A-Za-z0-9]+|(?i:(?:bearer|token)\s+\S+)")
 _MIN_SECRET_LEN = 8
 _ERROR_LINE = "The review could not complete:"
-_registered: set[str] = set()
+_MAX_REGISTERED = 256
+_registered: dict[str, None] = {}
 _registered_lock = threading.Lock()
 
 
@@ -58,7 +59,10 @@ def register_secret(value: str) -> None:
     """Have :func:`_redact` mask ``value`` wherever it appears; values under 8 characters are ignored."""
     if isinstance(value, str) and len(value) >= _MIN_SECRET_LEN:
         with _registered_lock:
-            _registered.add(value)
+            _registered.pop(value, None)
+            _registered[value] = None
+            while len(_registered) > _MAX_REGISTERED:
+                del _registered[next(iter(_registered))]
 
 
 def _redact(text: str) -> str:

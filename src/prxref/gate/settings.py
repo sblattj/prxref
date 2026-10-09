@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from prxref.gate import require_jwt
+from prxref.gate import EXTRA_HINT, GateDependencyError, require_jwt
 from prxref.llm import ConfigError
 
 WEBHOOK_SECRET_ENV = "PRXREF_GATE_WEBHOOK_SECRET"
@@ -52,6 +52,8 @@ def _require_pem(path: Path, name: str) -> None:
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
         load_pem_private_key(path.read_bytes(), password=None)
+    except ImportError as e:
+        raise GateDependencyError(f"prxref gate needs PyJWT with RS256 support; {EXTRA_HINT}") from e
     except (OSError, ValueError, TypeError) as e:
         raise ConfigError(f"{name}: {path} is not a usable PEM private key ({type(e).__name__})") from e
 

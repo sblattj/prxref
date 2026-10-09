@@ -587,6 +587,16 @@ def test_register_secret_ignores_short_values():
     assert worker._redact("a short b") == "a short b"
 
 
+def test_the_secret_registry_is_bounded_and_drops_the_oldest(monkeypatch):
+    monkeypatch.setattr(worker, "_registered", {})
+    values = [f"secret-value-{i:04d}" for i in range(300)]
+    for v in values:
+        worker.register_secret(v)
+    assert len(worker._registered) == 256
+    assert worker._redact(f"x {values[-1]} y") == "x [redacted] y"
+    assert worker._redact(f"x {values[0]} y") == f"x {values[0]} y"
+
+
 def test_a_registered_secret_reaches_no_record_row_or_log(store, gen, lease, tmp_path, caplog, monkeypatch):
     value = "bedrock-key-Zq81LmP0xY"
     worker.register_secret(value)

@@ -142,14 +142,15 @@ new generation reviews the new head against the new base. A base retarget
 (`pull_request.edited`) queues a new generation at once; if that delivery is lost, the
 next reconcile (`PRXREF_GATE_RECONCILE_MINUTES`) or push repairs it.
 
-A clean stop (`launchctl bootout`, SIGTERM, Ctrl-C) abandons any review that is
-running and releases the worker lease before the process exits, so the next start can
-take the head at once. After a crash (kill -9, power loss) the lease is still held, but
-a restart on the same host adopts a lease whose holder pid is dead at once instead of
-waiting for it to expire. The lease TTL (review deadline + 120 s) matters only when the
-process is alive but stuck. A review abandoned by a stop is wasted work; run
-`prxref gate pause` before a planned restart to avoid it, and `prxref gate resume`
-afterwards.
+A clean stop (`launchctl bootout`, SIGTERM, Ctrl-C) while the worker is idle releases
+the worker lease at once. A stop during a review waits up to 5 s for the worker, then
+exits with the lease still held and the generation `in_progress`: the worker releases
+the lease only when it reaches the end of its loop, which a running review prevents.
+The next start on the same host adopts a lease whose holder pid is dead at once and
+re-queues the in-progress generation, the same as after a crash (kill -9, power loss).
+The lease TTL (review deadline + 120 s) matters only when the holder process is alive
+but stuck. A review cut off by a stop is wasted work; run `prxref gate pause` before a
+planned restart to avoid it, and `prxref gate resume` afterwards.
 
 ## Troubleshooting
 
@@ -159,11 +160,12 @@ afterwards.
 - **401 on every delivery.** The webhook secret in the env file and the app differ.
 - **403 on a delivery.** The installation id or the repository is not in
   `PRXREF_GATE_INSTALLATION_IDS` / `PRXREF_GATE_REPOS`.
-- **Check stuck `in_progress`.** A clean stop releases the lease and a restart after a
-  crash adopts the dead process's lease (same host, dead pid) at once, so the next start
-  re-queues the work. Only a process that is alive but stuck holds the lease until it
-  expires (review deadline + 120 s), and only then does the watchdog re-queue. Re-run
-  from the PR's Checks tab ("Re-run") to queue it immediately.
+- **Check stuck `in_progress`.** A stop during a review leaves the lease held and the
+  generation `in_progress`, but a restart on the same host adopts the dead holder's
+  lease (same host, dead pid) at once and re-queues the work. Only a process that is
+  alive but stuck holds the lease until it expires (review deadline + 120 s), and only
+  then does the watchdog re-queue. Re-run from the PR's Checks tab ("Re-run") to queue
+  it immediately.
 - **`/health` answers 404 through the tunnel.** By design: it is local-only because it
   shows the lease holder and the last authentication failure. Use
   `curl http://127.0.0.1:8787/health` on the Mac.

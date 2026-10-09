@@ -1,6 +1,7 @@
 """Gate config keys and GateSettings (#102)."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -204,3 +205,13 @@ def test_a_garbage_pem_is_a_config_error_naming_the_path(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path, PRXREF_GATE_PRIVATE_KEY_FILE=str(bad))
     with pytest.raises(ConfigError, match="bad.pem"):
         settings.settings_from_config(config.load_config())
+
+
+def test_require_pem_names_the_extra_when_the_crypto_backend_is_missing(tmp_path, monkeypatch):
+    from prxref.gate import GateDependencyError
+
+    monkeypatch.setitem(sys.modules, "cryptography.hazmat.primitives.serialization", None)
+    pem = tmp_path / "k.pem"
+    pem.write_bytes(b"x")
+    with pytest.raises(GateDependencyError, match="RS256"):
+        settings._require_pem(pem, "PRXREF_GATE_PRIVATE_KEY_FILE")
