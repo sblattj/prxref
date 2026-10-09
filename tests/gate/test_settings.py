@@ -26,9 +26,22 @@ GATE_KEYS = {
 }
 
 
+def _make_pem() -> bytes:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+
+
+_PEM = _make_pem()
+
+
 def _key_file(tmp_path: Path, mode: int = 0o600) -> Path:
     path = tmp_path / "app.pem"
-    path.write_text("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n")
+    path.write_bytes(_PEM)
     path.chmod(mode)
     return path
 
@@ -176,3 +189,18 @@ def test_env_file_with_undecodable_bytes_is_a_config_error(tmp_path):
     env.chmod(0o600)
     with pytest.raises(ConfigError, match="env"):
         settings.load_env_file(env)
+
+
+def test_a_whitespace_only_webhook_secret_is_refused(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, PRXREF_GATE_WEBHOOK_SECRET="   ")
+    with pytest.raises(ConfigError, match="PRXREF_GATE_WEBHOOK_SECRET"):
+        settings.settings_from_config(config.load_config())
+
+
+def test_a_garbage_pem_is_a_config_error_naming_the_path(monkeypatch, tmp_path):
+    bad = tmp_path / "bad.pem"
+    bad.write_text("not a key\n")
+    bad.chmod(0o600)
+    _env(monkeypatch, tmp_path, PRXREF_GATE_PRIVATE_KEY_FILE=str(bad))
+    with pytest.raises(ConfigError, match="bad.pem"):
+        settings.settings_from_config(config.load_config())

@@ -116,6 +116,10 @@ class Receiver:
         """Answer one HTTP request with ``(status, json_body)``."""
         h = {k.lower(): v for k, v in headers.items()}
         if method == "GET" and path == "/health":
+            if "cf-connecting-ip" in h:
+                # Every request through the tunnel carries this header; /health (lease
+                # holder, last auth failure) is for a local curl only.
+                return 404, {"error": "not found"}
             return 200, self.health()
         if method != "POST" or path != "/webhook":
             return 404, {"error": "not found"}

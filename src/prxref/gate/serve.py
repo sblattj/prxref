@@ -27,7 +27,7 @@ import requests
 from prxref.config import load_config
 from prxref.gate import GateDependencyError, require_jwt, rulesets
 from prxref.gate import worker as worker_module
-from prxref.gate.app_auth import AppAuth
+from prxref.gate.app_auth import AppAuth, GateAuthError
 from prxref.gate.binding import make_guard
 from prxref.gate.checks import GitHubClient, Publisher
 from prxref.gate.receiver import Receiver, serve_http
@@ -35,9 +35,16 @@ from prxref.gate.settings import GateSettings, apply_env_file, settings_from_con
 from prxref.gate.store import Generation, Store
 from prxref.gate.watchdog import Watchdog
 from prxref.gate.worker import InstallationForge, ReviewOutcome, Worker
+
+try:  # TEMPORARY GUARD until seat A lands register_secret (#102); the controller removes it
+    from prxref.gate.worker import register_secret
+except ImportError:
+    register_secret = lambda v: None  # noqa: E731
 from prxref.llm import ConfigError
 
 logger = logging.getLogger(__name__)
+
+BEDROCK_KEY_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 
 
 @dataclass
@@ -95,6 +102,13 @@ def _install_redaction() -> None:
 
 def build(settings: GateSettings, cfg: Mapping[str, Any], *, session: Any = None) -> Gate:
     """Construct every component from validated settings; nothing listens or runs yet."""
+    for secret in (
+        cfg["gate_webhook_secret"],
+        cfg["gate_webhook_secret_previous"],
+        os.environ.get(BEDROCK_KEY_ENV, ""),
+    ):
+        if secret:
+            register_secret(secret)
     session = session or requests.Session()
     pem = settings.private_key_file.read_text(encoding="utf-8")
     auth = AppAuth(settings.app_id, pem, settings.installation_ids, session=session)
@@ -178,7 +192,7 @@ def status_text(store: Store) -> str:
     lines = [
         f"paused: {'yes' if store.is_paused() else 'no'}",
         f"queue depth: {store.queue_depth()}",
-        f"lease: {lease['holder'] + ' until ' + _fmt_time(lease['expires_at']) if lease else 'none'}",
+        f"lease: {lease['holder'] + ' until ' + _fmt_time(lease['expires_at']) if lease and lease['live'] else 'none'}",
         f"last publish: {_fmt_time(store.last_publish_time())}",
         f"last auth failure: {store.last_auth_failure() or 'none'}",
         "recent generations:",
@@ -238,7 +252,7 @@ def run_command(args: argparse.Namespace) -> int:
                 # gh output that is not JSON, the wrong shape, or no gh binary at all
                 print(f"prxref gate: {e}", file=sys.stderr)
                 return 1
-    except (ConfigError, GateDependencyError) as e:
+    except (ConfigError, GateDependencyError, GateAuthError) as e:
         print(f"prxref gate: {e}", file=sys.stderr)
         return 2
     except rulesets.RulesetError as e:

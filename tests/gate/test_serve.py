@@ -255,3 +255,70 @@ def test_a_non_gh_error_in_status_is_not_reported_as_exit_1(tmp_path, monkeypatc
     monkeypatch.setattr(serve, "status_text", boom)
     with pytest.raises(KeyError):
         cli.main(["gate", "status", "--env-file", str(env)])
+
+
+def test_status_prints_lease_none_when_the_lease_has_expired(tmp_path):
+    clock = [1000.0]
+    store = Store(tmp_path / "g.db", clock=lambda: clock[0])
+    try:
+        assert store.acquire_lease("host:1", 60) is not None
+        assert "lease: host:1 until" in serve.status_text(store)
+        clock[0] += 61
+        assert "lease: none" in serve.status_text(store)
+    finally:
+        store.close()
+
+
+def test_a_gate_auth_error_from_build_exits_2(tmp_path, monkeypatch, capsys):
+    from prxref.gate.app_auth import GateAuthError
+
+    def boom(settings, cfg):
+        raise GateAuthError("GitHub rejected the app JWT")
+
+    monkeypatch.setattr(serve, "settings_from_config", lambda cfg: "settings")
+    monkeypatch.setattr(serve, "build", boom)
+    env = _env_file(tmp_path, ["PRXREF_GATE_APP_ID=1"])
+    assert cli.main(["gate", "serve", "--env-file", str(env)]) == 2
+    assert "prxref gate: GitHub rejected the app JWT" in capsys.readouterr().err
+
+
+_HAS_REGISTER = hasattr(worker, "register_secret")
+
+
+@pytest.mark.skipif(not _HAS_REGISTER, reason="register_secret not landed (ImportError guard active)")
+def test_build_registers_the_webhook_and_bedrock_secrets_for_redaction(tmp_path, monkeypatch):
+    class FakeAuth:
+        def __init__(self, *a, **k):
+            pass
+
+        def bot_login(self):
+            return "sdlc[bot]"
+
+    monkeypatch.setattr(serve, "AppAuth", FakeAuth)
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key-0123456789")
+    key = tmp_path / "k.pem"
+    key.write_text("x")
+    cfg = {
+        "gate_webhook_secret": "whsec-abcdef123456",
+        "gate_webhook_secret_previous": "whprev-abcdef123456",
+        "rules_source": "base",
+        "llm_reasoning_effort": "",
+    }
+    gs = serve.GateSettings(
+        app_id=1,
+        private_key_file=key,
+        installation_ids=frozenset({2}),
+        repos=frozenset({"a/b"}),
+        secret_grace_minutes=30,
+        state_file=tmp_path / "s.db",
+        runs_dir=tmp_path / "runs",
+        review_deadline=900,
+        watchdog_seconds=60,
+        reconcile_minutes=10,
+    )
+    gate = serve.build(gs, cfg, session=object())
+    try:
+        for secret in ("whsec-abcdef123456", "whprev-abcdef123456", "bedrock-key-0123456789"):
+            assert worker._redact(f"leaked {secret} here") == "leaked [redacted] here"
+    finally:
+        gate.store.close()

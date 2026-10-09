@@ -345,3 +345,9 @@ def test_handler_exception_is_500_and_server_stays_up(rx, monkeypatch, caplog):
         server.shutdown()
         server.server_close()
     assert any("handler failed" in r.getMessage() for r in caplog.records)
+
+
+def test_health_is_local_only(rx):
+    assert rx.handle("GET", "/health", {"Cf-Connecting-Ip": "203.0.113.9"}, b"")[0] == 404
+    assert rx.handle("GET", "/health", {"cf-connecting-ip": "203.0.113.9"}, b"")[0] == 404
+    assert rx.handle("GET", "/health", {}, b"")[0] == 200

@@ -27,8 +27,8 @@ github-app = ["pyjwt[crypto]>=2.8"]
 # "Installed N packages" — which reads as a broken virtualenv, not a missing flag.
 # The trade-off is deliberate and one-way: dependency groups are not published in
 # wheel/sdist metadata, so `pip install prxref[dev]` no longer resolves them.
-# Contributors clone the repo and use uv; only `litellm` above is a real runtime
-# extra for users.
+# Contributors clone the repo and use uv; `litellm` and `github-app` above are the
+# real runtime extras for users.
 [dependency-groups]
 dev = [
     "pytest>=8.0",

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from prxref.gate import require_jwt
 from prxref.llm import ConfigError
 
 WEBHOOK_SECRET_ENV = "PRXREF_GATE_WEBHOOK_SECRET"
@@ -44,6 +45,17 @@ def _require_private(path: Path, name: str) -> None:
         raise ConfigError(f"{name}: {path} must be mode 0600 (it is {stat.S_IMODE(mode):04o}); run chmod 600 {path}")
 
 
+def _require_pem(path: Path, name: str) -> None:
+    """Parse the key with the backend PyJWT signs with, so a bad file fails at startup (exit 2)."""
+    require_jwt()
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        load_pem_private_key(path.read_bytes(), password=None)
+    except (OSError, ValueError, TypeError) as e:
+        raise ConfigError(f"{name}: {path} is not a usable PEM private key ({type(e).__name__})") from e
+
+
 def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
     """Validate the gate keys of a loaded ``cfg``; raise ``ConfigError`` naming the variable."""
     app_id = str(cfg["gate_app_id"]).strip()
@@ -54,13 +66,14 @@ def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
         raise ConfigError("PRXREF_GATE_PRIVATE_KEY_FILE is required")
     key_path = Path(key_file).expanduser()
     _require_private(key_path, "PRXREF_GATE_PRIVATE_KEY_FILE")
+    _require_pem(key_path, "PRXREF_GATE_PRIVATE_KEY_FILE")
     raw_ids = list(cfg["gate_installation_ids"])
     if not raw_ids or not all(_DIGITS_RE.fullmatch(v.strip()) for v in raw_ids):
         raise ConfigError("PRXREF_GATE_INSTALLATION_IDS must list one or more numeric installation ids")
     repos = [v.strip() for v in cfg["gate_repos"]]
     if not repos or not all(_REPO_RE.match(r) for r in repos):
         raise ConfigError("PRXREF_GATE_REPOS must list one or more owner/name repositories")
-    if not str(cfg["gate_webhook_secret"]):
+    if not str(cfg["gate_webhook_secret"]).strip():
         raise ConfigError("PRXREF_GATE_WEBHOOK_SECRET is required")
     for key, name in (("gate_state_file", "PRXREF_GATE_STATE_FILE"), ("gate_runs_dir", "PRXREF_GATE_RUNS_DIR")):
         if not str(cfg[key]).strip():

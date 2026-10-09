@@ -51,11 +51,13 @@ closed: the check concludes `failure`, never `neutral` or `skipped`.
    credentials-file: /Users/<you>/.cloudflared/<tunnel-uuid>.json
    ingress:
      - hostname: <webhook-host>
+       path: ^/webhook$
        service: http://127.0.0.1:8787
      - service: http_status:404
    ```
 
-   Check it with `cloudflared tunnel ingress validate` and
+   Only `/webhook` goes through the tunnel; everything else on the hostname, `/health`
+   included, falls to the 404 rule. Check it with `cloudflared tunnel ingress validate` and
    `cloudflared tunnel ingress rule https://<webhook-host>/webhook` (prints the
    `http://127.0.0.1:8787` rule).
 3. **Model key:** a *long-term* Amazon Bedrock API key (an IAM user with
@@ -140,13 +142,14 @@ new generation reviews the new head against the new base. A base retarget
 (`pull_request.edited`) queues a new generation at once; if that delivery is lost, the
 next reconcile (`PRXREF_GATE_RECONCILE_MINUTES`) or push repairs it.
 
-Stopping the service (`launchctl bootout`, SIGTERM, Ctrl-C) while a review is running
-does not interrupt that review. The worker checks the stop flag only between
-generations, so the process waits for the thread briefly and then exits with the lease
-still held. The next start can re-take that head only after the lease expires (review
-deadline + 120 s, the same window Troubleshooting names). This is bounded, not a hang.
-If a restart must be immediate, run `prxref gate pause` first and wait for
-`prxref gate status` to show no lease holder.
+A clean stop (`launchctl bootout`, SIGTERM, Ctrl-C) abandons any review that is
+running and releases the worker lease before the process exits, so the next start can
+take the head at once. After a crash (kill -9, power loss) the lease is still held, but
+a restart on the same host adopts a lease whose holder pid is dead at once instead of
+waiting for it to expire. The lease TTL (review deadline + 120 s) matters only when the
+process is alive but stuck. A review abandoned by a stop is wasted work; run
+`prxref gate pause` before a planned restart to avoid it, and `prxref gate resume`
+afterwards.
 
 ## Troubleshooting
 
@@ -156,9 +159,14 @@ If a restart must be immediate, run `prxref gate pause` first and wait for
 - **401 on every delivery.** The webhook secret in the env file and the app differ.
 - **403 on a delivery.** The installation id or the repository is not in
   `PRXREF_GATE_INSTALLATION_IDS` / `PRXREF_GATE_REPOS`.
-- **Check stuck `in_progress`.** The worker died mid-review; the watchdog re-queues it
-  after the lease expires (review deadline + 120 s). Re-run from the PR's Checks tab
-  ("Re-run") to queue it immediately.
+- **Check stuck `in_progress`.** A clean stop releases the lease and a restart after a
+  crash adopts the dead process's lease (same host, dead pid) at once, so the next start
+  re-queues the work. Only a process that is alive but stuck holds the lease until it
+  expires (review deadline + 120 s), and only then does the watchdog re-queue. Re-run
+  from the PR's Checks tab ("Re-run") to queue it immediately.
+- **`/health` answers 404 through the tunnel.** By design: it is local-only because it
+  shows the lease holder and the last authentication failure. Use
+  `curl http://127.0.0.1:8787/health` on the Mac.
 
 ## Rollback
 
