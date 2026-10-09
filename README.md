@@ -510,6 +510,8 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 
 `prxref learnings harvest --pr-url URL [--out FILE]` reads the PR's threads and prints one candidate `[[learning]]` entry, as TOML, for each prxref comment a human closed as won't fix. It goes to stdout, or to `FILE`. prxref never writes the learnings file into the repository; a human edits the candidates and commits the ones the team keeps. It exits `2` for an unrecognised URL or an unwritable `--out`, and `1` when the forge cannot be read. See [docs/learnings.md](docs/learnings.md).
 
+`prxref gate serve --env-file PATH [--host HOST] [--port PORT]` runs the sdlc review gate (#102): a GitHub App's webhook receiver, review worker and watchdog in one process, reading its credentials from a mode-0600 `KEY=VALUE` file and defaulting `PRXREF_RULES_SOURCE` to `base`. `prxref gate pause|resume|status --env-file PATH` stops or restarts dequeuing and shows the queue; `prxref gate render-manifest --webhook-url URL` and `prxref gate render-ruleset --integration-id ID` print the App manifest and the `sdlc-review` ruleset; `prxref gate apply-ruleset --repo OWNER/NAME --integration-id ID [--diff]` applies the ruleset with your `gh` (`--diff` changes nothing and exits `1` on drift). Exit `2` is a configuration error or the missing `github-app` extra.
+
 `prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its seven actions:
 
 - `prxref eval run --cases PATH --label NAME [--out DIR] [--rules-file PATH] [--scoped-rules PATH] [--prompts-dir DIR] [--resume] [--config PATH | --no-config]` replays every case and writes the run to `DIR/NAME/`:

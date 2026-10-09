@@ -806,6 +806,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="output format (default text); json emits exactly one JSON object on stdout",
     )
 
+    gate = sub.add_parser("gate", help="run or operate the sdlc review gate (GitHub App, #102)")
+    gate_sub = gate.add_subparsers(dest="gate_command")
+    g_serve = gate_sub.add_parser("serve", help="receiver + worker + watchdog in one process")
+    g_serve.add_argument("--env-file", required=True, help="mode-0600 KEY=VALUE file with the gate settings")
+    g_serve.add_argument("--host", default="127.0.0.1")
+    g_serve.add_argument("--port", type=int, default=8787)
+    for action, text in (("pause", "stop dequeuing (webhooks still queue)"),
+                         ("resume", "resume dequeuing"),
+                         ("status", "queue depth, lease, last publish, last auth failure, recent generations")):
+        p = gate_sub.add_parser(action, help=text)
+        p.add_argument("--env-file", required=True)
+    g_manifest = gate_sub.add_parser("render-manifest", help="print the GitHub App manifest JSON")
+    g_manifest.add_argument("--webhook-url", required=True)
+    g_render = gate_sub.add_parser("render-ruleset", help="print the sdlc-review ruleset JSON")
+    g_render.add_argument("--integration-id", type=int, required=True)
+    g_apply = gate_sub.add_parser("apply-ruleset", help="create/replace the ruleset via gh api")
+    g_apply.add_argument("--repo", required=True)
+    g_apply.add_argument("--integration-id", type=int, required=True)
+    g_apply.add_argument("--diff", action="store_true", help="print the drift and exit 1 if any; change nothing")
     return parser
 
 
@@ -2514,7 +2533,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point dispatching ``review``, ``serve``, ``eval <action>``,
     ``trace render``, ``prompts export``, ``config check``,
-    ``learnings harvest``, or ``--version``."""
+    ``gate <action>``, ``learnings harvest``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -2557,6 +2576,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_config_check(args)
         parser.print_help(sys.stderr)
         return 2
+
+    if args.command == "gate" and args.gate_command:
+        from prxref.gate.serve import run_command
+
+        return run_command(args)
 
     parser.print_help(sys.stderr)
     return 2
