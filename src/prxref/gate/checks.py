@@ -393,8 +393,11 @@ class Publisher:
         conclusion, reason = conclusion_for(result)
         findings = result.get("findings_active") or [] if isinstance(result, dict) else []
         demoted: list[InlineComment] = []
-        if self.store.publication(gen.id) is None:
-            event = "APPROVE" if conclusion == "success" else "REQUEST_CHANGES"
+        event = "APPROVE" if conclusion == "success" else "REQUEST_CHANGES"
+        published = self.store.publication(gen.id)
+        # Skip only when the recorded review is the very event about to be posted; a legacy "review" row
+        # (event unknown) or a different event posts, so the app's last review always matches the check.
+        if published is None or published[0] != event:
             self._fence(lease, gen)
             review_id = self._post_review(gen, lease, event, captured.comments)
             if review_id is None:
@@ -403,7 +406,7 @@ class Publisher:
                 self._fence(lease, gen)
                 review_id = self._post_review(gen, lease, event, ())
             if review_id is not None:
-                self.store.record_publication(gen.id, lease.token, "review", review_id)
+                self.store.record_publication(gen.id, lease.token, event, review_id)
         if captured.summary:
             self._fence(lease, gen)
             self._upsert_summary(gen, captured.summary)

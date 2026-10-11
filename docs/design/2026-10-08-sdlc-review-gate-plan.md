@@ -2873,41 +2873,36 @@ class Publisher:
                 return review["id"]
         return None
 
-    def _post_review(self, gen: Generation, event: str, comments: Sequence[InlineComment]) -> tuple[int, bool]:
-        """Post the ``event`` review; returns ``(review_id, demoted)``.
+    def _post_review(self, gen: Generation, lease: Lease, event: str, comments: Sequence[InlineComment]) -> int | None:
+        """Post the ``APPROVE`` or ``REQUEST_CHANGES`` review; ``None`` when GitHub refuses its anchors (422).
 
-        When GitHub refuses the anchors (422) the same event is re-posted with no comments and
-        ``demoted`` is true, so the caller turns the comments into check-run annotations.
+        A 422 on a review with no inline comments is not an anchor problem and propagates.
         """
         marker = REVIEW_MARKER.format(external_id=gen.external_id)
+        headline = "approved" if event == "APPROVE" else "changes requested"
+        payload = {
+            "commit_id": gen.head_sha, "event": event,
+            "body": f"{marker}\nsdlc review: {headline} - {len(comments)} inline finding(s).",
+            "comments": [
+                {"path": c.path, "line": c.line, "side": c.side, "body": c.body,
+                 **({"start_line": c.start_line, "start_side": c.side} if c.start_line else {})}
+                for c in comments
+            ],
+        }
         path = f"/pulls/{gen.pr_number}/reviews"
-
-        def payload(items: Sequence[InlineComment]) -> dict:
-            return {
-                "commit_id": gen.head_sha, "event": event,
-                "body": f"{marker}\nsdlc review: {len(items)} inline finding(s).",
-                "comments": [
-                    {"path": c.path, "line": c.line, "side": c.side, "body": c.body,
-                     **({"start_line": c.start_line, "start_side": c.side} if c.start_line else {})}
-                    for c in items
-                ],
-            }
-
-        def post(items: Sequence[InlineComment]) -> int:
+        try:
             try:
-                return self.client.request("POST", gen.repo, path, json=payload(items))["id"]
+                return self.client.request("POST", gen.repo, path, json=payload)["id"]
             except UncertainReply:
                 found = self._find_review(gen, marker)
                 if found is not None:
                     return found
-                return self.client.request("POST", gen.repo, path, json=payload(items))["id"]
-
-        try:
-            return post(comments), False
+                self._fence(lease, gen)  # the retry is a write: renew the lease and re-check the binding
+                return self.client.request("POST", gen.repo, path, json=payload)["id"]
         except GitHubError as exc:
-            if exc.status != 422 or not comments:
-                raise
-        return post(()), True
+            if exc.status == 422 and comments:
+                return None
+            raise
 
     def _upsert_summary(self, gen: Generation, body: str) -> None:
         page, mine = 1, None
@@ -2947,13 +2942,20 @@ class Publisher:
         conclusion, reason = conclusion_for(result)
         findings = result.get("findings_active") or [] if isinstance(result, dict) else []
         demoted: list[InlineComment] = []
-        if self.store.publication(gen.id) is None:
+        event = "APPROVE" if conclusion == "success" else "REQUEST_CHANGES"
+        published = self.store.publication(gen.id)
+        # Skip only when the recorded review is the very event about to be posted; a legacy "review" row
+        # (event unknown) or a different event posts, so the app's last review always matches the check.
+        if published is None or published[0] != event:
             self._fence(lease, gen)
-            event = "APPROVE" if conclusion == "success" else "REQUEST_CHANGES"
-            review_id, was_demoted = self._post_review(gen, event, captured.comments)
-            if was_demoted:
+            review_id = self._post_review(gen, lease, event, captured.comments)
+            if review_id is None:
+                # GitHub refused the anchors: the verdict still lands, comment-less; findings become annotations.
                 demoted = list(captured.comments)
-            self.store.record_publication(gen.id, lease.token, "review", review_id)
+                self._fence(lease, gen)
+                review_id = self._post_review(gen, lease, event, ())
+            if review_id is not None:
+                self.store.record_publication(gen.id, lease.token, event, review_id)
         if captured.summary:
             self._fence(lease, gen)
             self._upsert_summary(gen, captured.summary)
@@ -3950,10 +3952,10 @@ Renders the GitHub App manifest and the merge ruleset exactly as the spec lists 
 - Test: `tests/gate/test_rulesets.py`
 
 **Interfaces:**
-- Consumes: `CHECK_NAME` (Task 5). `MANIFEST_PERMISSIONS` is defined here (installation `contents: write`) and differs from `TOKEN_PERMISSIONS` (Task 3, minted token `contents: read`).
+- Consumes: `CHECK_NAME` (Task 5). `TOKEN_PERMISSIONS` (Task 3, minted token `contents: read`) is imported; the manifest overrides `contents` to `write` inline (installation permission).
 - Produces (all in `prxref.gate.rulesets`):
   - `RULESET_NAME = "sdlc-review"`; `class RulesetError(RuntimeError)`
-  - `def render_manifest(webhook_url: str, *, name: str = "sdlc") -> dict`
+  - `def render_manifest(webhook_url: str, *, name: str = "prxref-sdlc") -> dict`
   - `def render_ruleset(integration_id: int) -> dict`
   - `def apply_ruleset(repo: str, integration_id: int, *, run: Callable = subprocess.run) -> int` (ruleset id; creates, or updates the one named `sdlc-review`)
   - `def diff_ruleset(repo: str, integration_id: int, *, run: Callable = subprocess.run) -> str` (`""` when the live ruleset matches; else a unified diff)
@@ -4125,14 +4127,12 @@ import subprocess
 from collections.abc import Callable
 from typing import Any
 
+from prxref.gate.app_auth import TOKEN_PERMISSIONS
 from prxref.gate.receiver import CHECK_NAME
 
 RULESET_NAME = "sdlc-review"
 # The installation needs ``contents: write`` for the app's APPROVE to count toward the
 # ruleset's approval rule (probe: with ``contents: read`` the PR stayed REVIEW_REQUIRED).
-# The minted token (``app_auth.TOKEN_PERMISSIONS``) still asks for ``contents: read``; a
-# read-scoped token on a write installation approved in the probe.
-MANIFEST_PERMISSIONS = {"checks": "write", "pull_requests": "write", "contents": "write", "metadata": "read"}
 EVENTS = ["pull_request", "check_run", "check_suite"]
 
 
@@ -4147,7 +4147,9 @@ def render_manifest(webhook_url: str, *, name: str = "prxref-sdlc") -> dict:
         "url": "https://github.com/sblattj/prxref",
         "hook_attributes": {"url": webhook_url, "active": True},
         "public": False,
-        "default_permissions": dict(MANIFEST_PERMISSIONS),
+        # App approvals count toward required reviews only when the installation has contents:write;
+        # the minted token still asks for read (TOKEN_PERMISSIONS).
+        "default_permissions": {**TOKEN_PERMISSIONS, "contents": "write", "metadata": "read"},
         "default_events": list(EVENTS),
     }
 
@@ -4760,9 +4762,10 @@ A completed review posts one pull request review from `<slug>[bot]` (default
 `prxref-sdlc[bot]`): `APPROVE` when the conclusion is `success`, `REQUEST_CHANGES` on any
 other completed outcome, plus the summary comment. If GitHub refuses the inline anchors
 (422), the same event is re-posted without comments and they become check annotations. A
-review that cannot finish (deadline, crash, publish error) or is cancelled posts no
-review and fails closed: the check concludes `failure`, never `neutral` or `skipped`, and
-the failing required check blocks. The app's `APPROVE` is what satisfies the ruleset's one
+review that cannot finish (deadline, crash, publish error) posts no review and fails
+closed: the check concludes `failure`, never `neutral` or `skipped`, and the failing
+required check blocks; a cancelled generation (PR closed) concludes `cancelled` and posts
+no review. The app's `APPROVE` is what satisfies the ruleset's one
 required approval; no second account is involved.
 
 The app **installation** must hold `contents: write`: with `contents: read` an App
@@ -4898,7 +4901,7 @@ Order matters: remove the ruleset first, or every merge stays blocked.
 2. `launchctl bootout gui/$(id -u)/dev.prxref.gate` and
    `launchctl bootout gui/$(id -u)/dev.prxref.cloudflared`.
 3. Uninstall the app from the repository: GitHub → Settings → Applications →
-   Installed GitHub Apps → `prxref-sdlc` → Configure, or
+   Installed GitHub Apps → the app's name → Configure, or
    `gh api -X DELETE /app/installations/<installation-id>` with an app JWT.
 ````
 

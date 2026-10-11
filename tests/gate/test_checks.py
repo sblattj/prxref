@@ -195,7 +195,7 @@ def test_an_approved_result_posts_an_approve_review_with_the_generation_marker(s
         == f"<!-- sdlc-gate:generation={gen.external_id} -->\nsdlc review: approved - 1 inline finding(s)."
     )
     assert review["comments"] == [{"path": "a.py", "line": 3, "side": "RIGHT", "body": "**warning** x"}]
-    assert store.publication(gen.id) == ("review", 9)
+    assert store.publication(gen.id) == ("APPROVE", 9)
 
 
 def test_a_non_success_result_posts_a_request_changes_review(store, gen, lease):
@@ -223,15 +223,77 @@ def test_a_review_is_posted_even_with_no_inline_comments(store, gen, lease, resu
     reviews = gh.sent("POST", r"/reviews$")
     assert len(reviews) == 1
     assert reviews[0][3]["event"] == event and reviews[0][3]["comments"] == []
-    assert store.publication(gen.id) == ("review", 9)
+    assert store.publication(gen.id) == (event, 9)
 
 
-def test_a_published_generation_posts_no_second_review(store, gen, lease):
+@pytest.mark.parametrize("result", [{"verdict": "Error"}, "garbage", {"verdict": "Maybe"}])
+def test_an_error_or_malformed_result_posts_request_changes(store, gen, lease, result):
+    gh = _review_gh()
+    _complete(gh, store, gen, lease, result)
+    reviews = gh.sent("POST", r"/reviews$")
+    assert len(reviews) == 1 and reviews[0][3]["event"] == "REQUEST_CHANGES"
+    assert gh.sent("PATCH", r"/check-runs/555$")[-1][3]["conclusion"] == "failure"
+    assert store.publication(gen.id) == ("REQUEST_CHANGES", 9)
+
+
+def test_a_published_generation_with_the_same_event_posts_no_second_review(store, gen, lease):
+    store.set_check_run(gen.id, lease.token, 555)
+    store.record_publication(gen.id, lease.token, "APPROVE", 4)
+    gh = _review_gh()
+    _complete(gh, store, gen, lease, {"verdict": "Approved"})
+    assert not gh.sent("POST", r"/reviews$")
+    assert store.publication(gen.id) == ("APPROVE", 4)
+
+
+def test_a_rerun_with_a_different_event_posts_and_records_the_new_review(store, gen, lease):
+    store.set_check_run(gen.id, lease.token, 555)
+    store.record_publication(gen.id, lease.token, "REQUEST_CHANGES", 4)
+    gh = _review_gh()
+    _complete(gh, store, gen, lease, {"verdict": "Approved"})
+    reviews = gh.sent("POST", r"/reviews$")
+    assert len(reviews) == 1 and reviews[0][3]["event"] == "APPROVE"
+    assert store.publication(gen.id) == ("APPROVE", 9)
+
+
+def test_an_approved_generation_that_now_fails_posts_request_changes(store, gen, lease):
+    store.set_check_run(gen.id, lease.token, 555)
+    store.record_publication(gen.id, lease.token, "APPROVE", 4)
+    gh = _review_gh()
+    _complete(gh, store, gen, lease, {"verdict": "Request-Changes"})
+    reviews = gh.sent("POST", r"/reviews$")
+    assert len(reviews) == 1 and reviews[0][3]["event"] == "REQUEST_CHANGES"
+    assert store.publication(gen.id) == ("REQUEST_CHANGES", 9)
+
+
+def test_a_legacy_review_kind_means_event_unknown_and_posts(store, gen, lease):
     store.set_check_run(gen.id, lease.token, 555)
     store.record_publication(gen.id, lease.token, "review", 4)
     gh = _review_gh()
     _complete(gh, store, gen, lease, {"verdict": "Approved"})
-    assert not gh.sent("POST", r"/reviews$")
+    assert len(gh.sent("POST", r"/reviews$")) == 1
+    assert store.publication(gen.id) == ("APPROVE", 9)
+
+
+def test_an_uncertain_reply_on_the_comment_less_repost_recovers_by_marker(store, gen, lease):
+    marker = f"<!-- sdlc-gate:generation={gen.external_id} -->"
+    existing = [{"id": 13, "user": {"login": "sdlc[bot]"}, "body": f"{marker}\nsdlc review"}]
+    gh = _GitHub(
+        [
+            (
+                "POST",
+                r"/pulls/7/reviews$",
+                [_Resp(422, {"message": "line must be part of the diff"}), _Resp(502, {"message": "Bad Gateway"})],
+            ),
+            ("GET", r"/pulls/7/reviews$", [_Resp(200, existing)]),
+            ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
+        ]
+    )
+    comment = InlineComment(path="a.py", line=3, body="x")
+    _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
+    posts = gh.sent("POST", r"/reviews$")
+    assert len(posts) == 2 and posts[1][3]["comments"] == []
+    assert len(gh.sent("GET", r"/pulls/7/reviews$")) == 1
+    assert store.publication(gen.id) == ("APPROVE", 13)
 
 
 def test_fail_and_cancel_post_no_review(store, gen, lease):
@@ -256,7 +318,7 @@ def test_review_after_a_5xx_is_found_by_marker_not_reposted(store, gen, lease):
     comment = InlineComment(path="a.py", line=3, body="x")
     _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
     assert len(gh.sent("POST", r"/reviews$")) == 1
-    assert store.publication(gen.id) == ("review", 10)
+    assert store.publication(gen.id) == ("APPROVE", 10)
 
 
 @pytest.mark.parametrize(("verdict", "event"), [("Approved", "APPROVE"), ("Request-Changes", "REQUEST_CHANGES")])
@@ -269,7 +331,7 @@ def test_a_422_reposts_the_same_event_without_comments_and_demotes_them(store, g
     assert first["event"] == second["event"] == event and first["body"].split("\n")[0] == second["body"].split("\n")[0]
     annotation = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["annotations"][0]
     assert (annotation["path"], annotation["start_line"], annotation["message"]) == ("a.py", 3, "x")
-    assert store.publication(gen.id) == ("review", 11)
+    assert store.publication(gen.id) == (event, 11)
 
 
 def test_a_422_then_a_422_raises(store, gen, lease):
@@ -496,7 +558,7 @@ def test_a_422_on_the_retry_review_post_demotes_the_comments(store, gen, lease):
     assert len(posts) == 3 and posts[2][3]["comments"] == []
     annotation = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["annotations"][0]
     assert annotation["path"] == "a.py"
-    assert store.publication(gen.id) == ("review", 12)
+    assert store.publication(gen.id) == ("APPROVE", 12)
 
 
 def test_the_retry_posts_are_fenced_again(store, gen, lease):

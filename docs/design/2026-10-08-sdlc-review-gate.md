@@ -8,7 +8,7 @@ Date: 2026-10-08. Base: prxref 0.34.0 (`0d7d2e1`).
 A GitHub App (default name `prxref-sdlc`) that reviews every pull request on an installed repository
 with prxref, publishes an app-owned check run named `sdlc-review`, and is pinned as a
 required status check in a ruleset so that a PR cannot merge until the app's own check
-succeeds and one fresh human approval exists. The receiver, durable queue and worker run
+succeeds and the app's approval after the last push exists. The receiver, durable queue and worker run
 on one Mac behind an HTTPS tunnel. Inference comes from Amazon Bedrock.
 
 The existing advisory automation (`.github/workflows/prxref-review.yml`, the `prxref
@@ -105,7 +105,7 @@ generations(id PK, repo, pr_number, head_sha, base_sha, base_ref, gen INTEGER,
             reason, state, created_at, started_at, finished_at, check_run_id,
             external_id, conclusion, error, attempts)
 leases(name PK, holder, token INTEGER, expires_at)
-publications(generation_id PK, kind, github_id, posted_at)
+publications(generation_id PK, kind, github_id, posted_at)   -- kind = the review event; a re-run reaching a different event replaces the row
 ```
 
 - `gen` is monotonic per `(repo, pr_number)`. Inserting a generation marks every older
@@ -244,8 +244,9 @@ publications(generation_id PK, kind, github_id, posted_at)
 | `Approved` | `success` | `APPROVE` | Warnings attached as comments, non-blocking. |
 | `Request-Changes` (error-severity findings) | `failure` | `REQUEST_CHANGES` | Same rule as `PRXREF_FAIL_ON=error`. |
 | `Incomplete`, `degraded`, failed chunks | `failure` | `REQUEST_CHANGES` | Partial review is not a review. |
-| `Error` (LLM, forge, config) | `failure` | none (`fail()` path) | Summary carries the error class. |
-| Deadline hit, worker crash, malformed result | `failure` | none (`fail()` path) | Watchdog or restart publishes it. |
+| `Error` (LLM, forge, config) | `failure` | `REQUEST_CHANGES` | Goes through `complete()` like any finished review; summary carries the error class. |
+| Malformed result | `failure` | `REQUEST_CHANGES` | Also through `complete()`. |
+| Deadline hit, worker crash | `failure` | none (`fail()` path) | Watchdog or restart publishes the failing check; no review is posted. |
 | Generation superseded or stale | no publish | none | Newer generation owns the head. |
 | PR closed | `cancelled` | none (`cancel()` path) | Only if a check was already created. |
 

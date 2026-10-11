@@ -74,7 +74,9 @@ toward required reviews only then; the token the gate mints asks only for
 4. **Register the app:** `prxref gate render-manifest --webhook-url https://<webhook-host>/webhook > manifest.json`,
    then create the app from that manifest (GitHub → Settings → Developer settings →
    GitHub Apps → New, or the manifest flow). Install it on the target repositories
-   only. Download its private key to `~/.config/prxref-gate/sdlc.pem` and run
+   only, and confirm the installation shows **Repository contents: Read and write**
+   (accept the permission if GitHub asks). Without it the app's `APPROVE` does not count
+   toward the approval rule and every passing PR stays at review-required. Download its private key to `~/.config/prxref-gate/sdlc.pem` and run
    `chmod 600` on it. Note the app id and the installation id.
 5. **Apply the ruleset:** `prxref gate render-ruleset --integration-id <app-id>` shows it;
    `prxref gate apply-ruleset --repo <owner/name> --integration-id <app-id>` creates or

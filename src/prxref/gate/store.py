@@ -312,10 +312,17 @@ class Store:
             return self._requeue_in_progress(c)
 
     def record_publication(self, gen_id: int, token: int, kind: str, github_id: int) -> None:
+        """Record the review posted for a generation; ``kind`` is its event (``APPROVE``/``REQUEST_CHANGES``).
+
+        A later review for the same generation (a re-run that reached a different event) replaces the row.
+        Rows written before the event was stored carry ``kind="review"``: an unknown event.
+        """
         with self._tx() as c:
             self._fence(c, token)
             c.execute(
-                "INSERT OR IGNORE INTO publications(generation_id, kind, github_id, posted_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO publications(generation_id, kind, github_id, posted_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(generation_id) DO UPDATE SET "
+                "kind=excluded.kind, github_id=excluded.github_id, posted_at=excluded.posted_at",
                 (gen_id, kind, github_id, self._clock()),
             )
 

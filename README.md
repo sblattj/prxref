@@ -278,7 +278,7 @@ The service exposes:
 ## Review Gate (GitHub App)
 
 `prxref review` and `prxref serve` advise; they never block a merge. To make a prxref
-review a **required check**, run the gate: a GitHub App (`sdlc`) that publishes a check
+review a **required check**, run the gate: a GitHub App (`prxref-sdlc`) that publishes a check
 run named `sdlc-review`, required by a repository ruleset bound to that app, with the
 review rules read from the PR's base commit.
 
