@@ -1,7 +1,7 @@
 # sdlc review gate (GitHub App)
 
 The gate turns a prxref review into a **required, merge-blocking check**. A GitHub
-App named `sdlc` owns a check run named `sdlc-review`; a repository ruleset requires
+App (default name `prxref-sdlc`; operators may pick another, and the bot login is `<slug>[bot]`) owns a check run named `sdlc-review`; a repository ruleset requires
 that check *from that app* (by `integration_id`), so a status or a check with the
 same name from anyone else does not satisfy it. The advisory lane (`prxref serve`,
 `prxref review`, `action.yml`) is unchanged and never blocks.
@@ -32,9 +32,17 @@ reviews what is live.
 | Superseded or stale (the PR moved) | nothing published; a newer generation owns the head |
 | PR closed | `cancelled`, only if a check was already created |
 
-Every published outcome posts one review with event `COMMENT` (never `APPROVE` or
-`REQUEST_CHANGES`) plus the summary comment. A review that cannot finish fails
-closed: the check concludes `failure`, never `neutral` or `skipped`.
+Every published outcome posts one review plus the summary comment: a pass posts
+`APPROVE`, any other completed outcome posts `REQUEST_CHANGES`. The failure and
+cancel paths (deadline, crash, publish error, PR closed) post no review. The required
+check, pinned by `integration_id`, is the gate nobody can dismiss; the app's approval
+is the second lock. An owner or admin can dismiss the app's review (the ruleset
+`dismissal_restriction` is unavailable on personal free-plan repositories). Dismissing
+an `APPROVE` returns the PR to review-required, while the required check still blocks
+a failing PR. The installation needs `contents: write`, because an app's approval counts
+toward required reviews only then; the token the gate mints asks only for
+`contents: read`. A review that cannot finish fails closed: the check concludes
+`failure`, never `neutral` or `skipped`.
 
 ## Prerequisites
 
@@ -179,5 +187,5 @@ Order matters: remove the ruleset first, or every merge stays blocked.
 2. `launchctl bootout gui/$(id -u)/dev.prxref.gate` and
    `launchctl bootout gui/$(id -u)/dev.prxref.cloudflared`.
 3. Uninstall the app from the repository: GitHub → Settings → Applications →
-   Installed GitHub Apps → `sdlc` → Configure, or
+   Installed GitHub Apps → the app's name → Configure, or
    `gh api -X DELETE /app/installations/<installation-id>` with an app JWT.

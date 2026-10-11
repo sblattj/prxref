@@ -162,7 +162,12 @@ def _complete(gh, store, gen, lease, result, captured=None):
 
 def test_annotations_are_batched_by_fifty(store, gen, lease):
     findings = [_finding(f"f{i}.py") for i in range(120)]
-    gh = _GitHub([("PATCH", r"/check-runs/555$", [_Resp(200, {"id": 555})])])
+    gh = _GitHub(
+        [
+            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
+            ("PATCH", r"/check-runs/555$", [_Resp(200, {"id": 555})]),
+        ]
+    )
     _complete(gh, store, gen, lease, {"verdict": "Approved", "findings_active": findings})
     patches = [c[3] for c in gh.sent("PATCH", r"/check-runs/555$")]
     assert [len(p["output"]["annotations"]) for p in patches] == [50, 50, 20]
@@ -170,20 +175,72 @@ def test_annotations_are_batched_by_fifty(store, gen, lease):
     assert patches[-1]["status"] == "completed"
 
 
-def test_review_is_posted_as_comment_with_the_generation_marker(store, gen, lease):
-    gh = _GitHub(
+def _review_gh(*replies):
+    return _GitHub(
         [
-            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
+            ("POST", r"/pulls/7/reviews$", list(replies) or [_Resp(200, {"id": 9})]),
             ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
         ]
     )
+
+
+def test_an_approved_result_posts_an_approve_review_with_the_generation_marker(store, gen, lease):
+    gh = _review_gh()
     comment = InlineComment(path="a.py", line=3, body="**warning** x")
     _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
     review = gh.sent("POST", r"/reviews$")[0][3]
-    assert review["event"] == "COMMENT" and review["commit_id"] == HEAD
-    assert f"<!-- sdlc-gate:generation={gen.external_id} -->" in review["body"]
+    assert review["event"] == "APPROVE" and review["commit_id"] == HEAD
+    assert (
+        review["body"]
+        == f"<!-- sdlc-gate:generation={gen.external_id} -->\nsdlc review: approved - 1 inline finding(s)."
+    )
     assert review["comments"] == [{"path": "a.py", "line": 3, "side": "RIGHT", "body": "**warning** x"}]
     assert store.publication(gen.id) == ("review", 9)
+
+
+def test_a_non_success_result_posts_a_request_changes_review(store, gen, lease):
+    gh = _review_gh()
+    comment = InlineComment(path="a.py", line=3, body="x")
+    _complete(gh, store, gen, lease, {"verdict": "Request-Changes"}, checks.Captured(comments=(comment,)))
+    review = gh.sent("POST", r"/reviews$")[0][3]
+    assert review["event"] == "REQUEST_CHANGES"
+    assert review["body"].endswith("sdlc review: changes requested - 1 inline finding(s).")
+    assert gh.sent("PATCH", r"/check-runs/555$")[-1][3]["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize(
+    ("result", "event"),
+    [
+        ({"verdict": "Approved"}, "APPROVE"),
+        ({"verdict": "Request-Changes"}, "REQUEST_CHANGES"),
+        ({"verdict": "Incomplete"}, "REQUEST_CHANGES"),
+        ({"verdict": "Approved", "degraded": True}, "REQUEST_CHANGES"),
+    ],
+)
+def test_a_review_is_posted_even_with_no_inline_comments(store, gen, lease, result, event):
+    gh = _review_gh()
+    _complete(gh, store, gen, lease, result)
+    reviews = gh.sent("POST", r"/reviews$")
+    assert len(reviews) == 1
+    assert reviews[0][3]["event"] == event and reviews[0][3]["comments"] == []
+    assert store.publication(gen.id) == ("review", 9)
+
+
+def test_a_published_generation_posts_no_second_review(store, gen, lease):
+    store.set_check_run(gen.id, lease.token, 555)
+    store.record_publication(gen.id, lease.token, "review", 4)
+    gh = _review_gh()
+    _complete(gh, store, gen, lease, {"verdict": "Approved"})
+    assert not gh.sent("POST", r"/reviews$")
+
+
+def test_fail_and_cancel_post_no_review(store, gen, lease):
+    store.set_check_run(gen.id, lease.token, 555)
+    gh = _GitHub([("PATCH", r"/check-runs/555$", [_Resp(200, {})])])
+    publisher = _publisher(gh, store)
+    publisher.fail(store.get(gen.id), lease, "boom")
+    publisher.cancel(store.get(gen.id), lease, "closed")
+    assert gh.sent("PATCH", r"/check-runs/555$") and not gh.sent("POST", r"/reviews")
 
 
 def test_review_after_a_5xx_is_found_by_marker_not_reposted(store, gen, lease):
@@ -202,18 +259,33 @@ def test_review_after_a_5xx_is_found_by_marker_not_reposted(store, gen, lease):
     assert store.publication(gen.id) == ("review", 10)
 
 
-def test_a_422_review_demotes_comments_to_annotations(store, gen, lease):
-    gh = _GitHub(
-        [
-            ("POST", r"/pulls/7/reviews$", [_Resp(422, {"message": "line must be part of the diff"})]),
-            ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
-        ]
-    )
+@pytest.mark.parametrize(("verdict", "event"), [("Approved", "APPROVE"), ("Request-Changes", "REQUEST_CHANGES")])
+def test_a_422_reposts_the_same_event_without_comments_and_demotes_them(store, gen, lease, verdict, event):
+    gh = _review_gh(_Resp(422, {"message": "line must be part of the diff"}), _Resp(200, {"id": 11}))
     comment = InlineComment(path="a.py", line=3, body="x")
-    _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
+    _complete(gh, store, gen, lease, {"verdict": verdict}, checks.Captured(comments=(comment,)))
+    first, second = (c[3] for c in gh.sent("POST", r"/reviews$"))
+    assert first["comments"] and second["comments"] == []
+    assert first["event"] == second["event"] == event and first["body"].split("\n")[0] == second["body"].split("\n")[0]
     annotation = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["annotations"][0]
     assert (annotation["path"], annotation["start_line"], annotation["message"]) == ("a.py", 3, "x")
+    assert store.publication(gen.id) == ("review", 11)
+
+
+def test_a_422_then_a_422_raises(store, gen, lease):
+    gh = _review_gh(_Resp(422, {"message": "no"}), _Resp(422, {"message": "still no"}))
+    comment = InlineComment(path="a.py", line=3, body="x")
+    with pytest.raises(checks.GitHubError):
+        _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
+    assert len(gh.sent("POST", r"/reviews$")) == 2
     assert store.publication(gen.id) is None
+
+
+def test_a_422_on_a_comment_less_review_raises(store, gen, lease):
+    gh = _review_gh(_Resp(422, {"message": "no"}))
+    with pytest.raises(checks.GitHubError):
+        _complete(gh, store, gen, lease, {"verdict": "Approved"})
+    assert len(gh.sent("POST", r"/reviews$")) == 1
 
 
 def test_summary_comment_is_updated_only_when_authored_by_the_bot(store, gen, lease):
@@ -223,6 +295,7 @@ def test_summary_comment_is_updated_only_when_authored_by_the_bot(store, gen, le
     ]
     gh = _GitHub(
         [
+            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
             ("GET", r"/issues/7/comments$", [_Resp(200, feed)]),
             ("PATCH", r"/issues/comments/2$", [_Resp(200, {})]),
             ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
@@ -271,6 +344,7 @@ def test_summary_names_model_effort_tokens_and_shas(gen):
 def test_check_output_leads_with_the_executive_summary(store, gen, lease):
     gh = _GitHub(
         [
+            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
             ("GET", r"/issues/7/comments$", [_Resp(200, [])]),
             ("POST", r"/issues/7/comments$", [_Resp(201, {})]),
             ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
@@ -282,7 +356,9 @@ def test_check_output_leads_with_the_executive_summary(store, gen, lease):
 
 
 def test_check_output_falls_back_to_the_generated_summary(store, gen, lease):
-    gh = _GitHub([("PATCH", r"/check-runs/555$", [_Resp(200, {})])])
+    gh = _GitHub(
+        [("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]), ("PATCH", r"/check-runs/555$", [_Resp(200, {})])]
+    )
     _complete(gh, store, gen, lease, {"verdict": "Approved"})
     summary = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["summary"]
     assert "**success**" in summary and BASE in summary
@@ -387,6 +463,7 @@ def test_the_lease_is_renewed_and_guarded_before_every_write(store, gen, lease):
 def test_details_survive_a_summary_over_the_limit(store, gen, lease):
     gh = _GitHub(
         [
+            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
             ("GET", r"/issues/7/comments$", [_Resp(200, [])]),
             ("POST", r"/issues/7/comments$", [_Resp(201, {})]),
             ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
@@ -403,7 +480,11 @@ def test_a_422_on_the_retry_review_post_demotes_the_comments(store, gen, lease):
             (
                 "POST",
                 r"/pulls/7/reviews$",
-                [_Resp(502, {"message": "Bad Gateway"}), _Resp(422, {"message": "line must be part of the diff"})],
+                [
+                    _Resp(502, {"message": "Bad Gateway"}),
+                    _Resp(422, {"message": "line must be part of the diff"}),
+                    _Resp(200, {"id": 12}),
+                ],
             ),
             ("GET", r"/pulls/7/reviews$", [_Resp(200, [])]),
             ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
@@ -411,9 +492,11 @@ def test_a_422_on_the_retry_review_post_demotes_the_comments(store, gen, lease):
     )
     comment = InlineComment(path="a.py", line=3, body="x")
     _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
-    assert len(gh.sent("POST", r"/reviews$")) == 2
+    posts = gh.sent("POST", r"/reviews$")
+    assert len(posts) == 3 and posts[2][3]["comments"] == []
     annotation = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["annotations"][0]
     assert annotation["path"] == "a.py"
+    assert store.publication(gen.id) == ("review", 12)
 
 
 def test_the_retry_posts_are_fenced_again(store, gen, lease):
@@ -469,6 +552,7 @@ def test_complete_with_no_check_creates_one_first_and_runs_the_guard(store, gen,
     gh = _GitHub(
         [
             ("POST", r"/check-runs$", [_Resp(201, {"id": 888})]),
+            ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
             ("PATCH", r"/check-runs/888$", [_Resp(200, {})]),
         ]
     )

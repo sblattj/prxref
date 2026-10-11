@@ -289,13 +289,17 @@ class Publisher:
                 return review["id"]
         return None
 
-    def _post_review(self, gen: Generation, lease: Lease, comments: Sequence[InlineComment]) -> int | None:
-        """Post the ``COMMENT`` review; ``None`` when GitHub refuses its anchors (422)."""
+    def _post_review(self, gen: Generation, lease: Lease, event: str, comments: Sequence[InlineComment]) -> int | None:
+        """Post the ``APPROVE`` or ``REQUEST_CHANGES`` review; ``None`` when GitHub refuses its anchors (422).
+
+        A 422 on a review with no inline comments is not an anchor problem and propagates.
+        """
         marker = REVIEW_MARKER.format(external_id=gen.external_id)
+        headline = "approved" if event == "APPROVE" else "changes requested"
         payload = {
             "commit_id": gen.head_sha,
-            "event": "COMMENT",
-            "body": f"{marker}\nsdlc review: {len(comments)} inline finding(s).",
+            "event": event,
+            "body": f"{marker}\nsdlc review: {headline} - {len(comments)} inline finding(s).",
             "comments": [
                 {
                     "path": c.path,
@@ -318,7 +322,7 @@ class Publisher:
                 self._fence(lease, gen)
                 return self.client.request("POST", gen.repo, path, json=payload)["id"]
         except GitHubError as exc:
-            if exc.status == 422:
+            if exc.status == 422 and comments:
                 return None
             raise
 
@@ -381,7 +385,7 @@ class Publisher:
                 )
 
     def complete(self, gen: Generation, lease: Lease, result: object, captured: Captured, *, effort: str) -> str:
-        """Post the review and summary comment, then close the check; returns the conclusion."""
+        """Post the verdict review and summary comment, then close the check; returns the conclusion."""
         gen = self.store.get(gen.id)
         if gen.check_run_id is None:
             self._ensure_check(gen, lease, guarded=True)
@@ -389,12 +393,16 @@ class Publisher:
         conclusion, reason = conclusion_for(result)
         findings = result.get("findings_active") or [] if isinstance(result, dict) else []
         demoted: list[InlineComment] = []
-        if captured.comments and self.store.publication(gen.id) is None:
+        if self.store.publication(gen.id) is None:
+            event = "APPROVE" if conclusion == "success" else "REQUEST_CHANGES"
             self._fence(lease, gen)
-            review_id = self._post_review(gen, lease, captured.comments)
+            review_id = self._post_review(gen, lease, event, captured.comments)
             if review_id is None:
+                # GitHub refused the anchors: the verdict still lands, comment-less; findings become annotations.
                 demoted = list(captured.comments)
-            else:
+                self._fence(lease, gen)
+                review_id = self._post_review(gen, lease, event, ())
+            if review_id is not None:
                 self.store.record_publication(gen.id, lease.token, "review", review_id)
         if captured.summary:
             self._fence(lease, gen)

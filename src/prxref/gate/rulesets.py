@@ -2,7 +2,8 @@
 
 The ruleset requires the ``sdlc-review`` check from one app
 (``integration_id``), a branch up to date with its base, one approval
-after the last push, and no bypass actors. It is applied with the
+after the last push, and no bypass actors. That approval is satisfied by the
+app's own APPROVE review. It is applied with the
 operator's own ``gh`` login: the app's token has no administration
 permission and never edits rulesets.
 """
@@ -26,14 +27,16 @@ class RulesetError(RuntimeError):
     """A ``gh api`` call failed, or the live ruleset is missing."""
 
 
-def render_manifest(webhook_url: str, *, name: str = "sdlc") -> dict:
+def render_manifest(webhook_url: str, *, name: str = "prxref-sdlc") -> dict:
     """The App manifest for GitHub's manifest flow."""
     return {
         "name": name,
         "url": "https://github.com/sblattj/prxref",
         "hook_attributes": {"url": webhook_url, "active": True},
         "public": False,
-        "default_permissions": {**TOKEN_PERMISSIONS, "metadata": "read"},
+        # App approvals count toward required reviews only when the installation has contents:write;
+        # the minted token still asks for read (TOKEN_PERMISSIONS).
+        "default_permissions": {**TOKEN_PERMISSIONS, "contents": "write", "metadata": "read"},
         "default_events": list(EVENTS),
     }
 
