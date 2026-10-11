@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship `prxref gate …`, a local GitHub App (`sdlc`) that reviews every pull request on an allowlisted repository with prxref and publishes an app-owned `sdlc-review` check run that a ruleset pins as a required status check (issue #102).
+**Goal:** Ship `prxref gate …`, a local GitHub App (default name `prxref-sdlc`) that reviews every pull request on an allowlisted repository with prxref and publishes an app-owned `sdlc-review` check run that a ruleset pins as a required status check (issue #102).
 
-**Architecture:** One process (`prxref gate serve`) runs three threads over one SQLite file: an HTTP receiver that verifies, dedups and enqueues webhook deliveries; a single worker that holds a fenced lease, runs `orchestrate_review` against a capturing forge built on an installation token, and publishes a check run plus a `COMMENT` review; and a watchdog that re-queues orphaned work and reconciles open PRs against the store. Repository rules (`.prxref.toml`, rule files, standards documents, learnings) are read at the PR's **base** SHA; the head SHA supplies inert file context only.
+**Architecture:** One process (`prxref gate serve`) runs three threads over one SQLite file: an HTTP receiver that verifies, dedups and enqueues webhook deliveries; a single worker that holds a fenced lease, runs `orchestrate_review` against a capturing forge built on an installation token, and publishes a check run plus a review (`APPROVE` on a `success` conclusion, `REQUEST_CHANGES` on any other completed outcome); and a watchdog that re-queues orphaned work and reconciles open PRs against the store. Repository rules (`.prxref.toml`, rule files, standards documents, learnings) are read at the PR's **base** SHA; the head SHA supplies inert file context only.
 
 **Tech Stack:** Python 3.12+, stdlib (`sqlite3`, `http.server`, `threading`, `concurrent.futures`, `tomllib`, `plistlib`), `requests`, optional extra `github-app` = `pyjwt[crypto]`, litellm → Amazon Bedrock (`bedrock/us.anthropic.claude-opus-4-6-v1`), pytest, ruff, uv.
 
@@ -27,8 +27,8 @@
 - No head code execution: prxref never runs repository content. Rules come from the base SHA; head content is data only.
 - Credentials (`AWS_BEARER_TOKEN_BEDROCK`, the app private key, the webhook secrets, installation tokens) stay outside source, the SQLite file, run records and logs. The publisher logs request ids and status codes only.
 - The advisory lane (`.github/workflows/prxref-review.yml`, `prxref serve`, `action.yml`) is unchanged. `prxref review` and `prxref serve` keep `PRXREF_RULES_SOURCE=head` (today's behavior) by default.
-- The app never submits `APPROVE` or `REQUEST_CHANGES`; its review event is always `COMMENT`.
-- GitHub only. Check name `sdlc-review`. App name `sdlc`. Annotations at most 50 per check-run update.
+- The app submits `APPROVE` when the review conclusion is `success` and `REQUEST_CHANGES` on any other completed outcome, with inline comments riding on that review; if GitHub refuses the anchors (422) the same event is re-posted with no comments and the comments become check-run annotations. The `fail()` and `cancel()` paths post no review: the failing or cancelled required check blocks. There is no second account; the app's `APPROVE` satisfies the ruleset's one-approval rule. The installation needs `contents: write` (with `contents: read` an App `APPROVE` left `reviewDecision=REVIEW_REQUIRED`); the minted token still asks for `contents: read`. The repo owner can dismiss the app's review (ruleset `dismissal_restriction` is unavailable on a personal free-plan repository); that is an accepted limitation, and a dismissed `REQUEST_CHANGES` still leaves the failing required check blocking.
+- GitHub only. Check name `sdlc-review`. App name `prxref-sdlc` (bot login `<slug>[bot]`, derived at runtime). Annotations at most 50 per check-run update.
 - Exit codes: `review` keeps exit 0 doctrine; `gate serve` exits 2 on a configuration error (missing/malformed key, missing extra, key file not 0600, `PRXREF_DRY_RUN` on).
 - Every new config key follows `CLAUDE.md` "config lives in one place": `_DEFAULTS`, its type table, `_RANGES`/`_CHOICE_KEYS`, the `config.py` docstring, `.env.example`, `docs/env-vars.md` (row, category bullet, both totals), and `ENV_ONLY_KEYS` with its `docs/config-file.md` row.
 
@@ -2330,7 +2330,7 @@ git commit -m "feat(gate): base-pinned repository rules and standards (#102)" -m
 ---
 ### Task 7: `checks.py`: the check-run and review publisher
 
-Maps a review result to a check conclusion (spec "Verdict mapping"), owns every write to GitHub (check run, `COMMENT` review, the bot's summary comment, annotations), and makes each write idempotent against an uncertain reply. Every write is preceded by a lease renewal, so a worker that lost its fencing token publishes nothing.
+Maps a review result to a check conclusion (spec "Verdict mapping"), owns every write to GitHub (check run, `APPROVE` / `REQUEST_CHANGES` review, the bot's summary comment, annotations), and makes each write idempotent against an uncertain reply. Every write is preceded by a lease renewal, so a worker that lost its fencing token publishes nothing.
 
 The summary comment is upserted by the publisher, not by `ForgeImpl.post_summary`: that method takes the first comment carrying `SUMMARY_MARKER` whoever wrote it (`src/prxref/forges/github.py:549 (_find_summary)`), so on a PR the advisory lane already reviewed the bot would try to PATCH another user's comment and get a 403. The publisher matches the marker and `user.login == bot_login`.
 
@@ -2522,7 +2522,7 @@ def test_annotations_are_batched_by_fifty(store, gen, lease):
     assert patches[-1]["status"] == "completed"
 
 
-def test_review_is_posted_as_comment_with_the_generation_marker(store, gen, lease):
+def test_review_event_follows_the_conclusion_and_carries_the_generation_marker(store, gen, lease):
     gh = _GitHub([
         ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 9})]),
         ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
@@ -2530,10 +2530,39 @@ def test_review_is_posted_as_comment_with_the_generation_marker(store, gen, leas
     comment = InlineComment(path="a.py", line=3, body="**warning** x")
     _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
     review = gh.sent("POST", r"/reviews$")[0][3]
-    assert review["event"] == "COMMENT" and review["commit_id"] == HEAD
+    assert review["event"] == "APPROVE" and review["commit_id"] == HEAD
     assert f"<!-- sdlc-gate:generation={gen.external_id} -->" in review["body"]
     assert review["comments"] == [{"path": "a.py", "line": 3, "side": "RIGHT", "body": "**warning** x"}]
     assert store.publication(gen.id) == ("review", 9)
+
+
+def test_approved_review_without_findings_is_still_an_approve(store, gen, lease):
+    gh = _GitHub([
+        ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 11})]),
+        ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
+    ])
+    _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured())
+    review = gh.sent("POST", r"/reviews$")[0][3]
+    assert review["event"] == "APPROVE" and review["comments"] == []
+    assert store.publication(gen.id) == ("review", 11)
+
+
+def test_a_failing_conclusion_requests_changes(store, gen, lease):
+    gh = _GitHub([
+        ("POST", r"/pulls/7/reviews$", [_Resp(200, {"id": 12})]),
+        ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
+    ])
+    _complete(gh, store, gen, lease, {"verdict": "Request-Changes"}, checks.Captured())
+    assert gh.sent("POST", r"/reviews$")[0][3]["event"] == "REQUEST_CHANGES"
+
+
+def test_fail_and_cancel_post_no_review(store, gen, lease):
+    gh = _GitHub([("PATCH", r"/check-runs/555$", [_Resp(200, {})] * 2)])
+    store.set_check_run(gen.id, lease.token, 555)
+    publisher = _publisher(gh, store)
+    publisher.fail(store.get(gen.id), lease, "deadline")
+    publisher.cancel(store.get(gen.id), lease, "closed")
+    assert not gh.sent("POST", r"/reviews$")
 
 
 def test_review_after_a_5xx_is_found_by_marker_not_reposted(store, gen, lease):
@@ -2550,16 +2579,18 @@ def test_review_after_a_5xx_is_found_by_marker_not_reposted(store, gen, lease):
     assert store.publication(gen.id) == ("review", 10)
 
 
-def test_a_422_review_demotes_comments_to_annotations(store, gen, lease):
+def test_a_422_review_reposts_the_same_event_without_comments_and_demotes_them(store, gen, lease):
     gh = _GitHub([
-        ("POST", r"/pulls/7/reviews$", [_Resp(422, {"message": "line must be part of the diff"})]),
+        ("POST", r"/pulls/7/reviews$", [_Resp(422, {"message": "line must be part of the diff"}), _Resp(200, {"id": 13})]),
         ("PATCH", r"/check-runs/555$", [_Resp(200, {})]),
     ])
     comment = InlineComment(path="a.py", line=3, body="x")
     _complete(gh, store, gen, lease, {"verdict": "Approved"}, checks.Captured(comments=(comment,)))
     annotation = gh.sent("PATCH", r"/check-runs/555$")[-1][3]["output"]["annotations"][0]
     assert (annotation["path"], annotation["start_line"], annotation["message"]) == ("a.py", 3, "x")
-    assert store.publication(gen.id) is None
+    first, second = (call[3] for call in gh.sent("POST", r"/reviews$"))
+    assert first["event"] == second["event"] == "APPROVE" and first["comments"] and second["comments"] == []
+    assert store.publication(gen.id) == ("review", 13)
 
 
 def test_summary_comment_is_updated_only_when_authored_by_the_bot(store, gen, lease):
@@ -2842,30 +2873,41 @@ class Publisher:
                 return review["id"]
         return None
 
-    def _post_review(self, gen: Generation, comments: Sequence[InlineComment]) -> int | None:
-        """Post the ``COMMENT`` review; ``None`` when GitHub refuses its anchors (422)."""
+    def _post_review(self, gen: Generation, event: str, comments: Sequence[InlineComment]) -> tuple[int, bool]:
+        """Post the ``event`` review; returns ``(review_id, demoted)``.
+
+        When GitHub refuses the anchors (422) the same event is re-posted with no comments and
+        ``demoted`` is true, so the caller turns the comments into check-run annotations.
+        """
         marker = REVIEW_MARKER.format(external_id=gen.external_id)
-        payload = {
-            "commit_id": gen.head_sha, "event": "COMMENT",
-            "body": f"{marker}\nsdlc review: {len(comments)} inline finding(s).",
-            "comments": [
-                {"path": c.path, "line": c.line, "side": c.side, "body": c.body,
-                 **({"start_line": c.start_line, "start_side": c.side} if c.start_line else {})}
-                for c in comments
-            ],
-        }
         path = f"/pulls/{gen.pr_number}/reviews"
+
+        def payload(items: Sequence[InlineComment]) -> dict:
+            return {
+                "commit_id": gen.head_sha, "event": event,
+                "body": f"{marker}\nsdlc review: {len(items)} inline finding(s).",
+                "comments": [
+                    {"path": c.path, "line": c.line, "side": c.side, "body": c.body,
+                     **({"start_line": c.start_line, "start_side": c.side} if c.start_line else {})}
+                    for c in items
+                ],
+            }
+
+        def post(items: Sequence[InlineComment]) -> int:
+            try:
+                return self.client.request("POST", gen.repo, path, json=payload(items))["id"]
+            except UncertainReply:
+                found = self._find_review(gen, marker)
+                if found is not None:
+                    return found
+                return self.client.request("POST", gen.repo, path, json=payload(items))["id"]
+
         try:
-            return self.client.request("POST", gen.repo, path, json=payload)["id"]
-        except UncertainReply:
-            found = self._find_review(gen, marker)
-            if found is not None:
-                return found
-            return self.client.request("POST", gen.repo, path, json=payload)["id"]
+            return post(comments), False
         except GitHubError as exc:
-            if exc.status == 422:
-                return None
-            raise
+            if exc.status != 422 or not comments:
+                raise
+        return post(()), True
 
     def _upsert_summary(self, gen: Generation, body: str) -> None:
         page, mine = 1, None
@@ -2901,17 +2943,17 @@ class Publisher:
 
     def complete(self, gen: Generation, lease: Lease, result: object, captured: Captured,
                  *, effort: str, run_dir: str) -> str:
-        """Post the review and summary comment, then close the check; returns the conclusion."""
+        """Post the review (``APPROVE`` on success, else ``REQUEST_CHANGES``) and summary comment, then close the check; returns the conclusion."""
         conclusion, reason = conclusion_for(result)
         findings = result.get("findings_active") or [] if isinstance(result, dict) else []
         demoted: list[InlineComment] = []
-        if captured.comments and self.store.publication(gen.id) is None:
+        if self.store.publication(gen.id) is None:
             self._fence(lease, gen)
-            review_id = self._post_review(gen, captured.comments)
-            if review_id is None:
+            event = "APPROVE" if conclusion == "success" else "REQUEST_CHANGES"
+            review_id, was_demoted = self._post_review(gen, event, captured.comments)
+            if was_demoted:
                 demoted = list(captured.comments)
-            else:
-                self.store.record_publication(gen.id, lease.token, "review", review_id)
+            self.store.record_publication(gen.id, lease.token, "review", review_id)
         if captured.summary:
             self._fence(lease, gen)
             self._upsert_summary(gen, captured.summary)
@@ -2940,7 +2982,7 @@ class Publisher:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd ~/code/prxref/.claude/worktrees/sdlc-gate && uv run pytest tests/gate/test_checks.py -q`
-Expected: `22 passed` (9 parametrized conclusions + 13 tests).
+Expected: `25 passed` (9 parametrized conclusions + 16 tests).
 Then: `uv run ruff check src tests`
 
 - [ ] **Step 5: Commit**
@@ -2948,7 +2990,7 @@ Then: `uv run ruff check src tests`
 ```bash
 cd ~/code/prxref/.claude/worktrees/sdlc-gate
 git add src/prxref/gate/checks.py tests/gate/test_checks.py
-git commit -m "feat(gate): sdlc-review check and COMMENT review publisher (#102)" -m "Claude-Session-Id: <session UUID>"
+git commit -m "feat(gate): sdlc-review check and APPROVE / REQUEST_CHANGES review publisher (#102)" -m "Claude-Session-Id: <session UUID>"
 ```
 
 ---
@@ -3908,7 +3950,7 @@ Renders the GitHub App manifest and the merge ruleset exactly as the spec lists 
 - Test: `tests/gate/test_rulesets.py`
 
 **Interfaces:**
-- Consumes: `CHECK_NAME` (Task 5); `TOKEN_PERMISSIONS` (Task 3).
+- Consumes: `CHECK_NAME` (Task 5). `MANIFEST_PERMISSIONS` is defined here (installation `contents: write`) and differs from `TOKEN_PERMISSIONS` (Task 3, minted token `contents: read`).
 - Produces (all in `prxref.gate.rulesets`):
   - `RULESET_NAME = "sdlc-review"`; `class RulesetError(RuntimeError)`
   - `def render_manifest(webhook_url: str, *, name: str = "sdlc") -> dict`
@@ -3922,14 +3964,14 @@ Renders the GitHub App manifest and the merge ruleset exactly as the spec lists 
 
 ```json
 {
-  "name": "sdlc",
+  "name": "prxref-sdlc",
   "url": "https://github.com/sblattj/prxref",
   "hook_attributes": {"url": "https://sdlc.example.dev/webhook", "active": true},
   "public": false,
   "default_permissions": {
     "checks": "write",
     "pull_requests": "write",
-    "contents": "read",
+    "contents": "write",
     "metadata": "read"
   },
   "default_events": ["pull_request", "check_run", "check_suite"]
@@ -4083,10 +4125,14 @@ import subprocess
 from collections.abc import Callable
 from typing import Any
 
-from prxref.gate.app_auth import TOKEN_PERMISSIONS
 from prxref.gate.receiver import CHECK_NAME
 
 RULESET_NAME = "sdlc-review"
+# The installation needs ``contents: write`` for the app's APPROVE to count toward the
+# ruleset's approval rule (probe: with ``contents: read`` the PR stayed REVIEW_REQUIRED).
+# The minted token (``app_auth.TOKEN_PERMISSIONS``) still asks for ``contents: read``; a
+# read-scoped token on a write installation approved in the probe.
+MANIFEST_PERMISSIONS = {"checks": "write", "pull_requests": "write", "contents": "write", "metadata": "read"}
 EVENTS = ["pull_request", "check_run", "check_suite"]
 
 
@@ -4094,14 +4140,14 @@ class RulesetError(RuntimeError):
     """A ``gh api`` call failed, or the live ruleset is missing."""
 
 
-def render_manifest(webhook_url: str, *, name: str = "sdlc") -> dict:
+def render_manifest(webhook_url: str, *, name: str = "prxref-sdlc") -> dict:
     """The App manifest for GitHub's manifest flow."""
     return {
         "name": name,
         "url": "https://github.com/sblattj/prxref",
         "hook_attributes": {"url": webhook_url, "active": True},
         "public": False,
-        "default_permissions": dict(TOKEN_PERMISSIONS),
+        "default_permissions": dict(MANIFEST_PERMISSIONS),
         "default_events": list(EVENTS),
     }
 
@@ -4679,7 +4725,7 @@ Expected: FAIL (`FileNotFoundError: ... docs/gate.md`).
 # sdlc review gate (GitHub App)
 
 The gate turns a prxref review into a **required, merge-blocking check**. A GitHub
-App named `sdlc` owns a check run named `sdlc-review`; a repository ruleset requires
+App (default name `prxref-sdlc`) owns a check run named `sdlc-review`; a repository ruleset requires
 that check *from that app* (by `integration_id`), so a status or a check with the
 same name from anyone else does not satisfy it. The advisory lane (`prxref serve`,
 `prxref review`, `action.yml`) is unchanged and never blocks.
@@ -4710,9 +4756,24 @@ reviews what is live.
 | Superseded or stale (the PR moved) | nothing published; a newer generation owns the head |
 | PR closed | `cancelled`, only if a check was already created |
 
-Every outcome posts one review with event `COMMENT` (never `APPROVE` or
-`REQUEST_CHANGES`) plus the summary comment. A review that cannot finish fails
-closed: the check concludes `failure`, never `neutral` or `skipped`.
+A completed review posts one pull request review from `<slug>[bot]` (default
+`prxref-sdlc[bot]`): `APPROVE` when the conclusion is `success`, `REQUEST_CHANGES` on any
+other completed outcome, plus the summary comment. If GitHub refuses the inline anchors
+(422), the same event is re-posted without comments and they become check annotations. A
+review that cannot finish (deadline, crash, publish error) or is cancelled posts no
+review and fails closed: the check concludes `failure`, never `neutral` or `skipped`, and
+the failing required check blocks. The app's `APPROVE` is what satisfies the ruleset's one
+required approval; no second account is involved.
+
+The app **installation** must hold `contents: write`: with `contents: read` an App
+`APPROVE` left the PR at `REVIEW_REQUIRED`. The manifest asks for it. The short-lived
+token the gate mints still asks only for `contents: read`.
+
+**Accepted limitation.** The repository owner or an admin can dismiss the app's review:
+the ruleset `dismissal_restriction` setting is not available on a personal free-plan
+repository (the API drops it silently). Dismissing the `APPROVE` returns the PR to review
+required; dismissing a `REQUEST_CHANGES` lifts the review requirement, but the failing
+required check still blocks the merge.
 
 ## Prerequisites
 
@@ -4742,7 +4803,8 @@ closed: the check concludes `failure`, never `neutral` or `skipped`.
 4. **Register the app:** `prxref gate render-manifest --webhook-url https://<webhook-host>/webhook > manifest.json`,
    then create the app from that manifest (GitHub → Settings → Developer settings →
    GitHub Apps → New, or the manifest flow). Install it on the target repositories
-   only. Download its private key to `~/.config/prxref-gate/sdlc.pem` and run
+   only, and confirm the installation shows `contents: write` (accept the permission
+   if GitHub asks). Download its private key to `~/.config/prxref-gate/sdlc.pem` and run
    `chmod 600` on it. Note the app id and the installation id.
 5. **Apply the ruleset:** `prxref gate render-ruleset --integration-id <app-id>` shows it;
    `prxref gate apply-ruleset --repo <owner/name> --integration-id <app-id>` creates or
@@ -4836,7 +4898,7 @@ Order matters: remove the ruleset first, or every merge stays blocked.
 2. `launchctl bootout gui/$(id -u)/dev.prxref.gate` and
    `launchctl bootout gui/$(id -u)/dev.prxref.cloudflared`.
 3. Uninstall the app from the repository: GitHub → Settings → Applications →
-   Installed GitHub Apps → `sdlc` → Configure, or
+   Installed GitHub Apps → `prxref-sdlc` → Configure, or
    `gh api -X DELETE /app/installations/<installation-id>` with an app JWT.
 ````
 
@@ -4848,7 +4910,7 @@ Order matters: remove the ruleset first, or every merge stays blocked.
 ## Review Gate (GitHub App)
 
 `prxref review` and `prxref serve` advise; they never block a merge. To make a prxref
-review a **required check**, run the gate: a GitHub App (`sdlc`) that publishes a check
+review a **required check**, run the gate: a GitHub App (`prxref-sdlc`) that publishes a check
 run named `sdlc-review`, required by a repository ruleset bound to that app, with the
 review rules read from the PR's base commit.
 
@@ -4869,8 +4931,8 @@ Setup, launchd services, rotation and rollback: [docs/gate.md](docs/gate.md).
 - sdlc review gate ([#102](https://github.com/sblattj/prxref/issues/102)): `prxref gate
   serve` runs a GitHub App webhook receiver, a single worker and a watchdog on one
   SQLite file, and publishes a `sdlc-review` check run (Approved → `success`; every
-  other outcome, including a deadline hit or a crash, → `failure`) plus a `COMMENT`
-  review. Rules, rule packs and standards are read from the PR's base commit
+  other outcome, including a deadline hit or a crash, → `failure`) plus a review
+  (`APPROVE` on `success`, `REQUEST_CHANGES` on any other completed outcome). Rules, rule packs and standards are read from the PR's base commit
   (`PRXREF_RULES_SOURCE=base`, the gate's default). Every publish re-checks that the
   PR's head and base have not moved. `prxref gate pause|resume|status`,
   `render-manifest`, `render-ruleset` and `apply-ruleset [--diff]` operate it; twelve
@@ -5093,16 +5155,16 @@ git commit -m "feat(gate): launchd services and the gate env template (#102)" -m
 
 ### Task 15: Live proof on `sblattj/sdlc-sandbox`
 
-The spec's "Live proof (sandbox)" section: four phases against a real GitHub repository, a real app and the real gate, each capture a `gh api` JSON file in `docs/live-instance-verification/sdlc-gate/` naming the commit SHAs, ruleset id, app id and check run id. Unit tests prove the parts; only this proves that GitHub's ruleset accepts the app's check and refuses the foreign status of the same name, which is the whole point of the gate.
+The spec's "Live proof (sandbox)" section: four phases against a real GitHub repository, a real app and the real gate, each capture a `gh api` JSON file in `docs/live-instance-verification/sdlc-gate/` naming the commit SHAs, ruleset id, app id and check run id. Unit tests prove the parts; only this proves that GitHub's ruleset accepts the app's check and approval and refuses a status of the same name from a non-app source, which is the whole point of the gate. There is one human identity (the repo owner's own `gh` login) and the app; no second account.
 
 **This task needs the operator.** Before Step 3, stop and ask the user to confirm each item of the spec's "Operator prerequisites"; do not attempt any of them yourself:
 
 1. `cloudflared tunnel login` done, `cloudflared tunnel create sdlc` done, a DNS route to the webhook hostname, and `~/.cloudflared/config.yml` with the ingress rule from `docs/gate.md` "Prerequisites" step 2 (checks: `cloudflared tunnel list` lists `sdlc`; `cloudflared tunnel ingress validate` prints `OK`; `cloudflared tunnel ingress rule https://<webhook-host>/webhook` names `http://127.0.0.1:8787`).
 2. A long-term Bedrock API key in `~/.config/prxref-gate/env` as `AWS_BEARER_TOKEN_BEDROCK` (check without printing it: `grep -c '^AWS_BEARER_TOKEN_BEDROCK=.' ~/.config/prxref-gate/env` prints `1`).
-3. A machine-user GitHub account with write access to `sblattj/sdlc-sandbox`, logged into `gh` (check: `gh auth status` lists it; the steps below call it `<machine-user>`).
-4. The `sdlc` app registered from `prxref gate render-manifest` output, installed on `sblattj/sdlc-sandbox` only, its key at `~/.config/prxref-gate/sdlc.pem` mode 0600, and `PRXREF_GATE_APP_ID` / `PRXREF_GATE_INSTALLATION_IDS` / `PRXREF_GATE_WEBHOOK_SECRET` filled in the env file.
+3. The repo owner logged into `gh` with admin on `sblattj/sdlc-sandbox` (check: `gh auth status` lists it). No other account is needed: the app is the approver, and the owner's own login posts the foreign status.
+4. The `prxref-sdlc` app registered from `prxref gate render-manifest` output (the manifest asks for `contents: write`), installed on `sblattj/sdlc-sandbox` only with the installation showing `contents: write` (check: the installation's permissions list `contents: write`; with `contents: read` the app's approval does not count), its key at `~/.config/prxref-gate/sdlc.pem` mode 0600, and `PRXREF_GATE_APP_ID` / `PRXREF_GATE_INSTALLATION_IDS` / `PRXREF_GATE_WEBHOOK_SECRET` filled in the env file.
 
-Creating the public repository `sblattj/sdlc-sandbox` is in scope for the executor (Step 3) because it is public and owned by `sblattj`; per the identity policy, no other account touches it. Every `gh` call below on the sandbox runs as `sblattj` (`GH_TOKEN=$(gh auth token --user sblattj)`), except the phase 1 foreign status, which runs as `<machine-user>`. No token value is ever written to a file, an argument or a log.
+Creating the public repository `sblattj/sdlc-sandbox` is in scope for the executor (Step 3) because it is public and owned by `sblattj`; per the identity policy, no other account touches it. Every `gh` call below on the sandbox runs as `sblattj` (`GH_TOKEN=$(gh auth token --user sblattj)`), including the phase 1 foreign status: that login is not the app, so the `integration_id` pin must reject its same-named status. No token value is ever written to a file, an argument or a log.
 
 **Files:**
 - Create: `docs/live-instance-verification/sdlc-gate/capture.py` (writes one capture and its index entry)
@@ -5131,9 +5193,9 @@ import pytest
 DIR = Path(__file__).resolve().parents[2] / "docs" / "live-instance-verification" / "sdlc-gate"
 REQUIRED = {
     "1": {"ruleset", "foreign-status", "pr-blocked"},
-    "2": {"check-run", "pr-clean"},
+    "2": {"check-run", "app-review", "pr-clean"},
     "3": {"approval-dismissed", "check-run-new-head", "pr-blocked-new-head"},
-    "4": {"bad-signature", "incomplete", "deadline", "duplicate", "rerequest", "stale-head",
+    "4": {"request-changes-review", "pr-blocked-failing", "owner-dismissal", "bad-signature", "incomplete", "deadline", "duplicate", "rerequest", "stale-head",
           "close-reopen", "publish-5xx", "worker-restart", "secret-rotation"},
 }
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -5183,6 +5245,24 @@ def test_the_foreign_status_blocks_and_the_app_check_clears(index):
     check = _capture(index, "2", "check-run")
     assert (check["name"], check["app"]["id"], check["conclusion"]) == ("sdlc-review", integration, "success")
     assert _capture(index, "2", "pr-clean")["mergeable_state"] == "clean"
+
+
+def test_the_app_itself_approves_the_passing_pr(index):
+    reviews = _capture(index, "2", "app-review")
+    approvals = [r for r in reviews if r["state"] == "APPROVED"]
+    assert approvals and all(r["user"]["type"] == "Bot" for r in approvals)
+    assert all(r["user"]["login"].endswith("[bot]") for r in approvals)
+
+
+def test_a_failing_pr_is_blocked_by_request_changes_and_the_failing_check(index):
+    reviews = _capture(index, "4", "request-changes-review")
+    assert any(r["state"] == "CHANGES_REQUESTED" and r["user"]["type"] == "Bot" for r in reviews)
+    assert _capture(index, "4", "pr-blocked-failing")["mergeable_state"] == "blocked"
+
+
+def test_dismissing_the_apps_approve_returns_to_review_required(index):
+    reviews = _capture(index, "4", "owner-dismissal")
+    assert any(r["state"] == "DISMISSED" and r["user"]["type"] == "Bot" for r in reviews)
 
 
 def test_a_new_push_dismisses_the_approval_and_blocks_again(index):
@@ -5383,32 +5463,33 @@ RID=$(gh api repos/sblattj/sdlc-sandbox/rulesets --jq '.[] | select(.name=="sdlc
 prxref gate pause --env-file ~/.config/prxref-gate/env   # phase 1 needs no app check yet
 ```
 
-Then, as `sblattj`, create branch `proof` with one small change (a two-line `hello.py`), open PR `$PR` against `main`, and have `<machine-user>` approve it: `GH_TOKEN=$(gh auth token --user <machine-user>) gh pr review $PR -R $SB --approve`. The ruleset's `require_last_push_approval` means the approver must not be the last pusher, so `sblattj` does every push in phases 1 to 3.
+Then, as `sblattj`, create branch `proof` with one small change (a two-line `hello.py`), open PR `$PR` against `main`, and leave it unapproved: the app, not a person, approves it in phase 2. A PR author cannot approve their own PR, so no human approval is possible here. The ruleset's `require_last_push_approval` means the approval must come after the last push, so `sblattj` does every push in phases 1 to 3 and the app reviews each new head.
 
-- [ ] **Step 5: Phase 1: a foreign status of the same name does not clear the gate**
+- [ ] **Step 5: Phase 1: a status of the same name from a non-app source does not clear the gate**
 
 ```bash
 $CAP 1 ruleset $IDS -- repos/$SB/rulesets/$RID
-GH_TOKEN=$(gh auth token --user <machine-user>) $CAP 1 foreign-status $IDS -- \
+$CAP 1 foreign-status $IDS -- \
   --method POST repos/$SB/statuses/$HEAD -f state=success -f context=sdlc-review -f description="foreign status"
 sleep 10; $CAP 1 pr-blocked $IDS -- repos/$SB/pulls/$PR
 ```
 
-Expected: `1-pr-blocked.json` has `"mergeable_state": "blocked"` with the approval and the foreign `success` status both present. If it says `clean`, the ruleset is not bound to the app: stop and report, because the gate proves nothing.
+Expected: `1-pr-blocked.json` has `"mergeable_state": "blocked"` with the owner's foreign `success` status present and no app check run and no approval. If it says `clean`, the ruleset is not bound to the app: stop and report, because the gate proves nothing.
 
-- [ ] **Step 6: Phase 2: the app's check clears the gate on the same head**
+- [ ] **Step 6: Phase 2: the app's check and approval clear the gate on the same head**
 
 ```bash
 prxref gate resume --env-file ~/.config/prxref-gate/env   # the `opened` generation queued while paused now runs
 prxref gate status --env-file ~/.config/prxref-gate/env     # wait for the generation to finish
 CRID=$(gh api repos/$SB/commits/$HEAD/check-runs --jq '.check_runs[] | select(.name=="sdlc-review") | .id')
 $CAP 2 check-run $IDS --check-run-id $CRID -- repos/$SB/check-runs/$CRID
+$CAP 2 app-review $IDS --check-run-id $CRID -- repos/$SB/pulls/$PR/reviews
 sleep 10; $CAP 2 pr-clean $IDS --check-run-id $CRID -- repos/$SB/pulls/$PR
 ```
 
-Expected: `2-check-run.json` has `"conclusion": "success"` and `app.id == $APP`, and `2-pr-clean.json` has `"mergeable_state": "clean"`. `hello.py` must be clean enough for an Approved verdict. If the review says Request-Changes, fix `hello.py` in a new push; that changes the head, so restart phase 1 on the new head, keeping phases 1 and 2 on one head.
+Expected: `2-check-run.json` has `"conclusion": "success"` and `app.id == $APP`, `2-app-review.json` holds an `APPROVED` review by the app's bot login (`user.type == "Bot"`, derived from the app slug, `prxref-sdlc[bot]` by default), and `2-pr-clean.json` has `"mergeable_state": "clean"`. `hello.py` must be clean enough for an Approved verdict. If the review says Request-Changes, fix `hello.py` in a new push; that changes the head, so restart phase 1 on the new head, keeping phases 1 and 2 on one head.
 
-- [ ] **Step 7: Phase 3: a new push dismisses the approval and re-gates**
+- [ ] **Step 7: Phase 3: a new push dismisses the app's approval and re-gates**
 
 ```bash
 # as sblattj: push one more commit to `proof`; re-derive HEAD
@@ -5419,7 +5500,7 @@ CRID=$(gh api repos/$SB/commits/$HEAD/check-runs --jq '.check_runs[] | select(.n
 $CAP 3 check-run-new-head $IDS --check-run-id $CRID -- repos/$SB/check-runs/$CRID
 ```
 
-Expected: the earlier approval is `DISMISSED`, the PR is `blocked`, and a new `sdlc-review` check run exists on the new head.
+Expected: the earlier approval is `DISMISSED`, the PR is `blocked`, and a new `sdlc-review` check run exists on the new head (the app approves the new head once its review passes).
 
 - [ ] **Step 8: Phase 4: failure cases**
 
@@ -5427,6 +5508,8 @@ Run `mkdir -m 700 -p /tmp/prxref-proof` first. Write each case's evidence to `/t
 
 | Case | How | Pass when |
 |---|---|---|
+| `request-changes-review`, `pr-blocked-failing` | as `sblattj`, open a second PR `$PRF` from a branch whose `hello.py` carries an obvious error-severity defect; wait for the generation; `$CAP 4 request-changes-review $IDS -- repos/$SB/pulls/$PRF/reviews`, then `$CAP 4 pr-blocked-failing $IDS -- repos/$SB/pulls/$PRF` | a `CHANGES_REQUESTED` review by the app's bot login, the check run `failure`, `mergeable_state` `blocked`, and a merge attempt (`gh pr merge $PRF -R $SB`) refused |
+| `owner-dismissal` | as the repo owner, dismiss the app's `APPROVE` on `$PR`: `gh api -X PUT repos/$SB/pulls/$PR/reviews/<review-id>/dismissals -f message="proof"`; `$CAP 4 owner-dismissal $IDS -- repos/$SB/pulls/$PR/reviews` | the review is `DISMISSED` and the PR returns to review-required (`reviewDecision` `REVIEW_REQUIRED`); the passing check still reports `success`, so the check, not the review, remains what the ruleset pins (the documented limitation: the owner can dismiss the app's review) |
 | `bad-signature` | `faults.py send --kind bad-signature` | `status` 401; `prxref gate status` shows no new generation |
 | `duplicate` | `faults.py send --kind duplicate` | first 202, second 200 `{"status": "duplicate"}`; one generation |
 | `rerequest` | `faults.py send --kind rerequest` (and the Checks tab's "Re-run") | 202; a new generation with the same head; capture the new check run |
@@ -5445,7 +5528,7 @@ Restore every env value changed above and restart the gate before Step 9.
 `docs/live-instance-verification/sdlc-gate/README.md`: one section per phase stating what was proven, with the repo, PR number, head and base SHAs, ruleset id, app id, each check run id and the gate version, each linked to its capture file, plus a "Findings" section listing anything that behaved differently from the spec.
 
 Run: `cd ~/code/prxref/.claude/worktrees/sdlc-gate && uv run pytest tests/gate/test_live_captures.py -q`
-Expected: `6 passed`.
+Expected: `9 passed`.
 
 Run: `uv run ruff check src tests docs/live-instance-verification/sdlc-gate`
 Expected: `All checks passed!`
@@ -5522,7 +5605,7 @@ prxref --version                          # 0.35.0
 launchctl kickstart -k gui/$(id -u)/dev.prxref.gate
 ```
 
-As `sblattj`, push one commit to the sandbox's `proof` branch, have `<machine-user>` approve, wait for the check, then capture with `$CAP 2 check-run-0.35.0 … --check-run-id $CRID -- repos/$SB/check-runs/$CRID` and `$CAP 2 pr-clean-0.35.0 … -- repos/$SB/pulls/$PR` (each index entry records `gate_version: 0.35.0`). These two captures sit on a later head than phases 1 and 2, so `test_phases_one_and_two_hold_repo_pr_base_and_head_constant` must exclude names ending `-0.35.0`: change its filter to `if e["phase"] in ("1", "2") and not e["name"].endswith("-0.35.0")`. Commit the captures, the index and the test change on a branch and open a PR (`docs: phase 2 re-run on 0.35.0 (#102)`).
+As `sblattj`, push one commit to the sandbox's `proof` branch, wait for the check and the app's approval, then capture with `$CAP 2 check-run-0.35.0 … --check-run-id $CRID -- repos/$SB/check-runs/$CRID` and `$CAP 2 pr-clean-0.35.0 … -- repos/$SB/pulls/$PR` (each index entry records `gate_version: 0.35.0`). These two captures sit on a later head than phases 1 and 2, so `test_phases_one_and_two_hold_repo_pr_base_and_head_constant` must exclude names ending `-0.35.0`: change its filter to `if e["phase"] in ("1", "2") and not e["name"].endswith("-0.35.0")`. Commit the captures, the index and the test change on a branch and open a PR (`docs: phase 2 re-run on 0.35.0 (#102)`).
 
 - [ ] **Step 5: Record the model situation on issue #102**
 

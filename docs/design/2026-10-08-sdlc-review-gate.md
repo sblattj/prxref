@@ -5,7 +5,7 @@ Date: 2026-10-08. Base: prxref 0.34.0 (`0d7d2e1`).
 
 ## Goal
 
-A GitHub App named `sdlc` that reviews every pull request on an installed repository
+A GitHub App (default name `prxref-sdlc`) that reviews every pull request on an installed repository
 with prxref, publishes an app-owned check run named `sdlc-review`, and is pinned as a
 required status check in a ruleset so that a PR cannot merge until the app's own check
 succeeds and one fresh human approval exists. The receiver, durable queue and worker run
@@ -26,7 +26,7 @@ Actions job "prxref review"; the gate's is the app check `sdlc-review`.
 | Request budget | `PRXREF_LLM_TIMEOUT=900` and `PRXREF_LLM_MAX_TOKENS=32000` set explicitly in the gate env | The prompt-scaled deadline covers the openai-compat family; the gate does not rely on it for litellm. The advisory workflow already hit `finish_reason=length` at the 4096 default on a reasoning model. |
 | Webhook loss | A reconciler that lists open PRs is load-bearing, not a backstop | GitHub docs: "GitHub does not automatically redeliver failed deliveries." A push during sleep, shutdown or tunnel loss produces no delivery at all. |
 | Version pin | The release that ships the gate (0.35.0); the sandbox pins it | Issue text says 0.31.0, which has none of the gate code. |
-| Sandbox | New public repo `sblattj/sdlc-sandbox`; second write identity is a new machine user | Free plan: rulesets work on public repos only. The stealth account must not appear on a public repo. |
+| Sandbox | New public repo `sblattj/sdlc-sandbox`; one identity only: the repo owner plus the app, no second account | Free plan: rulesets work on public repos only. A PR author cannot approve their own PR, so the app is the only possible approver in a solo repo. |
 | Tunnel | `cloudflared` named tunnel as a launchd service | Installed; stable hostname; survives restarts. |
 | Rules source | Base SHA for `.prxref.toml`, rulepacks, standards; head SHA only for inert file context | Today `orchestrator` builds the forge reader at `pr.source_sha` (head). The issue requires base. prxref never executes repository content, so "no head code execution" already holds. |
 | Spec vs plan | Seven points above follow the plan's "Spec questions" section | docs/design/2026-10-08-sdlc-review-gate-plan.md, "## Spec questions" items 1, 2, 3, 8, 14, 21, 26 |
@@ -63,7 +63,7 @@ or class, and a test file under `tests/gate/`.
 
 - Does: builds the app JWT (RS256, 10-minute expiry, issued 60 s in the past for clock
   skew), exchanges it for an installation token scoped at mint to the one repository and
-  to `checks: write`, `pull_requests: write`, `contents: read`, and caches it until 5
+  to `checks: write`, `pull_requests: write`, `contents: read` (the token asks for read even though the app *installation* must hold `contents: write`; a read-scoped token on a write installation still approves), and caches it until 5
   minutes before its one-hour expiry.
 - Used by: the publisher and the binding guard; exposes `token_for(repo_full_name)`.
 - Depends on: `pyjwt[crypto]` from the new optional extra `github-app`; `requests`.
@@ -159,15 +159,19 @@ publications(generation_id PK, kind, github_id, posted_at)
   id`, `details_url` set to the PR's checks tab URL (GitHub requires http(s); the local
   run record path goes in the summary text), and a summary that names the model id,
   effort, token counts, verdict, chunk counts and the base and head SHAs reviewed.
-  Actionable inline findings are posted as a pull request review from `sdlc[bot]` with
-  event `COMMENT`, never `APPROVE` or `REQUEST_CHANGES`, so the app never satisfies or
-  blocks the human-approval rule. File-level findings become check annotations (max 50
+  The app submits a pull request review from `<slug>[bot]` (default `prxref-sdlc[bot]`,
+  derived at runtime from the app slug): event `APPROVE` when the review conclusion is
+  `success`, `REQUEST_CHANGES` on any other completed outcome, with the actionable inline
+  findings riding on that review. If GitHub refuses the anchors (422), the same event is
+  re-posted with no comments and the comments are demoted to check-run annotations. The
+  `fail()` and `cancel()` paths post no review; the failing or cancelled required check
+  blocks. The app's APPROVE is what satisfies the ruleset's one-approval rule. File-level findings become check annotations (max 50
   per update, batched).
 - Comment bodies come from prxref's own `formatter` and `markers`, so the next run's
   thread dedup and "Previously raised" logic recognise the gate's comments exactly as
   they recognise the advisory lane's. The executive summary is posted as the check
   output and also as the usual prxref summary comment (same marker), so a reader sees
-  one summary per head, authored by `sdlc[bot]`.
+  one summary per head, authored by `<slug>[bot]` (`prxref-sdlc[bot]` by default).
 - Uncertain replies: on a timeout or 5xx while creating a check or review, the publisher
   first lists check runs for the head SHA filtered by `app_id` and `external_id`, and
   reviews by the bot login, before retrying, so a duplicate is never created.
@@ -206,8 +210,8 @@ publications(generation_id PK, kind, github_id, posted_at)
 ### `rulesets.py`: manifest and ruleset renderer
 
 - `prxref gate render-manifest` prints the GitHub App manifest JSON for the manifest flow:
-  name `sdlc`, webhook URL, events `pull_request`, `check_run`, `check_suite`,
-  permissions `checks: write`, `pull_requests: write`, `contents: read`,
+  name `prxref-sdlc`, webhook URL, events `pull_request`, `check_run`, `check_suite`,
+  permissions `checks: write`, `pull_requests: write`, `contents: write`,
   `metadata: read`.
 - `prxref gate render-ruleset --integration-id N` prints the ruleset JSON:
   - target `branch`, include `~DEFAULT_BRANCH`, enforcement `active`, `bypass_actors: []`
@@ -216,6 +220,14 @@ publications(generation_id PK, kind, github_id, posted_at)
   - `pull_request`: `required_approving_review_count: 1`,
     `dismiss_stale_reviews_on_push: true`, `require_last_push_approval: true`,
     `require_code_owner_review: false`, `required_review_thread_resolution: false`
+  - The installation needs `contents: write`: probes showed that with installation
+    `contents: read` an App APPROVE left `reviewDecision=REVIEW_REQUIRED`, and with
+    `contents: write` it became `APPROVED` / `CLEAN`.
+  - Accepted limitation: the repo owner or an admin can dismiss the app's review. Ruleset
+    `dismissal_restriction` is not available on a personal free-plan repository (the PUT
+    is silently dropped). Dismissing the APPROVE returns the PR to `REVIEW_REQUIRED`; a
+    dismissed REQUEST_CHANGES unblocks the review requirement, but the failing required
+    check still blocks the merge.
 - `prxref gate apply-ruleset --repo owner/name` posts it with the operator's own `gh`
   token and prints the ruleset id; `--diff` shows the live ruleset against the rendered
   one for the bypass audit.
@@ -227,15 +239,15 @@ publications(generation_id PK, kind, github_id, posted_at)
 
 ## Verdict mapping
 
-| Review outcome | Check conclusion | Notes |
-|---|---|---|
-| `Approved` | `success` | Warnings attached as comments, non-blocking. |
-| `Request-Changes` (error-severity findings) | `failure` | Same rule as `PRXREF_FAIL_ON=error`. |
-| `Incomplete`, `degraded`, failed chunks | `failure` | Partial review is not a review. |
-| `Error` (LLM, forge, config) | `failure` | Summary carries the error class. |
-| Deadline hit, worker crash, malformed result | `failure` | Watchdog or restart publishes it. |
-| Generation superseded or stale | no publish | Newer generation owns the head. |
-| PR closed | `cancelled` | Only if a check was already created. |
+| Review outcome | Check conclusion | Review event | Notes |
+|---|---|---|---|
+| `Approved` | `success` | `APPROVE` | Warnings attached as comments, non-blocking. |
+| `Request-Changes` (error-severity findings) | `failure` | `REQUEST_CHANGES` | Same rule as `PRXREF_FAIL_ON=error`. |
+| `Incomplete`, `degraded`, failed chunks | `failure` | `REQUEST_CHANGES` | Partial review is not a review. |
+| `Error` (LLM, forge, config) | `failure` | none (`fail()` path) | Summary carries the error class. |
+| Deadline hit, worker crash, malformed result | `failure` | none (`fail()` path) | Watchdog or restart publishes it. |
+| Generation superseded or stale | no publish | none | Newer generation owns the head. |
+| PR closed | `cancelled` | none (`cancel()` path) | Only if a check was already created. |
 
 ## Credentials and secrets
 
@@ -261,9 +273,9 @@ publications(generation_id PK, kind, github_id, posted_at)
   (`~/.cloudflared/cert.pem` does not exist today, and `cloudflared tunnel list` fails on
   it). Then `cloudflared tunnel create sdlc` and a DNS route for the webhook hostname.
 - A long-term Bedrock API key for the daemon, as above.
-- A new GitHub machine-user account with write access to `sblattj/sdlc-sandbox`, used
-  only as the second pusher and the foreign-status author in phase 1.
-- Registering the `sdlc` GitHub App from the rendered manifest and installing it on the
+- No second GitHub account: the repo owner's own `gh` login posts the foreign status in
+  phase 1, and the app is the approver.
+- Registering the `prxref-sdlc` GitHub App from the rendered manifest and installing it on the
   sandbox only; downloading its private key to the mode-0600 path.
 
 ## Operations
@@ -297,11 +309,13 @@ Unit tests, fake GitHub and fake LLM, under `tests/gate/`, one file per componen
 ## Live proof (sandbox)
 
 Repository `sblattj/sdlc-sandbox`, public, with the ruleset applied and the app installed
-only there. Identities: `sblattj` and a new machine user with write access. Keep the
+only there. Identities: the repo owner (`sblattj`) and the app. Keep the
 repo, PR, base, head, approval and ruleset constant across phases 1 and 2.
 
-1. Post a success *status* named `sdlc-review` from the machine user's token on the head.
-   Capture: the ruleset, the status, the PR `mergeable_state` showing `blocked`.
+1. Post a success *status* named `sdlc-review` from the repo owner's own `gh` login (an
+   account that is not the app) on the head. Capture: the ruleset, the status, the PR
+   `mergeable_state` showing `blocked`, proving the `integration_id` pin rejects a
+   same-named status from a non-app source.
 2. Let the app review the same head. Capture: the check run with `app.id` equal to the
    ruleset `integration_id`, `conclusion: success`, and `mergeable_state: clean`.
 3. Push a new commit. Capture: the previous approval dismissed, a new check run on the
