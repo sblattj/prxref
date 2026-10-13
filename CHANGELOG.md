@@ -10,6 +10,19 @@ tracker.
 
 ## [Unreleased]
 
+## [0.35.1] — 2026-10-12
+
+### Fixed
+
+- CI wiring: the built-in CI globs now find Azure Pipelines kept in `azure-pipelines/`,
+  `.azure-pipelines/` and `.azuredevops/`
+  ([#104](https://github.com/sblattj/prxref/issues/104)).
+- CI wiring: with no CI file found, one note replaces a "no CI job runs it" warning per
+  file ([#104](https://github.com/sblattj/prxref/issues/104)).
+- CI wiring: docs, JSON and other data, runner-collected test files and library modules
+  are no longer treated as checks; a `--check`/`--verify`/`--smoke` flag counts only where
+  it is defined ([#105](https://github.com/sblattj/prxref/issues/105)).
+
 ## [0.35.0] — 2026-10-12
 
 ### Added
@@ -3279,7 +3292,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.35.1...HEAD
+[0.35.1]: https://github.com/sblattj/prxref/releases/tag/v0.35.1
 [0.35.0]: https://github.com/sblattj/prxref/releases/tag/v0.35.0
 [0.34.0]: https://github.com/sblattj/prxref/releases/tag/v0.34.0
 [0.33.0]: https://github.com/sblattj/prxref/releases/tag/v0.33.0
