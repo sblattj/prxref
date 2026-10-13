@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:                    # no actions/checkout of the PR: see the note below
-      - uses: sblattj/prxref@v0.35.0
+      - uses: sblattj/prxref@v0.35.1
         with:
           llm-base-url: ${{ vars.PRXREF_LLM_BASE_URL }}
           llm-api-key: ${{ secrets.PRXREF_LLM_API_KEY }}
@@ -31,7 +31,7 @@ jobs:
 
 3. Open a pull request. prxref posts inline comments and a summary, and exits 0 on every review error, so it never blocks a merge.
 
-**Fork safety.** `pull_request_target` hands the job secrets and a write token even for a fork's pull request. That is safe only because prxref reads the diff over the GitHub API from the PR URL and the job never checks out or runs the pull request's code, so do not add an `actions/checkout` of the PR head to this job. The action honours that: it checks out nothing. Pin the prxref release with `version: "0.35.0"` (keep it in step with the action tag) for reproducible reviews; the other inputs are in [action.yml](action.yml). On GitLab, Bitbucket, Gitea, Azure DevOps, or your own server, see [Quickstart](#quickstart) and [docs/forges.md](docs/forges.md).
+**Fork safety.** `pull_request_target` hands the job secrets and a write token even for a fork's pull request. That is safe only because prxref reads the diff over the GitHub API from the PR URL and the job never checks out or runs the pull request's code, so do not add an `actions/checkout` of the PR head to this job. The action honours that: it checks out nothing. Pin the prxref release with `version: "0.35.1"` (keep it in step with the action tag) for reproducible reviews; the other inputs are in [action.yml](action.yml). On GitLab, Bitbucket, Gitea, Azure DevOps, or your own server, see [Quickstart](#quickstart) and [docs/forges.md](docs/forges.md).
 
 ```
                   ┌──────────────────────┐
@@ -160,8 +160,8 @@ pip install prxref           # into the current environment
 prxref review --pr-url https://github.com/org/repo/pull/123
 
 # Pin a version
-uvx prxref==0.35.0 review --pr-url https://github.com/org/repo/pull/123
-pipx install prxref==0.35.0
+uvx prxref==0.35.1 review --pr-url https://github.com/org/repo/pull/123
+pipx install prxref==0.35.1
 
 # Optional litellm backend extra
 pipx install 'prxref[litellm]'
