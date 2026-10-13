@@ -100,6 +100,7 @@ def build(settings: GateSettings, cfg: Mapping[str, Any], *, session: Any = None
     for secret in (
         cfg["gate_webhook_secret"],
         cfg["gate_webhook_secret_previous"],
+        cfg.get("llm_api_key", ""),
         os.environ.get(BEDROCK_KEY_ENV, ""),
     ):
         if secret:

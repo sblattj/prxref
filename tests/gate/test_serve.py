@@ -282,7 +282,7 @@ def test_a_gate_auth_error_from_build_exits_2(tmp_path, monkeypatch, capsys):
     assert "prxref gate: GitHub rejected the app JWT" in capsys.readouterr().err
 
 
-def test_build_registers_the_webhook_and_bedrock_secrets_for_redaction(tmp_path, monkeypatch):
+def test_build_registers_the_webhook_bedrock_and_llm_api_key_secrets_for_redaction(tmp_path, monkeypatch):
     class FakeAuth:
         def __init__(self, *a, **k):
             pass
@@ -297,6 +297,7 @@ def test_build_registers_the_webhook_and_bedrock_secrets_for_redaction(tmp_path,
     cfg = {
         "gate_webhook_secret": "whsec-abcdef123456",
         "gate_webhook_secret_previous": "whprev-abcdef123456",
+        "llm_api_key": "sk-or-v1-abcdef123456",
         "rules_source": "base",
         "llm_reasoning_effort": "",
     }
@@ -314,7 +315,7 @@ def test_build_registers_the_webhook_and_bedrock_secrets_for_redaction(tmp_path,
     )
     gate = serve.build(gs, cfg, session=object())
     try:
-        for secret in ("whsec-abcdef123456", "whprev-abcdef123456", "bedrock-key-0123456789"):
+        for secret in ("whsec-abcdef123456", "whprev-abcdef123456", "bedrock-key-0123456789", "sk-or-v1-abcdef123456"):
             assert worker._redact(f"leaked {secret} here") == "leaked [redacted] here"
     finally:
         gate.store.close()
