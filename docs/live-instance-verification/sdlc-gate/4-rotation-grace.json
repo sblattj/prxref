@@ -1,0 +1,62 @@
+{
+  "after_window_new_secret": [
+    {
+      "delivery": "79c40c59-82f6-4b46-95a0-907825dc9a3b",
+      "event": "pull_request",
+      "reply": {
+        "delivery": "79c40c59-82f6-4b46-95a0-907825dc9a3b",
+        "status": "accepted"
+      },
+      "status": 202
+    },
+    {
+      "delivery": "79c40c59-82f6-4b46-95a0-907825dc9a3b",
+      "event": "pull_request",
+      "reply": {
+        "delivery": "79c40c59-82f6-4b46-95a0-907825dc9a3b",
+        "status": "duplicate"
+      },
+      "status": 202
+    }
+  ],
+  "after_window_old_secret_sent_17:44:43": [
+    {
+      "delivery": "6191ab7e-7304-4d21-9be8-97ce4e3319e7",
+      "event": "pull_request",
+      "reply": {
+        "error": "signature rejected"
+      },
+      "status": 401
+    },
+    {
+      "delivery": "6191ab7e-7304-4d21-9be8-97ce4e3319e7",
+      "event": "pull_request",
+      "reply": {
+        "error": "signature rejected"
+      },
+      "status": 401
+    }
+  ],
+  "grace_minutes": 2,
+  "inside_window_old_secret": [
+    {
+      "delivery": "363c9dab-0379-4034-bfcf-262a8f6af7b7",
+      "event": "pull_request",
+      "reply": {
+        "delivery": "363c9dab-0379-4034-bfcf-262a8f6af7b7",
+        "status": "accepted"
+      },
+      "status": 202
+    },
+    {
+      "delivery": "363c9dab-0379-4034-bfcf-262a8f6af7b7",
+      "event": "pull_request",
+      "reply": {
+        "delivery": "363c9dab-0379-4034-bfcf-262a8f6af7b7",
+        "status": "duplicate"
+      },
+      "status": 202
+    }
+  ],
+  "restart_time": "17:41:09"
+}

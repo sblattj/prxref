@@ -1,0 +1,37 @@
+{
+  "check_run_after": {
+    "conclusion": "success",
+    "head_sha": "973f0e152f647e906d062855f4319cbd343de29f",
+    "id": 115072319004,
+    "name": "sdlc-review",
+    "status": "completed"
+  },
+  "check_run_seen_in_progress": 115072319004,
+  "generations": [
+    {
+      "attempts": 2,
+      "check_run_id": 115072100352,
+      "conclusion": "success",
+      "gen": 13,
+      "head_sha": "2715d3928f12e6b5eee8a75aad9026bca5092e4c",
+      "id": 14,
+      "reason": "synchronize",
+      "state": "completed"
+    },
+    {
+      "attempts": 2,
+      "check_run_id": 115072319004,
+      "conclusion": "success",
+      "gen": 14,
+      "head_sha": "973f0e152f647e906d062855f4319cbd343de29f",
+      "id": 15,
+      "reason": "synchronize",
+      "state": "completed"
+    }
+  ],
+  "log": [
+    "WARNING re-queued in-progress generations of a previous worker: [14]",
+    "WARNING re-queued in-progress generations of a previous worker: [15]"
+  ],
+  "note": "attempt 1 (first head) was restarted before its check run existed; attempt 2 restarted with the check run in_progress"
+}

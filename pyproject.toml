@@ -18,6 +18,7 @@ Changelog = "https://github.com/sblattj/prxref/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 litellm = ["litellm>=1.40"]
+github-app = ["pyjwt[crypto]>=2.8"]
 
 # The dev tools are a PEP 735 dependency group, NOT a project extra. uv installs
 # the default `dev` group automatically on `uv run` and `uv sync`; it installs an
@@ -26,13 +27,14 @@ litellm = ["litellm>=1.40"]
 # "Installed N packages" — which reads as a broken virtualenv, not a missing flag.
 # The trade-off is deliberate and one-way: dependency groups are not published in
 # wheel/sdist metadata, so `pip install prxref[dev]` no longer resolves them.
-# Contributors clone the repo and use uv; only `litellm` above is a real runtime
-# extra for users.
+# Contributors clone the repo and use uv; `litellm` and `github-app` above are the
+# real runtime extras for users.
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.6",
+    "pyjwt[crypto]>=2.8",
 ]
 
 [project.scripts]

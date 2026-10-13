@@ -10,6 +10,21 @@ tracker.
 
 ## [Unreleased]
 
+### Added
+
+- sdlc review gate ([#102](https://github.com/sblattj/prxref/issues/102)): `prxref gate
+  serve` runs a GitHub App webhook receiver, a single worker and a watchdog on one
+  SQLite file, and publishes a `sdlc-review` check run (Approved → `success`; every
+  other outcome, including a deadline hit or a crash, → `failure`). Every finished review
+  also posts an `APPROVE` (on success) or `REQUEST_CHANGES` review; a deadline hit or a
+  crash posts none, the failing check blocks. The App manifest's default name is
+  `prxref-sdlc` and its installation needs `contents: write` so the app's approval counts. Rules, rule packs and standards are read from the PR's base commit
+  (`PRXREF_RULES_SOURCE=base`, the gate's default). Every publish re-checks that the
+  PR's head and base have not moved. `prxref gate pause|resume|status`,
+  `render-manifest`, `render-ruleset` and `apply-ruleset [--diff]` operate it; twelve
+  `PRXREF_GATE_*` variables configure it; the new `github-app` extra brings PyJWT.
+  Runbook: `docs/gate.md`.
+
 ## [0.34.0] — 2026-10-07
 
 ### Added

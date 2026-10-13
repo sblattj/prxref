@@ -275,6 +275,20 @@ The service exposes:
 - `POST /webhook` — verifies HMAC or token signatures per forge (for Gitea and Forgejo, the `X-Forgejo-Signature` or `X-Gitea-Signature` HMAC against `PRXREF_GITEA_WEBHOOK_SECRET`, checked before the GitHub-compatible headers those forges also send; for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
+## Review Gate (GitHub App)
+
+`prxref review` and `prxref serve` advise; they never block a merge. To make a prxref
+review a **required check**, run the gate: a GitHub App (`prxref-sdlc`) that publishes a check
+run named `sdlc-review`, required by a repository ruleset bound to that app, with the
+review rules read from the PR's base commit.
+
+```bash
+pip install 'prxref[github-app,litellm]'
+prxref gate serve --env-file ~/.config/prxref-gate/env
+```
+
+Setup, launchd services, rotation and rollback: [docs/gate.md](docs/gate.md).
+
 ## Review Against a Spec or Ticket
 
 Give prxref the spec or ticket a change implements, and the review also checks the diff against it. A source is a public web page, a local file, a local directory (up to 20 `.md`, `.markdown`, `.txt` or `.adoc` files directly inside it), or a Jira ticket URL:
@@ -509,6 +523,8 @@ The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs
 `prxref prompts export DIR [--force]` writes the packaged `worker.md`, `systemic.md` and `summary.md` prompt templates into `DIR`, byte for byte, as the starting point for a `PRXREF_PROMPTS_DIR` override directory, and prints each path it wrote. It creates `DIR` when it is missing. When any of the three files already exists it overwrites nothing, writes nothing, and exits `2` naming the file; `--force` overwrites them. The judge prompt of `prxref eval` is never exported, because it cannot be overridden. How to edit and use the exported templates: [Prompt Template Overrides](#prompt-template-overrides).
 
 `prxref learnings harvest --pr-url URL [--out FILE]` reads the PR's threads and prints one candidate `[[learning]]` entry, as TOML, for each prxref comment a human closed as won't fix. It goes to stdout, or to `FILE`. prxref never writes the learnings file into the repository; a human edits the candidates and commits the ones the team keeps. It exits `2` for an unrecognised URL or an unwritable `--out`, and `1` when the forge cannot be read. See [docs/learnings.md](docs/learnings.md).
+
+`prxref gate serve --env-file PATH [--host HOST] [--port PORT]` runs the sdlc review gate (#102): a GitHub App's webhook receiver, review worker and watchdog in one process, reading its credentials from a mode-0600 `KEY=VALUE` file and defaulting `PRXREF_RULES_SOURCE` to `base`. `prxref gate pause|resume|status --env-file PATH` stops or restarts dequeuing and shows the queue; `prxref gate render-manifest --webhook-url URL` and `prxref gate render-ruleset --integration-id ID` print the App manifest and the `sdlc-review` ruleset; `prxref gate apply-ruleset --repo OWNER/NAME --integration-id ID [--diff]` applies the ruleset with your `gh` (`--diff` changes nothing and exits `1` on drift). Exit `2` is a configuration error or the missing `github-app` extra.
 
 `prxref eval` scores [replays](#replay-mode-evaluation) against labelled human findings. It never posts, and it adds no environment variable. Its seven actions:
 

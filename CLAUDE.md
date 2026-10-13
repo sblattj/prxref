@@ -56,8 +56,9 @@ auto-detects the forge.
   `_FLOAT_KEYS` / `_RANGES` / `_CHOICE_KEYS` tables. A new key needs those
   tables, the `config.py` docstring, `.env.example`, `docs/env-vars.md`, and a
   classification into `FILE_KEYS` (`.prxref.toml`, between defaults and env)
-  or `ENV_ONLY_KEYS` with its row in `docs/config-file.md`; a test enforces
-  the partition. Anything that names a host, runs a program, writes a file or
+  or `ENV_ONLY_KEYS` with its row in `docs/config-file.md`;
+  `tests/test_issue_38_config_file.py` (`EXPECTED_ENV_ONLY`) enforces the
+  partition. Anything that names a host, runs a program, writes a file or
   reads outside the repo is env-only. Renaming a file key in a release needs
   an alias, or existing `.prxref.toml` files exit 2.
 - every posted comment carries model attribution

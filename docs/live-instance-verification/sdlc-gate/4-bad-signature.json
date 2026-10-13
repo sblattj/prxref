@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {
+      "delivery": "c87749b6-325e-49e6-b784-fa82c43efae0",
+      "event": "pull_request",
+      "reply": {
+        "error": "signature rejected"
+      },
+      "status": 401
+    }
+  ]
+}

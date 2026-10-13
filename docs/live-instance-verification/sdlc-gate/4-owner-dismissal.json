@@ -1,0 +1,82 @@
+[
+  {
+    "_links": {
+      "html": {
+        "href": "https://github.com/sblattj/sdlc-sandbox/pull/7#pullrequestreview-5497342247"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/7"
+      }
+    },
+    "author_association": "NONE",
+    "body": "<!-- sdlc-gate:generation=1 -->\nsdlc review: approved - 0 inline finding(s).",
+    "commit_id": "3ef4a7cc4a568c42d961c267d1e29b40e9b39378",
+    "html_url": "https://github.com/sblattj/sdlc-sandbox/pull/7#pullrequestreview-5497342247",
+    "id": 5497342247,
+    "node_id": "PRR_kwDOVFPRas8AAAABR6rJJw",
+    "pull_request_url": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/7",
+    "state": "DISMISSED",
+    "submitted_at": "2026-10-13T00:23:07Z",
+    "user": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/5125883?v=4",
+      "events_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/events{/privacy}",
+      "followers_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/apps/prxref-sdlc",
+      "id": 341146397,
+      "login": "prxref-sdlc[bot]",
+      "node_id": "BOT_kgDOFFV7HQ",
+      "organizations_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/orgs",
+      "received_events_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/received_events",
+      "repos_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/subscriptions",
+      "type": "Bot",
+      "url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D",
+      "user_view_type": "public"
+    }
+  },
+  {
+    "_links": {
+      "html": {
+        "href": "https://github.com/sblattj/sdlc-sandbox/pull/7#pullrequestreview-5497355706"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/7"
+      }
+    },
+    "author_association": "NONE",
+    "body": "<!-- sdlc-gate:generation=2 -->\nsdlc review: approved - 0 inline finding(s).",
+    "commit_id": "260b952648dea5fd185a5efb18601f7282558416",
+    "html_url": "https://github.com/sblattj/sdlc-sandbox/pull/7#pullrequestreview-5497355706",
+    "id": 5497355706,
+    "node_id": "PRR_kwDOVFPRas8AAAABR6r9ug",
+    "pull_request_url": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/7",
+    "state": "DISMISSED",
+    "submitted_at": "2026-10-13T00:24:59Z",
+    "user": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/5125883?v=4",
+      "events_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/events{/privacy}",
+      "followers_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/apps/prxref-sdlc",
+      "id": 341146397,
+      "login": "prxref-sdlc[bot]",
+      "node_id": "BOT_kgDOFFV7HQ",
+      "organizations_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/orgs",
+      "received_events_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/received_events",
+      "repos_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/subscriptions",
+      "type": "Bot",
+      "url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D",
+      "user_view_type": "public"
+    }
+  }
+]
