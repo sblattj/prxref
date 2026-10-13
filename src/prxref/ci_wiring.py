@@ -78,6 +78,9 @@ DEFAULT_CI_GLOBS: tuple[str, ...] = (
     ".github/workflows/*.y*ml",
     ".gitlab-ci.yml",
     "azure-pipelines.yml",
+    "azure-pipelines/*.y*ml",
+    ".azure-pipelines/*.y*ml",
+    ".azuredevops/**/*.y*ml",
     ".circleci/config.yml",
     "Jenkinsfile",
     "bitbucket-pipelines.yml",
@@ -433,12 +436,132 @@ def target_candidates(
     return out
 
 
+#: The extensions of files that can be run as a check: scripts and source
+#: code. Everything else (prose, data, config, images, lockfiles) is never
+#: check-shaped, whatever its name or the flags its text mentions: a
+#: ``.md`` that says "gains a --check flag" documents a check, it is not
+#: one. An allowlist, so a kind nobody listed (``.rst``, ``.adoc``,
+#: ``.ini``, ``.csv``) stays out by default.
+_SCRIPT_EXTENSIONS = frozenset({
+    ".sh", ".bash", ".zsh", ".ksh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
+    ".py", ".rb", ".pl", ".pm", ".php", ".lua", ".r", ".jl", ".ex", ".exs",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts",
+    ".go", ".rs", ".java", ".kt", ".kts", ".swift", ".cs", ".fsx", ".groovy",
+    ".scala", ".clj", ".dart",
+})
+
+#: Script kinds no test runner collects: a file of one of these under
+#: ``tests/`` still needs a CI step, unlike a ``*.test.js`` the runner finds.
+_SHELL_EXTENSIONS = frozenset({
+    ".sh", ".bash", ".zsh", ".ksh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
+})
+
+#: Languages where "has an entry point" is decidable from the text, so a
+#: module without one that a sibling file imports is a library.
+_ENTRY_EXTENSIONS = frozenset({
+    ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts",
+})
+
+# The entry-point spellings: a shebang line, a Python main guard, Node's
+# ``require.main`` and ESM ``import.meta.main``.
+_ENTRY_RE = re.compile(
+    r"""^#!|__name__\s*==\s*['"]__main__['"]|require\.main\s*===?\s*module"""
+    r"""|import\.meta\.main""",
+    re.M,
+)
+
+# A line that imports a module: an importing keyword.
+_IMPORT_LINE_RE = re.compile(r"\b(?:import|require|from|source|include)\b")
+
+
+def _extension(path: str) -> str:
+    return PurePosixPath(path).suffix.lower()
+
+
+def _has_shebang(file: FileDiff) -> bool:
+    """True when the file's first line, added or context, is a shebang."""
+    return any(
+        ln.new_line == 1 and ln.text.startswith("#!")
+        for hunk in file.hunks
+        for ln in hunk.lines
+        if ln.kind != "-"
+    )
+
+
+def _executable_kind(file: FileDiff) -> bool:
+    """True when ``file`` is a script or source file, the only kind a check can be.
+
+    A listed script extension, or an extensionless file that starts with a
+    shebang. Docs, JSON and other data, config and extensionless files with
+    no shebang are never checks.
+    """
+    ext = _extension(file.path)
+    if ext:
+        return ext in _SCRIPT_EXTENSIONS
+    return not PurePosixPath(file.path).name.startswith(".") and _has_shebang(file)
+
+
+def _runner_collects(path: str) -> bool:
+    """True when a test runner finds ``path`` by itself, so CI runs it with the suite.
+
+    :func:`default_include` minus the shell-script kinds, which no runner
+    collects even under ``tests/``.
+    """
+    return default_include(path) and _extension(path) not in _SHELL_EXTENSIONS
+
+
+def _is_library(file: FileDiff, files: Sequence[FileDiff]) -> bool:
+    """True when ``file`` has no entry point and another changed file imports it."""
+    if _extension(file.path) not in _ENTRY_EXTENSIONS:
+        return False
+    if any(_ENTRY_RE.search(text) for _, text in _added_lines(file)):
+        return False
+    stem = re.escape(PurePosixPath(file.path).stem)
+    mention = re.compile(rf"(?<![\w-]){stem}(?![\w-])")
+    return any(
+        other.path != file.path
+        and other.status != "removed"
+        and any(
+            _IMPORT_LINE_RE.search(text) and mention.search(text)
+            for _, text in _added_lines(other)
+        )
+        for other in files
+    )
+
+
+def _defines_flag(text: str, flag: str) -> bool:
+    """True when ``text`` defines ``--flag`` rather than mentions it.
+
+    The flag as a whole string literal (``add_argument('--check')``,
+    ``.option('--check <dir>')``, ``argv.includes("--check")``) or a shell
+    ``case`` pattern (``--check)``, ``-c|--check)``). Prose and help text
+    that merely contains the flag, a flag inside a longer string, and a
+    comment line do not.
+    """
+    stripped = text.strip()
+    if stripped.startswith(("//", "/*", "*", '"""', "'''")) or (
+        stripped.startswith("#") and not stripped.startswith("#!")
+    ):
+        return False
+    f = re.escape(f"--{flag}")
+    literal = rf"""['"]{f}(?:=\S*?|\s+[<\[][^'"]*)?['"]"""
+    case = rf"(?:^|\|)\s*{f}\s*(?:\||\))"
+    return bool(re.search(literal, text) or re.search(case, stripped))
+
+
 def candidate_checks(
     files: Sequence[FileDiff],
     *,
     read: Callable[[str], str | None] | None = None,
 ) -> list[CiCandidate]:
     """The check-shaped files and runner targets among ``files``.
+
+    Only a script or source file can be a check (:func:`_executable_kind`):
+    docs, JSON and other data never are. A test file the suite's runner
+    collects (:func:`_runner_collects`) is not one either, and a module with
+    no entry point that another changed file imports is a library
+    (:func:`_is_library`). A ``--flag`` counts only on a line that defines it
+    (:func:`_defines_flag`), not in prose or help text.
 
     A file that is not ``removed`` counts when it is new (any status but
     ``modified``) and its basename contains a :data:`CI_SUFFIX_HINT` word
@@ -459,8 +582,10 @@ def candidate_checks(
         if file.status == "removed":
             continue
         path = file.path
+        if not _executable_kind(file) or _runner_collects(path):
+            continue  # docs and data are never checks; the suite's runner finds tests
         fresh = file.status != "modified"
-        if fresh:
+        if fresh and not _is_library(file, files):
             hint = _hint_in_tokens(_name_tokens(PurePosixPath(path).name))
             if hint is not None:
                 candidates[path] = (f"its name mentions {hint!r}", True)
@@ -475,7 +600,7 @@ def candidate_checks(
         flag_hint: str | None = None
         for _, text in _added_lines(file):
             for flag in _FLAG_RE.findall(text):
-                if flag in dropped:
+                if flag in dropped or not _defines_flag(text, flag):
                     continue
                 flag_hint = flag_hint or _hint_in_tokens(_name_tokens(flag))
         if flag_hint is not None:
@@ -998,7 +1123,30 @@ def ci_wiring_findings(
         else "- (no CI configuration file was found)"
     )
     findings: list[Finding] = []
-    for candidate in candidates:
+    if not texts:
+        # No CI file was read, so no per-file claim can be checked: one note
+        # for the whole run, not a "no CI job runs it" warning per candidate.
+        labels = ", ".join(f"`{candidate.label}`" for candidate in candidates)
+        findings.append(Finding(
+            file=candidates[0].path,
+            line=0,
+            severity=severity,
+            confidence=1.0,
+            title=(
+                "No CI configuration found; cannot check "
+                + (f"`{candidates[0].label}`" if len(candidates) == 1
+                   else f"{len(candidates)} added checks")
+                + " (set ci_wiring_globs)"
+            ),
+            body=(
+                f"This PR adds check-shaped files ({labels}), but no CI "
+                f"configuration file was found, so the run cannot tell whether "
+                f"CI runs them. If the repository's pipeline lives at a custom "
+                f"path, set `ci_wiring_globs` (`PRXREF_CI_WIRING_GLOBS`) to "
+                f"it.{_BODY_SUFFIX}"
+            ),
+        ))
+    for candidate in candidates if texts else ():
         verb = "added" if candidate.new else "changed"
         if any(
             invokes(text, ci_path, candidate, runners=runners)
