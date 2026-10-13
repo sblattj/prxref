@@ -43,7 +43,7 @@ new head again.
 | close-reopen | paused, pushed `bfdecc8`, closed: queued gen 8 `cancelled`; reopened: gen 9 `reopened` completed `success`, check run 115071361079 | [4-close-reopen.json](4-close-reopen.json) |
 | publish-5xx | in-process gate with injected 502: stderr `injected 502 after GitHub answered 201`; head `26da6bd` has exactly one `sdlc-review` check run, 115071894735, `success` | [4-publish-5xx.json](4-publish-5xx.json) |
 | worker-restart | SIGTERM+start while check run 115072319004 was `in_progress` (head `973f0e1`): log `re-queued in-progress generations of a previous worker`; the same check run concluded `success` | [4-worker-restart.json](4-worker-restart.json) |
-| secret-rotation | grace 2 min, restart 17:41:09; old-secret delivery at 17:41 accepted (202), at 17:44:43 rejected (401); new secret accepted | [4-rotation-grace.json](4-secret-rotation.json) |
+| secret-rotation | grace 2 min, restart 17:41:09; old-secret delivery at 17:41 accepted (202), at 17:44:43 rejected (401); new secret accepted | [4-rotation-grace.json](4-rotation-grace.json) |
 
 ## Findings (behaved differently from the plan or spec)
 
@@ -57,6 +57,8 @@ new head again.
   attempts. Reviewing the receiver: a rerequest whose payload lacks a base is stale, not repaired.
 - **A bad signature is not recorded in `last_auth_failure`.** `/health` and `gate status` showed `null` after
   the 401 (the 401 appears in the access log).
+  `last_auth_failure` covers model-key and auth outcomes only (it reads the `Error` verdict line stored by
+  `_error_reason` in `src/prxref/gate/worker.py`), so `null` after a 401 bad signature is expected.
 - **Free-model flakes fail safe.** On the second stale-head head `56e002a`, the sweep got a `malformed response
   (KeyError)` and the check concluded `failure` / Incomplete instead of `success`. A reply with no `findings`
   list also triggered one parse retry on another review. No 429 was seen.
