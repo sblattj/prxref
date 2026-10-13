@@ -20,6 +20,13 @@ Same head `3ef4a7c`, gate resumed. Check run **115067619961**: `sdlc-review`, `s
 ([2-check-run.json](2-check-run.json)). `prxref-sdlc[bot]` (Bot) `APPROVED`
 ([2-app-review.json](2-app-review.json)). PR `mergeable_state: clean` ([2-pr-clean.json](2-pr-clean.json)).
 
+Re-run on the released **0.35.0** (launchd service `dev.prxref.gate`, `~/.local/bin/prxref`), one clean commit
+pushed to `proof`, new head `309f9214c39d558bad7045ef9881aae8d3f13fd3` (same base): check run
+**115112524659**, `sdlc-review`, `success`, `app.id` 5278363
+([2-check-run-0.35.0.json](2-check-run-0.35.0.json)); PR `mergeable_state: clean`
+([2-pr-clean-0.35.0.json](2-pr-clean-0.35.0.json)); `prxref-sdlc[bot]` `APPROVED` on that head. Both index
+entries record `gate_version: 0.35.0`. No retry was needed.
+
 ## Phase 3: a new push dismisses the approval and re-gates
 
 Push to head `260b952648dea5fd185a5efb18601f7282558416`: the earlier approval became `DISMISSED`

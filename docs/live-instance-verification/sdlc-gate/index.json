@@ -66,6 +66,19 @@
   },
   {
     "phase": "2",
+    "name": "check-run-0.35.0",
+    "file": "2-check-run-0.35.0.json",
+    "repo": "sblattj/sdlc-sandbox",
+    "pr": 7,
+    "head_sha": "309f9214c39d558bad7045ef9881aae8d3f13fd3",
+    "base_sha": "c85ee0b56e3227644b35c2fe5198d94f9f6d36c7",
+    "ruleset_id": 24960663,
+    "app_id": 5278363,
+    "check_run_id": 115112524659,
+    "gate_version": "0.35.0"
+  },
+  {
+    "phase": "2",
     "name": "pr-clean",
     "file": "2-pr-clean.json",
     "repo": "sblattj/sdlc-sandbox",
@@ -76,6 +89,19 @@
     "app_id": 5278363,
     "check_run_id": 115067619961,
     "gate_version": "0.34.0"
+  },
+  {
+    "phase": "2",
+    "name": "pr-clean-0.35.0",
+    "file": "2-pr-clean-0.35.0.json",
+    "repo": "sblattj/sdlc-sandbox",
+    "pr": 7,
+    "head_sha": "309f9214c39d558bad7045ef9881aae8d3f13fd3",
+    "base_sha": "c85ee0b56e3227644b35c2fe5198d94f9f6d36c7",
+    "ruleset_id": 24960663,
+    "app_id": 5278363,
+    "check_run_id": 115112524659,
+    "gate_version": "0.35.0"
   },
   {
     "phase": "3",
