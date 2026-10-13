@@ -1,0 +1,44 @@
+{
+  "first_head_check_runs": [
+    {
+      "conclusion": null,
+      "head_sha": "7a4e5bf963fd9f639982b931c8a235d9f629d460",
+      "id": 115071013187,
+      "name": "sdlc-review",
+      "status": "in_progress"
+    }
+  ],
+  "generations": [
+    {
+      "check_run_id": 115071013187,
+      "conclusion": null,
+      "error": "head moved",
+      "gen": 6,
+      "head_sha": "7a4e5bf963fd9f639982b931c8a235d9f629d460",
+      "id": 7,
+      "pr_number": 7,
+      "reason": "synchronize",
+      "state": "stale"
+    },
+    {
+      "check_run_id": 115071140702,
+      "conclusion": "failure",
+      "error": null,
+      "gen": 7,
+      "head_sha": "56e002ad0f002fd75676f1f6bf4aaab34923d6bf",
+      "id": 8,
+      "pr_number": 7,
+      "reason": "synchronize",
+      "state": "completed"
+    }
+  ],
+  "second_head_check_runs": [
+    {
+      "conclusion": "failure",
+      "head_sha": "56e002ad0f002fd75676f1f6bf4aaab34923d6bf",
+      "id": 115071140702,
+      "name": "sdlc-review",
+      "status": "completed"
+    }
+  ]
+}

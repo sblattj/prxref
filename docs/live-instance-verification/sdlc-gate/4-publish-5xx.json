@@ -1,0 +1,26 @@
+{
+  "generations": [
+    {
+      "check_run_id": 115071894735,
+      "conclusion": "success",
+      "error": null,
+      "gen": 12,
+      "head_sha": "26da6bda7eddb65ca4c156fbac75cccff261fddc",
+      "id": 13,
+      "reason": "synchronize",
+      "state": "completed"
+    }
+  ],
+  "sdlc_review_check_runs": [
+    {
+      "conclusion": "success",
+      "head_sha": "26da6bda7eddb65ca4c156fbac75cccff261fddc",
+      "id": 115071894735,
+      "name": "sdlc-review",
+      "status": "completed"
+    }
+  ],
+  "stderr": [
+    "injected 502 after GitHub answered 201"
+  ]
+}

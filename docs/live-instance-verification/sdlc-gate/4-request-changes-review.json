@@ -1,0 +1,42 @@
+[
+  {
+    "_links": {
+      "html": {
+        "href": "https://github.com/sblattj/sdlc-sandbox/pull/8#pullrequestreview-5497422919"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/8"
+      }
+    },
+    "author_association": "NONE",
+    "body": "<!-- sdlc-gate:generation=3 -->\nsdlc review: changes requested - 7 inline finding(s).",
+    "commit_id": "dfcf9a28309bcea83c08c1d39ea809e913ac298c",
+    "html_url": "https://github.com/sblattj/sdlc-sandbox/pull/8#pullrequestreview-5497422919",
+    "id": 5497422919,
+    "node_id": "PRR_kwDOVFPRas8AAAABR6wERw",
+    "pull_request_url": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/8",
+    "state": "CHANGES_REQUESTED",
+    "submitted_at": "2026-10-13T00:32:46Z",
+    "user": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/5125883?v=4",
+      "events_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/events{/privacy}",
+      "followers_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/apps/prxref-sdlc",
+      "id": 341146397,
+      "login": "prxref-sdlc[bot]",
+      "node_id": "BOT_kgDOFFV7HQ",
+      "organizations_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/orgs",
+      "received_events_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/received_events",
+      "repos_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D/subscriptions",
+      "type": "Bot",
+      "url": "https://api.github.com/users/prxref-sdlc%5Bbot%5D",
+      "user_view_type": "public"
+    }
+  }
+]

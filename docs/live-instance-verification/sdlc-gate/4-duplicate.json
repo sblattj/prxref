@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "delivery": "de91d28d-41f6-4881-bccf-a6e267c215a0",
+      "event": "pull_request",
+      "reply": {
+        "delivery": "de91d28d-41f6-4881-bccf-a6e267c215a0",
+        "status": "accepted"
+      },
+      "status": 202
+    },
+    {
+      "delivery": "de91d28d-41f6-4881-bccf-a6e267c215a0",
+      "event": "pull_request",
+      "reply": {
+        "delivery": "de91d28d-41f6-4881-bccf-a6e267c215a0",
+        "status": "duplicate"
+      },
+      "status": 202
+    }
+  ]
+}

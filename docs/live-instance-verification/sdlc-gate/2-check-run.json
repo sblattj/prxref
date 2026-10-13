@@ -1,0 +1,93 @@
+{
+  "app": {
+    "client_id": "Iv23lifkkJMdMEg3igru",
+    "created_at": "2026-10-11T21:30:32Z",
+    "description": "",
+    "events": [
+      "check_run",
+      "check_suite",
+      "pull_request"
+    ],
+    "external_url": "https://github.com/sblattj/prxref",
+    "html_url": "https://github.com/apps/prxref-sdlc",
+    "id": 5278363,
+    "name": "prxref-sdlc",
+    "node_id": "A_kwDOAE42-84AUIqb",
+    "owner": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/5125883?v=4",
+      "events_url": "https://api.github.com/users/sblattj/events{/privacy}",
+      "followers_url": "https://api.github.com/users/sblattj/followers",
+      "following_url": "https://api.github.com/users/sblattj/following{/other_user}",
+      "gists_url": "https://api.github.com/users/sblattj/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/sblattj",
+      "id": 5125883,
+      "login": "sblattj",
+      "node_id": "MDQ6VXNlcjUxMjU4ODM=",
+      "organizations_url": "https://api.github.com/users/sblattj/orgs",
+      "received_events_url": "https://api.github.com/users/sblattj/received_events",
+      "repos_url": "https://api.github.com/users/sblattj/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/sblattj/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/sblattj/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/sblattj",
+      "user_view_type": "public"
+    },
+    "permissions": {
+      "checks": "write",
+      "contents": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "slug": "prxref-sdlc",
+    "updated_at": "2026-10-13T00:19:02Z"
+  },
+  "check_suite": {
+    "id": 103842436478
+  },
+  "completed_at": "2026-10-13T00:23:09Z",
+  "conclusion": "success",
+  "details_url": "https://github.com/sblattj/sdlc-sandbox/pull/7/checks",
+  "external_id": "1",
+  "head_sha": "3ef4a7cc4a568c42d961c267d1e29b40e9b39378",
+  "html_url": "https://github.com/sblattj/sdlc-sandbox/runs/115067619961",
+  "id": 115067619961,
+  "name": "sdlc-review",
+  "node_id": "CR_kwDOVFPRas8AAAAaypCKeQ",
+  "output": {
+    "annotations_count": 0,
+    "annotations_url": "https://api.github.com/repos/sblattj/sdlc-sandbox/check-runs/115067619961/annotations",
+    "summary": "## prxref automated review: Approved\n\nPR: proof: hello \u00b7 files reviewed: 1\n\n\ud83d\udfe5 0 error \u00b7 \ud83d\udfe7 0 warning \u00b7 \ud83d\udd0d 0 spec \u00b7 \u2b1c 0 outofscope\n\nNo findings \u2014 nice work.\n\n---\n\nReviewed by prxref \u00b7 model=nvidia/nemotron-3-ultra-550b-a55b:free \u00b7 3721 tok \u00b7 33.8s\n\n\n---\n\n**success**: approved\n\n- Verdict: Approved\n- Model: nvidia/nemotron-3-ultra-550b-a55b:free (effort: medium)\n- Tokens: 3241 in, 480 out\n- Chunks reviewed: 2/2 (0 failed)\n- Base: `c85ee0b56e3227644b35c2fe5198d94f9f6d36c7` (main); head: `3ef4a7cc4a568c42d961c267d1e29b40e9b39378`\n- Generation 1; run record: `runs/1`",
+    "text": null,
+    "title": "sdlc review: success"
+  },
+  "pull_requests": [
+    {
+      "base": {
+        "ref": "main",
+        "repo": {
+          "id": 1414779242,
+          "name": "sdlc-sandbox",
+          "url": "https://api.github.com/repos/sblattj/sdlc-sandbox"
+        },
+        "sha": "c85ee0b56e3227644b35c2fe5198d94f9f6d36c7"
+      },
+      "head": {
+        "ref": "proof",
+        "repo": {
+          "id": 1414779242,
+          "name": "sdlc-sandbox",
+          "url": "https://api.github.com/repos/sblattj/sdlc-sandbox"
+        },
+        "sha": "3ef4a7cc4a568c42d961c267d1e29b40e9b39378"
+      },
+      "id": 4836571651,
+      "number": 7,
+      "url": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/7"
+    }
+  ],
+  "started_at": "2026-10-13T00:22:31Z",
+  "status": "completed",
+  "url": "https://api.github.com/repos/sblattj/sdlc-sandbox/check-runs/115067619961"
+}

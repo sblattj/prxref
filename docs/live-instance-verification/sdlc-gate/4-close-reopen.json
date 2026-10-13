@@ -1,0 +1,35 @@
+{
+  "check_runs": [
+    {
+      "conclusion": "success",
+      "head_sha": "bfdecc8ae34bbaeba7ba6d40cf052a95a3d80f24",
+      "id": 115071361079,
+      "name": "sdlc-review",
+      "status": "completed"
+    }
+  ],
+  "generations": [
+    {
+      "check_run_id": null,
+      "conclusion": null,
+      "error": null,
+      "gen": 8,
+      "head_sha": "bfdecc8ae34bbaeba7ba6d40cf052a95a3d80f24",
+      "id": 9,
+      "pr_number": 7,
+      "reason": "synchronize",
+      "state": "cancelled"
+    },
+    {
+      "check_run_id": 115071361079,
+      "conclusion": "success",
+      "error": null,
+      "gen": 9,
+      "head_sha": "bfdecc8ae34bbaeba7ba6d40cf052a95a3d80f24",
+      "id": 10,
+      "pr_number": 7,
+      "reason": "reopened",
+      "state": "completed"
+    }
+  ]
+}

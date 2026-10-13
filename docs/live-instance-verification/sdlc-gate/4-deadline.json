@@ -1,0 +1,93 @@
+{
+  "app": {
+    "client_id": "Iv23lifkkJMdMEg3igru",
+    "created_at": "2026-10-11T21:30:32Z",
+    "description": "",
+    "events": [
+      "check_run",
+      "check_suite",
+      "pull_request"
+    ],
+    "external_url": "https://github.com/sblattj/prxref",
+    "html_url": "https://github.com/apps/prxref-sdlc",
+    "id": 5278363,
+    "name": "prxref-sdlc",
+    "node_id": "A_kwDOAE42-84AUIqb",
+    "owner": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/5125883?v=4",
+      "events_url": "https://api.github.com/users/sblattj/events{/privacy}",
+      "followers_url": "https://api.github.com/users/sblattj/followers",
+      "following_url": "https://api.github.com/users/sblattj/following{/other_user}",
+      "gists_url": "https://api.github.com/users/sblattj/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/sblattj",
+      "id": 5125883,
+      "login": "sblattj",
+      "node_id": "MDQ6VXNlcjUxMjU4ODM=",
+      "organizations_url": "https://api.github.com/users/sblattj/orgs",
+      "received_events_url": "https://api.github.com/users/sblattj/received_events",
+      "repos_url": "https://api.github.com/users/sblattj/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/sblattj/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/sblattj/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/sblattj",
+      "user_view_type": "public"
+    },
+    "permissions": {
+      "checks": "write",
+      "contents": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "slug": "prxref-sdlc",
+    "updated_at": "2026-10-13T00:19:02Z"
+  },
+  "check_suite": {
+    "id": 103845980747
+  },
+  "completed_at": "2026-10-13T00:38:22Z",
+  "conclusion": "failure",
+  "details_url": "https://github.com/sblattj/sdlc-sandbox/pull/7/checks",
+  "external_id": "12",
+  "head_sha": "2ad09ab7d0b8f6f9b6c3a932e4c238b678a62526",
+  "html_url": "https://github.com/sblattj/sdlc-sandbox/runs/115071705158",
+  "id": 115071705158,
+  "name": "sdlc-review",
+  "node_id": "CR_kwDOVFPRas8AAAAays7gRg",
+  "output": {
+    "annotations_count": 0,
+    "annotations_url": "https://api.github.com/repos/sblattj/sdlc-sandbox/check-runs/115071705158/annotations",
+    "summary": "**failure**: deadline: review exceeded 20s",
+    "text": null,
+    "title": "sdlc review: failure"
+  },
+  "pull_requests": [
+    {
+      "base": {
+        "ref": "main",
+        "repo": {
+          "id": 1414779242,
+          "name": "sdlc-sandbox",
+          "url": "https://api.github.com/repos/sblattj/sdlc-sandbox"
+        },
+        "sha": "c85ee0b56e3227644b35c2fe5198d94f9f6d36c7"
+      },
+      "head": {
+        "ref": "proof",
+        "repo": {
+          "id": 1414779242,
+          "name": "sdlc-sandbox",
+          "url": "https://api.github.com/repos/sblattj/sdlc-sandbox"
+        },
+        "sha": "2ad09ab7d0b8f6f9b6c3a932e4c238b678a62526"
+      },
+      "id": 4836571651,
+      "number": 7,
+      "url": "https://api.github.com/repos/sblattj/sdlc-sandbox/pulls/7"
+    }
+  ],
+  "started_at": "2026-10-13T00:38:01Z",
+  "status": "completed",
+  "url": "https://api.github.com/repos/sblattj/sdlc-sandbox/check-runs/115071705158"
+}
