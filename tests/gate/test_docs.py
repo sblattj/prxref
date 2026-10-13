@@ -52,5 +52,5 @@ def test_rollback_deletes_the_ruleset_before_anything_else():
 def test_readme_and_changelog_point_at_the_gate():
     assert "docs/gate.md" in (ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    unreleased = changelog.split("## [0.35.0]", 1)[1].split("\n## [", 1)[0]
     assert "https://github.com/sblattj/prxref/issues/102" in unreleased

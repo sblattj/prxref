@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-10-12
+
 ### Added
 
 - sdlc review gate ([#102](https://github.com/sblattj/prxref/issues/102)): `prxref gate
@@ -3277,7 +3279,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/sblattj/prxref/releases/tag/v0.35.0
 [0.34.0]: https://github.com/sblattj/prxref/releases/tag/v0.34.0
 [0.33.0]: https://github.com/sblattj/prxref/releases/tag/v0.33.0
 [0.32.3]: https://github.com/sblattj/prxref/releases/tag/v0.32.3
