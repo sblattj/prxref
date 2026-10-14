@@ -547,10 +547,15 @@ LLM / pipeline:
                                 written, and the author's original is kept
                                 verbatim below it in a collapsed "Original
                                 description" section; the review prompts
-                                read only the original. Costs one extra LLM
-                                call and one forge write per run. Matched
-                                exactly; any other value is a configuration
-                                error
+                                read only the original. Runs only when the
+                                run posts (never with --no-post,
+                                PRXREF_DRY_RUN or a replay). Costs one extra
+                                LLM call and one forge write per new PR
+                                head; a head already described is left
+                                alone, "force" included. A failure is
+                                recorded and never changes the verdict.
+                                Matched exactly; any other value is a
+                                configuration error
   PRXREF_LABELS                 PR auto-labels (#37): "off" (the default)
                                 applies none. "existing" applies the
                                 proposed conventional labels (feat, fix,
@@ -563,6 +568,8 @@ LLM / pipeline:
                                 one. "create" applies the conventional names
                                 and creates any the repository lacks. Forges
                                 without PR labels (Bitbucket) skip it.
+                                Applied only when PRXREF_DESCRIBE writes a
+                                description.
                                 Matched exactly; any other value is a
                                 configuration error
   PRXREF_FALLBACK               Where the review goes when a post fails

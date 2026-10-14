@@ -1226,11 +1226,14 @@ def _build_json_result(result: Any) -> dict:
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
     ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
-    ``config_file``, ``review_depth``, ``learnings``, then ``sampling`` and
+    ``config_file``, ``review_depth``, ``learnings``, ``describe``, then ``sampling`` and
     ``replay`` when present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH``
     value the run used (``"standard"`` or ``"thorough"``), ``null`` only
     when the result carries none. ``learnings`` is the learnings-file record
     (#33), ``null`` when no ``PRXREF_LEARNINGS_FILE`` was loaded.
+    ``describe`` is the PR auto-description record (#37), ``null`` when
+    ``PRXREF_DESCRIBE`` is ``off``; otherwise ``{mode, written, reason,
+    head, labels_mode, labels_applied, labels_reason, error}``.
     ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
     ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
@@ -1338,6 +1341,7 @@ def _build_json_result(result: Any) -> dict:
         "config_file": result.get("config_file"),
         "review_depth": result.get("review_depth"),
         "learnings": result.get("learnings"),
+        "describe": result.get("describe"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -2032,6 +2036,8 @@ def _run_review(
         verdict_store=cfg["verdict_store"],
         learnings=inputs.learnings,
         rules_source=cfg["rules_source"],
+        describe_mode=cfg["describe"],
+        labels_mode=cfg["labels"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp

@@ -298,6 +298,9 @@ class ForgeImpl:
     """Azure DevOps Services / Server Forge adapter."""
 
     name: str = "azure-devops"
+    #: Azure DevOps answers a longer pull request description with HTTP 400
+    #: (#37). The describe step shortens the generated part to fit.
+    max_description_chars: int | None = 4000
 
     def __init__(self, session: requests.Session | None = None) -> None:
         """Initialize with an optional custom requests Session."""

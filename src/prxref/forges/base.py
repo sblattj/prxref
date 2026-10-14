@@ -414,7 +414,11 @@ class Forge(Protocol):
         Optional: callers resolve it with ``getattr(forge, "update_description",
         None)``, so a Forge without it is still valid (a replay or local diff
         never writes). Implemented by every real forge. Raises on transport,
-        HTTP or authentication failure like ``post_summary``.
+        HTTP or authentication failure like ``post_summary``. A forge that
+        caps the description length says so in an optional
+        ``max_description_chars`` attribute (read with ``getattr``; absent or
+        ``None`` is no limit; Azure DevOps sets 4000), which the describe step
+        honours by shortening the generated part, never the original.
         """
         ...
 

@@ -184,6 +184,8 @@ its `PRXREF_` name.
 | `suggestions` | string | `on` asks for applicable code suggestions ([more](env-vars.md#llm--pipeline)). |
 | `routing_probe` | string | `off` drops the worker prompt's matching-rules section and its route-table reads ([more](env-vars.md#llm--pipeline)). |
 | `incremental` | string | `on` re-reviews only the files changed since the last reviewed head ([more](env-vars.md#llm--pipeline)). |
+| `describe` | string | `empty` or `force` drafts the PR description from the diff, keeping the original ([more](env-vars.md#llm--pipeline)). |
+| `labels` | string | `existing` or `create` applies conventional labels with a generated description ([more](env-vars.md#llm--pipeline)). |
 
 ### Limits
 
