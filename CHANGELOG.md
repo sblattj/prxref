@@ -10,6 +10,29 @@ tracker.
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-10-14
+
+### Added
+
+- Opt-in generated PR descriptions (`PRXREF_DESCRIBE=off|empty|force`) and conventional
+  labels (`PRXREF_LABELS=off|existing|create`), also available as the action inputs
+  `describe` and `labels`. A human-written description is never overwritten unless
+  `force`; the original is kept verbatim in a collapsed section; the generated block is
+  pinned to the PR head, so there is no model call or write again until a new head
+  arrives; review prompts read only the original description
+  ([#37](https://github.com/sblattj/prxref/issues/37)).
+- New `describe` key in the run record and in `--format json` (`null` when off).
+  Failures are recorded and never change the verdict; the describe call's cost and tokens
+  join the run's ([#37](https://github.com/sblattj/prxref/issues/37)).
+- Labels on GitHub, GitLab, Gitea and Azure DevOps (`existing` never creates labels);
+  Bitbucket has no PR labels. Azure DevOps descriptions are fit to its 4000-character
+  limit ([#37](https://github.com/sblattj/prxref/issues/37)).
+
+### Changed
+
+- The review gate refuses `update_*` and `add_*` forge writes, so a gate review never
+  edits a PR's body or labels ([#37](https://github.com/sblattj/prxref/issues/37)).
+
 ## [0.35.1] — 2026-10-12
 
 ### Fixed
@@ -3292,7 +3315,8 @@ Development baseline. Never published to PyPI and never tagged; superseded by
 - Diff content is sent to whichever OpenAI-compatible endpoint you configure.
 - Requires Python 3.12+. Tested on 3.12 and 3.13.
 
-[Unreleased]: https://github.com/sblattj/prxref/compare/v0.35.1...HEAD
+[Unreleased]: https://github.com/sblattj/prxref/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/sblattj/prxref/releases/tag/v0.36.0
 [0.35.1]: https://github.com/sblattj/prxref/releases/tag/v0.35.1
 [0.35.0]: https://github.com/sblattj/prxref/releases/tag/v0.35.0
 [0.34.0]: https://github.com/sblattj/prxref/releases/tag/v0.34.0
