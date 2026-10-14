@@ -385,6 +385,27 @@ class ForgeImpl:
         _, raw = self._find_summary(ref)
         return raw
 
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the pull request description (issue #37). Raises on HTTP failure.
+
+        Bitbucket Cloud has no PR labels, so this is the only describe write.
+        The live title is read first and sent back with the description:
+        Cloud's PUT treats the title as required.
+        """
+        headers, auth = self._get_auth()
+        url = self._pr_url(ref)
+        current = self._session.get(url, headers=headers, auth=auth, timeout=_REQUEST_TIMEOUT)
+        current.raise_for_status()
+        title = current.json().get("title") or ""
+        resp = self._session.put(
+            url,
+            json={"title": title, "description": body},
+            headers=headers,
+            auth=auth,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 

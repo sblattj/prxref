@@ -483,6 +483,69 @@ class ForgeImpl:
             )
             resp.raise_for_status()
 
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the merge request description (issue #37). Raises on HTTP failure."""
+        resp = self._session.put(
+            f"{self._api_base(ref)}/merge_requests/{ref.number}",
+            headers=self._get_auth_headers(),
+            json={"description": body},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
+    def list_labels(self, ref: PRRef) -> list[str]:
+        """Return every label name visible to the project (group labels included).
+
+        ``FeedReadError`` propagates when the listing cannot be read fully.
+        """
+        url = f"{self._api_base(ref)}/labels"
+        names: list[str] = []
+        for page in self._iter_pages(
+            ref, url, self._get_auth_headers(), what="label list",
+            extra_params={"include_ancestor_groups": "true"},
+        ):
+            names.extend(str(item["name"]) for item in page if item.get("name"))
+        return names
+
+    def add_labels(
+        self, ref: PRRef, labels: Sequence[str], *, create_missing: bool = False,
+    ) -> list[str]:
+        """Apply ``labels`` to the MR and return the names actually applied.
+
+        A label the project lacks is skipped unless ``create_missing``, in
+        which case it is created first (neutral colour). Matching is
+        case-insensitive and applies the project's own spelling.
+        """
+        wanted = list(dict.fromkeys(label for label in labels if label))
+        if not wanted:
+            return []
+        headers = self._get_auth_headers()
+        base = self._api_base(ref)
+        existing = {name.lower(): name for name in self.list_labels(ref)}
+        to_apply: list[str] = []
+        for label in wanted:
+            if label.lower() in existing:
+                to_apply.append(existing[label.lower()])
+            elif create_missing:
+                resp = self._session.post(
+                    f"{base}/labels",
+                    headers=headers,
+                    json={"name": label, "color": "#ededed"},
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                to_apply.append(label)
+        if not to_apply:
+            return []
+        resp = self._session.put(
+            f"{base}/merge_requests/{ref.number}",
+            headers=headers,
+            json={"add_labels": ",".join(to_apply)},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return to_apply
+
     def post_inline_comments(self, ref: PRRef, comments: Sequence[InlineComment]) -> int:
         """Post inline comments; returns the number actually posted."""
         if not comments:

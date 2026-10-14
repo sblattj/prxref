@@ -49,6 +49,8 @@ _REQUEST_TIMEOUT = (10.0, 30.0)
 # 50 pages puts the ceiling far past any real PR, and running out of budget is
 # a refusal to post rather than an invisible short read.
 _PAGE_SIZE = 100
+# Neutral grey for a label prxref creates (issue #37).
+_NEUTRAL_LABEL_COLOR = "ededed"
 _MAX_PAGES = 50
 # A rejection body is operator-only diagnostics, never posted to the forge, but
 # it is still bounded: GitHub's validation errors enumerate every unmatched
@@ -608,6 +610,62 @@ class ForgeImpl:
                 timeout=_REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
+
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the pull request body (issue #37). Raises on HTTP failure."""
+        url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}"
+        resp = self.session.patch(
+            url, json={"body": body}, headers=self._headers(ref.host),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
+    def list_labels(self, ref: PRRef) -> list[str]:
+        """Return every label name the repository has, paged to the end.
+
+        ``FeedReadError`` propagates when the listing cannot be read fully.
+        """
+        url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/labels"
+        names: list[str] = []
+        for page in self._iter_pages(ref, url, self._headers(ref.host), what="label list"):
+            names.extend(str(item["name"]) for item in page if item.get("name"))
+        return names
+
+    def add_labels(
+        self, ref: PRRef, labels: Sequence[str], *, create_missing: bool = False,
+    ) -> list[str]:
+        """Apply ``labels`` to the PR and return the names actually applied.
+
+        A label the repository lacks is skipped unless ``create_missing``, in
+        which case it is created first (neutral colour). Matching is
+        case-insensitive and applies the repository's own spelling.
+        """
+        wanted = list(dict.fromkeys(label for label in labels if label))
+        if not wanted:
+            return []
+        headers = self._headers(ref.host)
+        repo_url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+        existing = {name.lower(): name for name in self.list_labels(ref)}
+        to_apply: list[str] = []
+        for label in wanted:
+            if label.lower() in existing:
+                to_apply.append(existing[label.lower()])
+            elif create_missing:
+                resp = self.session.post(
+                    f"{repo_url}/labels",
+                    json={"name": label, "color": _NEUTRAL_LABEL_COLOR},
+                    headers=headers, timeout=_REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                to_apply.append(label)
+        if not to_apply:
+            return []
+        resp = self.session.post(
+            f"{repo_url}/issues/{ref.number}/labels",
+            json={"labels": to_apply}, headers=headers, timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return to_apply
 
     def post_inline_comments(self, ref: PRRef, comments: Sequence[InlineComment]) -> int:
         """Post inline comments; returns the number actually posted.

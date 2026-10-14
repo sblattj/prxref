@@ -986,6 +986,8 @@ def _routed_session(summary_feed):
             })
         if url.endswith("/issues/42/comments"):
             return _mock_response(json_data=summary_feed)
+        if url.endswith("/repos/acme/api/labels"):
+            return _mock_response(json_data=[{"name": "fix"}])
         if url.endswith("/pulls/42/comments"):
             return _mock_response(json_data=review_comments)
         if url.endswith("/pulls/42/commits"):
@@ -1047,6 +1049,12 @@ def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
         "list_paths": lambda: getattr(
             forge.list_paths(ref, sha=HEAD_SHA), "paths", None
         ) == ("src/app.py",),
+        "update_description": lambda: forge.update_description(ref, "b") is None,
+        "list_labels": lambda: forge.list_labels(ref) == ["fix"],
+        # One label to create (POST) and one to apply, so both writes are timed.
+        "add_labels": lambda: forge.add_labels(
+            ref, ["fix", "feat"], create_missing=True
+        ) == ["fix", "feat"],
         # Both branches: no summary yet (POST), and one to update (PATCH).
         "post_summary": lambda: (
             forge.post_summary(ref, "first") is None
