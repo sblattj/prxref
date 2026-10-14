@@ -469,11 +469,11 @@ def generate_description(
     res.labels = conventional_labels(labels) if isinstance(labels, list) else []
 
     body = parsed.get("description")
-    if not isinstance(body, str) or not body.strip():
+    body = _sanitize_generated(body) if isinstance(body, str) else ""
+    if not body:
         res.error = "describe reply has no description text"
         logger.warning("describe: no description written: %s", res.error)
         return res
-    body = _sanitize_generated(body)
     if len(body) > MAX_GENERATED_CHARS:
         logger.warning(
             "describe: generated description of %d characters cut to %d",

@@ -377,6 +377,7 @@ class TestGenerateDescription:
         reply(labels=["feat"]),
         reply(description=17),
         reply(description="   "),
+        reply(description="<!-- /prxref:generated -->\n"),
     ])
     def test_bad_output_yields_no_description_and_never_raises(self, text, caplog):
         with caplog.at_level(logging.WARNING, logger="prxref"):
