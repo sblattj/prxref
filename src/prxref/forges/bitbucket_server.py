@@ -479,6 +479,38 @@ class ForgeImpl:
         existing = self._find_summary(ref)
         return None if existing is None else existing.get("text")
 
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the pull request description (issue #37). Raises on HTTP failure.
+
+        Bitbucket Server has no PR labels, so this is the only describe write.
+        Data Center's PUT needs the PR's current ``version`` and replaces the
+        reviewer list with whatever it is sent, so the PR is read first and its
+        title, version and reviewers are sent back unchanged.
+        """
+        headers, auth = self._get_auth()
+        url = self._pr_url(ref)
+        current = self._session.get(url, headers=headers, auth=auth, timeout=_REQUEST_TIMEOUT)
+        current.raise_for_status()
+        data = current.json()
+        reviewers = []
+        for entry in data.get("reviewers") or []:
+            name = ((entry or {}).get("user") or {}).get("name")
+            if name:
+                reviewers.append({"user": {"name": name}})
+        resp = self._session.put(
+            url,
+            json={
+                "version": data.get("version", 0),
+                "title": data.get("title") or "",
+                "description": body,
+                "reviewers": reviewers,
+            },
+            headers=headers,
+            auth=auth,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Post (or update) the top-level review summary comment.
 
