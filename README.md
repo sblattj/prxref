@@ -448,6 +448,19 @@ By default every run re-reviews the whole PR. With `PRXREF_INCREMENTAL=on` (off 
 
 A run reviews every file on a first review, when the forge cannot read its summary or the read fails, when the summary has no marker, when the PR head is unknown or the forge cannot compare commits, and when the comparison fails (a force-push can make the marked head unknown). It also reviews every file with `--full-review`, with `PRXREF_POST_MODE=inline` (which never writes the marker), with `PRXREF_FAIL_ON` other than `never` (a gate's verdict must see the whole PR), and on every replay. `--full-review` and a `PRXREF_FAIL_ON` gate skip reading the previous summary, but they still record the head they reviewed, so the following push is incremental again (when a review unit of such a run fails, it records no head, and the following push reviews every file). The `--format json` key `incremental` says which scope a run took and why. Turning it on costs one extra forge read per run for the previous summary, plus a compare read when the head has moved. See [docs/env-vars.md](docs/env-vars.md).
 
+## Generated PR Descriptions and Labels
+
+prxref can draft a pull request's description from its diff and label it (#37). Both are off by default:
+
+- `PRXREF_DESCRIBE=empty` writes a description only when the PR has none written by a human (an empty body, or only an earlier prxref description). `PRXREF_DESCRIBE=force` writes one over a human description too. prxref never overwrites a human description unless forced.
+- The author's original is never lost: it is kept byte for byte below the generated text in a collapsed **Original description** section.
+- The generated text is marked by hidden comments that pin it to the PR head and the time it was written. A run on the same head makes no model call and no write, `force` included; a push to a new head regenerates it and keeps the original.
+- The review itself ignores the generated part: every review prompt reads only the original description.
+- `PRXREF_LABELS=existing` applies conventional labels (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `perf`, `breaking`) only where the repository already has a matching label; `create` creates the missing ones. Labels ride a description write. Bitbucket has no PR labels.
+- It runs only when the run posts (never with `--no-post`, `PRXREF_DRY_RUN` or a replay), costs one extra model call per new head, and a failure is recorded in the `--format json` key `describe` without changing the verdict.
+
+Per-forge details, including Azure DevOps's 4000-character limit: [docs/forges.md](docs/forges.md#pr-descriptions-and-labels). Settings: [docs/env-vars.md](docs/env-vars.md).
+
 ## CLI Flags
 
 `prxref review` takes:
@@ -500,6 +513,7 @@ A run reviews every file on a first review, when the forge cannot read its summa
   - `config_file`: the repository config file the run read (#38). Always present, and `null` when no file was read; otherwise `{"path", "sha256", "keys"}`: the file as its errors name it (relative to the working directory when inside it), the sha256 of its bytes, and the sorted keys it sets, including any that the environment or a flag then overrode. With `-v` in text mode, one log line `config: <path> (<n> keys)` says the same. See [docs/config-file.md](docs/config-file.md);
   - `review_depth`: the `PRXREF_REVIEW_DEPTH` the run used, `standard` or `thorough`. Always present; a custom `worker.md` override still records the configured value.
   - `learnings`: the team-learnings tally (#33). Always present, and `null` while no `PRXREF_LEARNINGS_FILE` was loaded; otherwise `{"file", "sha256", "loaded", "expired", "suppressed"}`, where `suppressed` lists one `{"learning_id", "finding_id", "title"}` per finding a learning dropped. See [docs/learnings.md](docs/learnings.md).
+  - `describe`: the generated PR description and labels step (#37). Always present, and `null` while `PRXREF_DESCRIBE` is `off`; otherwise `{"mode", "written", "reason", "head", "labels_mode", "labels_applied", "labels_reason", "error"}`: whether the description was written and why (or why not), the PR head SHA it is pinned to, the labels applied, and the error of a failed model call or forge write (`null` when none). See [Generated PR descriptions and labels](#generated-pr-descriptions-and-labels).
   - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
   - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`, `description`, `as_of`, `as_of_source`), on replay runs only.
 

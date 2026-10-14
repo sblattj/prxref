@@ -408,6 +408,46 @@ class Forge(Protocol):
         """
         ...
 
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the PR/MR description with ``body`` (issue #37).
+
+        Optional: callers resolve it with ``getattr(forge, "update_description",
+        None)``, so a Forge without it is still valid (a replay or local diff
+        never writes). Implemented by every real forge. Raises on transport,
+        HTTP or authentication failure like ``post_summary``. A forge that
+        caps the description length says so in an optional
+        ``max_description_chars`` attribute (read with ``getattr``; absent or
+        ``None`` is no limit; Azure DevOps sets 4000), which the describe step
+        honours by shortening the generated part, never the original.
+        """
+        ...
+
+    def list_labels(self, ref: PRRef) -> list[str]:
+        """Return the repository's existing label names, paged to the end.
+
+        Optional: callers resolve it with ``getattr(forge, "list_labels",
+        None)``. Implemented by GitHub, GitLab, Gitea and Azure DevOps;
+        Bitbucket Cloud and Server have no PR labels and omit it (as does
+        replay). Azure DevOps has no repository-wide listing, so it returns
+        the labels in use on the PR and its most recent siblings. Raises
+        ``FeedReadError`` when the listing cannot be read to the end.
+        """
+        ...
+
+    def add_labels(
+        self, ref: PRRef, labels: Sequence[str], *, create_missing: bool = False
+    ) -> list[str]:
+        """Apply ``labels`` to the PR and return the names actually applied.
+
+        Optional: callers resolve it with ``getattr(forge, "add_labels",
+        None)``; same forges as ``list_labels``. Matching against the repo's
+        labels is case-insensitive and the repo's own spelling is applied.
+        With ``create_missing=False`` a label the repo lacks is skipped and
+        never created; with ``True`` it is created first (neutral colour).
+        Raises on transport, HTTP or authentication failure.
+        """
+        ...
+
     def get_commits(
         self, ref: PRRef, *, base_sha: str = "", head_sha: str = ""
     ) -> list[CommitData]:

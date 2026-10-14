@@ -42,6 +42,20 @@ inputs:
     description: Sampling seed. Empty leaves it unset.
     required: false
     default: ""
+  describe:
+    description: >-
+      Generated PR description (#37): `off` (default) never touches the PR body;
+      `empty` writes one only when the PR has no human-written description;
+      `force` writes one over it too, keeping the original in a collapsed section.
+    required: false
+    default: "off"
+  labels:
+    description: >-
+      Generated PR labels (#37), applied with a generated description: `off`
+      (default); `existing` applies only labels the repository already has;
+      `create` creates the missing conventional labels.
+    required: false
+    default: "off"
   pr-url:
     description: URL of the pull request to review. Defaults to the triggering pull request.
     required: false
@@ -88,6 +102,8 @@ runs:
         PRXREF_LLM_MAX_TOKENS: ${{ inputs.llm-max-tokens }}
         PRXREF_LLM_REASONING_EFFORT: ${{ inputs.llm-reasoning-effort }}
         PRXREF_LLM_SEED: ${{ inputs.llm-seed }}
+        PRXREF_DESCRIBE: ${{ inputs.describe }}
+        PRXREF_LABELS: ${{ inputs.labels }}
         PRXREF_ACTION_PR_URL: ${{ inputs.pr-url }}
       run: |
         "$RUNNER_TEMP/prxref-venv/bin/prxref" review --pr-url "$PRXREF_ACTION_PR_URL" -v

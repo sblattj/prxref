@@ -552,6 +552,31 @@ self-hosted instance.
   [Docker Compose or Docker CLI setup](deploy.md#1-docker-deployment-recommended), and put
   `PRXREF_GITEA_TOKEN` and `PRXREF_GITEA_WEBHOOK_SECRET` in its env file.
 
+## PR descriptions and labels
+
+With `PRXREF_DESCRIBE` set to `empty` or `force` (off by default), a posting run drafts the
+pull request's description from its diff and writes it back (issue #37); with
+`PRXREF_LABELS` set to `existing` or `create` (also off by default) it then applies
+conventional labels. The forge capabilities differ:
+
+| Forge | Description write | Labels | Notes |
+|---|---|---|---|
+| GitHub & GitHub Enterprise Server | `PATCH /repos/{owner}/{repo}/pulls/{number}` (`body`) | Repository labels (`GET /repos/{owner}/{repo}/labels`, paged); applied with `POST /repos/{owner}/{repo}/issues/{number}/labels`; `create` creates a missing one with `POST /repos/{owner}/{repo}/labels` | |
+| GitLab | `PUT /projects/{id}/merge_requests/{iid}` (`description`) | Project labels (`GET /projects/{id}/labels`, paged); applied with `PUT /projects/{id}/merge_requests/{iid}` (`add_labels`); `create` creates a missing one with `POST /projects/{id}/labels` | |
+| Gitea / Forgejo | `PATCH /repos/{owner}/{repo}/pulls/{number}` (`body`) | Repository labels (`GET /repos/{owner}/{repo}/labels`, paged); applied by id with `POST /repos/{owner}/{repo}/issues/{number}/labels`; `create` creates a missing one | |
+| Azure DevOps | `PATCH .../pullrequests/{id}` (`description`) | PR tags (`.../pullrequests/{id}/labels`) | Azure DevOps caps a description at **4000 characters** and refuses a longer one with HTTP 400, so the generated part is shortened to fit; when the preserved original alone leaves no room, the write is skipped with a warning and the reason is recorded. Azure DevOps has no repository-wide label list: for `PRXREF_LABELS=existing`, the "existing" labels are an approximation, the labels on this PR and on the repository's 100 most recent pull requests (any status). |
+| Bitbucket Cloud | `PUT /repositories/{workspace}/{repo}/pullrequests/{id}` (`title`, `description`) | None: Bitbucket has no PR labels. The run record's `describe.labels_reason` says so. | |
+| Bitbucket Server / Data Center | `PUT .../pull-requests/{id}` (`version`, `title`, `description`, reviewers kept) | None: Bitbucket Server has no PR labels. | |
+
+`existing` never creates a label; `create` creates the missing conventional ones with a
+neutral colour. The token must be allowed to edit the pull request (and, for `create`, to
+create repository labels). A failed write, a refused permission, or a label list that
+cannot be read is logged and recorded in the run record's `describe.error`; it never
+changes the verdict or the exit code. Replays and local diffs never write. The
+[review gate](../README.md#review-gate-github-app) does not write descriptions or labels:
+its review runs on a capturing forge that refuses every write but the summary and inline
+comments it publishes itself.
+
 ## When prxref cannot post
 
 Some setups give prxref a token that can read a pull request but not comment on it: a

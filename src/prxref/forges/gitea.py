@@ -427,6 +427,80 @@ class ForgeImpl:
             )
         resp.raise_for_status()
 
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the pull request body (issue #37). Raises on HTTP failure."""
+        resp = self.session.patch(
+            f"{self._repo_url(ref)}/pulls/{ref.number}",
+            json={"body": body}, headers=self._headers(), timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
+    def _label_ids(self, ref: PRRef) -> dict[str, tuple[str, int]]:
+        """Map lower-cased label name to ``(name, id)`` for the repository, paged to the end."""
+        found: dict[str, tuple[str, int]] = {}
+        for page in range(1, _MAX_PAGES + 1):
+            items = self._get_list(
+                ref, f"{self._repo_url(ref)}/labels", what="label list",
+                params={"limit": _PAGE_SIZE, "page": page},
+            )
+            for item in items:
+                name, label_id = item.get("name"), item.get("id")
+                if name and isinstance(label_id, int):
+                    found[str(name).lower()] = (str(name), label_id)
+            if len(items) < _PAGE_SIZE:
+                return found
+        raise FeedReadError(
+            f"label list for {self._where(ref)} outran the {_MAX_PAGES}-page budget without reaching the end"
+        )
+
+    def list_labels(self, ref: PRRef) -> list[str]:
+        """Return the repository's label names, paged to the end (``FeedReadError`` otherwise)."""
+        return [name for name, _ in self._label_ids(ref).values()]
+
+    def add_labels(
+        self, ref: PRRef, labels: Sequence[str], *, create_missing: bool = False,
+    ) -> list[str]:
+        """Apply ``labels`` to the PR and return the names actually applied.
+
+        A label the repository lacks is skipped unless ``create_missing``, in
+        which case it is created first (neutral colour). Labels go by id, which
+        every Gitea version accepts.
+        """
+        wanted = list(dict.fromkeys(label for label in labels if label))
+        if not wanted:
+            return []
+        headers = self._headers()
+        existing = self._label_ids(ref)
+        names: list[str] = []
+        ids: list[int] = []
+        for label in wanted:
+            hit = existing.get(label.lower())
+            if hit is not None:
+                names.append(hit[0])
+                ids.append(hit[1])
+            elif create_missing:
+                resp = self.session.post(
+                    f"{self._repo_url(ref)}/labels",
+                    json={"name": label, "color": "#ededed"},
+                    headers=headers, timeout=_REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                created_id = resp.json().get("id")
+                if not isinstance(created_id, int):
+                    raise FeedReadError(
+                        f"creating label {label!r} for {self._where(ref)} returned no id"
+                    )
+                names.append(label)
+                ids.append(created_id)
+        if not ids:
+            return []
+        resp = self.session.post(
+            f"{self._repo_url(ref)}/issues/{ref.number}/labels",
+            json={"labels": ids}, headers=headers, timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return names
+
     def post_inline_comments(self, ref: PRRef, comments: Sequence[InlineComment]) -> int:
         """Post every comment in one ``COMMENT`` review; returns the number posted.
 

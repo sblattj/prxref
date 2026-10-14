@@ -298,6 +298,9 @@ class ForgeImpl:
     """Azure DevOps Services / Server Forge adapter."""
 
     name: str = "azure-devops"
+    #: Azure DevOps answers a longer pull request description with HTTP 400
+    #: (#37). The describe step shortens the generated part to fit.
+    max_description_chars: int | None = 4000
 
     def __init__(self, session: requests.Session | None = None) -> None:
         """Initialize with an optional custom requests Session."""
@@ -932,6 +935,92 @@ class ForgeImpl:
             timeout=_REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
+
+    def update_description(self, ref: PRRef, body: str) -> None:
+        """Replace the pull request description (issue #37). Raises on HTTP failure.
+
+        Azure DevOps caps a description at 4000 characters and answers a longer
+        one with HTTP 400; that surfaces as the usual ``HTTPError``.
+        """
+        resp = self._session.patch(
+            self._pr_api(ref),
+            params={"api-version": _API_VERSION},
+            json={"description": body},
+            headers=self._headers(),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
+    @staticmethod
+    def _label_names(labels: object) -> list[str]:
+        """Return the label names in a pull request JSON's ``labels`` array."""
+        if not isinstance(labels, list):
+            return []
+        return [
+            str(item["name"]) for item in labels
+            if isinstance(item, dict) and item.get("name") and item.get("active", True)
+        ]
+
+    def list_labels(self, ref: PRRef) -> list[str]:
+        """Return the label (tag) names already in use in the repository.
+
+        Azure DevOps has no repository-wide label listing: a PR label exists
+        only as a tag on some pull request. So this is the union of the labels
+        on this PR and on the repository's most recent pull requests (one page
+        of up to 100, any status). Raises ``FeedReadError`` when either read
+        fails.
+        """
+        where = f"{ref.owner}/{ref.repo}#{ref.number}"
+        names: dict[str, str] = {}
+        try:
+            current = self._json(self._get(self._pr_api(ref, "/labels")), "label list")
+            listing = self._json(
+                self._get(
+                    f"{self._api_base(ref)}/pullrequests",
+                    {"searchCriteria.status": "all", "$top": 100},
+                ),
+                "pull request list",
+            )
+        except (requests.RequestException, ValueError) as e:
+            raise FeedReadError(f"label list for {where} could not be read: {e}") from e
+        for name in self._label_names(current.get("value")):
+            names.setdefault(name.lower(), name)
+        for pr in listing.get("value") or []:
+            if isinstance(pr, dict):
+                for name in self._label_names(pr.get("labels")):
+                    names.setdefault(name.lower(), name)
+        return list(names.values())
+
+    def add_labels(
+        self, ref: PRRef, labels: Sequence[str], *, create_missing: bool = False,
+    ) -> list[str]:
+        """Apply ``labels`` to the PR as tags and return the names actually applied.
+
+        Posting a tag to an Azure DevOps PR creates it when it does not exist,
+        so without ``create_missing`` only a label already in use in the
+        repository (see ``list_labels``) is applied; the rest are skipped.
+        """
+        wanted = list(dict.fromkeys(label for label in labels if label))
+        if not wanted:
+            return []
+        existing = {name.lower(): name for name in self.list_labels(ref)}
+        applied: list[str] = []
+        for label in wanted:
+            name = existing.get(label.lower())
+            if name is None:
+                if not create_missing:
+                    continue
+                name = label
+            resp = self._session.post(
+                self._pr_api(ref, "/labels"),
+                params={"api-version": _API_VERSION},
+                json={"name": name},
+                headers=self._headers(),
+                timeout=_REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            applied.append(name)
+        return applied
 
     def _change_tracking(self, ref: PRRef) -> dict[str, tuple[int, int]]:
         """Map each changed path to its ``(changeTrackingId, iteration)`` in the latest iteration.

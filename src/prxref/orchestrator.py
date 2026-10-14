@@ -237,12 +237,14 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from . import (
     chunk_context,
     costs,
+    describe,
     followup,
     heuristics,
     repo_contracts,
@@ -264,6 +266,7 @@ from .evidence import (
 from .forges.base import (
     ATTRIBUTION_MARKER,
     CommitData,
+    FeedReadError,
     Forge,
     InlineComment,
     PRData,
@@ -640,6 +643,8 @@ def orchestrate_review(
     verdict_store: str | None = None,
     learnings: Any = None,
     rules_source: str = "head",
+    describe_mode: str = "off",
+    labels_mode: str = "off",
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -673,6 +678,19 @@ def orchestrate_review(
 
     ``rules_source`` (#102): ``"base"`` reads standards documents at the PR's
     base sha; ``"head"``, the default, is the behavior before 0.35.0.
+
+    ``describe_mode`` (``PRXREF_DESCRIBE``: ``off``/``empty``/``force``) and
+    ``labels_mode`` (``PRXREF_LABELS``: ``off``/``existing``/``create``) turn
+    on the PR auto-description and auto-labels step (#37,
+    :func:`_describe_step`), which runs on posting runs only, after the
+    empty-diff exit and before any review unit. Every review prompt sees the
+    PR description through :func:`prxref.describe.review_description`, so a
+    generated block is never read back as author intent, whatever the mode.
+    With ``describe_mode`` ``off`` the run record's ``describe`` key is
+    ``None`` and nothing else changes; otherwise it is ``{mode, written,
+    reason, head, labels_mode, labels_applied, labels_reason, error}``. The
+    describe call's cost and tokens join the run's. A failure there is
+    recorded in ``error`` and never changes the verdict.
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists, and on
@@ -1264,6 +1282,14 @@ def orchestrate_review(
         raise ValueError(
             f"incremental must be one of {INCREMENTAL_MODES}, got {incremental!r}"
         )
+    if describe_mode not in describe.DESCRIBE_MODES:
+        raise ValueError(
+            f"describe_mode must be one of {describe.DESCRIBE_MODES}, got {describe_mode!r}"
+        )
+    if labels_mode not in describe.LABEL_MODES:
+        raise ValueError(
+            f"labels_mode must be one of {describe.LABEL_MODES}, got {labels_mode!r}"
+        )
     ci_wiring_defaulted = ci_wiring is None
     if ci_wiring_defaulted:
         ci_wiring = "on"
@@ -1308,6 +1334,9 @@ def orchestrate_review(
         "largest_chunk_tokens": 0,
         "overflow_files": 0,
         "chunk_token_budget": token_budget,
+        "describe": (
+            _describe_record(describe_mode, labels_mode) if describe_mode != "off" else None
+        ),
     }
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
@@ -1597,6 +1626,33 @@ def orchestrate_review(
             ),
         ), run_inputs)
 
+    # PR auto-description and labels (#37): opt-in, posting runs only (post
+    # is already False for --no-post, PRXREF_DRY_RUN and every replay). Run
+    # here, after the empty-diff exit (nothing to describe) and before any
+    # review unit, so it never waits on, or is lost with, a review failure.
+    # Its outcome is recorded and never touches the verdict or exit code.
+    describe_unit: dict[str, Any] | None = None
+    if describe_mode != "off":
+        if post:
+            run_inputs["describe"], describe_unit = _describe_step(
+                forge, ref, pr, llm, raw, mode=describe_mode, labels_mode=labels_mode,
+                max_tokens=max_tokens, tracer=tracer,
+            )
+        else:
+            run_inputs["describe"]["reason"] = "posting is off (--no-post, PRXREF_DRY_RUN or a replay)"
+        tracer.event("describe", "ok", **run_inputs["describe"])
+        if describe_unit is not None:
+            # Priced now too, so an exit before the review's own pricing
+            # still carries the describe call's cost.
+            try:
+                _stamp_run_cost(run_inputs, [describe_unit], {} if price_table is None else price_table)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("cost accounting failed (continuing): %s", e)
+                run_inputs["cost_usd"] = None
+                run_inputs["cost_estimated"] = False
+                run_inputs["cost_api_equivalent"] = False
+    cost_units_extra = [describe_unit] if describe_unit is not None else []
+
     # Planned once the chunks are final and before anything is written to the
     # forge, so a degenerate cap is an error run that pruned nothing.
     scoped_blocks: list[Any] | None = None
@@ -1883,7 +1939,8 @@ def orchestrate_review(
     # review; a crash here leaves the cost unknown.
     try:
         _stamp_run_cost(
-            run_inputs, results, {} if price_table is None else price_table,
+            run_inputs, [*results, *cost_units_extra],
+            {} if price_table is None else price_table,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("cost accounting failed (continuing): %s", e)
@@ -1892,8 +1949,9 @@ def orchestrate_review(
         run_inputs["cost_api_equivalent"] = False
     cost_label = _cost_label(run_inputs, post_cost)
 
-    input_tokens = sum(r["input_tokens"] for r in results)
-    output_tokens = sum(r["output_tokens"] for r in results)
+    # Tokens cover the same units as the cost: the describe call included.
+    input_tokens = sum(r["input_tokens"] for r in [*results, *cost_units_extra])
+    output_tokens = sum(r["output_tokens"] for r in [*results, *cost_units_extra])
     model = next((r["model"] for r in results if r["model"]), "unknown")
 
     # Total failure is about the CHUNKS, deliberately: the sweep sees only a
@@ -2973,6 +3031,167 @@ def _parse_retry_total(units: Sequence[Mapping[str, Any]]) -> int:
         if isinstance(value, int) and not isinstance(value, bool):
             total += value
     return total
+
+
+def _describe_now() -> datetime:
+    """The ``at=`` time of a generated description; a seam tests pin."""
+    return datetime.now(UTC)
+
+
+def _describe_record(mode: str, labels_mode: str) -> dict[str, Any]:
+    """The run record's ``describe`` value before the step runs (#37)."""
+    return {
+        "mode": mode,
+        "written": False,
+        "reason": "not reached",
+        "head": None,
+        "labels_mode": labels_mode,
+        "labels_applied": [],
+        "labels_reason": "PRXREF_LABELS is off" if labels_mode == "off" else "not reached",
+        "error": None,
+    }
+
+
+def _fit_description(
+    generated: str, original: str, *, head_sha: str, at: datetime, limit: int | None,
+) -> str | None:
+    """The composed body, its generated part shortened to fit ``limit`` characters.
+
+    ``limit`` is the forge's ``max_description_chars`` (``None`` is no
+    limit). The preserved original is never shortened: when it alone (with
+    the markers around it) leaves no room for any generated text, ``None``.
+    """
+    body = describe.compose_description(generated, original, head_sha=head_sha, at=at)
+    if limit is None or len(body) <= limit:
+        return body
+    frame = len(describe.compose_description("", original, head_sha=head_sha, at=at))
+    room = limit - frame
+    if room <= 0:
+        return None
+    # The composed length is the frame plus the (stripped) generated text, so
+    # cutting the generated text to ``room`` (note included) fits exactly.
+    note = "\n\n_(shortened to fit the forge's description limit)_"
+    cut = generated.strip()[: max(room - len(note), 0)].rstrip()
+    if not cut:
+        return None
+    body = describe.compose_description(cut + note, original, head_sha=head_sha, at=at)
+    return body if len(body) <= limit else None
+
+
+def _describe_step(
+    forge: Forge,
+    ref: PRRef,
+    pr: PRData,
+    llm: LLMClient,
+    raw_diff: str,
+    *,
+    mode: str,
+    labels_mode: str,
+    max_tokens: int | None,
+    tracer: Any,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Draft the PR description and labels (#37): ``(record, cost_unit)``.
+
+    Runs only on a posting run with ``PRXREF_DESCRIBE`` not ``off``; the
+    caller checks both. Order: :func:`prxref.describe.decide_write` on the
+    current body, then the regeneration guard (a body whose generated block
+    is pinned to this head is left alone, ``force`` included, with no model
+    call), then one :func:`prxref.describe.generate_description` call, then
+    the forge's ``update_description`` with the body composed from the
+    split original, shortened to the forge's ``max_description_chars``.
+    Labels follow when ``labels_mode`` is not ``off``, the description was
+    written and the forge has ``add_labels``. ``cost_unit`` is the model
+    call's run-cost unit, ``None`` when no call was made. Never raises: any
+    failure is logged and lands in ``record["error"]``, and the review goes
+    on unchanged.
+    """
+    record = _describe_record(mode, labels_mode)
+    unit: dict[str, Any] | None = None
+    head = (pr.source_sha or "").strip()
+    record["head"] = head or None
+    try:
+        current = pr.description or ""
+        parts = describe.split_description(current)
+        write, reason = describe.decide_write(current, mode)
+        record["reason"] = reason
+        if not write:
+            return record, None
+        if not head:
+            record["reason"] = "the forge reported no PR head SHA to pin the description to"
+            return record, None
+        if parts.generated is not None and parts.head == head:
+            record["reason"] = f"the generated description is already pinned to head {head}"
+            return record, None
+        updater = getattr(forge, "update_description", None)
+        if updater is None:
+            record["reason"] = f"the {ref.forge} forge cannot update a PR description"
+            return record, None
+        with tracer.span("describe.generate"):
+            res = describe.generate_description(
+                llm, title=pr.title, diff=raw_diff, original=parts.original,
+                max_tokens=max_tokens if max_tokens is not None else reviewer.MAX_TOKENS,
+            )
+        if res.model or res.input_tokens or res.output_tokens:
+            unit = res.unit()
+        if not res.body:
+            record["reason"] = "the model returned no usable description"
+            record["error"] = res.error or "empty description"
+            return record, unit
+        body = _fit_description(
+            res.body, parts.original, head_sha=head, at=_describe_now(),
+            limit=getattr(forge, "max_description_chars", None),
+        )
+        if body is None:
+            record["reason"] = (
+                "the original description alone exceeds the forge's "
+                f"{getattr(forge, 'max_description_chars', None)}-character limit"
+            )
+            logger.warning("describe: %s; not written", record["reason"])
+            return record, unit
+        with tracer.span("forge.update_description"):
+            updater(ref, body)
+        record["written"] = True
+    except Exception as e:  # noqa: BLE001 -- the describe step never fails a review
+        record["error"] = f"{type(e).__name__}: {e}"
+        logger.warning("describe: the PR description was not written: %s", record["error"])
+        return record, unit
+    if labels_mode != "off":
+        _apply_labels(forge, ref, res.labels, labels_mode, record)
+    return record, unit
+
+
+def _apply_labels(
+    forge: Forge, ref: PRRef, proposed: Sequence[str], labels_mode: str, record: dict[str, Any],
+) -> None:
+    """Apply the proposed labels per ``labels_mode``; fills ``record``. Never raises."""
+    adder = getattr(forge, "add_labels", None)
+    if adder is None:
+        record["labels_reason"] = f"the {ref.forge} forge has no PR labels"
+        return
+    try:
+        existing: list[str] | None = None
+        if labels_mode == "existing":
+            lister = getattr(forge, "list_labels", None)
+            if lister is not None:
+                try:
+                    existing = list(lister(ref))
+                except FeedReadError as e:
+                    record["error"] = f"list_labels: {e}"
+                    logger.warning("describe: the repository's labels could not be read: %s", e)
+        picked, create_missing = describe.pick_labels(proposed, existing, labels_mode)
+        if not picked:
+            record["labels_reason"] = (
+                "the repository's labels could not be read" if labels_mode == "existing" and existing is None
+                else "no proposed label to apply" if not proposed
+                else "no proposed label matches a repository label" if labels_mode == "existing"
+                else "no proposed label to apply"
+            )
+            return
+        record["labels_applied"] = list(adder(ref, picked, create_missing=create_missing))
+        record["labels_reason"] = None
+    except Exception as e:  # noqa: BLE001 -- labels never fail a review
+        record["error"] = f"add_labels: {type(e).__name__}: {e}"
+        logger.warning("describe: labels were not applied: %s", e)
 
 
 def _attribution(
@@ -4137,7 +4356,7 @@ def _invoke_chunk(
         blocks = "\n\n".join(part for part in (blocks.strip(), extra_blocks.strip()) if part)
     try:
         res = reviewer.review_chunk(
-            llm, chunk, pr_title=pr.title, pr_description=pr.description,
+            llm, chunk, pr_title=pr.title, pr_description=describe.review_description(pr.description),
             max_tokens=max_tokens, context_lines=context_lines,
             context_blocks=blocks, sibling_files=all_files or (),
             trace_label=trace_label, trace_dir=trace_dir or "",
@@ -4435,7 +4654,7 @@ def _run_sweep(
     )
     try:
         findings_raw, meta = reviewer.review_systemic(
-            llm, digest, pr_title=pr.title, pr_description=pr.description,
+            llm, digest, pr_title=pr.title, pr_description=describe.review_description(pr.description),
             max_tokens=max_tokens, threads=discussion,
             trace_label="sweep", trace_dir=trace_dir or "",
             prompt_context=prompt_context, parse_retries=parse_retries,

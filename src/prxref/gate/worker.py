@@ -96,7 +96,7 @@ class InstallationForge(ForgeImpl):
         return headers
 
 
-_WRITE_PREFIXES = ("post_", "prune_", "delete_", "create_", "dismiss_")
+_WRITE_PREFIXES = ("post_", "prune_", "delete_", "create_", "dismiss_", "update_", "add_")
 
 
 class CapturingForge:

@@ -534,6 +534,44 @@ LLM / pipeline:
                                 summary, plus a compare diff read when the
                                 head has moved. Matched exactly; any
                                 other value is a configuration error
+  PRXREF_DESCRIBE               PR auto-description (#37): "off" (the
+                                default) never touches the PR body.
+                                "empty" drafts a description from the diff
+                                only when the PR has no human-written one
+                                (an empty body, or one holding only an
+                                earlier prxref-generated description).
+                                "force" always drafts one, even over a
+                                human-written body. The generated text is
+                                marked by hidden prxref:generated comments
+                                pinning the PR head and the time it was
+                                written, and the author's original is kept
+                                verbatim below it in a collapsed "Original
+                                description" section; the review prompts
+                                read only the original. Runs only when the
+                                run posts (never with --no-post,
+                                PRXREF_DRY_RUN or a replay). Costs one extra
+                                LLM call and one forge write per new PR
+                                head; a head already described is left
+                                alone, "force" included. A failure is
+                                recorded and never changes the verdict.
+                                Matched exactly; any other value is a
+                                configuration error
+  PRXREF_LABELS                 PR auto-labels (#37): "off" (the default)
+                                applies none. "existing" applies the
+                                proposed conventional labels (feat, fix,
+                                docs, refactor, test, chore, ci, perf,
+                                breaking) only where the repository already
+                                has a matching label, case-insensitively and
+                                through common aliases (feature or
+                                enhancement for feat, bug or bugfix for fix,
+                                documentation for docs), and never creates
+                                one. "create" applies the conventional names
+                                and creates any the repository lacks. Forges
+                                without PR labels (Bitbucket) skip it.
+                                Applied only when PRXREF_DESCRIBE writes a
+                                description.
+                                Matched exactly; any other value is a
+                                configuration error
   PRXREF_FALLBACK               Where the review goes when a post fails
                                 (#48): "auto" (the default) acts only when a
                                 summary or inline post fails (a read-only
@@ -900,6 +938,11 @@ _DEFAULTS: dict[str, object] = {
     "review_depth": "standard",
     "routing_probe": "on",
     "incremental": "off",
+    # PR auto-description and auto-labels (#37): both opt-in. Vocabularies
+    # restated from prxref.describe.DESCRIBE_MODES / LABEL_MODES (config
+    # stays a leaf module); pinned together by tests/test_issue_37_describe.py.
+    "describe": "off",
+    "labels": "off",
     "fallback": "auto",
     # The built-in contract-glob set. Unlike the
     # other _LIST_KEYS defaults, this one is non-empty: an env value REPLACES
@@ -1054,6 +1097,8 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "review_depth": frozenset({"standard", "thorough"}),
     "routing_probe": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
+    "describe": frozenset({"off", "empty", "force"}),
+    "labels": frozenset({"off", "existing", "create"}),
     "fallback": frozenset({"auto", "off"}),
     "ci_wiring": frozenset({"off", "on"}),
 }
@@ -1218,7 +1263,7 @@ FILE_KEYS = frozenset({
     "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
-    "suggestions", "routing_probe", "incremental",
+    "suggestions", "routing_probe", "incremental", "describe", "labels",
     "context_contract_globs", "context_exclude_globs",
     "context_standards_globs", "context_standards_max_chars",
     "metadata_rules", "branch_patterns", "commit_reference",
