@@ -35,7 +35,7 @@ jobs:
       - name: Install prxref
         # Installs the published package from PyPI. Pin it with `prxref==X.Y.Z`, or install
         # unreleased changes with `pip install git+https://github.com/sblattj/prxref.git`.
-        # The composite action `uses: sblattj/prxref@v0.36.1` does the same in one step.
+        # The composite action `uses: sblattj/prxref@v0.36.2` does the same in one step.
         run: pip install --no-cache-dir prxref
 
       - name: Run prxref review

@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.36.2] - 2026-10-15
+
 ### Fixed
 
 - A re-review no longer approves a PR whose error findings are still open threads
