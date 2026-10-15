@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-10-14
+
 ### Fixed
 
 - The chunk pass and the systemic sweep no longer both post one bug when the sweep
