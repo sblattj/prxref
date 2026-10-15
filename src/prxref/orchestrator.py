@@ -3530,7 +3530,7 @@ def _thread_dedup_accounting(
         lines.append(
             f"{open_errors} suppressed error finding(s) are still open in their "
             f"threads, so the verdict stays Request-Changes until the code is "
-            f"fixed or the thread is resolved (issue #117)."
+            f"fixed or the thread is marked won't-fix (issue #117)."
         )
     if matched_resolved_detail:
         lines.append("Matched resolved threads:")
