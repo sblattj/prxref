@@ -67,7 +67,13 @@ the gate itself). That exact match is on file plus normalized title. With
 in the same file and on the same line, as
 `duplicate of <chunk|sweep> finding (reworded, similarity S)`. A sweep copy is
 dropped only when it is no more severe than the chunk copy, so a sweep finding
-never takes a chunk finding's place.
+never takes a chunk finding's place. The code-overlap tier
+(`PRXREF_DEDUP_CODE_OVERLAP`, #113, on by default) then catches a restatement
+whose title is reworded past that floor: a sweep finding on the same file and
+line as a chunk finding of equal or higher severity, whose claim shares at
+least 2 code identifiers with it and whose title shares 3 title words or a
+problem class, is dropped as
+`duplicate of chunk finding (same line, shared code: a, b)`.
 
 Finding grouping (`PRXREF_GROUP_FINDINGS`) is the one pass a sweep finding
 skips: `apply_rule_grouping` folds chunk findings only, so a sweep finding is

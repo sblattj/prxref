@@ -586,6 +586,7 @@ def orchestrate_review(
     confidence_floor: float | None = None,
     max_errors: int | None = None,
     dedup_similarity: float | None = None,
+    dedup_code_overlap: bool = True,
     post_mode: str = "summary+inline",
     post_verdict: bool = True,
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
@@ -726,6 +727,10 @@ def orchestrate_review(
     and reads no environment variable, so the run is byte-identical to one
     without it; a threshold also drops a reworded restatement in the same
     file and on the same line (:func:`quality.titles_similar`).
+    ``dedup_code_overlap`` (default on, issue #113) is forwarded as its
+    ``code_overlap``: a sweep finding on the same file and line as a
+    no-less-severe chunk finding is also dropped when their claims share
+    two code identifiers and their titles agree on the problem.
 
     ``post_mode`` selects what is written to the forge: ``"summary+inline"``
     (default) keeps today's behaviour — the summary first, then the inline
@@ -2327,7 +2332,7 @@ def orchestrate_review(
     # that would lose the recall the sweep exists to add.
     findings = apply_sweep_dedup(
         chunk_part + sweep_part, sweep_start=len(chunk_part),
-        similarity=dedup_similarity,
+        similarity=dedup_similarity, code_overlap=dedup_code_overlap,
     )
     # Last, deliberately: it only decorates body text (never drop_reason or
     # severity), so it must run after every pass that keys off title/body

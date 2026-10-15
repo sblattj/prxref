@@ -210,7 +210,12 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     Across the boundary the chunk copy always survives and a sweep copy
     is dropped only when it is no more severe; on one side the more
     severe, then higher-confidence, copy is kept. Without a threshold
-    the tier does not run.
+    the tier does not run. A third tier (issue #113, ``dedup_code_overlap``,
+    on by default in the review pipeline) then drops a sweep finding on
+    the same file and positive line as a no-less-severe chunk finding when
+    their claims share at least two code identifiers and their titles
+    share three words or a problem class
+    (``duplicate of chunk finding (same line, shared code: a, b)``).
 21. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
@@ -1731,6 +1736,7 @@ def apply_sweep_dedup(
     sweep_start: int,
     *,
     similarity: float | None = None,
+    code_overlap: bool = False,
 ) -> list[Finding]:
     """Drop systemic-sweep findings that restate a chunk finding.
 
@@ -1789,6 +1795,13 @@ def apply_sweep_dedup(
     on severity with its group before any of it is judged. ``sweep_start``
     below zero is treated as zero (everything is sweep output); past the
     end, nothing is deduplicated.
+
+    ``code_overlap`` switches on a third tier (issue #113) that runs last
+    and only across the chunk/sweep boundary; see
+    :func:`_dedup_code_overlap`. ``False`` (the default here) skips it, so
+    a bare call stays the exact tier plus the optional reworded tier; the
+    review pipeline turns it on through ``dedup_code_overlap``, which
+    defaults to on.
     """
     start = max(0, sweep_start)
     chunk_keys = {
@@ -1808,9 +1821,11 @@ def apply_sweep_dedup(
             result.append(replace(f, drop_reason="duplicate of chunk finding"))
         else:
             result.append(f)
-    if similarity is None:
-        return result
-    return _dedup_reworded(result, start, similarity)
+    if similarity is not None:
+        result = _dedup_reworded(result, start, similarity)
+    if code_overlap:
+        result = _dedup_code_overlap(result, start)
+    return result
 
 
 def _reworded_severity_rank(finding: Finding) -> int:
@@ -1893,6 +1908,99 @@ def _dedup_reworded(
                 kept_sweep.append(i)
             else:
                 result[i] = _reworded_drop(findings[i], "sweep", jaccard)
+    return result
+
+
+CODE_OVERLAP_MIN_SHARED: int = 2
+"""Fewest code identifiers a chunk and a sweep finding must share (issue #113).
+
+Counted over :func:`_code_tokens` of each finding's title plus body. One
+shared identifier is not enough: two different bugs on one line routinely
+name the same call (``conn.execute`` for both an injection and an
+unclosed cursor). The issue #113 SQL-injection pair shares two
+(``conn.execute``, ``customer_name``).
+"""
+
+CODE_OVERLAP_REASON_TOKENS: int = 3
+"""Most shared identifiers the code-overlap ``drop_reason`` lists."""
+
+
+def _code_overlap_match(sweep: Finding, chunk: Finding) -> list[str] | None:
+    """Shared identifiers when ``sweep`` restates ``chunk``, else ``None``.
+
+    Both conditions must hold:
+
+    - the two claims (title plus body) share at least
+      :data:`CODE_OVERLAP_MIN_SHARED` :func:`_code_tokens`, and
+    - the titles agree on the problem: they share at least
+      :data:`TITLE_MIN_SHARED_TOKENS` title tokens (Jaccard ignored), or
+      they name a common :func:`_problem_classes` class (``injection``,
+      ``null``, ...).
+
+    The title condition is the brake that keeps two different bugs on one
+    expression apart: "Nonce generator references undefined ``request``"
+    and "Suggested nonce generator is derivable from the session cookie"
+    share three identifiers but only two title words and no class.
+    """
+    sweep_claim = f"{sweep.title or ''} {sweep.body or ''}"
+    chunk_claim = f"{chunk.title or ''} {chunk.body or ''}"
+    shared = sorted(_code_tokens(sweep_claim) & _code_tokens(chunk_claim))
+    if len(shared) < CODE_OVERLAP_MIN_SHARED:
+        return None
+    sweep_title = sweep.title or ""
+    chunk_title = chunk.title or ""
+    _, title_shared = title_similarity(sweep_title, chunk_title)
+    if title_shared >= TITLE_MIN_SHARED_TOKENS:
+        return shared
+    if _problem_classes(sweep_title) & _problem_classes(chunk_title):
+        return shared
+    return None
+
+
+def _dedup_code_overlap(findings: list[Finding], start: int) -> list[Finding]:
+    """Drop a sweep finding that restates a chunk finding on its line (#113).
+
+    The chunk pass and the systemic sweep often report one bug with titles
+    too different for the reworded tier (``SQL injection in find_orders
+    query`` against ``SQL injection via f-string interpolation of
+    customer_name`` share two title words, under the floor of three), while
+    their bodies cite the same code. This tier compares each active sweep
+    finding with the active chunk findings in the same file on the same
+    positive line whose severity is at least as high, in
+    :func:`_reworded_keep_key` order, and drops it on the first one that
+    :func:`_code_overlap_match` accepts, with ``drop_reason``
+    ``duplicate of chunk finding (same line, shared code: a, b)`` (up to
+    :data:`CODE_OVERLAP_REASON_TOKENS` identifiers, sorted).
+
+    Only ever across the boundary: a chunk finding is never dropped, two
+    sweep findings are never compared, a MORE severe sweep copy is kept
+    (so the review's worst severity never drops), and file-level (line 0)
+    findings are never compared, since they have no line to agree on.
+    Deterministic and pure: the result depends only on finding content.
+    """
+    chunk_by_line: dict[tuple[str, int], list[int]] = {}
+    for i, f in enumerate(findings[:start]):
+        if f.drop_reason is None and (f.line or 0) > 0:
+            chunk_by_line.setdefault((f.file, f.line or 0), []).append(i)
+    for indices in chunk_by_line.values():
+        indices.sort(key=lambda i: _reworded_keep_key(findings[i]))
+    result = list(findings)
+    for i in range(start, len(findings)):
+        f = findings[i]
+        if f.drop_reason is not None or (f.line or 0) <= 0:
+            continue
+        rank = _reworded_severity_rank(f)
+        for k in chunk_by_line.get((f.file, f.line or 0), ()):
+            if _reworded_severity_rank(findings[k]) > rank:
+                continue
+            shared = _code_overlap_match(f, findings[k])
+            if shared is not None:
+                named = ", ".join(shared[:CODE_OVERLAP_REASON_TOKENS])
+                result[i] = replace(
+                    f,
+                    drop_reason=f"duplicate of chunk finding (same line, shared code: {named})",
+                )
+                break
     return result
 
 

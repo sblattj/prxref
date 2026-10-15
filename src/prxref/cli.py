@@ -1984,6 +1984,7 @@ def _run_review(
         max_findings_per_rule=cfg["max_findings_per_rule"],
         group_findings=cfg["group_findings"],
         dedup_similarity=cfg["dedup_similarity"],
+        dedup_code_overlap=cfg["dedup_code_overlap"],
         post_mode=cfg["post_mode"],
         post_verdict=cfg["post_verdict"],
         summary_bullet_separator=cfg["summary_bullet_separator"],

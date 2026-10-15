@@ -10,6 +10,24 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- The chunk pass and the systemic sweep no longer both post one bug when the sweep
+  rewords its title. A new code-overlap dedup tier, on by default, drops a sweep
+  finding on the same file and line as a chunk finding of equal or higher severity
+  when the two claims share at least 2 code identifiers and their titles share 3 title
+  words or a problem class (injection, null, race, ...); the dropped copy reads
+  `duplicate of chunk finding (same line, shared code: a, b)`. Fixes #113
+  ([#113](https://github.com/sblattj/prxref/issues/113)).
+
+### Changed
+
+- **Default output change:** because the code-overlap tier is on by default, a review
+  can post fewer inline findings than 0.36.0 did on the same PR. Turn it off with
+  `PRXREF_DEDUP_CODE_OVERLAP=0` or `dedup_code_overlap = false` in `.prxref.toml`. The
+  key also joins the eval run's `config` allowlist
+  ([#113](https://github.com/sblattj/prxref/issues/113)).
+
 ## [0.36.0] — 2026-10-14
 
 ### Added

@@ -102,6 +102,13 @@ LLM / pipeline:
                                 lower severity. Greater than 0 and at most
                                 1.0; unset (default) = off, only the
                                 exact-title dedup runs
+  PRXREF_DEDUP_CODE_OVERLAP     Code-overlap dedup (#113): drops a sweep
+                                finding on the same file and line as a
+                                no-less-severe chunk finding when their
+                                bodies share 2+ code identifiers and their
+                                titles share 3 words or a problem class.
+                                On by default; any value other than the
+                                literal "1" (e.g. "0") turns it off
   PRXREF_MAX_CHUNKS             Max diff chunks reviewed per PR; positive int
                                 (default 8)
   PRXREF_CHUNK_TOKEN_BUDGET     Approximate token budget per diff chunk;
@@ -881,6 +888,7 @@ _DEFAULTS: dict[str, object] = {
     "max_findings_per_rule": 2,
     "group_findings": False,
     "dedup_similarity": None,
+    "dedup_code_overlap": True,
     "max_chunks": 8,
     "chunk_token_budget": DEFAULT_TOKEN_BUDGET,
     "chunk_max_files": DEFAULT_MAX_FILES_PER_CHUNK,
@@ -1073,7 +1081,7 @@ _FLOAT_KEYS = frozenset({
 })
 _BOOL_KEYS = frozenset({
     "allow_unsigned", "dry_run", "post_verdict", "post_cost", "group_findings",
-    "stable_ids",
+    "stable_ids", "dedup_code_overlap",
 })
 _LIST_KEYS = frozenset({
     "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
@@ -1251,7 +1259,8 @@ FILE_KEYS = frozenset({
     "llm_temperature", "llm_seed", "llm_cli_concurrency", "llm_parse_retries",
     "confidence_floor", "max_error_findings", "max_warning_findings",
     "max_outofscope_findings", "max_findings_per_rule", "group_findings",
-    "dedup_similarity", "max_chunks", "chunk_token_budget", "chunk_max_files",
+    "dedup_similarity", "dedup_code_overlap", "max_chunks", "chunk_token_budget",
+    "chunk_max_files",
     "chunk_context_lines", "max_workers", "max_inline_comments",
     "post_mode", "post_verdict", "post_cost",
     "severity_markers", "summary_bullet_separator",

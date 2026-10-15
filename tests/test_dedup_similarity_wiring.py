@@ -131,9 +131,11 @@ class TestOrchestratorForwardsTheThreshold:
         seen: list[float | None] = []
         real = quality.apply_sweep_dedup
 
-        def _spy(findings, sweep_start, *, similarity=None):
+        def _spy(findings, sweep_start, *, similarity=None, code_overlap=False):
             seen.append(similarity)
-            return real(findings, sweep_start, similarity=similarity)
+            return real(
+                findings, sweep_start, similarity=similarity, code_overlap=code_overlap
+            )
 
         monkeypatch.setattr(orchestrator, "apply_sweep_dedup", _spy)
         chunk, sweep = _p1_pair()

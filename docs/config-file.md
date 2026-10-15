@@ -196,6 +196,7 @@ its `PRXREF_` name.
 | `max_warning_findings` | integer | Cap on warning-severity findings ([more](env-vars.md#llm--pipeline)). |
 | `max_outofscope_findings` | integer | Cap on `outofscope`-severity findings ([more](env-vars.md#llm--pipeline)). |
 | `dedup_similarity` | number | Title similarity at which two findings on one line are merged ([more](env-vars.md#llm--pipeline)). |
+| `dedup_code_overlap` | boolean | Drop a sweep finding that restates a chunk finding on its line in other words; on by default ([more](env-vars.md#llm--pipeline)). |
 | `max_chunks` | integer | Most diff chunks reviewed per PR ([more](env-vars.md#llm--pipeline)). |
 | `chunk_token_budget` | integer | Approximate token budget per chunk ([more](env-vars.md#llm--pipeline)). |
 | `chunk_max_files` | integer | Most files in one chunk ([more](env-vars.md#llm--pipeline)). |

@@ -65,6 +65,7 @@ RUN_CONFIG_KEYS = (
     "chunk_token_budget",
     "chunk_max_files",
     "dedup_similarity",
+    "dedup_code_overlap",
     "group_findings",
     "max_warning_findings",
     "max_outofscope_findings",
