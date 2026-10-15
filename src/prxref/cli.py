@@ -2128,8 +2128,9 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
 
     Otherwise severity is compared exactly as the verdict is built in the
     orchestrator (``Request-Changes`` iff an active finding has severity
-    ``error``), so the gate and the posted verdict can never disagree about
-    what counts. A result without parseable findings is tolerated the way
+    ``error``, or ``thread_dedup.open_errors`` counts an error still open in
+    an existing thread, issue #117), so the gate and the posted verdict can
+    never disagree about what counts. A result without parseable findings is tolerated the way
     ``_fmt_counts`` tolerates one: nothing countable means nothing to gate on.
 
     Returns the exit code and, when the gate fires, the stderr line that says
@@ -2149,8 +2150,18 @@ def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
         hits = [f for f in findings if getattr(f, "severity", None) == "error"]
     else:
         hits = findings
-    if not hits:
+    thread_dedup = result.get("thread_dedup")
+    open_errors = thread_dedup.get("open_errors", 0) if isinstance(thread_dedup, dict) else 0
+    if not isinstance(open_errors, int):
+        open_errors = 0
+    if not hits and not open_errors:
         return 0, None
+    if not hits:
+        plural = "" if open_errors == 1 else "s"
+        return 1, (
+            f"PRXREF_FAIL_ON={fail_on}: {open_errors} error finding{plural} "
+            f"still open in existing threads; exiting 1"
+        )
     plural = "" if len(hits) == 1 else "s"
     return 1, (
         f"PRXREF_FAIL_ON={fail_on}: review found {len(hits)} "

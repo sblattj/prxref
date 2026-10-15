@@ -190,7 +190,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    ``cost_api_equivalent`` on claude-cli-priced runs only).
 7. Verdict: ``"Error"`` when every CHUNK review failed (a sweep success
    on a dead worker pool cannot carry the run); ``"Request-Changes"``
-   iff any active error-severity finding survives; else ``"Incomplete"``
+   iff any active error-severity finding survives, or a thread gate
+   dropped an error finding (at or above the confidence floor) against an
+   open thread that is not a won't-fix decision (issue #117: the defect is
+   still in the code, only the repeat comment is suppressed); else ``"Incomplete"``
    when any review unit failed (issue #72: a partial review used to read
    as ``"Approved"`` because the failed chunk simply contributed no
    findings); else ``"Approved"``. A partial failure also degrades the
@@ -2202,6 +2205,25 @@ def orchestrate_review(
         if before.drop_reason is None and after.drop_reason is not None
     ]
     thread_suppressed = len(suppressed_detail)
+    # Issue #117: a thread gate stops an open thread's finding from being
+    # posted twice, but the defect it names is still in the code. An
+    # error-severity drop that clears the confidence floor, matched against
+    # an open thread that is not a won't-fix decision, keeps the verdict at
+    # Request-Changes even though nothing new is posted inline.
+    open_thread_floor: float | None = None
+    open_thread_errors = 0
+    for before, after in zip(before_threads, findings, strict=True):
+        if before.drop_reason is not None or after.drop_reason is None:
+            continue
+        if after.severity != "error":
+            continue
+        if open_thread_floor is None:
+            open_thread_floor = _resolve_confidence_floor(confidence_floor)
+        if after.confidence < open_thread_floor:
+            continue
+        matched = open_thread_for_drop(before, threads)
+        if matched is not None and not matched.wont_fix:
+            open_thread_errors += 1
     before_noted = findings
     findings, thread_matched_resolved = _note_previously_raised(findings, threads)
     matched_resolved_detail = [
@@ -2213,11 +2235,12 @@ def orchestrate_review(
     ]
     thread_accounting_args = (
         thread_suppressed, thread_matched_resolved,
-        suppressed_detail, matched_resolved_detail,
+        suppressed_detail, matched_resolved_detail, open_thread_errors,
     )
     if threads:
         run_inputs["thread_dedup"] = {
             "suppressed": thread_suppressed,
+            "open_errors": open_thread_errors,
             "matched_resolved": thread_matched_resolved,
             "threads_read": len(threads),
             # Threads that can no longer suppress anything: resolved OR
@@ -2352,10 +2375,12 @@ def orchestrate_review(
     # not happen as one that found nothing. Precedence: an active
     # error-severity finding still wins over incompleteness (a real defect
     # beats a coverage gap), and the total-failure "Error" verdict left at
-    # the all-failed exit above can never be shadowed from here.
+    # the all-failed exit above can never be shadowed from here. An error
+    # still open in an existing thread counts as active here (issue #117).
     verdict = (
         "Request-Changes"
-        if any(f.severity == "error" for f in findings_active)
+        if open_thread_errors
+        or any(f.severity == "error" for f in findings_active)
         else "Incomplete"
         if chunks_failed
         else "Approved"
@@ -3473,6 +3498,7 @@ def _thread_dedup_accounting(
     matched_resolved: int,
     suppressed_detail: Sequence[dict[str, object]] = (),
     matched_resolved_detail: Sequence[dict[str, object]] = (),
+    open_errors: int = 0,
 ) -> str:
     """Render the thread-dedup reconciliation block (issue #73).
 
@@ -3482,7 +3508,9 @@ def _thread_dedup_accounting(
     history. The first line names both counts; one bullet per suppressed
     finding follows, ``file:line — title — <thread ref>``, naming the thread
     it matched (its URL when the forge reports one), and one per finding
-    that matched a resolved thread. ``""`` when neither count is non-zero,
+    that matched a resolved thread. A non-zero ``open_errors`` (issue #117)
+    adds a line saying that many suppressed error findings still hold the
+    verdict at Request-Changes. ``""`` when neither count is non-zero,
     so a run without thread history keeps a byte-identical summary.
     "Resolved" here covers outdated threads too — anything the gates skip.
     A suppression can come from a resolved or outdated thread only when it
@@ -3498,6 +3526,12 @@ def _thread_dedup_accounting(
     if suppressed_detail:
         lines.append("Suppressed:")
         lines.extend(_thread_detail_line(d) for d in suppressed_detail)
+    if open_errors:
+        lines.append(
+            f"{open_errors} suppressed error finding(s) are still open in their "
+            f"threads, so the verdict stays Request-Changes until the code is "
+            f"fixed or the thread is resolved (issue #117)."
+        )
     if matched_resolved_detail:
         lines.append("Matched resolved threads:")
         lines.extend(_thread_detail_line(d) for d in matched_resolved_detail)

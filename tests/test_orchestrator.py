@@ -458,7 +458,9 @@ class TestDedup:
         dropped = res["findings_dropped"][0]
         assert dropped.title == "Null deref"
         assert dropped.drop_reason == "duplicate of existing thread"
-        assert res["verdict"] == "Approved"
+        # Issue #117: the suppressed error is still open in alice's thread,
+        # so it holds the verdict even though it is not posted again.
+        assert res["verdict"] == "Request-Changes"
         assert len(forge.inline_batches) == 1
         assert [c.line for c in forge.inline_batches[0]] == [7]
         assert len(forge.summaries) == 1

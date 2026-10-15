@@ -10,6 +10,18 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- A re-review no longer approves a PR whose error findings are still open threads
+  (#117). Thread dedup correctly skips re-posting a finding an open thread already
+  raises, but the verdict counted only the findings it posted, so any push to a still
+  buggy PR flipped the gate from block to approve. An error finding at or above the
+  confidence floor that a thread gate drops against an open thread that is not a
+  won't-fix decision now keeps the verdict at `Request-Changes`, and `PRXREF_FAIL_ON`
+  agrees. The run record counts these in `thread_dedup.open_errors`, and the summary
+  says why. A PR whose author answers such a thread without fixing the code stays
+  blocked until the thread is resolved or the model stops reporting the bug.
+
 ## [0.36.1] - 2026-10-14
 
 ### Fixed

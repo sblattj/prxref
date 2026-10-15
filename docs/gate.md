@@ -26,7 +26,7 @@ reviews what is live.
 | Review outcome | Check conclusion |
 |---|---|
 | Approved | `success` |
-| Request-Changes | `failure` |
+| Request-Changes (an active error, or an error still open in an existing thread) | `failure` |
 | Incomplete (a chunk, the sweep or a model failed) | `failure` |
 | Error, deadline hit, crash | `failure` |
 | Superseded or stale (the PR moved) | nothing published; a newer generation owns the head |
