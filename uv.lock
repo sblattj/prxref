@@ -1574,7 +1574,7 @@ wheels = [
 
 [[package]]
 name = "referencing"
-version = "0.37.1"
+version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
