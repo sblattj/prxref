@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-10-15
+
 ### Fixed
 
 - The chunker no longer underestimates a file of a few very long lines (#122). It
