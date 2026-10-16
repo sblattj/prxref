@@ -569,7 +569,9 @@ conventional labels. The forge capabilities differ:
 | Bitbucket Server / Data Center | `PUT .../pull-requests/{id}` (`version`, `title`, `description`, reviewers kept) | None: Bitbucket Server has no PR labels. | |
 
 `existing` never creates a label; `create` creates the missing conventional ones with a
-neutral colour. The token must be allowed to edit the pull request (and, for `create`, to
+neutral colour. On a repository with GitHub's default label set, `existing` maps the
+conventional names onto it: `feat` applies `enhancement`, `fix` applies `bug` and `docs`
+applies `documentation`, keeping the repository's own spelling. The token must be allowed to edit the pull request (and, for `create`, to
 create repository labels). A failed write, a refused permission, or a label list that
 cannot be read is logged and recorded in the run record's `describe.error`; it never
 changes the verdict or the exit code. Replays and local diffs never write. The
