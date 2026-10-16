@@ -10,6 +10,21 @@ tracker.
 
 ## [Unreleased]
 
+### Added
+
+- `PRXREF_REVIEW_SKIP_GLOBS` (env only, #120): files matching any glob are left out of
+  every chunk and the sweep, listed in the summary as not reviewed, and recorded as
+  `review_skipped` in the run record. Meant for generated files such as a vendored
+  bundle, whose multi-megabyte diff failed its chunk and turned the whole review
+  `Incomplete`. A repository config file cannot set it, so a PR cannot exempt its
+  own changes.
+
+### Changed
+
+- A failed gate review now says why in its review body (#120): the check's reason, then up
+  to 3 failed units with their files and redacted error. Before, the PR showed only
+  "changes requested - 0 inline finding(s)" and the cause sat in the run record.
+
 ## [0.36.2] - 2026-10-15
 
 ### Fixed

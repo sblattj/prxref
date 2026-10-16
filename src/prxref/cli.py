@@ -2004,6 +2004,7 @@ def _run_review(
         size_warn_lines=cfg["size_warn_lines"],
         size_warn_files=cfg["size_warn_files"],
         size_ignore_globs=cfg["size_ignore_globs"],
+        review_skip_globs=cfg["review_skip_globs"],
         **_metadata_rule_kwargs(cfg, inputs.metadata),
         replay=(
             replay.stamp(has_forge=url is not None, pin=getattr(forge, "description_pin", None))

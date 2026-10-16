@@ -230,6 +230,7 @@ config-level range check in front of these arguments.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import logging
 import os
@@ -608,6 +609,7 @@ def orchestrate_review(
     size_warn_lines: int | None = None,
     size_warn_files: int | None = None,
     size_ignore_globs: Sequence[str] = (),
+    review_skip_globs: Sequence[str] = (),
     replay: Mapping[str, Any] | None = None,
     prompts: PromptTemplates | None = None,
     scoped_rules: Any = None,
@@ -821,6 +823,13 @@ def orchestrate_review(
     threshold is set the advisory's stats ride the result under
     ``size_advisory``, and a triggered advisory is prepended to every posted
     summary. It never touches the verdict.
+
+    ``review_skip_globs`` (env-only, the operator's call) names diff paths
+    no review unit sees: matched with :func:`fnmatch.fnmatchcase` against
+    the full path like ``size_ignore_globs``, dropped right after the diff
+    is parsed, so neither a chunk nor the sweep digest carries them. They
+    are listed under ``review_skipped`` and in one note atop the summary,
+    so a skip is visible, never silent. Empty (the default) changes nothing.
 
     ``metadata_rules`` (issue #70) is ``"on"`` or ``"off"``; on turns on
     the deterministic PR-metadata checks. The CLI resolves a rules-file
@@ -1450,6 +1459,14 @@ def orchestrate_review(
         with tracer.span("parse_diff") as sp:
             files = parse_unified_diff(raw)
             sp["files"] = len(files)
+            if review_skip_globs:
+                skipped = [
+                    f.path for f in files
+                    if any(fnmatch.fnmatchcase(f.path, g) for g in review_skip_globs)
+                ]
+                files = [f for f in files if f.path not in skipped]
+                run_inputs["review_skipped"] = skipped
+                sp["skipped"] = len(skipped)
     except Exception as e:  # noqa: BLE001
         logger.error("parse_unified_diff failed: %s", e)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
@@ -1482,6 +1499,9 @@ def orchestrate_review(
         logger.warning("size advisory failed (continuing without it): %s", e)
         run_inputs["size_advisory"] = None
     size_advisory_line = _size_advisory_line(run_inputs["size_advisory"])
+    # The skip note rides the same top-of-summary slot, so all three summary
+    # renders carry it.
+    size_advisory_line = _review_skip_line(run_inputs.get("review_skipped")) + size_advisory_line
 
     # Deterministic PR-metadata checks (#70), computed here — before any
     # worker dispatch — so the no-LLM guarantee is structural: nothing below
@@ -5103,6 +5123,20 @@ def _metadata_section(
         f"**PR metadata**\n\n{bullets}\n\n"
         "_Deterministic checks, no model; they never change the verdict._"
     )
+
+
+def _review_skip_line(skipped: Sequence[str] | None) -> str:
+    """The blockquote naming files ``review_skip_globs`` kept out of review.
+
+    ``""`` when nothing was skipped, so a run without the setting is
+    byte-identical. At most 5 paths are named; the rest are counted.
+    """
+    if not skipped:
+        return ""
+    shown = ", ".join(f"`{p}`" for p in skipped[:5])
+    more = f" and {len(skipped) - 5} more" if len(skipped) > 5 else ""
+    n = len(skipped)
+    return f"> ℹ️ Not reviewed ({n} file{'s' if n != 1 else ''} matched PRXREF_REVIEW_SKIP_GLOBS): {shown}{more}\n\n"
 
 
 def _size_advisory_line(stats: Mapping[str, Any] | None) -> str:

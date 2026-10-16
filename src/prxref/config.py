@@ -231,6 +231,16 @@ LLM / pipeline:
                                 to the built-in lock-file and generated-file
                                 detection, never replacing it. Empty
                                 (default) adds nothing.
+  PRXREF_REVIEW_SKIP_GLOBS      fnmatch globs (matched like
+                                PRXREF_SIZE_IGNORE_GLOBS) whose diff paths no
+                                review unit sees: not a chunk, not the sweep.
+                                For generated files too big to review (a
+                                vendored bundle). Each skipped path is listed
+                                in the run record (review_skipped) and in a
+                                note atop the summary. Environment only: a
+                                repository config file cannot set it, so a
+                                PR cannot exclude its own files. Empty
+                                (default) skips nothing.
   PRXREF_METADATA_RULES         Opt-in deterministic PR-metadata checks
                                 (#70): "off" (default) or empty runs none,
                                 keeps every prompt, finding and run-record
@@ -784,7 +794,8 @@ Gate (prxref gate serve, #102):
   PRXREF_GATE_RECONCILE_MINUTES   open-PR reconcile interval (10)
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
-PRXREF_SIZE_IGNORE_GLOBS, PRXREF_SCOPED_RULES, PRXREF_CONTEXT_CONTRACT_GLOBS,
+PRXREF_SIZE_IGNORE_GLOBS, PRXREF_REVIEW_SKIP_GLOBS, PRXREF_SCOPED_RULES,
+PRXREF_CONTEXT_CONTRACT_GLOBS,
 PRXREF_CONTEXT_EXCLUDE_GLOBS, PRXREF_BRANCH_PATTERNS, PRXREF_AREA_GLOBS,
 PRXREF_CI_WIRING_GLOBS and PRXREF_CONTEXT_STANDARDS_GLOBS) split on any run
 of commas and/or
@@ -920,6 +931,7 @@ _DEFAULTS: dict[str, object] = {
     "size_warn_lines": None,
     "size_warn_files": None,
     "size_ignore_globs": [],
+    "review_skip_globs": [],
     "spec_sources": [],
     "spec_max_chars": 120000,
     "spec_digest_tokens": 3000,
@@ -1084,7 +1096,7 @@ _BOOL_KEYS = frozenset({
     "stable_ids", "dedup_code_overlap",
 })
 _LIST_KEYS = frozenset({
-    "llm_models", "spec_sources", "size_ignore_globs", "scoped_rules",
+    "llm_models", "spec_sources", "size_ignore_globs", "review_skip_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
     "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
     "context_standards_globs", "gate_installation_ids", "gate_repos",
@@ -1290,6 +1302,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "dry_run": "gate",
     "allow_unsigned": "gate",
     "rules_source": "gate",
+    "review_skip_globs": "gate",
     "gate_app_id": "credential",
     "gate_private_key_file": "credential",
     "gate_installation_ids": "gate",

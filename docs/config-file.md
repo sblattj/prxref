@@ -315,6 +315,7 @@ instead, even when the value is empty.
 | `gate_review_deadline` | gate | How long a gate review may run before it fails. |
 | `gate_watchdog_seconds` | gate | The gate's repair interval. |
 | `gate_reconcile_minutes` | gate | The gate's open-PR reconcile interval. |
+| `review_skip_globs` | gate | Removes files from review; a PR could otherwise exempt its own changes. |
 
 ## Paths
 

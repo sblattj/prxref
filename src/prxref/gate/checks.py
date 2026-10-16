@@ -104,6 +104,32 @@ def conclusion_for(result: object) -> tuple[str, str]:
     return "success", "approved"
 
 
+_FAILED_UNITS_SHOWN = 3
+_UNIT_ERROR_CHARS = 200
+
+
+def failure_detail(result: object, reason: str) -> str:
+    """The review-body tail naming why a review failed: the reason, then each failed unit's files and error.
+
+    Errors are redacted and truncated; at most :data:`_FAILED_UNITS_SHOWN` units are listed.
+    """
+    from prxref.gate.worker import _redact
+
+    lines = [f"\nReason: {reason}."]
+    units = result.get("failed_chunks") if isinstance(result, dict) else None
+    units = [u for u in units or [] if isinstance(u, dict)]
+    for u in units[:_FAILED_UNITS_SHOWN]:
+        files = ", ".join(f"`{f}`" for f in (u.get("files") or [])[:3]) or "whole-PR sweep"
+        more = len(u.get("files") or []) - 3
+        if more > 0:
+            files += f" and {more} more"
+        error = " ".join(_redact(str(u.get("error") or "")).split())[:_UNIT_ERROR_CHARS]
+        lines.append(f"- failed {u.get('kind', 'unit')} {u.get('unit', '?')} ({files}): {error}")
+    if len(units) > _FAILED_UNITS_SHOWN:
+        lines.append(f"- and {len(units) - _FAILED_UNITS_SHOWN} more failed unit(s); see the check run")
+    return "\n".join(lines)
+
+
 def annotations_for(findings: Sequence[Finding], demoted: Sequence[InlineComment]) -> list[dict]:
     """File-level findings, then inline comments GitHub refused, as check annotations."""
     out = [
@@ -289,9 +315,12 @@ class Publisher:
                 return review["id"]
         return None
 
-    def _post_review(self, gen: Generation, lease: Lease, event: str, comments: Sequence[InlineComment]) -> int | None:
+    def _post_review(
+        self, gen: Generation, lease: Lease, event: str, comments: Sequence[InlineComment], why: str = ""
+    ) -> int | None:
         """Post the ``APPROVE`` or ``REQUEST_CHANGES`` review; ``None`` when GitHub refuses its anchors (422).
 
+        ``why`` (from :func:`failure_detail`) is appended so a failed review names its cause on the PR.
         A 422 on a review with no inline comments is not an anchor problem and propagates.
         """
         marker = REVIEW_MARKER.format(external_id=gen.external_id)
@@ -299,7 +328,7 @@ class Publisher:
         payload = {
             "commit_id": gen.head_sha,
             "event": event,
-            "body": f"{marker}\nsdlc review: {headline} - {len(comments)} inline finding(s).",
+            "body": f"{marker}\nsdlc review: {headline} - {len(comments)} inline finding(s).{why}",
             "comments": [
                 {
                     "path": c.path,
@@ -399,12 +428,13 @@ class Publisher:
         # (event unknown) or a different event posts, so the app's last review always matches the check.
         if published is None or published[0] != event:
             self._fence(lease, gen)
-            review_id = self._post_review(gen, lease, event, captured.comments)
+            why = failure_detail(result, reason) if conclusion != "success" else ""
+            review_id = self._post_review(gen, lease, event, captured.comments, why)
             if review_id is None:
                 # GitHub refused the anchors: the verdict still lands, comment-less; findings become annotations.
                 demoted = list(captured.comments)
                 self._fence(lease, gen)
-                review_id = self._post_review(gen, lease, event, ())
+                review_id = self._post_review(gen, lease, event, (), why)
             if review_id is not None:
                 self.store.record_publication(gen.id, lease.token, event, review_id)
         if captured.summary:

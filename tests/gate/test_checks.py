@@ -204,7 +204,7 @@ def test_a_non_success_result_posts_a_request_changes_review(store, gen, lease):
     _complete(gh, store, gen, lease, {"verdict": "Request-Changes"}, checks.Captured(comments=(comment,)))
     review = gh.sent("POST", r"/reviews$")[0][3]
     assert review["event"] == "REQUEST_CHANGES"
-    assert review["body"].endswith("sdlc review: changes requested - 1 inline finding(s).")
+    assert review["body"].endswith("sdlc review: changes requested - 1 inline finding(s).\nReason: error-severity findings.")
     assert gh.sent("PATCH", r"/check-runs/555$")[-1][3]["conclusion"] == "failure"
 
 
