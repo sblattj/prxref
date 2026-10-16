@@ -10,6 +10,15 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- The chunker no longer underestimates a file of a few very long lines (#122). It
+  counted 40 tokens per changed line, so a 3.5 MB minified bundle read as about 27k
+  tokens, shared a chunk with other files, and took their review down when the model
+  rejected the prompt. The estimate is now the larger of that and one token per 3
+  changed characters: ordinary code places exactly as before, and a long-line file
+  gets its own chunk and counts in `chunks_over_budget`.
+
 ## [0.37.0] - 2026-10-15
 
 ### Added

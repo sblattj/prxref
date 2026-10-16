@@ -585,15 +585,27 @@ def trim_hunk_context(hunk: Hunk, context_lines: int) -> Hunk:
     )
 
 
-def est_tokens(f: FileDiff) -> int:
-    """The chunker's token estimate for one file: 40 per changed line.
+_TOKENS_PER_LINE = 40
+_CHARS_PER_TOKEN = 3
 
-    ``(lines_added + lines_removed) * 40``. :func:`plan_chunks` places files
-    by it and :class:`ChunkPlan` reports chunk sizes by it, so the reported
-    numbers and the placement can never disagree. It runs above a prompt's
-    real token count on purpose.
+
+def est_tokens(f: FileDiff) -> int:
+    """The chunker's token estimate for one file: 40 per changed line, or more for long lines.
+
+    ``max((lines_added + lines_removed) * 40, changed_chars // 3)``. The line
+    term covers ordinary code, where a line averages well under 120
+    characters, so the character term never wins there and placement is
+    unchanged. The character term keeps a file of few, very long lines (a
+    minified bundle, a lockfile on one line) from reading as tiny: a 3.5 MB
+    one-line-per-module bundle was estimated at 27k tokens (issue #122).
+    :func:`plan_chunks` places files by it and :class:`ChunkPlan` reports
+    chunk sizes by it, so the reported numbers and the placement can never
+    disagree. It runs above a prompt's real token count on purpose.
     """
-    return (f.lines_added + f.lines_removed) * 40
+    changed = [ln for h in f.hunks for ln in h.lines if ln.kind != " "]
+    by_lines = len(changed) * _TOKENS_PER_LINE
+    by_chars = sum(len(ln.text) for ln in changed) // _CHARS_PER_TOKEN
+    return max(by_lines, by_chars)
 
 
 @dataclass(frozen=True)
