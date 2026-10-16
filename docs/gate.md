@@ -46,7 +46,7 @@ toward required reviews only then; the token the gate mints asks only for
 
 ## Prerequisites
 
-1. **Install the extra:** `uv tool install 'prxref[github-app,litellm]==0.36.2'`. Without
+1. **Install the extra:** `uv tool install 'prxref[github-app,litellm]==0.37.0'`. Without
    `github-app`, `prxref gate serve` exits 2 naming the extra.
 2. **Tunnel:** a Cloudflare zone, `cloudflared tunnel login`, `cloudflared tunnel create sdlc`,
    and `cloudflared tunnel route dns sdlc <webhook-host>`. The webhook URL is

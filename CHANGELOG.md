@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-15
+
 ### Added
 
 - `PRXREF_REVIEW_SKIP_GLOBS` (env only, #120): files matching any glob are left out of
