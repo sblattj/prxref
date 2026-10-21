@@ -13,3 +13,7 @@ docs/superpowers/
 docs/configurability/
 docs/release-hardening/
 docs/issues/
+
+# SAM build output and deploy answers (account-specific)
+deploy/aws/.aws-sam/
+deploy/aws/samconfig.toml

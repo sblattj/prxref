@@ -44,6 +44,7 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
 
 ```bash
 cd deploy/aws
+sam validate --lint
 sam build
 sam deploy --guided
 ```
@@ -51,7 +52,8 @@ sam deploy --guided
 `--guided` asks for the parameters (`AppId`, `InstallationIds`, `Repos`, `AppKeySecretArn`,
 `WebhookSecretArn`, `ModelId`, `ReasoningEffort`, `ReviewDeadline`), lets SAM create an ECR
 repository for the image, and saves the answers to `samconfig.toml` so later deploys are
-`sam build && sam deploy`. The stack outputs `WebhookUrl`, `QueueUrl`, `DeadLetterQueueUrl` and
+`sam build && sam deploy`. `samconfig.toml` holds the secret ARNs (your account id) and is
+git-ignored, as is `.aws-sam/`. The stack outputs `WebhookUrl`, `QueueUrl`, `DeadLetterQueueUrl` and
 `TableName`. The table is retained if the stack is deleted.
 
 ## Send a signed sample webhook
