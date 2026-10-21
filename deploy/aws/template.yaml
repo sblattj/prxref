@@ -1,0 +1,273 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  prxref review gate on AWS Lambda: HTTP API receiver, SQS FIFO, a serial worker,
+  a one-minute watchdog and a DynamoDB store. See deploy/aws/README.md.
+
+Parameters:
+  AppId:
+    Type: String
+    AllowedPattern: "[0-9]+"
+    Description: The GitHub App's numeric id.
+  InstallationIds:
+    Type: String
+    AllowedPattern: "[0-9]+(,[0-9]+)*"
+    Description: Comma-separated installation ids the gate accepts.
+  Repos:
+    Type: String
+    Description: Comma-separated owner/name repositories the gate reviews.
+  AppKeySecretArn:
+    Type: String
+    AllowedPattern: "arn:aws[a-z-]*:secretsmanager:.+"
+    Description: ARN of the Secrets Manager secret holding the app's PEM private key.
+  WebhookSecretArn:
+    Type: String
+    AllowedPattern: "arn:aws[a-z-]*:secretsmanager:.+"
+    Description: ARN of the Secrets Manager secret holding the webhook secret.
+  ModelId:
+    Type: String
+    Default: bedrock/us.anthropic.claude-opus-4-6-v1
+    Description: litellm model id for the review (PRXREF_LLM_MODELS).
+  ReasoningEffort:
+    Type: String
+    Default: medium
+    AllowedValues: [low, medium, high]
+    Description: PRXREF_LLM_REASONING_EFFORT for the review.
+  ReviewDeadline:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    Description: >-
+      PRXREF_GATE_REVIEW_DEADLINE in seconds; the worker also caps it at its remaining
+      time minus 120 s.
+
+Globals:
+  Function:
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        GATE_TABLE_NAME: !Ref Table
+        GATE_QUEUE_URL: !Ref Queue
+        PRXREF_GATE_APP_ID: !Ref AppId
+        PRXREF_GATE_INSTALLATION_IDS: !Ref InstallationIds
+        PRXREF_GATE_REPOS: !Ref Repos
+        PRXREF_RULES_SOURCE: base
+
+Resources:
+  # -- state ------------------------------------------------------------------
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+
+  Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      VisibilityTimeout: 5400
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # -- logs (14 days) -----------------------------------------------------------
+  ReceiverLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+  WatchdogLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+
+  # -- functions -----------------------------------------------------------------
+  ReceiverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Verify the webhook HMAC, record the generation, send it to SQS.
+      Timeout: 10
+      MemorySize: 512
+      PackageType: Image
+      ImageConfig:
+        Command: ["prxref.gate.aws.receiver_handler"]
+      LoggingConfig:
+        LogGroup: !Ref ReceiverLogs
+      Environment:
+        Variables:
+          GATE_WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
+      Policies:
+        - Statement:
+            - Sid: Table
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:ConditionCheckItem
+              Resource: !GetAtt Table.Arn
+            - Sid: Enqueue
+              Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt Queue.Arn
+            - Sid: WebhookSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref WebhookSecretArn
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            Path: /webhook
+            Method: POST
+    Metadata:
+      DockerContext: ../..
+      Dockerfile: deploy/aws/Dockerfile
+      DockerTag: gate
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Take the lease, review one generation, publish the sdlc-review check.
+      Timeout: 900
+      MemorySize: 4096
+      ReservedConcurrentExecutions: 1
+      PackageType: Image
+      ImageConfig:
+        Command: ["prxref.gate.aws.worker_handler"]
+      LoggingConfig:
+        LogGroup: !Ref WorkerLogs
+      Environment:
+        Variables:
+          GATE_APP_KEY_SECRET_ARN: !Ref AppKeySecretArn
+          PRXREF_LLM_BACKEND: litellm
+          PRXREF_LLM_MODELS: !Ref ModelId
+          PRXREF_LLM_REASONING_EFFORT: !Ref ReasoningEffort
+          PRXREF_GATE_REVIEW_DEADLINE: !Ref ReviewDeadline
+          AWS_REGION_NAME: !Ref AWS::Region
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      Policies:
+        - Statement:
+            - Sid: Bedrock
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.*
+                - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.*
+            - Sid: Table
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:ConditionCheckItem
+              Resource: !GetAtt Table.Arn
+            - Sid: Requeue
+              Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt Queue.Arn
+            - Sid: AppKey
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref AppKeySecretArn
+      Events:
+        Generations:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Queue.Arn
+            BatchSize: 1
+    Metadata:
+      DockerContext: ../..
+      Dockerfile: deploy/aws/Dockerfile
+      DockerTag: gate
+
+  WatchdogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Re-queue expired work, reconcile open PRs, resend queued generations.
+      Timeout: 60
+      MemorySize: 512
+      PackageType: Image
+      ImageConfig:
+        Command: ["prxref.gate.aws.watchdog_handler"]
+      LoggingConfig:
+        LogGroup: !Ref WatchdogLogs
+      Environment:
+        Variables:
+          GATE_APP_KEY_SECRET_ARN: !Ref AppKeySecretArn
+      Policies:
+        - Statement:
+            - Sid: Table
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:ConditionCheckItem
+              Resource: !GetAtt Table.Arn
+            - Sid: Enqueue
+              Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt Queue.Arn
+            - Sid: AppKey
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref AppKeySecretArn
+      Events:
+        EveryMinute:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+    Metadata:
+      DockerContext: ../..
+      Dockerfile: deploy/aws/Dockerfile
+      DockerTag: gate
+
+Outputs:
+  WebhookUrl:
+    Description: Set this as the GitHub App's webhook URL.
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/webhook
+  QueueUrl:
+    Description: The generation queue (SQS FIFO).
+    Value: !Ref Queue
+  DeadLetterQueueUrl:
+    Description: Messages that failed three receives.
+    Value: !Ref DeadLetterQueue
+  TableName:
+    Description: The gate's DynamoDB table.
+    Value: !Ref Table

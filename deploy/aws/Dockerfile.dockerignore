@@ -1,0 +1,6 @@
+# Only what the image needs; keeps .venv, .git and the test tree out of the build context.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src
