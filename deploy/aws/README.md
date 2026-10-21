@@ -62,9 +62,10 @@ under `prxref-gate/`.
   the artifact bucket and read the gate's logs.
 - An ECR repository `prxref-gate` (Lambda may pull only for `prxref-gate-*` functions) and an
   artifact bucket.
-- An IAM user `prxref-deployer` that can only assume the deployer role. It has no access
-  keys; give it a console password (from a file, never a command line) and sign in with
-  `aws login`.
+- An IAM user `prxref-deployer` that can only assume the deployer role and use `aws login`
+  (`signin:AuthorizeOAuth2Access`, `signin:CreateOAuth2Token`; without them the sign-in page
+  answers "Invalid request"). It has no access keys; give it a console password (from a file,
+  never a command line).
 
 ```bash
 aws cloudformation deploy --stack-name prxref-gate-deployer \

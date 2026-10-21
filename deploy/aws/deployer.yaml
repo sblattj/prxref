@@ -398,6 +398,12 @@ Resources:
               - Effect: Allow
                 Action: sts:AssumeRole
                 Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${GateStackName}-deployer
+              - Sid: CliLogin
+                Effect: Allow
+                Action:
+                  - signin:AuthorizeOAuth2Access
+                  - signin:CreateOAuth2Token
+                Resource: "*"
               - Sid: OwnPassword
                 Effect: Allow
                 Action:
