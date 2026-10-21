@@ -64,8 +64,10 @@ rejected — the bypass only tolerates a *missing* one.
 
 ### Deliberate non-goals
 
-- **prxref does not gate merges.** `review` exits 0 even when the review fails.
-  It is an advisor. Do not build a security control on its exit code.
+- **`prxref review` does not gate merges.** It exits 0 even when the review fails.
+  It is an advisor. Do not build a security control on its exit code. Gating is
+  the separate, opt-in `prxref gate` (docs/gate.md): a GitHub App posts the
+  `sdlc-review` check, and a ruleset you configure makes that check required.
 - **Diff content is sent to the LLM endpoint you configure.** If your diffs are
   sensitive, point prxref at an endpoint you trust. prxref does not choose or
   contact any provider on its own.

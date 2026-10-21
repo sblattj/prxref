@@ -299,3 +299,30 @@ def test_recent_publication_and_last_publish(db, clock):
     newer = _enqueue(db, "h2")
     assert [g.id for g in db.recent(1)] == [newer.id]
     assert db.get(gen.id).finished_at == clock[0]
+
+
+# Dynamo-only: a throttled transaction is a capacity error, not a state conflict.
+def test_dynamo_throttled_transaction_is_not_a_state_conflict(make_store, monkeypatch):
+    from botocore.exceptions import ClientError
+
+    db = make_store()
+    if isinstance(db, Store):
+        pytest.skip("DynamoDB transaction cancellation reasons")
+    gen = _enqueue(db)
+    token = db.acquire_lease("hostA:1", 60)
+    throttled = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": [{"Code": "None"}, {"Code": "ThrottlingError"}],
+        },
+        "TransactWriteItems",
+    )
+
+    def raise_throttled(**_kwargs):
+        raise throttled
+
+    monkeypatch.setattr(db._db, "transact_write_items", raise_throttled)
+    with pytest.raises(ClientError):
+        db.start(gen.id, token)
+    with pytest.raises(ClientError):
+        db.set_check_run(gen.id, token, 99)

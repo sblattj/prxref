@@ -93,6 +93,9 @@ def _code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
 
 
+_CAPACITY_CODES = frozenset({"ThrottlingError", "ProvisionedThroughputExceeded"})
+
+
 class _Cancelled(Exception):
     """A transaction was cancelled by a condition on an item other than the fence."""
 
@@ -173,6 +176,10 @@ class DynamoStore:
             codes = [r.get("Code", "None") for r in exc.response.get("CancellationReasons", [])]
             if fence and codes and codes[0] == "ConditionalCheckFailed":
                 raise LeaseLost("fencing token is not the live worker lease") from None
+            # A throttle is not a state conflict: let it fail the invocation so SQS redelivers,
+            # rather than read as "not queued" or drop a check run id.
+            if _CAPACITY_CODES.intersection(codes):
+                raise
             raise _Cancelled(codes) from None
 
     def _fence_item(self, token: int) -> dict:

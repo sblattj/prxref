@@ -18,6 +18,13 @@ tracker.
   template, the container image and the runbook. The `aws` extra installs boto3, PyJWT
   and litellm. See "Run on AWS" in docs/gate.md.
 
+### Changed
+
+- The gate's merge model is check-only: `prxref gate render-manifest` asks for
+  `contents: read`, so the app's review never counts as an approval, and
+  `prxref gate render-ruleset` requires the `sdlc-review` check with no approving reviews.
+  Run `prxref gate apply-ruleset` after upgrading.
+
 ### Fixed
 
 - Error findings that the head file contradicts no longer block (#126). A reviewer

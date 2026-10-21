@@ -178,4 +178,5 @@ the app's Advanced tab: recent deliveries should show 202.
 2. To turn the AWS gate off entirely: remove the required `sdlc-review` check from the ruleset
    first (docs/gate.md, Rollback), then disable the worker's SQS trigger
    (`aws lambda update-event-source-mapping --uuid <id> --no-enabled`) and the webhook, then
-   `sam delete`. The table is retained; delete it by hand when you no longer want the history.
+   `sam delete`. The deployer role has no `lambda:*` actions, so run the trigger step with an
+   administrator profile. The table is retained; delete it by hand when you no longer want the history.
