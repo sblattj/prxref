@@ -182,6 +182,12 @@ class Store:
             (),
         )
 
+    def queued(self) -> list[Generation]:
+        """Every queued generation, oldest id first."""
+        with self._lock:
+            rows = self._conn.execute(f"SELECT {_COLUMNS} FROM generations WHERE state='queued' ORDER BY id").fetchall()
+        return [Generation(*r) for r in rows]
+
     def get(self, gen_id: int) -> Generation:
         found = self._one("WHERE id=?", (gen_id,))
         if found is None:

@@ -19,6 +19,8 @@ Changelog = "https://github.com/sblattj/prxref/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 litellm = ["litellm>=1.40"]
 github-app = ["pyjwt[crypto]>=2.8"]
+# The review gate on AWS Lambda (deploy/aws): DynamoDB, SQS and Secrets Manager via boto3.
+aws = ["boto3>=1.34", "pyjwt[crypto]>=2.8", "litellm>=1.40"]
 
 # The dev tools are a PEP 735 dependency group, NOT a project extra. uv installs
 # the default `dev` group automatically on `uv run` and `uv sync`; it installs an
@@ -35,6 +37,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "pyjwt[crypto]>=2.8",
+    "boto3>=1.34",
+    "moto[dynamodb,sqs,secretsmanager]>=5.0",
 ]
 
 [project.scripts]

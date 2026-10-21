@@ -1,12 +1,19 @@
-"""Gate durable state: generations, supersede, lease fencing, restart recovery (#102)."""
+"""Gate durable state: generations, supersede, lease fencing, restart recovery (#102).
+
+The contract runs against both backends: the SQLite :class:`Store` and the
+DynamoDB :class:`DynamoStore` (moto).
+"""
 
 import os
 import socket
 import sqlite3
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from prxref.gate import store as store_mod
+from prxref.gate.dynamo_store import DynamoStore, create_table
 from prxref.gate.store import LeaseLost, Store
 
 
@@ -16,24 +23,52 @@ def clock():
     return now
 
 
+@pytest.fixture(params=["sqlite", "dynamo"])
+def make_store(request, tmp_path, clock, monkeypatch):
+    """A factory of stores on one backing state: one SQLite file, or one DynamoDB table."""
+    opened = []
+
+    def sqlite_store():
+        opened.append(Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0]))
+        return opened[-1]
+
+    if request.param == "sqlite":
+        yield sqlite_store
+    else:
+        for name, value in (
+            ("AWS_ACCESS_KEY_ID", "testing"),
+            ("AWS_SECRET_ACCESS_KEY", "testing"),
+            ("AWS_SESSION_TOKEN", "testing"),
+            ("AWS_DEFAULT_REGION", "us-east-1"),
+        ):
+            monkeypatch.setenv(name, value)
+        with mock_aws():
+            client = boto3.client("dynamodb", region_name="us-east-1")
+            create_table(client, "gate")
+            yield lambda: DynamoStore("gate", client, clock=lambda: clock[0])
+    for store in opened:
+        store.close()
+
+
 @pytest.fixture
-def db(tmp_path, clock):
-    store = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
-    yield store
-    store.close()
+def db(make_store):
+    return make_store()
 
 
 def _enqueue(db, head="h1", pr=7, base="b1", reason="opened"):
     return db.enqueue("acme/widget", pr, head, base, "main", reason)
 
 
-def test_wal_and_synchronous_full(tmp_path, db):
+# SQLite-only: WAL and synchronous=FULL are properties of the SQLite file.
+def test_wal_and_synchronous_full(tmp_path, clock):
+    db = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
     conn = sqlite3.connect(tmp_path / "gate.sqlite3")
     try:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         conn.close()
     assert db._conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+    db.close()
 
 
 def test_duplicate_delivery_is_refused(db):
@@ -79,6 +114,7 @@ def test_a_dead_local_holder_is_broken_immediately(db):
     assert db.acquire_lease("hostB:2", 60, holder_alive=lambda h: False) == 2
 
 
+# SQLite-only by nature: pid liveness is for a local ``host:pid`` holder; a Lambda holder just expires.
 def test_holder_alive_checks_pids_on_this_host():
     host = socket.gethostname()
     assert store_mod.holder_alive(f"{host}:{os.getpid()}") is True
@@ -152,10 +188,10 @@ def test_last_auth_failure_reports_the_newest_auth_error(db):
     assert "AuthenticationError" in db.last_auth_failure()
 
 
-def test_state_survives_reopen(tmp_path, clock):
-    first = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+def test_state_survives_reopen(make_store):
+    first = make_store()
     g = first.enqueue("acme/widget", 7, "h1", "b1", "main", "opened")
-    second = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+    second = make_store()
     try:
         assert second.get(g.id).head_sha == "h1"
     finally:
@@ -165,9 +201,9 @@ def test_state_survives_reopen(tmp_path, clock):
 
 @pytest.mark.parametrize("recover", ["requeue_expired", "adopt_orphans"])
 @pytest.mark.parametrize(("check_run", "final"), [(99, "stale"), (None, "superseded")])
-def test_overtaken_in_progress_row_is_finished_not_stranded(tmp_path, clock, recover, check_run, final):
-    a = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
-    b = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+def test_overtaken_in_progress_row_is_finished_not_stranded(make_store, clock, recover, check_run, final):
+    a = make_store()
+    b = make_store()
     try:
         g2 = _enqueue(a, "h2")
         token = a.acquire_lease("hostA:1", 60)
@@ -198,9 +234,9 @@ def test_overtaken_in_progress_row_is_finished_not_stranded(tmp_path, clock, rec
         b.close()
 
 
-def test_two_store_objects_fence_each_other_on_one_file(tmp_path, clock):
-    a = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
-    b = Store(tmp_path / "gate.sqlite3", clock=lambda: clock[0])
+def test_two_store_objects_fence_each_other_on_one_file(make_store, clock):
+    a = make_store()
+    b = make_store()
     try:
         gen = _enqueue(a)
         old = a.acquire_lease("hostA:1", 60)
@@ -238,3 +274,28 @@ def test_release_lease_expires_only_the_matching_holder_and_token(db):
     db.release_lease("hostA:1", token)
     assert db.lease_info()["live"] is False
     assert db.acquire_lease("hostB:1", 60) == token + 1
+
+
+def test_queued_lists_every_queued_row_oldest_first(db):
+    a = _enqueue(db, "h1", pr=7)
+    b = _enqueue(db, "h9", pr=8)
+    token = db.acquire_lease("hostA:1", 60)
+    db.start(a.id, token)
+    assert [g.id for g in db.queued()] == [b.id]
+    assert db.queue_depth() == 1
+
+
+def test_recent_publication_and_last_publish(db, clock):
+    gen = _enqueue(db)
+    token = db.acquire_lease("hostA:1", 60)
+    assert db.last_publish_time() is None
+    db.start(gen.id, token)
+    db.record_publication(gen.id, token, "APPROVE", 55)
+    db.record_publication(gen.id, token, "REQUEST_CHANGES", 56)
+    assert db.publication(gen.id) == ("REQUEST_CHANGES", 56)
+    clock[0] += 5
+    db.finish(gen.id, token, "completed", "success")
+    assert db.last_publish_time() == clock[0]
+    newer = _enqueue(db, "h2")
+    assert [g.id for g in db.recent(1)] == [newer.id]
+    assert db.get(gen.id).finished_at == clock[0]
