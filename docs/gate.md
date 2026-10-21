@@ -181,6 +181,18 @@ planned restart to avoid it, and `prxref gate resume` afterwards.
   shows the lease holder and the last authentication failure. Use
   `curl http://127.0.0.1:8787/health` on the Mac.
 
+## Run on AWS
+
+The same gate also runs on AWS Lambda, so it does not depend on one Mac being awake:
+an HTTP API receiver, an SQS FIFO queue, a worker that reviews one generation at a time
+with Bedrock through its execution role, a one-minute watchdog, and a DynamoDB table in
+place of the SQLite file. The container image installs `prxref[aws]`;
+the SAM template, Dockerfile and runbook (secrets, `sam deploy --guided`, a signed
+sample webhook, switching the app's webhook URL, rollback) are in
+[deploy/aws/README.md](../deploy/aws/README.md). Differences from the local gate: there is no
+previous-webhook-secret grace window, and the GitHub key and webhook secret come from
+Secrets Manager instead of the env file.
+
 ## Rollback
 
 Order matters: remove the ruleset first, or every merge stays blocked.

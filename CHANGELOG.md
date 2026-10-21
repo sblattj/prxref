@@ -10,6 +10,14 @@ tracker.
 
 ## [Unreleased]
 
+### Added
+
+- The review gate runs on AWS Lambda (#102): `prxref.gate.aws` has the receiver, worker
+  and watchdog handlers, `DynamoStore` keeps the gate's state in one DynamoDB table
+  with the same lease fencing as the SQLite store, and `deploy/aws/` holds the SAM
+  template, the container image and the runbook. The `aws` extra installs boto3, PyJWT
+  and litellm. See "Run on AWS" in docs/gate.md.
+
 ### Fixed
 
 - Error findings that the head file contradicts no longer block (#126). A reviewer
