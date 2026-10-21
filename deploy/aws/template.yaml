@@ -199,6 +199,9 @@ Resources:
           PRXREF_LLM_MAX_TOKENS: "32000"
           PRXREF_LLM_TIMEOUT: "600"
           PRXREF_REVIEW_SKIP_GLOBS: !Ref ReviewSkipGlobs
+          # A blocking error is re-checked against the head file and its callees before
+          # it can fail the check (#126); at most 5 calls of 120 s each, on 4 threads.
+          PRXREF_VERIFY_ERRORS: llm
           AWS_REGION_NAME: !Ref AWS::Region
           LITELLM_LOCAL_MODEL_COST_MAP: "True"
       Policies:
