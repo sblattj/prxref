@@ -472,7 +472,7 @@ LLM / pipeline:
   PRXREF_VERIFY_ERRORS_MAX      Error verification (#126): model calls one
                                 run may make at "llm", most confident errors
                                 first; non-negative int (default 5)
-  PRXREF_SUGGESTIONS           Code suggestions (#30): "off" (the default)
+  PRXREF_SUGGESTIONS            Code suggestions (#30): "off" (the default)
                                 leaves every prompt, call and finding as
                                 before, and the run record's "suggestions"
                                 is null. "on" asks each chunk worker (never
