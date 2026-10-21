@@ -472,6 +472,7 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("ci_wiring") == {"triggered": False, "reason": "no reader"}
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
         assert payload.pop("stable_ids") is not None  # #71: ids are on by default
+        assert payload.pop("error_verification")["mode"] == "names"  # #126: on by default
         assert payload.pop("metadata_rules") is None  # #70: null when PRXREF_METADATA_RULES is off
         assert payload.pop("failed_chunks") == []
         assert payload.pop("review_depth") == "standard"

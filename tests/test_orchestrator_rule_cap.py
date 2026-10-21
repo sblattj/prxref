@@ -626,6 +626,7 @@ class TestOffPathMatchesBase:
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "error_verification",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "failed_chunks", *CHUNK_KEYS,
         }
@@ -636,7 +637,7 @@ class TestOffPathMatchesBase:
         at = A81_JSON_KEYS.index("chunks_failed") + 1
         assert payload == [*A81_JSON_KEYS[:at], "failed_chunks", *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
                            "rule_scope_cleared",
-                           "repo_context", "parse_retries", "context_followup", "suggestions",
+                           "repo_context", "parse_retries", "context_followup", "error_verification", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
                            "metadata_rules", "config_file", "review_depth",
                            "learnings", "describe", "sampling"]

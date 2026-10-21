@@ -41,7 +41,7 @@ BASE_JSON = (
     '"ticket_context": null, "spec_grounding": null, "size_advisory": null, '
     '"prompt_templates": null, "scoped_rules": null, "rule_counts": null, '
     '"rule_scope_cleared": null, '
-    '"repo_context": null, "parse_retries": null, "context_followup": null, '
+    '"repo_context": null, "parse_retries": null, "context_followup": null, "error_verification": null, '
     '"suggestions": null, "incremental": null, "degraded": null}\n'
 )
 

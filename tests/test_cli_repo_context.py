@@ -278,7 +278,7 @@ class TestJsonKey:
                                             "sampling": {"seed": 1}, "replay": {}}))
         assert keys.index("repo_context") == keys.index("rule_scope_cleared") + 1
         assert keys[keys.index("repo_context") + 1:] == [
-            "parse_retries", "context_followup", "suggestions", "incremental", "ci_wiring",
+            "parse_retries", "context_followup", "error_verification", "suggestions", "incremental", "ci_wiring",
             "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
             "learnings", "describe", "sampling", "replay",
         ]
@@ -404,9 +404,11 @@ class TestEvalWiring:
         assert stub_llm.calls == 0
 
     def test_run_config_keys_end_with_the_six_settings_then_the_read_caps(self):
-        assert evals.RUN_CONFIG_KEYS[-11:-3] == SIX + READ_CAPS
-        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 11
-        assert evals.RUN_CONFIG_KEYS[-3:] == ("routing_probe", "ci_wiring", "review_depth")
+        assert evals.RUN_CONFIG_KEYS[-13:-5] == SIX + READ_CAPS
+        assert evals.RUN_CONFIG_KEYS.index("repo_context") == len(evals.RUN_CONFIG_KEYS) - 13
+        assert evals.RUN_CONFIG_KEYS[-5:] == (
+            "routing_probe", "ci_wiring", "review_depth", "verify_errors", "verify_errors_max",
+        )
 
 
 class TestFixtureEvalEndToEnd:
@@ -433,7 +435,7 @@ class TestFixtureEvalEndToEnd:
         assert [entry for entry in entries if entry["kind"] == "contract"] != []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        assert list(run["config"])[-11:-3] == list(SIX + READ_CAPS)
+        assert list(run["config"])[-13:-5] == list(SIX + READ_CAPS)
         assert run["config"]["repo_context"] == "repo"
         assert run["config"]["context_contract_globs"] == config._DEFAULTS["context_contract_globs"]
         # The eval harness pins standards discovery off (OD2), whatever the default.

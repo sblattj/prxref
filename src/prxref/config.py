@@ -456,7 +456,23 @@ LLM / pipeline:
                                 repository reader, the run logs one WARNING
                                 and the follow-up stays off for that run. Any
                                 other value is a configuration error
-  PRXREF_SUGGESTIONS            Code suggestions (#30): "off" (the default)
+  PRXREF_VERIFY_ERRORS          Error verification (#126): checks every
+                                active model error at or above the
+                                confidence floor against the head file
+                                before it can block. "names" (the default)
+                                drops an undefined-name claim ("`os` is not
+                                imported") when the head file binds the
+                                name, with no model call. "llm" also asks
+                                the model once per remaining error, with the
+                                head file and the definitions it calls, and
+                                downgrades it to a warning when the reply
+                                quotes a served line that refutes it. "off"
+                                skips the pass. Any other value is a
+                                configuration error
+  PRXREF_VERIFY_ERRORS_MAX      Error verification (#126): model calls one
+                                run may make at "llm", most confident errors
+                                first; non-negative int (default 5)
+  PRXREF_SUGGESTIONS           Code suggestions (#30): "off" (the default)
                                 leaves every prompt, call and finding as
                                 before, and the run record's "suggestions"
                                 is null. "on" asks each chunk worker (never
@@ -954,6 +970,10 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_reads": 200,
     "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
+    # Error verification (#126): vocabulary restated from
+    # prxref.verify.VERIFY_MODES (config stays a leaf module).
+    "verify_errors": "names",
+    "verify_errors_max": 5,
     "suggestions": "off",
     "review_depth": "standard",
     "routing_probe": "on",
@@ -1083,7 +1103,7 @@ _INT_KEYS = frozenset({
     "max_warning_findings", "max_outofscope_findings", "scoped_rules_max_chars",
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
-    "max_areas_per_pr", "evidence_max_chars",
+    "max_areas_per_pr", "evidence_max_chars", "verify_errors_max",
     "context_standards_max_chars",
     "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
     "gate_reconcile_minutes",
@@ -1112,6 +1132,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
+    "verify_errors": frozenset({"off", "names", "llm"}),
     "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
     "review_depth": frozenset({"standard", "thorough"}),
@@ -1230,6 +1251,7 @@ _RANGES: dict[str, _Range] = {
     "max_warning_findings": _Range(0, low_inclusive=True),
     "max_outofscope_findings": _Range(0, low_inclusive=True),
     "max_findings_per_rule": _Range(0, low_inclusive=True),
+    "verify_errors_max": _Range(0, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
     "repo_context_max_chars": _Range(0),
     "repo_context_max_reads": _Range(0),
@@ -1283,6 +1305,7 @@ FILE_KEYS = frozenset({
     "ticket_context_file", "ticket_context_max_chars",
     "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
+    "verify_errors", "verify_errors_max",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "routing_probe", "incremental", "describe", "labels",
     "context_contract_globs", "context_exclude_globs",

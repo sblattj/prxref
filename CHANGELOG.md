@@ -10,6 +10,23 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- Error findings that the head file contradicts no longer block (#126). A reviewer
+  that saw only the lines around a hunk could claim `os` "may not be imported" and
+  raise a `NameError` in a file whose head imports it, and that one error turned the
+  review Request-Changes. A new pass, `PRXREF_VERIFY_ERRORS` (`verify_errors` in a
+  config file), checks every active model `error` before grouping, the cap and the
+  gate count it. At `names`, the default, a Python undefined-name claim is dropped
+  with `contradicted by head file: <path>:<line> binds "<name>"` when the head file
+  binds every name it cites at module scope; no model call. At `llm`, each remaining
+  error (most confident first, at most `PRXREF_VERIFY_ERRORS_MAX`, default 5) also
+  gets one bounded call that sees the head file and the definitions it names; a
+  `refuted` reply downgrades the finding to `warning` only when its quoted line occurs
+  in the code that call was shown. `off` skips the pass. The run record gains
+  `error_verification`, and the extra calls count toward `input_tokens`,
+  `output_tokens` and `cost_usd`.
+
 ## [0.37.1] - 2026-10-15
 
 ### Fixed

@@ -52,14 +52,14 @@ BASE_KEYS = {
 RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
-    "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+    "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
     "review_depth", "learnings", "describe",
 }
 NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
     "scoped_rules", "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries",
-    "context_followup", "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids",
+    "context_followup", "error_verification", "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids",
     "degraded", "learnings", "describe",
 )
 
@@ -223,10 +223,12 @@ class TestTheRecordKeys:
         assert res["verdict"] == VERDICT[path]
         assert set(res) == BASE_KEYS | RECORD_KEYS
         for key in NULL_WHEN_OFF:
-            if key == "stable_ids" and path == "success":
+            if key in ("stable_ids", "error_verification") and path == "success":
                 continue
             assert res[key] is None, key
         if path == "success":
+            # #126: error verification is on ("names") by default.
+            assert res["error_verification"]["mode"] == "names"
             assert res["stable_ids"]["assigned"] == len(res["findings_active"]) + len(
                 res["findings_dropped"]
             )

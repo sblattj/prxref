@@ -43,7 +43,9 @@ auto-detects the forge.
   level only), a chunk whose first reply asks about a symbol it was not shown
   is re-sent once with that symbol's definition appended. The lookup is
   deterministic, the model calls no tools, and a follow-up never triggers
-  another.
+  another. A second: with PRXREF_VERIFY_ERRORS=llm (off by default), each
+  remaining model error (up to PRXREF_VERIFY_ERRORS_MAX) gets one bounded
+  verification call with the head file and its callees pre-gathered.
 - non-blocking by default: `review` exits 0 on every review error — empty diff,
   network failure, LLM timeout, bad credentials, a totally failed review
   (advisor, not gate). Exit 2 is reserved for a configuration error: a required

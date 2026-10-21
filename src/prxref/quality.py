@@ -247,6 +247,10 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from . import heuristics
+from .chunk_context import _PY_ASSIGN_RE as _CC_PY_ASSIGN_RE
+from .chunk_context import _PY_DEF_RE as _CC_PY_DEF_RE
+from .chunk_context import _PY_FROM_RE as _CC_PY_FROM_RE
+from .chunk_context import _PY_IMPORT_RE as _CC_PY_IMPORT_RE
 from .forges.base import Thread
 from .triage import DiffLine, FileDiff, Finding, Hunk
 
@@ -2441,6 +2445,170 @@ def apply_removal_claim_check(
             )
             continue
         out.append(f)
+    return out
+
+
+# An error claim that a name is unbound: the NameError family (#126).
+_UNDEFINED_NAME_CLAIM_RE = re.compile(
+    r"\bNameError\b"
+    r"|\bnot\s+(?:been\s+|yet\s+)?(?:imported|defined)\b"
+    r"|\bundefined\s+(?:name|variable|symbol|identifier)\b"
+    r"|\bmissing\s+(?:an?\s+)?import\b"
+    r"|\bnever\s+(?:imported|defined)\b"
+    r"|\bwithout\s+(?:an?\s+|being\s+)?import(?:ed|ing)?\b",
+    re.IGNORECASE,
+)
+_CLAIM_NAME_SPAN_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
+_CLAIM_NAME_QUOTED_RE = re.compile(r"""\bname\s+['"]([A-Za-z_][A-Za-z0-9_]*)['"]""")
+_PY_SUFFIXES = (".py", ".pyi")
+_PY_BLOCK_SCOPES = ("def", "async", "class")
+
+
+def _undefined_name_claim(f: Finding) -> list[str]:
+    """The names an undefined-name claim is about, in first-mention order; ``[]`` when it is not one."""
+    text = f"{f.title or ''}\n{f.body or ''}"
+    if not _UNDEFINED_NAME_CLAIM_RE.search(text):
+        return []
+    names = [m.group(1) for m in _CLAIM_NAME_SPAN_RE.finditer(text)]
+    names += [m.group(1) for m in _CLAIM_NAME_QUOTED_RE.finditer(text)]
+    return list(dict.fromkeys(names))
+
+
+def _import_clause_names(clause: str, *, from_import: bool) -> list[str]:
+    """The names one ``import``/``from ... import`` clause binds (``*`` binds none here)."""
+    out: list[str] = []
+    for item in clause.split(","):
+        parts = item.split()
+        if not parts or parts[0] == "*":
+            continue
+        if len(parts) >= 3 and parts[1] == "as":
+            out.append(parts[2])
+        elif from_import:
+            out.append(parts[0])
+        else:
+            out.append(parts[0].split(".")[0])
+    return [name for name in out if re.fullmatch(r"[A-Za-z_]\w*", name)]
+
+
+def module_bindings(text: str) -> dict[str, int]:
+    """Module-level names a Python file binds, each mapped to its first 1-based line.
+
+    Read with :data:`prxref.chunk_context._PY_IMPORT_RE`,
+    :data:`~prxref.chunk_context._PY_FROM_RE`,
+    :data:`~prxref.chunk_context._PY_DEF_RE` and
+    :data:`~prxref.chunk_context._PY_ASSIGN_RE`: ``import a.b`` binds ``a``,
+    ``import x as y`` and ``from m import x as y`` bind ``y``, ``from m
+    import a, b`` (also parenthesized over several lines) binds ``a`` and
+    ``b``, and a ``def``/``class`` or a column-0 assignment binds its name.
+    Only module scope counts: a line inside a ``def`` or ``class`` body binds
+    nothing here, while one inside a module-level ``try``/``if``/``with``
+    block does. Best effort and pure; a string literal can mislead the scope
+    tracking, which only ever makes the result smaller or larger by a name the
+    file really spells.
+    """
+    bindings: dict[str, int] = {}
+    scopes: list[tuple[int, str]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        lineno = i + 1
+        i += 1
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        while scopes and scopes[-1][0] >= indent:
+            scopes.pop()
+        in_function = any(kind in _PY_BLOCK_SCOPES for _, kind in scopes)
+        if stripped.endswith(":") or re.match(r"(?:async\s+)?(?:def|class)\b", stripped):
+            scopes.append((indent, stripped.split(None, 1)[0].rstrip(":")))
+        if in_function:
+            continue
+        names: list[str] = []
+        from_match = _CC_PY_FROM_RE.match(raw)
+        if from_match is not None:
+            clause = raw[from_match.end():].split("#", 1)[0].strip()
+            if clause.startswith("("):
+                clause = clause[1:]
+                while ")" not in clause and i < len(lines):
+                    clause += "," + lines[i].split("#", 1)[0]
+                    i += 1
+                clause = clause.split(")", 1)[0]
+            names = _import_clause_names(clause.rstrip("\\"), from_import=True)
+        elif _CC_PY_IMPORT_RE.match(raw):
+            clause = stripped[len("import"):].split("#", 1)[0].split(";", 1)[0]
+            names = _import_clause_names(clause, from_import=False)
+        else:
+            m = _CC_PY_DEF_RE.match(raw) or _CC_PY_ASSIGN_RE.match(raw)
+            if m is not None:
+                names = [m.group(1)]
+        for name in names:
+            bindings.setdefault(name, lineno)
+    return bindings
+
+
+def apply_undefined_name_check(
+    findings: Sequence[Finding],
+    read: Callable[[str], str | None] | None,
+    *,
+    confidence_floor: float | None = None,
+) -> list[Finding]:
+    """Drop an error claiming a name is unbound when the head file binds it (#126, tier 0).
+
+    A chunk sees a few context lines around each hunk and never the file's
+    imports, so a worker can claim "`os` may not be imported ... NameError"
+    about a file whose line 5 is ``import os``. This pass reads the head
+    file and settles that claim without a model.
+
+    A finding is judged only when it is active, its severity is ``error``
+    (compared case-insensitively), it is not a deterministic check's
+    (:func:`prxref.heuristics.is_deterministic`), its confidence is at or
+    above the floor (``confidence_floor``, else ``PRXREF_CONFIDENCE_FLOOR``,
+    else the default), its file is Python (``.py``/``.pyi``), and its title
+    or body states the undefined-name shape (``NameError``, "not imported",
+    "not defined", "undefined name", "missing import", ...) and names at
+    least one identifier in backticks (or as ``name 'x'``). When ``read``
+    returns the head file and :func:`module_bindings` binds EVERY named
+    identifier, the finding is dropped as ``contradicted by head file:
+    <path>:<line> binds "<name>"`` (joined with ``; `` for several names);
+    otherwise it is left as it was. ``read`` None, a read that raises or
+    returns None, or any unbound name changes nothing.
+
+    Pure and order-preserving, the same length in and out, like
+    :func:`apply_removal_claim_check`.
+    """
+    if read is None:
+        return list(findings)
+    floor = _resolve_confidence_floor(confidence_floor)
+    out: list[Finding] = []
+    cache: dict[str, dict[str, int] | None] = {}
+    for f in findings:
+        if (
+            f.drop_reason is not None
+            or (f.severity or "").strip().lower() != "error"
+            or heuristics.is_deterministic(f)
+            or float(f.confidence or 0.0) < floor
+            or not (f.file or "").endswith(_PY_SUFFIXES)
+        ):
+            out.append(f)
+            continue
+        names = _undefined_name_claim(f)
+        if not names:
+            out.append(f)
+            continue
+        if f.file not in cache:
+            try:
+                text = read(f.file)
+            except Exception:  # noqa: BLE001 -- a failed read leaves the claim standing
+                text = None
+            cache[f.file] = module_bindings(text) if isinstance(text, str) else None
+        bound = cache[f.file]
+        if bound is None or not all(name in bound for name in names):
+            out.append(f)
+            continue
+        reason = "; ".join(f'{f.file}:{bound[name]} binds "{name}"' for name in names)
+        out.append(replace(f, drop_reason=f"contradicted by head file: {reason}"))
     return out
 
 

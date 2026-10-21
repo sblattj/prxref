@@ -840,17 +840,18 @@ def _json_payload(res: dict) -> dict:
 
 
 def _trace_events(path: str) -> list[dict]:
-    """The trace minus clock fields and the always-on #71 ``stableids`` event.
+    """The trace minus clock fields, the always-on #71 ``stableids`` event and the #126 ``verify`` event.
 
-    The stable-id pass has no off switch since 0.30.1, so its one trace
-    event is projected away like the record keys a later feature added;
+    The stable-id pass has no off switch since 0.30.1, and error verification
+    is on (``names``) by default, so their one trace event each is projected
+    away like the record keys a later feature added;
     ``seq`` is renumbered so the remaining events read as the BASE run's.
     """
     events = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             event = json.loads(line)
-            if event.get("node") == "stableids":
+            if event.get("node") in ("stableids", "verify"):
                 continue
             event["seq"] = len(events) + (events[0]["seq"] if events else event["seq"])
             event.pop("t_ms", None)

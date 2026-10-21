@@ -1224,7 +1224,8 @@ def _build_json_result(result: Any) -> dict:
     ``ticket_context``, ``spec_grounding``, ``size_advisory``,
     ``prompt_templates``, ``scoped_rules``, ``rule_counts``,
     ``rule_scope_cleared``, ``repo_context``, ``parse_retries``,
-    ``context_followup``, ``suggestions``, ``incremental``, ``ci_wiring``,
+    ``context_followup``, ``error_verification``, ``suggestions``,
+    ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
     ``config_file``, ``review_depth``, ``learnings``, ``describe``, then ``sampling`` and
     ``replay`` when present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH``
@@ -1254,6 +1255,9 @@ def _build_json_result(result: Any) -> dict:
     and so is 0.18's ``context_followup`` (``null`` whenever
     ``PRXREF_CONTEXT_FOLLOWUP`` is ``off``; otherwise the follow-up record
     of :func:`prxref.orchestrator.orchestrate_review`), and so is
+    ``error_verification`` (#126: ``null`` whenever ``PRXREF_VERIFY_ERRORS``
+    is ``off`` or the run ended before the passes; otherwise the
+    verification record of :func:`prxref.verify.verify_errors`), and so is
     ``suggestions`` (#30: ``null`` whenever ``PRXREF_SUGGESTIONS`` is
     ``off``; otherwise ``{"kept", "cleared"}`` over the active findings),
     and so is ``incremental`` (#34: ``null`` whenever ``PRXREF_INCREMENTAL``
@@ -1331,6 +1335,7 @@ def _build_json_result(result: Any) -> dict:
         "repo_context": result.get("repo_context"),
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),
+        "error_verification": result.get("error_verification"),
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
         "ci_wiring": result.get("ci_wiring"),
@@ -2024,6 +2029,8 @@ def _run_review(
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
+        verify_errors=cfg["verify_errors"],
+        verify_errors_max=cfg["verify_errors_max"],
         rule_scoping=cfg["rule_scoping"],
         review_depth=cfg["review_depth"],
         suggestions=cfg["suggestions"],

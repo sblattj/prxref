@@ -84,6 +84,8 @@ RUN_CONFIG_KEYS = (
     "routing_probe",
     "ci_wiring",
     "review_depth",
+    "verify_errors",
+    "verify_errors_max",
 )
 EVAL_PINS: Mapping[str, Any] = {
     "ci_wiring": "off",

@@ -164,6 +164,8 @@ its `PRXREF_` name.
 | `repo_context_max_reads` | integer | Uncached repository-context reads all chunks together may make in one run ([more](env-vars.md#llm--pipeline)). |
 | `repo_context_max_chunk_reads` | integer | Uncached repository-context reads one chunk may make ([more](env-vars.md#llm--pipeline)). |
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
+| `verify_errors` | string | Error verification before an error can block: `off`, `names` (the default) or `llm` ([more](env-vars.md#llm--pipeline)). |
+| `verify_errors_max` | integer | Model calls one run's error verification may make at `llm` ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
 | `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at every `repo_context` level, on by default; replaces the built-in set; `[]` or `"off"` turns them off ([more](env-vars.md#llm--pipeline)). |

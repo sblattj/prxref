@@ -258,6 +258,7 @@ from . import (
     specs,
     systemic,
     verdicts,
+    verify,
 )
 from .ci_fallback import DEGRADED_SUMMARY_KEY
 from .ci_wiring import ci_wiring_findings, mentions_ci_work
@@ -631,6 +632,8 @@ def orchestrate_review(
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
     llm_parse_retries: int = 0,
     context_followup: str = "off",
+    verify_errors: str = verify.DEFAULT_MODE,
+    verify_errors_max: int = verify.DEFAULT_MAX_CALLS,
     suggestions: str = "off",
     routing_probe: str = "on",
     incremental: str = "off",
@@ -1291,6 +1294,10 @@ def orchestrate_review(
         raise ValueError(
             f"suggestions must be one of {SUGGESTION_MODES}, got {suggestions!r}"
         )
+    if verify_errors not in verify.VERIFY_MODES:
+        raise ValueError(
+            f"verify_errors must be one of {verify.VERIFY_MODES}, got {verify_errors!r}"
+        )
     if routing_probe not in ROUTING_PROBE_MODES:
         raise ValueError(
             f"routing_probe must be one of {ROUTING_PROBE_MODES}, got {routing_probe!r}"
@@ -1339,6 +1346,7 @@ def orchestrate_review(
             0 if isinstance(llm_parse_retries, int) and llm_parse_retries >= 1 else None
         ),
         "context_followup": _followup_record() if context_followup == "on" else None,
+        "error_verification": None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "ci_wiring": None,
@@ -2300,6 +2308,20 @@ def orchestrate_review(
     findings = consistent
     findings = apply_removal_claim_check(findings, files)
     findings = apply_hedge_gate(findings, spec_digest=injected)
+    # AFTER the cheap prunes and BEFORE grouping, the cap and the gate (#126):
+    # an error the head file contradicts must not consume ``max_errors`` or
+    # fold a title group. Runs after severity consistency, so a downgraded
+    # member can leave its title group mixed.
+    if verify_errors != "off":
+        findings, input_tokens, output_tokens, cost_label = _verify_error_findings(
+            llm, findings, reader, run_inputs,
+            mode=verify_errors, max_calls=verify_errors_max,
+            confidence_floor=confidence_floor, repo_plan=repo_plan,
+            context_exclude_globs=context_exclude_globs, max_workers=max_workers,
+            cost_units=[*results, *cost_units_extra],
+            price_table=price_table, post_cost=post_cost,
+            tokens=(input_tokens, output_tokens), cost_label=cost_label, tracer=tracer,
+        )
     # Its own guard (#75), independent of grouping and the cap: any loaded
     # rules file that declares a section scope (any rule at all, for the
     # category half) turns the check on, so a
@@ -4096,6 +4118,73 @@ CI_WIRING_INACTIVE_WARNING = (
     "read files at the PR head and no repository directory was given); the CI "
     "wiring check is off for this run"
 )
+
+def _verify_error_findings(
+    llm: Any,
+    findings: list[Finding],
+    reader: Callable[[str], str | None] | None,
+    run_inputs: dict[str, Any],
+    *,
+    mode: str,
+    max_calls: int,
+    confidence_floor: float | None,
+    repo_plan: _RepoPlan | None,
+    context_exclude_globs: Sequence[str],
+    max_workers: int,
+    cost_units: Sequence[Mapping[str, Any]],
+    price_table: Mapping[str, Any] | None,
+    post_cost: bool,
+    tokens: tuple[int, int],
+    cost_label: str,
+    tracer: Tracer,
+) -> tuple[list[Finding], int, int, str]:
+    """Run the error-verification pass (#126): ``(findings, input_tokens, output_tokens, cost_label)``.
+
+    Calls :func:`prxref.verify.verify_errors` over the run's cached head-file
+    reader, with the repository plan's listing and exclusion when one exists
+    (else :func:`prxref.repo_context.exclude_predicate` of
+    ``PRXREF_CONTEXT_EXCLUDE_GLOBS``, so an excluded file never reaches a
+    verifier prompt). Sets ``run_inputs["error_verification"]`` and emits one
+    ``verify ok`` trace event with the totals. When tier 1 made calls, their
+    units join ``cost_units`` and the run is priced again, exactly as the
+    describe call is, so the tokens, cost and cost label cover them.
+    """
+    listing_paths = repo_plan.listing_paths if repo_plan is not None else None
+    listing_complete = repo_plan.listing_complete if repo_plan is not None else False
+    exclude = (
+        repo_plan.exclude if repo_plan is not None
+        else exclude_predicate(list(context_exclude_globs))
+    )
+    findings, record, units = verify.verify_errors(
+        llm, findings, reader, mode=mode, max_calls=max_calls,
+        confidence_floor=confidence_floor, listing_paths=listing_paths,
+        listing_complete=listing_complete, exclude=exclude, max_workers=max_workers,
+    )
+    run_inputs["error_verification"] = record
+    if record is not None:
+        tracer.event("verify", "ok", **{k: v for k, v in record.items() if k != "detail"})
+        if record["name_refuted"] or record["refuted"]:
+            logger.info(
+                "error verification: dropped %d error(s) the head file contradicts, "
+                "downgraded %d refuted error(s) to warning",
+                record["name_refuted"], record["refuted"],
+            )
+    input_tokens, output_tokens = tokens
+    if not units:
+        return findings, input_tokens, output_tokens, cost_label
+    try:
+        _stamp_run_cost(
+            run_inputs, [*cost_units, *units], {} if price_table is None else price_table,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cost accounting failed (continuing): %s", e)
+        run_inputs["cost_usd"] = None
+        run_inputs["cost_estimated"] = False
+        run_inputs["cost_api_equivalent"] = False
+    input_tokens += sum(int(u.get("input_tokens") or 0) for u in units)
+    output_tokens += sum(int(u.get("output_tokens") or 0) for u in units)
+    return findings, input_tokens, output_tokens, _cost_label(run_inputs, post_cost)
+
 
 _FOLLOWUP_TOTALS = ("confirmed", "unconfirmed", "discarded", "input_tokens", "output_tokens")
 
