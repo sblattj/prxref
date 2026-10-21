@@ -30,7 +30,7 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
 4. **Two secrets**, created from files so no secret value is ever on a command line:
 
    ```bash
-   aws secretsmanager create-secret --name prxref-gate/app-key \
+   aws secretsmanager create-secret --name prxref-gate/app-private-key \
      --secret-string file://path/to/app.pem
    aws secretsmanager create-secret --name prxref-gate/webhook-secret \
      --secret-string file://path/to/webhook-secret.txt
@@ -42,19 +42,74 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
 
 ## Deploy
 
+The stack must be named `prxref-gate`: the deploy identity below scopes every permission to
+resources CloudFormation names after it, and the function boundary only allows secrets
+under `prxref-gate/`.
+
+### Once, as an admin: the deploy identity
+
+`deployer.yaml` creates:
+
+- `prxref-gate-cfn-exec`, the role CloudFormation acts as. It can create and change only
+  `prxref-gate-*` functions, roles, queues, the table, log groups and the schedule rule, plus
+  HTTP APIs in the region (their ids are random, so that one is region-wide).
+- `prxref-gate-function-boundary`, a permissions boundary. The exec role can create a role
+  only if it carries this boundary, so a template deployed through it cannot mint a function
+  role that does more than write logs, use the gate's table and queues, read
+  `prxref-gate/*` secrets and invoke Anthropic models on Bedrock.
+- `prxref-gate-deployer`, the role `sam deploy` runs as: change sets on the `prxref-gate`
+  stack only when they name the exec role, pass that role, push to the ECR repository, write
+  the artifact bucket and read the gate's logs.
+- An ECR repository `prxref-gate` (Lambda may pull only for `prxref-gate-*` functions) and an
+  artifact bucket.
+- An IAM user `prxref-deployer` that can only assume the deployer role. It has no access
+  keys; give it a console password (from a file, never a command line) and sign in with
+  `aws login`.
+
+```bash
+aws cloudformation deploy --stack-name prxref-gate-deployer \
+  --template-file deploy/aws/deployer.yaml --capabilities CAPABILITY_NAMED_IAM
+aws cloudformation describe-stacks --stack-name prxref-gate-deployer \
+  --query 'Stacks[0].Outputs' --output table
+```
+
+Then two profiles in `~/.aws/config`:
+
+```ini
+[profile prxref-deployer-login]
+region = us-west-2
+
+[profile prxref-deploy]
+region = us-west-2
+role_arn = <DeployerRoleArn>
+source_profile = prxref-deployer-login
+```
+
+`aws login --profile prxref-deployer-login`, choose IAM user, then
+`aws sts get-caller-identity --profile prxref-deploy` should print the deployer role.
+
+### Every deploy, as the deployer
+
 ```bash
 cd deploy/aws
 sam validate --lint
 sam build
-sam deploy --guided
+sam deploy --profile prxref-deploy --stack-name prxref-gate \
+  --role-arn <ExecRoleArn> --s3-bucket <ArtifactBucketName> \
+  --image-repository <ImageRepositoryUri> --capabilities CAPABILITY_IAM \
+  --parameter-overrides PermissionsBoundaryArn=<FunctionBoundaryArn> AppId=... \
+    InstallationIds=... Repos=... AppKeySecretArn=... WebhookSecretArn=...
 ```
 
-`--guided` asks for the parameters (`AppId`, `InstallationIds`, `Repos`, `AppKeySecretArn`,
-`WebhookSecretArn`, `ModelId`, `ReasoningEffort`, `ReviewDeadline`), lets SAM create an ECR
-repository for the image, and saves the answers to `samconfig.toml` so later deploys are
-`sam build && sam deploy`. `samconfig.toml` holds the secret ARNs (your account id) and is
-git-ignored, as is `.aws-sam/`. The stack outputs `WebhookUrl`, `QueueUrl`, `DeadLetterQueueUrl` and
-`TableName`. The table is retained if the stack is deleted.
+Add `--save-params` once and later deploys are `sam build && sam deploy --profile prxref-deploy`.
+Do not use `--resolve-s3` or `--resolve-image-repos`: they create SAM's own managed stacks,
+which the deployer role is not allowed to touch. `samconfig.toml` holds ARNs with your account
+id and is git-ignored, as is `.aws-sam/`. The stack outputs `WebhookUrl`, `QueueUrl`,
+`DeadLetterQueueUrl` and `TableName`. The table is retained if the stack is deleted. Delete
+the stack with `--role-arn <ExecRoleArn>` too.
+
+Deploying as an admin instead also works: `sam deploy --guided` with `PermissionsBoundaryArn`
+left empty.
 
 ## Send a signed sample webhook
 

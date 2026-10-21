@@ -40,10 +40,20 @@ Parameters:
     Description: >-
       PRXREF_GATE_REVIEW_DEADLINE in seconds; the worker also caps it at its remaining
       time minus 120 s.
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Managed policy every function role carries as its permissions boundary. Required when
+      deploying through deployer.yaml's exec role (its FunctionBoundaryArn output).
+
+Conditions:
+  HasBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
 
 Globals:
   Function:
     Architectures: [x86_64]
+    PermissionsBoundary: !If [HasBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
     Environment:
       Variables:
         GATE_TABLE_NAME: !Ref Table
