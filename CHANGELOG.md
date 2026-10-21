@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-21
+
 ### Added
 
 - The review gate runs on AWS Lambda (#102): `prxref.gate.aws` has the receiver, worker
