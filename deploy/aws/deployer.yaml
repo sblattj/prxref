@@ -113,6 +113,12 @@ Resources:
   # -- CloudFormation acts as this role -------------------------------------------
   ExecRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn-lint:
+        config:
+          # apigateway:TagResource is real (CloudFormation tags HTTP API stages) but missing
+          # from cfn-lint's action list.
+          ignore_checks: [W3037]
     Properties:
       RoleName: !Sub ${GateStackName}-cfn-exec
       AssumeRolePolicyDocument:
@@ -130,6 +136,10 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              - Sid: SamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
               - Sid: Functions
                 Effect: Allow
                 Action: lambda:*
@@ -151,9 +161,12 @@ Resources:
                   - lambda:UntagResource
                   - lambda:ListTags
                 Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*
+              # Lambda checks a mapping before CloudFormation knows its id.
               - Sid: ListMappings
                 Effect: Allow
-                Action: lambda:ListEventSourceMappings
+                Action:
+                  - lambda:ListEventSourceMappings
+                  - lambda:GetEventSourceMapping
                 Resource: "*"
               - Sid: RolesWithBoundary
                 Effect: Allow
@@ -265,6 +278,8 @@ Resources:
                   - apigateway:PUT
                   - apigateway:PATCH
                   - apigateway:DELETE
+                  - apigateway:TagResource
+                  - apigateway:UntagResource
                 Resource:
                   - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis
                   - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*
