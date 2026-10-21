@@ -24,9 +24,13 @@ attacking, and the ones worth reporting if you can break them.
 
 - Every credential is read from the environment at call time. prxref writes no
   credential file and has no config file that can hold one.
-- prxref reads **no upstream LLM provider credentials** — no OpenAI, AWS, Google,
-  or Anthropic keys. It talks to one OpenAI-compatible endpoint whose URL and key
-  you supply. Provider credentials live behind that endpoint, not here.
+- By default prxref reads **no upstream LLM provider credentials** — no OpenAI, AWS,
+  Google, or Anthropic keys. It talks to one OpenAI-compatible endpoint whose URL and
+  key you supply. Provider credentials live behind that endpoint, not here.
+- The opt-in `litellm` backend (`PRXREF_LLM_BACKEND=litellm`) calls a provider
+  directly, so it reads that provider's own credentials from the environment. On
+  AWS (deploy/aws) the gate calls Bedrock with the Lambda execution role, which can
+  invoke models and read the gate's two secrets, nothing else.
 - Forge tokens are scoped per forge (`PRXREF_BITBUCKET_TOKEN`,
   `PRXREF_GITHUB_TOKEN`, `PRXREF_GITHUB_ENTERPRISE_TOKEN`, `PRXREF_GITLAB_TOKEN`).
   Grant only pull-request write scope.
