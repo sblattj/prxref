@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from prxref.gate.settings import WEBHOOK_SECRET_ENV, WEBHOOK_SECRET_PREVIOUS_ENV, GateSettings
-from prxref.gate.store import Store
+from prxref.gate.store import Generation, Store
 from prxref.webhooks import _check_hmac
 
 logger = logging.getLogger(__name__)
@@ -79,15 +79,27 @@ def map_event(event: str, payload: dict, *, app_id: int, repo: str, store: Store
 
 
 class Receiver:
-    """Pure request handling; :func:`serve_http` puts it on a socket."""
+    """Pure request handling; :func:`serve_http` puts it on a socket.
+
+    ``on_enqueue`` is called with each generation the receiver enqueues: the
+    AWS receiver uses it to send the generation to SQS; the local gate leaves
+    it unset, since its worker polls the store.
+    """
 
     def __init__(
-        self, store: Store, settings: GateSettings, *, started_at: float, clock: Callable[[], float] = time.time
+        self,
+        store: Store,
+        settings: GateSettings,
+        *,
+        started_at: float,
+        clock: Callable[[], float] = time.time,
+        on_enqueue: Callable[[Generation], None] | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
         self._started_at = started_at
         self._clock = clock
+        self._on_enqueue = on_enqueue
 
     def _verify(self, body: bytes, headers: dict) -> str:
         state, _ = _check_hmac(body, headers, "x-hub-signature-256", WEBHOOK_SECRET_ENV, "gate")
@@ -157,7 +169,11 @@ class Receiver:
         if intent.kind == "cancel":
             self.store.cancel_pr(repo, intent.pr_number)
         else:
-            self.store.enqueue(repo, intent.pr_number, intent.head_sha, intent.base_sha, intent.base_ref, intent.reason)
+            gen = self.store.enqueue(
+                repo, intent.pr_number, intent.head_sha, intent.base_sha, intent.base_ref, intent.reason
+            )
+            if self._on_enqueue is not None:
+                self._on_enqueue(gen)
         self.store.mark_delivery_handled(delivery)
         return 202, {"status": "accepted", "delivery": delivery}
 

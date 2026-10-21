@@ -17,14 +17,26 @@ per PR event on AWS: nothing polls, and nothing stays up between PRs except a on
 4. **Worker** (Lambda container image, 4 GB, 15 min, reserved concurrency 1): takes the store
    lease, then runs the existing `run_generation` (binding check, check run, `prxref` review of
    the diff fetched through the API, publish). It never checks out the branch or runs PR code.
-   The review deadline is 12 min, so a timed-out review still gets a red check.
+   The review deadline is the smaller of `PRXREF_GATE_REVIEW_DEADLINE` and the invocation's
+   remaining time minus 2 min (about 13 min), so a timed-out review still gets a red check.
+   The lease TTL is 14 min. A message for a generation that is no longer queued is a no-op. A
+   held lease raises, so SQS redelivers after the visibility timeout. While the gate is paused
+   the worker consumes the message and leaves the row queued; the watchdog resends it.
 5. **Model** (Bedrock): litellm uses the worker's execution role. That role can call
    `bedrock:InvokeModel*` and read its two secrets, nothing else. No bearer token on Lambda.
 6. **GitHub**: the `sdlc-review` check run, plus inline findings.
 
-**Watchdog** (EventBridge `rate(1 minute)` + Lambda): runs the existing `reconcile` and
-`requeue_expired`, then sends one SQS message per generation it re-queued. It only enqueues; the
-worker does every repair.
+**Watchdog** (EventBridge `rate(1 minute)` + Lambda): runs the existing `requeue_expired`, and
+`reconcile` every `PRXREF_GATE_RECONCILE_MINUTES` per warm container, then sends one SQS message
+per generation that is queued, not only the ones it re-queued. That also recovers a row the
+receiver stored but failed to send. A first send dedupes on the generation id, a re-queued one
+on `<id>-<attempts>`, so the FIFO 5-minute dedupe window cannot swallow a re-queue. It only
+enqueues; the worker does every repair.
+
+**Secrets**: the app key and the webhook secret are plain `SecretString`s, read once per cold
+start and registered for redaction. The previous-secret grace window is measured from process
+start, which on Lambda is every cold start, so it is off: rotate by updating the secret and the
+app's webhook secret together, then redeliver any delivery that failed in between.
 
 ## Store
 

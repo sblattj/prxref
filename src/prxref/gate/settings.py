@@ -58,36 +58,73 @@ def _require_pem(path: Path, name: str) -> None:
         raise ConfigError(f"{name}: {path} is not a usable PEM private key ({type(e).__name__})") from e
 
 
-def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
-    """Validate the gate keys of a loaded ``cfg``; raise ``ConfigError`` naming the variable."""
+def _app_id(cfg: Mapping[str, Any]) -> int:
     app_id = str(cfg["gate_app_id"]).strip()
     if not _DIGITS_RE.fullmatch(app_id):
         raise ConfigError("PRXREF_GATE_APP_ID must be the app's numeric id")
+    return int(app_id)
+
+
+def _installation_ids(cfg: Mapping[str, Any]) -> frozenset[int]:
+    raw_ids = list(cfg["gate_installation_ids"])
+    if not raw_ids or not all(_DIGITS_RE.fullmatch(v.strip()) for v in raw_ids):
+        raise ConfigError("PRXREF_GATE_INSTALLATION_IDS must list one or more numeric installation ids")
+    return frozenset(int(v.strip()) for v in raw_ids)
+
+
+def _repos(cfg: Mapping[str, Any]) -> frozenset[str]:
+    repos = [v.strip() for v in cfg["gate_repos"]]
+    if not repos or not all(_REPO_RE.match(r) for r in repos):
+        raise ConfigError("PRXREF_GATE_REPOS must list one or more owner/name repositories")
+    return frozenset(r.lower() for r in repos)
+
+
+def settings_from_config(cfg: Mapping[str, Any]) -> GateSettings:
+    """Validate the gate keys of a loaded ``cfg``; raise ``ConfigError`` naming the variable."""
+    app_id = _app_id(cfg)
     key_file = str(cfg["gate_private_key_file"]).strip()
     if not key_file:
         raise ConfigError("PRXREF_GATE_PRIVATE_KEY_FILE is required")
     key_path = Path(key_file).expanduser()
     _require_private(key_path, "PRXREF_GATE_PRIVATE_KEY_FILE")
     _require_pem(key_path, "PRXREF_GATE_PRIVATE_KEY_FILE")
-    raw_ids = list(cfg["gate_installation_ids"])
-    if not raw_ids or not all(_DIGITS_RE.fullmatch(v.strip()) for v in raw_ids):
-        raise ConfigError("PRXREF_GATE_INSTALLATION_IDS must list one or more numeric installation ids")
-    repos = [v.strip() for v in cfg["gate_repos"]]
-    if not repos or not all(_REPO_RE.match(r) for r in repos):
-        raise ConfigError("PRXREF_GATE_REPOS must list one or more owner/name repositories")
+    installation_ids = _installation_ids(cfg)
+    repos = _repos(cfg)
     if not str(cfg["gate_webhook_secret"]).strip():
         raise ConfigError("PRXREF_GATE_WEBHOOK_SECRET is required")
     for key, name in (("gate_state_file", "PRXREF_GATE_STATE_FILE"), ("gate_runs_dir", "PRXREF_GATE_RUNS_DIR")):
         if not str(cfg[key]).strip():
             raise ConfigError(f"{name} is required")
     return GateSettings(
-        app_id=int(app_id),
+        app_id=app_id,
         private_key_file=key_path,
-        installation_ids=frozenset(int(v.strip()) for v in raw_ids),
-        repos=frozenset(r.lower() for r in repos),
+        installation_ids=installation_ids,
+        repos=repos,
         secret_grace_minutes=int(cfg["gate_secret_grace_minutes"]),
         state_file=Path(str(cfg["gate_state_file"])).expanduser(),
         runs_dir=Path(str(cfg["gate_runs_dir"])).expanduser(),
+        review_deadline=int(cfg["gate_review_deadline"]),
+        watchdog_seconds=int(cfg["gate_watchdog_seconds"]),
+        reconcile_minutes=int(cfg["gate_reconcile_minutes"]),
+    )
+
+
+def lambda_settings(cfg: Mapping[str, Any], runs_dir: Path) -> GateSettings:
+    """Settings for the AWS Lambda gate: no key file, no state file, no secret grace window.
+
+    The private key and the webhook secret come from Secrets Manager, the
+    state from DynamoDB, so the file fields are unused placeholders. The
+    previous-secret grace is measured from process start, which on Lambda is
+    each cold start, so it is off (0 minutes).
+    """
+    return GateSettings(
+        app_id=_app_id(cfg),
+        private_key_file=Path(os.devnull),
+        installation_ids=_installation_ids(cfg),
+        repos=_repos(cfg),
+        secret_grace_minutes=0,
+        state_file=Path(os.devnull),
+        runs_dir=runs_dir,
         review_deadline=int(cfg["gate_review_deadline"]),
         watchdog_seconds=int(cfg["gate_watchdog_seconds"]),
         reconcile_minutes=int(cfg["gate_reconcile_minutes"]),
