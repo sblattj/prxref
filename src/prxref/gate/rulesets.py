@@ -1,10 +1,10 @@
 """GitHub App manifest and merge ruleset for the sdlc gate (#102).
 
 The ruleset requires the ``sdlc-review`` check from one app
-(``integration_id``), a branch up to date with its base, one approval
-after the last push, and no bypass actors. That approval is satisfied by the
-app's own APPROVE review. It is applied with the
-operator's own ``gh`` login: the app's token has no administration
+(``integration_id``), a branch up to date with its base, zero required
+approvals, and no bypass actors. The required check is the gate. The app's own
+APPROVE or REQUEST_CHANGES review is informational and does not count toward
+merge. The ruleset is applied with the operator's own ``gh`` login: the app's token has no administration
 permission and never edits rulesets.
 """
 
@@ -34,15 +34,15 @@ def render_manifest(webhook_url: str, *, name: str = "prxref-sdlc") -> dict:
         "url": "https://github.com/sblattj/prxref",
         "hook_attributes": {"url": webhook_url, "active": True},
         "public": False,
-        # App approvals count toward required reviews only when the installation has contents:write;
-        # the minted token still asks for read (TOKEN_PERMISSIONS).
-        "default_permissions": {**TOKEN_PERMISSIONS, "contents": "write", "metadata": "read"},
+        # Check-only model: the required check is the gate, so the installation needs only
+        # contents:read. The app's review is informational and no longer counts toward merge.
+        "default_permissions": {**TOKEN_PERMISSIONS, "contents": "read", "metadata": "read"},
         "default_events": list(EVENTS),
     }
 
 
 def render_ruleset(integration_id: int) -> dict:
-    """The default-branch ruleset that makes the app's check and one fresh approval required."""
+    """The default-branch ruleset that requires the app's check and no approvals."""
     return {
         "name": RULESET_NAME,
         "target": "branch",
@@ -60,9 +60,9 @@ def render_ruleset(integration_id: int) -> dict:
             {
                 "type": "pull_request",
                 "parameters": {
-                    "required_approving_review_count": 1,
+                    "required_approving_review_count": 0,
                     "dismiss_stale_reviews_on_push": True,
-                    "require_last_push_approval": True,
+                    "require_last_push_approval": False,
                     "require_code_owner_review": False,
                     "required_review_thread_resolution": False,
                 },

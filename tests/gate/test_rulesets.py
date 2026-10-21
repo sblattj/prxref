@@ -84,3 +84,13 @@ def test_a_gh_failure_raises_with_its_stderr():
     gh = _Gh([(1, "")])
     with pytest.raises(rulesets.RulesetError, match="HTTP 403"):
         rulesets.apply_ruleset(REPO, 123456, run=gh)
+
+
+def test_check_only_merge_model_values():
+    manifest = rulesets.render_manifest("https://sdlc.example.dev/webhook")
+    assert manifest["default_permissions"]["contents"] == "read"
+    pr_rule = next(r for r in rulesets.render_ruleset(123456)["rules"] if r["type"] == "pull_request")
+    params = pr_rule["parameters"]
+    assert params["required_approving_review_count"] == 0
+    assert params["require_last_push_approval"] is False
+    assert "require_extra_approval_for_unattributed_changes" not in params

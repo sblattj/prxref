@@ -35,13 +35,11 @@ reviews what is live.
 Every published outcome posts one review plus the summary comment: a pass posts
 `APPROVE`, any other completed outcome posts `REQUEST_CHANGES`. The failure and
 cancel paths (deadline, crash, publish error, PR closed) post no review. The required
-check, pinned by `integration_id`, is the gate nobody can dismiss; the app's approval
-is the second lock. An owner or admin can dismiss the app's review (the ruleset
-`dismissal_restriction` is unavailable on personal free-plan repositories). Dismissing
-an `APPROVE` returns the PR to review-required, while the required check still blocks
-a failing PR. The installation needs `contents: write`, because an app's approval counts
-toward required reviews only then; the token the gate mints asks only for
-`contents: read`. A review that cannot finish fails closed: the check concludes
+check, pinned by `integration_id`, is the gate nobody can dismiss. The ruleset requires
+zero approvals, so the app's review is informational and does not count toward merge.
+The installation needs only `contents: read`, and so does the token the gate mints.
+Dismissing the app's review changes nothing, because the required check still blocks
+a failing PR. A review that cannot finish fails closed: the check concludes
 `failure`, never `neutral` or `skipped`.
 
 ## Prerequisites
@@ -74,9 +72,8 @@ toward required reviews only then; the token the gate mints asks only for
 4. **Register the app:** `prxref gate render-manifest --webhook-url https://<webhook-host>/webhook > manifest.json`,
    then create the app from that manifest (GitHub → Settings → Developer settings →
    GitHub Apps → New, or the manifest flow). Install it on the target repositories
-   only, and confirm the installation shows **Repository contents: Read and write**
-   (accept the permission if GitHub asks). Without it the app's `APPROVE` does not count
-   toward the approval rule and every passing PR stays at review-required. Download its private key to `~/.config/prxref-gate/sdlc.pem` and run
+   only, and confirm the installation shows **Repository contents: Read-only**.
+   The app's review is informational, so it needs no write access. Download its private key to `~/.config/prxref-gate/sdlc.pem` and run
    `chmod 600` on it. Note the app id and the installation id.
 5. **Apply the ruleset:** `prxref gate render-ruleset --integration-id <app-id>` shows it;
    `prxref gate apply-ruleset --repo <owner/name> --integration-id <app-id>` creates or
