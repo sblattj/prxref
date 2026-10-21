@@ -491,10 +491,9 @@ not: read the file from something the PR cannot change.
   `$BITBUCKET_PR_DESTINATION_BRANCH` on Bitbucket Pipelines; see
   [review-rules.md](review-rules.md#ci-safety-read-the-rules-from-something-the-pr-cannot-change).
 - **Check out the base, not the PR.** prxref reads the diff over the forge
-  API, so it never needs the PR's code on disk. A job that checks out only the
-  target branch, as the repository's own `pull_request_target` workflow
-  (`.github/workflows/prxref-review.yml`) does, auto-discovers the target
-  branch's `.prxref.toml`.
+  API, so it never needs the PR's code on disk. A `pull_request_target` job
+  that checks out only the target branch auto-discovers the target branch's
+  `.prxref.toml`.
 - **Turn it off.** `PRXREF_CONFIG_FILE=off` (or `--no-config`) in a gated lane
   ignores any file, and the pipeline's environment is the whole configuration.
 
