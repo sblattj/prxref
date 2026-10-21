@@ -40,6 +40,17 @@ Parameters:
     Description: >-
       PRXREF_GATE_REVIEW_DEADLINE in seconds; the worker also caps it at its remaining
       time minus 120 s.
+  ImageUri:
+    Type: String
+    AllowedPattern: ".+\\.dkr\\.ecr\\..+@sha256:[0-9a-f]{64}"
+    Description: >-
+      The gate image by digest, as deploy.sh pushes it. Built with buildx and Docker v2 media
+      types: an image built under the containerd image store (OrbStack, Docker Desktop) has
+      mixed layer types and Lambda fails it with Runtime.InvalidEntrypoint.
+  ReviewSkipGlobs:
+    Type: String
+    Default: ""
+    Description: PRXREF_REVIEW_SKIP_GLOBS for the review (generated or vendored files to skip).
   PermissionsBoundaryArn:
     Type: String
     Default: ""
@@ -126,6 +137,7 @@ Resources:
       Timeout: 10
       MemorySize: 512
       PackageType: Image
+      ImageUri: !Ref ImageUri
       ImageConfig:
         Command: ["prxref.gate.aws.receiver_handler"]
       LoggingConfig:
@@ -159,10 +171,6 @@ Resources:
           Properties:
             Path: /webhook
             Method: POST
-    Metadata:
-      DockerContext: ../..
-      Dockerfile: deploy/aws/Dockerfile
-      DockerTag: gate
 
   WorkerFunction:
     Type: AWS::Serverless::Function
@@ -172,6 +180,7 @@ Resources:
       MemorySize: 4096
       ReservedConcurrentExecutions: 1
       PackageType: Image
+      ImageUri: !Ref ImageUri
       ImageConfig:
         Command: ["prxref.gate.aws.worker_handler"]
       LoggingConfig:
@@ -183,6 +192,13 @@ Resources:
           PRXREF_LLM_MODELS: !Ref ModelId
           PRXREF_LLM_REASONING_EFFORT: !Ref ReasoningEffort
           PRXREF_GATE_REVIEW_DEADLINE: !Ref ReviewDeadline
+          # Bedrock rejects litellm's sampling seed (UnsupportedParamsError), and Anthropic
+          # extended thinking needs temperature 1.
+          PRXREF_LLM_SEED: "off"
+          PRXREF_LLM_TEMPERATURE: "1"
+          PRXREF_LLM_MAX_TOKENS: "32000"
+          PRXREF_LLM_TIMEOUT: "600"
+          PRXREF_REVIEW_SKIP_GLOBS: !Ref ReviewSkipGlobs
           AWS_REGION_NAME: !Ref AWS::Region
           LITELLM_LOCAL_MODEL_COST_MAP: "True"
       Policies:
@@ -219,10 +235,6 @@ Resources:
           Properties:
             Queue: !GetAtt Queue.Arn
             BatchSize: 1
-    Metadata:
-      DockerContext: ../..
-      Dockerfile: deploy/aws/Dockerfile
-      DockerTag: gate
 
   WatchdogFunction:
     Type: AWS::Serverless::Function
@@ -230,7 +242,13 @@ Resources:
       Description: Re-queue expired work, reconcile open PRs, resend queued generations.
       Timeout: 60
       MemorySize: 512
+      # One tick at a time, and no async retries: a retried tick overlaps the next one, and two
+      # reconciles racing on one head each enqueue a generation (the later supersedes the other).
+      ReservedConcurrentExecutions: 1
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
       PackageType: Image
+      ImageUri: !Ref ImageUri
       ImageConfig:
         Command: ["prxref.gate.aws.watchdog_handler"]
       LoggingConfig:
@@ -263,10 +281,6 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: rate(1 minute)
-    Metadata:
-      DockerContext: ../..
-      Dockerfile: deploy/aws/Dockerfile
-      DockerTag: gate
 
 Outputs:
   WebhookUrl:

@@ -17,8 +17,8 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
 
 ## Prerequisites
 
-1. **AWS CLI and SAM CLI**, credentials for the target account, and a local Docker engine
-   (OrbStack works) for `sam build`.
+1. **AWS CLI and SAM CLI**, credentials for the target account, and a local Docker engine with
+   buildx (OrbStack works) for `deploy.sh`.
 2. **Bedrock model access** for the model in `ModelId` (default
    `bedrock/us.anthropic.claude-opus-4-6-v1`, a US cross-region inference profile) in the stack's
    region. Check it before deploying:
@@ -91,18 +91,32 @@ source_profile = prxref-deployer-login
 
 ### Every deploy, as the deployer
 
+The image is not built by `sam build`. Under the containerd image store (OrbStack, Docker
+Desktop) `sam build` pushes a manifest that mixes Docker and OCI layer types, and Lambda fails
+that image at init with `Runtime.InvalidEntrypoint` and no other output. `deploy.sh` builds with
+buildx and Docker v2 media types, pushes `gate-<commit>`, and passes the digest as `ImageUri`.
+
+The first deploy saves everything but the image to `samconfig.toml`:
+
 ```bash
 cd deploy/aws
 sam validate --lint
-sam build
-sam deploy --profile prxref-deploy --stack-name prxref-gate \
+sam deploy --profile prxref-deploy --stack-name prxref-gate --template-file template.yaml \
   --role-arn <ExecRoleArn> --s3-bucket <ArtifactBucketName> \
   --image-repository <ImageRepositoryUri> --capabilities CAPABILITY_IAM \
   --parameter-overrides PermissionsBoundaryArn=<FunctionBoundaryArn> AppId=... \
-    InstallationIds=... Repos=... AppKeySecretArn=... WebhookSecretArn=...
+    InstallationIds=... Repos=... AppKeySecretArn=... WebhookSecretArn=... \
+    ReviewSkipGlobs=... ImageUri=<any pushed digest> --save-params
 ```
 
-Add `--save-params` once and later deploys are `sam build && sam deploy --profile prxref-deploy`.
+From then on every deploy, image included, is one command from the repository root:
+
+```bash
+deploy/aws/deploy.sh --profile prxref-deploy
+```
+
+It reads `image_repository` and the overrides from `samconfig.toml`, because `sam deploy
+--parameter-overrides` on the command line replaces the saved set rather than adding to it.
 Do not use `--resolve-s3` or `--resolve-image-repos`: they create SAM's own managed stacks,
 which the deployer role is not allowed to touch. `samconfig.toml` holds ARNs with your account
 id and is git-ignored, as is `.aws-sam/`. The stack outputs `WebhookUrl`, `QueueUrl`,

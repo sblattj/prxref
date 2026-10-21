@@ -84,5 +84,7 @@ own review. The app key and webhook secret live in Secrets Manager. The app has
 
 `deploy/aws/template.yaml` is an AWS SAM template: HTTP API, three functions, SQS FIFO + DLQ,
 DynamoDB (on-demand, TTL), the EventBridge rule, IAM roles and Secrets Manager references.
-`sam build && sam deploy --guided` deploys it. Images are built with the local Docker
-(OrbStack).
+`deploy/aws/deploy.sh` deploys it: it builds the image with buildx and Docker v2 media types
+(a containerd-store build from `sam build` fails on Lambda with `Runtime.InvalidEntrypoint`),
+pushes it, and passes the digest as `ImageUri`. The watchdog has reserved concurrency 1 and no
+async retries, so two reconciles never race on one head.
