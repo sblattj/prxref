@@ -10,6 +10,14 @@ tracker.
 
 ## [Unreleased]
 
+### Added
+
+- The gate deploys itself from GitHub Actions with no stored AWS keys:
+  `.github/workflows/deploy-gate.yml` assumes the deployer role over GitHub OIDC on every
+  push to main that touches the gate. `deployer.yaml` gains `GitHubDeploySubject` (the
+  exact `sub`, immutable form included) and an optional OIDC provider, and `deploy.sh`
+  gains `--no-profile` to use the credentials already in the environment.
+
 ## [0.38.0] - 2026-10-21
 
 ### Added

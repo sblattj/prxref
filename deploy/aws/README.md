@@ -126,6 +126,38 @@ the stack with `--role-arn <ExecRoleArn>` too.
 Deploying as an admin instead also works: `sam deploy --guided` with `PermissionsBoundaryArn`
 left empty.
 
+### From GitHub Actions, with no stored keys
+
+`.github/workflows/deploy-gate.yml` runs `deploy.sh --no-profile` on every push to main that
+touches the gate. The job asks GitHub for an OIDC token, and
+`aws-actions/configure-aws-credentials` trades it for the deployer role's temporary
+credentials. AWS checks the token's `sub` against `GitHubDeploySubject` with `StringEquals`,
+so only that repository's main branch can deploy: other branches, forks and pull requests are
+refused at `sts:AssumeRoleWithWebIdentity`.
+
+Repositories created after 2026-07-15 (and renamed, transferred or opted-in ones) send an
+immutable `sub` that carries the owner and repository ids. A trust policy written as
+`repo:OWNER/REPO:*` fails for them with "Not authorized to perform
+sts:AssumeRoleWithWebIdentity". Read the prefix first:
+
+```bash
+gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+```
+
+Then, once, as an admin, update the deploy identity with the full subject:
+
+```bash
+aws cloudformation deploy --stack-name prxref-gate-deployer --template-file deploy/aws/deployer.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides "GitHubDeploySubject=<prefix>:ref:refs/heads/main"
+```
+
+Pass `GitHubOidcProviderArn=<arn>` as well when the account already has a
+`token.actions.githubusercontent.com` provider (there can be only one). Then set two
+repository secrets: `PRXREF_GATE_DEPLOY_ROLE_ARN` (the `DeployerRoleArn` output) and
+`PRXREF_GATE_SAMCONFIG` (the contents of your `samconfig.toml`). Neither is a credential: the
+role can only be assumed by the token GitHub mints for the trusted job.
+
 ## Send a signed sample webhook
 
 Before GitHub points at the API, sign a request yourself. The signature is computed from the

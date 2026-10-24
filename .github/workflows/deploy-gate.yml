@@ -1,0 +1,59 @@
+name: Deploy gate
+
+# Deploys deploy/aws/template.yaml when main changes the gate's code or template. The job
+# assumes the deployer role over GitHub OIDC: AWS trusts this repository's main branch by
+# its exact `sub` (deployer.yaml, GitHubDeploySubject), so no AWS key is stored anywhere.
+# A run from any other branch, a fork or a pull request cannot assume the role.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "deploy/aws/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/deploy-gate.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-gate
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'sblattj/prxref'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the deployer role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.PRXREF_GATE_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+          role-session-name: gate-deploy-${{ github.run_id }}
+          role-duration-seconds: 3600
+          mask-aws-account-id: true
+
+      - name: Install SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      # samconfig.toml holds ARNs with the account id, so it lives in a secret, not the repo.
+      - name: Write samconfig.toml
+        env:
+          SAMCONFIG: ${{ secrets.PRXREF_GATE_SAMCONFIG }}
+        run: printf '%s\n' "$SAMCONFIG" > deploy/aws/samconfig.toml
+
+      - name: Deploy
+        run: bash deploy/aws/deploy.sh --no-profile

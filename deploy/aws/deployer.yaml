@@ -15,6 +15,27 @@ Parameters:
     Type: String
     Default: prxref-deployer
     Description: IAM user allowed to assume the deployer role (console sign-in, no access keys).
+  GitHubDeploySubject:
+    Type: String
+    Default: ""
+    AllowedPattern: "(repo:[^*]+)?"
+    Description: >-
+      The exact OIDC `sub` of the GitHub Actions job that may assume the deployer role, for
+      example repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/heads/main (repositories created after
+      2026-07-15 send this immutable form; read yours from
+      `gh api repos/OWNER/REPO/actions/oidc/customization/sub`). Empty: no CI deploys.
+  GitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN of an existing token.actions.githubusercontent.com OIDC provider (one per account).
+      Empty: this stack creates it when GitHubDeploySubject is set.
+
+Conditions:
+  GitHubDeploy: !Not [!Equals [!Ref GitHubDeploySubject, ""]]
+  CreateGitHubProvider: !And
+    - !Condition GitHubDeploy
+    - !Equals [!Ref GitHubOidcProviderArn, ""]
 
 Resources:
   # -- artifacts ----------------------------------------------------------------
@@ -293,6 +314,14 @@ Resources:
                   - ecr:GetRepositoryPolicy
                 Resource: !GetAtt ImageRepository.Arn
 
+  # -- GitHub Actions signs in with a short-lived OIDC token, no stored keys ------------
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateGitHubProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
   # -- the identity that runs `sam deploy` -------------------------------------------
   DeployerRole:
     Type: AWS::IAM::Role
@@ -306,6 +335,22 @@ Resources:
             Principal:
               AWS: !GetAtt DeployerUser.Arn
             Action: sts:AssumeRole
+          - !If
+            - GitHubDeploy
+            - Sid: GitHubActions
+              Effect: Allow
+              Principal:
+                Federated: !If
+                  - CreateGitHubProvider
+                  - !Ref GitHubOidcProvider
+                  - !Ref GitHubOidcProviderArn
+              Action: sts:AssumeRoleWithWebIdentity
+              # StringEquals on the whole sub: one repository, one branch, no wildcards.
+              Condition:
+                StringEquals:
+                  token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                  token.actions.githubusercontent.com:sub: !Ref GitHubDeploySubject
+            - !Ref AWS::NoValue
       Policies:
         - PolicyName: deploy-gate-stack
           PolicyDocument:
@@ -442,3 +487,7 @@ Outputs:
   ArtifactBucketName:
     Description: Pass to `sam deploy --s3-bucket`.
     Value: !Ref ArtifactBucket
+  GitHubOidcProviderArn:
+    Condition: GitHubDeploy
+    Description: The OIDC provider the deployer role trusts.
+    Value: !If [CreateGitHubProvider, !Ref GitHubOidcProvider, !Ref GitHubOidcProviderArn]
