@@ -62,7 +62,8 @@ under `prxref-gate/`.
   the artifact bucket and read the gate's logs.
 - An ECR repository `prxref-gate` (Lambda may pull only for `prxref-gate-*` functions) and an
   artifact bucket.
-- An IAM user `prxref-deployer` that can only assume the deployer role and use `aws login`
+- An IAM user `prxref-deployer` (optional; see below to drop it once CI deploys) that can only
+  assume the deployer role and use `aws login`
   (`signin:AuthorizeOAuth2Access`, `signin:CreateOAuth2Token`; without them the sign-in page
   answers "Invalid request"). It has no access keys; give it a console password (from a file,
   never a command line).
@@ -157,6 +158,20 @@ Pass `GitHubOidcProviderArn=<arn>` as well when the account already has a
 repository secrets: `PRXREF_GATE_DEPLOY_ROLE_ARN` (the `DeployerRoleArn` output) and
 `PRXREF_GATE_SAMCONFIG` (the contents of your `samconfig.toml`). Neither is a credential: the
 role can only be assumed by the token GitHub mints for the trusted job.
+
+Once a merge to main has deployed, the `prxref-deployer` user is no longer needed. Drop it by
+passing an empty name in the same update, which also removes it from the role's trust policy
+(delete its console password first, or CloudFormation cannot delete the user):
+
+```bash
+aws iam delete-login-profile --user-name prxref-deployer
+aws cloudformation deploy --stack-name prxref-gate-deployer --template-file deploy/aws/deployer.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides "GitHubDeploySubject=<prefix>:ref:refs/heads/main" "DeployerUserName="
+```
+
+The template refuses an update that leaves neither the user nor `GitHubDeploySubject`, since
+no one could deploy. Without the user, a fix to the deploy path itself goes through an admin.
 
 ## Send a signed sample webhook
 

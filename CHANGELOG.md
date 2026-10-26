@@ -12,6 +12,9 @@ tracker.
 
 ### Added
 
+- `deployer.yaml`'s IAM user is optional: an empty `DeployerUserName` leaves only the
+  GitHub Actions OIDC deploy, and the template refuses an update that would leave no one able
+  to deploy.
 - The gate deploys itself from GitHub Actions with no stored AWS keys:
   `.github/workflows/deploy-gate.yml` assumes the deployer role over GitHub OIDC on every
   push to main that touches the gate. `deployer.yaml` gains `GitHubDeploySubject` (the
