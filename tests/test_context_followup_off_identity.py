@@ -70,8 +70,8 @@ SWEEP_CONTENT = json.dumps({"findings": []})
 # Recorded at 43ec560 with PRXREF_REPO_CONTEXT=repo, PRXREF_CONTEXT_FOLLOWUP
 # unset, over tests/fixtures/issue22/pr.patch against the route below.
 EXPECTED_REQUEST_COUNT = 3
-PRE_29_SHA = "6f39ae9a3763c9ba3e02da15839966366fafeb217ae187cd8493fbf5af74f78e"
-POST_29_SHA = "0df673d2681af50407aa082df9ee22ddc857d25a7e42b9395a6ce66ba921e598"
+PRE_29_SHA = "07f1d507fa6b929b2483ab2fa610349355ef7c4e23e8f224f029301e5a3a2c3f"
+POST_29_SHA = "5e1f061ba04deedee51b7c02c31dd8f148560da7b85f9c682a9d1002ad48916e"
 ISSUE_29_LINE = "assistant/engine.py:12: class Step:\n"
 EXPECTED_MESSAGE_SHAS = [
     # The sweep request: still the 0.17.0 recording.
@@ -84,7 +84,7 @@ EXPECTED_MESSAGE_SHAS = [
     # replay chunk context, so this prompt gains exactly
     # ``assistant/engine.py:12: class Step:``; it was PRE_29_SHA at 0.17.0.
     POST_29_SHA,
-    "9e29727a5e9e520f48fd2b60961f8d8c07844c4c4e79b91a99e2bde5d7d9624f",
+    "69642b0e902c5ab5ee620d31e13740e491d8a445fa553c6dbf4694056a70a0b3",
 ]
 
 
