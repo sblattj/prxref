@@ -107,7 +107,7 @@ CONTEXTS = {
 # the 0.15 recording.
 BASE_GOLDEN = {
     "worker/off": (
-        "c3f7402b1742b6cb7d37a78aa2b3136c0ccc295d7dd769af0ed7e452d3c4c8d4",
+        "5bdb1187017f275bf1afc5de65db61709155410ab94ff3d6d34c20533e11e335",
         "4efbc87d908fc50b2ea9adb6dbc43b58e144a8c99734cef5790e425851b2f0f4",
     ),
     "sweep/off": (
@@ -115,7 +115,7 @@ BASE_GOLDEN = {
         "577820a0c654d7ac50edab15990cf9d527c83317ad90aa16a6ded0f4dc8aa80f",
     ),
     "worker/scope": (
-        "2c9c16c7a5e3b4bd0eef0cbc7038096b36c3ba68b576ac19c4772986a050b325",
+        "4e5eb1c3dc10f298546e68161dd960581ba6ea2b9e4fead4909f70a290bbb448",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/scope": (
@@ -123,7 +123,7 @@ BASE_GOLDEN = {
         "971380d4218e5aaebd8afd76787b1e57ba08697d910d30547dd7ac219fb70103",
     ),
     "worker/full": (
-        "30cf139f0cbf72466efb761c10af9e8f01bfbe624bd2f9d94a390f650e6cddc2",
+        "a5715b5c90a5ca402c51eeaed9e56cdb68119fbdda0ded71058164766d2e9039",
         "118d48be8eeac397b8246b5c6bfc3afb1478100f678c2a540648e41a37f4b715",
     ),
     "sweep/full": (
@@ -131,7 +131,7 @@ BASE_GOLDEN = {
         "3dcf3ce2490de05559933421db5beb8ab046a884f1d38d7470cf06921874732a",
     ),
     "worker/override": (
-        "f3d27a6b686ce01fa410fb8d24f361c9965725db69a9fc3c9e0b76d8154e82fe",
+        "5a7989b29cc4893651b9301fa899f6d400354d7c7f4d069dca4dde7ed5719295",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/override": (
@@ -143,7 +143,7 @@ BASE_GOLDEN = {
         "69f464cf7517584bb8630547fde874febcff84f0498e95d7292a175952383c43",
     ),
     "orchestrator/1": (
-        "c3f7402b1742b6cb7d37a78aa2b3136c0ccc295d7dd769af0ed7e452d3c4c8d4",
+        "5bdb1187017f275bf1afc5de65db61709155410ab94ff3d6d34c20533e11e335",
         "0113e78e0815af17dbbc6f2e642bfacc237f9464ead72197801a6c23799b2239",
     ),
 }

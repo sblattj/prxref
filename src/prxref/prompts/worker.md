@@ -29,6 +29,8 @@ There is no downstream investigation pass that will confirm your suspicions. If 
 
 Before asserting that something is absent, unsupported, undocumented, or contradicted, check the `### Other files changed in this PR` summary below the diff — the refuting evidence may sit in a sibling file the chunk split moved out of view. If a sibling file plausibly refutes the claim, drop the finding or lower it to a question with `confidence` at or below 0.5.
 
+Calibrate `warning` against what you were shown. Before claiming a runtime failure from a bad value, check whether the shown code or its write path already validates and rejects it; if so, name the trigger that still reaches it (for example version skew between services) or drop the finding. Before a conditional exploit ("if the client follows the link"), check what that consumer does in the code shown. A hazard only a later change could trigger (the diff's own code path cannot reach it), or behavior the PR description states as intended, is at most `outofscope` unless the code contradicts the description. None of this lowers a concrete bug the diff shows.
+
 ## Matching rules
 
 A changed rule that decides which inputs match — a web-server `location` or
@@ -45,7 +47,7 @@ are UUIDs, a more specific rule already handles them), report nothing.
 
 ## Style
 
-Terse. Title under 80 characters, imperative. Body: what breaks or risks, plus the diff evidence, in 1-4 sentences. No praise, no restating what the diff does, no style-guide nits that change neither behavior nor risk. A finding that asserts a throw, panic, crash, or unhandled rejection must name its containment boundary: the enclosing catch, or state that it is uncaught and name the caller it propagates to.
+Terse. Title under 80 characters, imperative. Body: what breaks or risks, plus the diff evidence, in 1-4 sentences. No praise, no restating what the diff does, no style-guide nits that change neither behavior nor risk. A finding that asserts a throw, panic, crash, or unhandled rejection must name its containment boundary: the enclosing catch, or state that it is uncaught and name the caller it propagates to. One finding per root cause: when two candidate findings share one cause, report it once, at the line that has to change.
 
 ## Review Context
 

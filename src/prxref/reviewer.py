@@ -118,7 +118,9 @@ RULE_REQUEST = "\n\n".join((
     "rule in the team review rules covers the defect — or the rule you would name is "
     "scoped to another language, file type, or artifact (for example a Java-only rule "
     "on a TypeScript file) — leave \"rule\" out. Never name a rule whose stated scope "
-    "does not cover this finding, and never make a name up.",
+    "does not cover this finding, and never make a name up. Never stretch the closest-sounding "
+    "rule to fit: a rule covers a finding only when the defect it describes is this one; "
+    "otherwise leave \"rule\" out.",
     '"rule" never changes "severity" or "confidence".',
 ))
 

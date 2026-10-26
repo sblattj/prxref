@@ -18,6 +18,20 @@ tracker.
   exact `sub`, immutable form included) and an optional OIDC provider, and `deploy.sh`
   gains `--no-profile` to use the credentials already in the environment.
 
+### Changed
+
+- The chunk worker prompt calibrates `warning`. Before claiming a runtime failure from a
+  bad value it checks whether the shown code or write path already rejects it, and names
+  the trigger that still reaches it; before a conditional exploit it checks what the
+  named consumer does. A hazard only a later change could trigger, or behavior the PR
+  description states as intended, is at most `outofscope` unless the code contradicts
+  the description. Concrete bugs the diff shows are unaffected.
+- The worker reports one finding per root cause, at the line that has to change, instead
+  of one per nearby symptom.
+- The rule-name request says never to stretch the closest-sounding team rule onto a
+  finding: a rule is named only when the defect it describes is the finding's defect,
+  otherwise `rule` is left out.
+
 ## [0.38.0] - 2026-10-21
 
 ### Added
