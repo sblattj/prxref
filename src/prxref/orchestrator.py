@@ -337,6 +337,7 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    head_removal_claims_name_symbol,
     open_thread_for_drop,
     previously_discussed_thread,
     prompt_example_titles,
@@ -2314,6 +2315,9 @@ def orchestrate_review(
         findings, files, reader,
         repo_plan.listing_paths if repo_plan is not None else None,
         run_inputs, tracer,
+        fallback_listing=lambda: _removal_claim_listing(
+            forge, ref, getattr(pr, "source_sha", "") or "", repo_dir,
+        ),
     )
     findings = apply_hedge_gate(findings, spec_digest=injected)
     # AFTER the cheap prunes and BEFORE grouping, the cap and the gate (#126):
@@ -2715,6 +2719,33 @@ def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
     return out
 
 
+def _removal_claim_listing(
+    forge: Any, ref: Any, sha: str, repo_dir: RepoDir | None,
+) -> tuple[tuple[str, ...], str] | None:
+    """The head listing for symbol removal claims when repo_context gave none (#116), or None.
+
+    The ci_wiring stage's listing source: ``repo_reader.forge_reader`` at
+    the head sha, then ``repo_reader.repo_dir_reader`` over ``--repo-dir``
+    when the forge gives no listing. Returns ``(paths, source)`` with
+    ``source`` the reader's kind (``"forge"`` or ``"repo-dir"``). A lister
+    that raises or gives None leaves the next source, then None.
+    """
+    readers = [repo_reader.forge_reader(forge, ref, sha)]
+    if repo_dir is not None:
+        readers.append(repo_reader.repo_dir_reader(repo_dir))
+    for source in readers:
+        if source is None:
+            continue
+        try:
+            listing = source.listing()
+        except Exception as e:  # noqa: BLE001 -- a failed listing is "no listing"
+            logger.info("removal claims: %s listing failed: %s", source.kind, e)
+            continue
+        if listing is not None:
+            return listing.paths, source.kind
+    return None
+
+
 def _check_removal_claims(
     findings: list[Finding],
     files: Sequence[Any],
@@ -2722,6 +2753,8 @@ def _check_removal_claims(
     listing: Collection[str] | None,
     run_inputs: dict[str, Any],
     tracer: Tracer,
+    *,
+    fallback_listing: Callable[[], tuple[Collection[str], str] | None] | None = None,
 ) -> list[Finding]:
     """Both removal-claim checks, counted: the diff's post-image, then the head tree (#116).
 
@@ -2729,14 +2762,36 @@ def _check_removal_claims(
     diff path was removed when the post-image keeps it;
     :func:`prxref.quality.apply_head_removal_claim_check` then drops a claim
     that a symbol or a file outside the diff was removed when the head tree
-    (``reader``, and ``listing`` for symbols) still has it. Sets
-    ``run_inputs["removal_claims"]`` to ``diff_refuted`` and
-    ``head_refuted``, the findings each pass dropped, plus ``reader`` and
-    ``listing``, whether the head pass had each, and, when either pass
-    dropped a finding, emits one ``removal drop`` trace event with the same
-    fields.
+    (``reader``, and a listing for symbols) still has it.
+
+    The listing is repo_context's ``listing``. Without one (repo_context off,
+    the default), ``fallback_listing`` is called LAZILY: only when
+    :func:`prxref.quality.head_removal_claims_name_symbol` says an active
+    finding claims a symbol was removed, so a review with no such claim
+    makes no listing call. Its None leaves file-path claims only.
+
+    Sets ``run_inputs["removal_claims"]`` to ``diff_refuted`` and
+    ``head_refuted``, the findings each pass dropped, ``reader`` and
+    ``listing``, whether the head pass had each, and ``listing_source``
+    (``"repo_context"``, ``"forge"``, ``"repo-dir"`` or None), and, when
+    either pass dropped a finding, emits one ``removal drop`` trace event
+    with the same fields.
     """
     diff_checked = apply_removal_claim_check(findings, files)
+    source: str | None = "repo_context" if listing is not None else None
+    if (
+        listing is None
+        and reader is not None
+        and fallback_listing is not None
+        and head_removal_claims_name_symbol(diff_checked, files)
+    ):
+        try:
+            fallback = fallback_listing()
+        except Exception as e:  # noqa: BLE001 -- a failed listing is "no listing"
+            logger.info("removal claims: listing failed: %s", e)
+            fallback = None
+        if fallback is not None:
+            listing, source = fallback
     head_checked = apply_head_removal_claim_check(diff_checked, files, reader, listing)
     record = {
         "diff_refuted": sum(
@@ -2749,6 +2804,7 @@ def _check_removal_claims(
         ),
         "reader": reader is not None,
         "listing": listing is not None,
+        "listing_source": source,
     }
     run_inputs["removal_claims"] = record
     if record["diff_refuted"] or record["head_refuted"]:

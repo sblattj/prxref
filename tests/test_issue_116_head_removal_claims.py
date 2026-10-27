@@ -8,8 +8,10 @@ sees it. :func:`prxref.quality.apply_head_removal_claim_check` reads the head
 tree and drops those claims.
 
 The orchestrator tests run the REAL reviewer and passes over a three-README
-diff with a ``--repo-dir`` checkout as the head tree and a scripted LLM. No
-test touches the network.
+diff with a scripted LLM. The head tree is a ``--repo-dir`` checkout, or a
+fake forge with the head-sha reads ``repo_reader.forge_reader`` probes
+(``get_file_content``/``list_paths``), the way the production gate runs with
+repo_context off. No test touches the network.
 """
 
 from __future__ import annotations
@@ -21,9 +23,10 @@ from pathlib import Path
 import pytest
 
 from prxref import orchestrator
+from prxref.forges.base import PathListing
 from prxref.forges.repo_dir import RepoDir
 from prxref.llm import InvokeResult
-from prxref.quality import apply_head_removal_claim_check
+from prxref.quality import apply_head_removal_claim_check, head_removal_claims_name_symbol
 from prxref.triage import Finding, parse_unified_diff
 from tests.test_orchestrator import REF, FakeForge, make_pr
 
@@ -114,11 +117,34 @@ def _head(root: Path, *, hook: bool = True) -> Path:
     return root
 
 
-def _review(tmp_path: Path, *, hook: bool = True, repo_dir: bool = True, **kwargs):
-    root = _head(tmp_path / "repo", hook=hook)
+class _ListingForge(FakeForge):
+    """FakeForge plus head-sha reads, counting ``list_paths`` calls; ``fail`` makes the lister raise."""
+
+    def __init__(self, *args, repo_files: dict[str, str], fail: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.repo_files = repo_files
+        self.list_fail = fail
+        self.list_calls = 0
+
+    def get_file_content(self, ref, path, sha=None):
+        return self.repo_files.get(path)
+
+    def list_paths(self, ref, sha=None):
+        self.list_calls += 1
+        if self.list_fail:
+            raise RuntimeError("listing down")
+        return PathListing(paths=tuple(sorted(self.repo_files)), complete=True)
+
+
+def _pr():
     pr = make_pr()
     pr.description = DESCRIPTION
-    forge = FakeForge(pr=pr, diff=PATCH)
+    return pr
+
+
+def _review(tmp_path: Path, *, hook: bool = True, repo_dir: bool = True, **kwargs):
+    root = _head(tmp_path / "repo", hook=hook)
+    forge = FakeForge(pr=_pr(), diff=PATCH)
     kwargs.setdefault("repo_context", "repo")
     kwargs.setdefault("max_workers", 1)
     return orchestrator.orchestrate_review(
@@ -127,8 +153,33 @@ def _review(tmp_path: Path, *, hook: bool = True, repo_dir: bool = True, **kwarg
     )
 
 
+def _forge_files(*, hook: bool = True) -> dict[str, str]:
+    files = {path: "\n".join(README_LINES) + "\n" for path in READMES}
+    files[EDITOR] = EDITOR_TEXT if hook else "export {};\n"
+    if hook:
+        files[HOOK] = HOOK_TEXT
+    return files
+
+
+def _forge_review(*, hook: bool = True, fail: bool = False, llm=None, ci_wiring: str = "off"):
+    """repo_context off (the default) and no --repo-dir: the production gate's setup.
+
+    ci_wiring is off by default here because that stage lists the tree on
+    its own reader, so ``list_calls`` then counts only the removal pass.
+    """
+    forge = _ListingForge(pr=_pr(), diff=PATCH, repo_files=_forge_files(hook=hook), fail=fail)
+    res = orchestrator.orchestrate_review(
+        forge, REF, llm or _ScriptLLM(), post=False, repo_context="off", max_workers=1,
+        ci_wiring=ci_wiring,
+    )
+    return forge, res
+
+
 def _issue_findings(findings) -> list[Finding]:
     return [f for f in findings if f.title == TITLE]
+
+
+DROP = f"claims removal of a symbol defined at head: {HOOK}:3 (useDraftLock)"
 
 
 class TestTheIssueThroughTheOrchestrator:
@@ -139,13 +190,55 @@ class TestTheIssueThroughTheOrchestrator:
         assert _issue_findings(res["findings_active"]) == []
         assert sorted(f.file for f in dropped) == sorted(READMES)
         for f in dropped:
-            assert f.drop_reason == (
-                f"claims removal of a symbol defined at head: {HOOK}:3 (useDraftLock)"
-            )
+            assert f.drop_reason == DROP
             assert "use-draft-lock.tsx:3" in f.drop_reason
         assert res["verdict"] != "Request-Changes"
         assert res["removal_claims"] == {
             "diff_refuted": 0, "head_refuted": 3, "reader": True, "listing": True,
+            "listing_source": "repo_context",
+        }
+
+    def test_repo_context_off_drops_them_through_the_forge_listing(self):
+        forge, res = _forge_review()
+        dropped = _issue_findings(res["findings_dropped"])
+        assert _issue_findings(res["findings_active"]) == []
+        assert sorted(f.file for f in dropped) == sorted(READMES)
+        assert {f.drop_reason for f in dropped} == {DROP}
+        assert res["verdict"] != "Request-Changes"
+        assert res["removal_claims"] == {
+            "diff_refuted": 0, "head_refuted": 3, "reader": True, "listing": True,
+            "listing_source": "forge",
+        }
+        assert forge.list_calls == 1
+
+    def test_repo_context_off_with_the_hook_absent_keeps_the_claims(self):
+        _, res = _forge_review(hook=False)
+        assert sorted(f.file for f in _issue_findings(res["findings_active"])) == sorted(READMES)
+        assert res["verdict"] == "Request-Changes"
+        assert res["removal_claims"]["head_refuted"] == 0
+        assert res["removal_claims"]["listing_source"] == "forge"
+
+    def test_no_symbol_claim_makes_no_listing_call(self):
+        for title, body in (
+            ("Typo in heading", "Spelling."),
+            ("Dead link", "`docs/history.md` was removed, so this link points nowhere."),
+        ):
+            forge, res = _forge_review(llm=_ScriptLLM(title=title, body=body))
+            assert forge.list_calls == 0, title
+            assert res["removal_claims"]["listing"] is False
+            assert res["removal_claims"]["listing_source"] is None
+
+    def test_with_ci_wiring_on_only_its_own_listing_call_is_made(self):
+        forge, _ = _forge_review(llm=_ScriptLLM(title="Typo in heading", body="Spelling."), ci_wiring="on")
+        assert forge.list_calls == 1
+
+    def test_a_raising_lister_leaves_symbol_claims(self):
+        forge, res = _forge_review(fail=True)
+        assert forge.list_calls == 1
+        assert sorted(f.file for f in _issue_findings(res["findings_active"])) == sorted(READMES)
+        assert res["removal_claims"] == {
+            "diff_refuted": 0, "head_refuted": 0, "reader": True, "listing": False,
+            "listing_source": None,
         }
 
     def test_the_hook_absent_at_head_keeps_the_claims(self, tmp_path):
@@ -160,13 +253,14 @@ class TestTheIssueThroughTheOrchestrator:
         assert sorted(f.file for f in _issue_findings(res["findings_active"])) == sorted(READMES)
         assert res["removal_claims"] == {
             "diff_refuted": 0, "head_refuted": 0, "reader": False, "listing": False,
+            "listing_source": None,
         }
 
-    def test_a_reader_without_a_listing_leaves_symbol_claims(self, tmp_path):
+    def test_repo_context_off_with_a_repo_dir_lists_the_checkout(self, tmp_path):
         res = _review(tmp_path, repo_context="off")
-        assert sorted(f.file for f in _issue_findings(res["findings_active"])) == sorted(READMES)
-        assert res["removal_claims"]["reader"] is True
-        assert res["removal_claims"]["listing"] is False
+        assert _issue_findings(res["findings_active"]) == []
+        assert res["removal_claims"]["listing_source"] == "repo-dir"
+        assert res["removal_claims"]["head_refuted"] == 3
 
 
 def _finding(title: str, body: str = "", *, severity: str = "warning", file: str = READMES[0]) -> Finding:
@@ -288,3 +382,21 @@ class TestThePass:
         assert out.drop_reason == (
             "claims removal of a symbol defined at head: src/hooks/useDraftLock/index.ts:1 (useDraftLock)"
         )
+
+
+class TestNamesASymbol:
+    def test_only_an_active_governed_symbol_claim_counts(self):
+        assert head_removal_claims_name_symbol([_finding(TITLE, BODY)], FILES)
+        assert not head_removal_claims_name_symbol([_finding("Typo", "Spelling.")], FILES)
+        assert not head_removal_claims_name_symbol(
+            [_finding("Dead link", "`docs/history.md` was removed.")], FILES,
+        )
+        assert not head_removal_claims_name_symbol(
+            [_finding("Lock gone", "This removed the `useDraftLock` call in the editor.")], FILES,
+        )
+        gone = Finding(
+            file=READMES[0], line=3, severity="error", confidence=0.9, title=TITLE, body=BODY,
+            drop_reason="earlier",
+        )
+        assert not head_removal_claims_name_symbol([gone], FILES)
+        assert not head_removal_claims_name_symbol([_finding(TITLE, f"{BODY} (deterministic check, no model)")], FILES)

@@ -28,10 +28,12 @@ tracker.
 - A finding that claims a symbol or a file was removed is checked against the PR head
   before it counts: when the head tree still defines the symbol (a definition or export
   found through the repository listing) or still holds the file, the finding is dropped and
-  its drop reason names the head `file:line`. The claim is usually copied from the PR
+  its drop reason names the head `file:line`. This works with `PRXREF_REPO_CONTEXT` off,
+  the default: the check then lists the tree through the forge, or `--repo-dir`, and only
+  when a finding claims a symbol was removed. The claim is usually copied from the PR
   description or stale doc prose, so the worker and sweep prompts now say such claims are
   to be checked against the code shown. The run record's new `removal_claims` entry counts
-  the drops (#116).
+  the drops and names the listing source (#116).
 
 ## [0.38.0] - 2026-10-21
 

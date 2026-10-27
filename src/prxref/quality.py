@@ -2605,6 +2605,30 @@ def _head_definition_line(text: str, name: str) -> int | None:
     return text.count("\n", 0, m.start()) + 1
 
 
+def head_removal_claims_name_symbol(findings: Sequence[Finding], files: Sequence[FileDiff]) -> bool:
+    """Whether any finding :func:`apply_head_removal_claim_check` judges claims a SYMBOL was removed.
+
+    The same filter the pass applies (active, not deterministic, a removal
+    claim not about a diff path) with at least one governed symbol. The
+    orchestrator asks this before fetching a repository listing just for the
+    pass, so a review with no such claim makes no listing call (#116). Pure.
+    """
+    diff_forms: set[str] | None = None
+    for f in findings:
+        if (
+            f.drop_reason is not None
+            or heuristics.is_deterministic(f)
+            or not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}")
+        ):
+            continue
+        if diff_forms is None:
+            diff_forms = {form for path in _diff_path_candidates(files) for form in _path_forms(path)}
+        objects = _head_removal_objects(f, diff_forms)
+        if objects is not None and objects[0]:
+            return True
+    return False
+
+
 def apply_head_removal_claim_check(
     findings: Sequence[Finding],
     files: Sequence[FileDiff],
