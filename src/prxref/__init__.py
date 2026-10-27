@@ -1,3 +1,3 @@
 """prxref — fast automated AI code review for Bitbucket, GitLab, GitHub, Gitea/Forgejo, and Azure DevOps."""
 
-__version__ = "0.38.0"
+__version__ = "0.39.0"

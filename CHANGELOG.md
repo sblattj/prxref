@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-26
+
 ### Added
 
 - `deployer.yaml`'s IAM user is optional: an empty `DeployerUserName` leaves only the
