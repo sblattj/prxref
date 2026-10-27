@@ -119,7 +119,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    are raised to the group's max severity — the sweep's corroborating
    title counts toward its group) → ``apply_removal_claim_check`` (a
    claim that a NAMED path was removed when the post-image still carries
-   it) → ``apply_hedge_gate`` (a finding whose own text conditions the
+   it) → ``apply_head_removal_claim_check`` (#116, a claim that a symbol
+   or a file outside the diff was removed when the head tree still
+   defines or holds it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
    ``apply_rule_scope_check`` then ``apply_rule_category_check`` (#75,
@@ -238,7 +240,7 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -313,6 +315,7 @@ from .quality import (
     apply_containment_note,
     apply_evidence_drops,
     apply_example_echo_check,
+    apply_head_removal_claim_check,
     apply_hedge_gate,
     apply_learning_suppression,
     apply_line_align,
@@ -1347,6 +1350,7 @@ def orchestrate_review(
         ),
         "context_followup": _followup_record() if context_followup == "on" else None,
         "error_verification": None,
+        "removal_claims": None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "ci_wiring": None,
@@ -2306,7 +2310,11 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
-    findings = apply_removal_claim_check(findings, files)
+    findings = _check_removal_claims(
+        findings, files, reader,
+        repo_plan.listing_paths if repo_plan is not None else None,
+        run_inputs, tracer,
+    )
     findings = apply_hedge_gate(findings, spec_digest=injected)
     # AFTER the cheap prunes and BEFORE grouping, the cap and the gate (#126):
     # an error the head file contradicts must not consume ``max_errors`` or
@@ -2705,6 +2713,53 @@ def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
         rule = normalize_rule(f.rule) if active else None
         out.append(f if rule == f.rule else replace(f, rule=rule))
     return out
+
+
+def _check_removal_claims(
+    findings: list[Finding],
+    files: Sequence[Any],
+    reader: Callable[[str], str | None] | None,
+    listing: Collection[str] | None,
+    run_inputs: dict[str, Any],
+    tracer: Tracer,
+) -> list[Finding]:
+    """Both removal-claim checks, counted: the diff's post-image, then the head tree (#116).
+
+    :func:`prxref.quality.apply_removal_claim_check` drops a claim that a
+    diff path was removed when the post-image keeps it;
+    :func:`prxref.quality.apply_head_removal_claim_check` then drops a claim
+    that a symbol or a file outside the diff was removed when the head tree
+    (``reader``, and ``listing`` for symbols) still has it. Sets
+    ``run_inputs["removal_claims"]`` to ``diff_refuted`` and
+    ``head_refuted``, the findings each pass dropped, plus ``reader`` and
+    ``listing``, whether the head pass had each, and, when either pass
+    dropped a finding, emits one ``removal drop`` trace event with the same
+    fields.
+    """
+    diff_checked = apply_removal_claim_check(findings, files)
+    head_checked = apply_head_removal_claim_check(diff_checked, files, reader, listing)
+    record = {
+        "diff_refuted": sum(
+            1 for before, after in zip(findings, diff_checked, strict=True)
+            if before.drop_reason is None and after.drop_reason is not None
+        ),
+        "head_refuted": sum(
+            1 for before, after in zip(diff_checked, head_checked, strict=True)
+            if before.drop_reason is None and after.drop_reason is not None
+        ),
+        "reader": reader is not None,
+        "listing": listing is not None,
+    }
+    run_inputs["removal_claims"] = record
+    if record["diff_refuted"] or record["head_refuted"]:
+        tracer.event("removal", "drop", **record)
+    if record["head_refuted"]:
+        logger.info(
+            "removal claims: dropped %d finding(s) claiming removal of a symbol or file "
+            "the head tree still has",
+            record["head_refuted"],
+        )
+    return head_checked
 
 
 def _worker_template(prompts: PromptTemplates | None, review_depth: str) -> str:

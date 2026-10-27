@@ -241,7 +241,7 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
@@ -2392,6 +2392,23 @@ _REMOVAL_VERB_POST = (
 )
 
 
+def _removal_object_pattern(alternation: str) -> re.Pattern[str]:
+    """A removal verb governing one object spelled by ``alternation`` (lowercase text).
+
+    Either the verb takes the object (``removed the file src/app.py``,
+    ``deleted useDraftLock``), with at most the :data:`_OBJECT_FILLER`
+    tokens between, or the object is the removal's subject
+    (``src/app.py was removed``, ``... no longer exists``). The object may
+    sit in backticks and must not run into a longer word or path.
+    """
+    anchored = rf"(?<![\w/-])`?(?:{alternation})`?(?![\w/-])"
+    return re.compile(
+        rf"{_REMOVAL_VERB_PRE}\s+(?:the\s+)?(?:file\s+)?"
+        rf"{_OBJECT_FILLER}{anchored}"
+        rf"|{anchored}\s+{_REMOVAL_VERB_POST}"
+    )
+
+
 def _path_forms(path: str) -> list[str]:
     """How a body may spell one diff path: full, parent/basename, basename."""
     norm = path.replace("\\", "/").lower()
@@ -2418,13 +2435,7 @@ def _governed_claimed_paths(
     hits: list[tuple[int, str]] = []
     for path in candidates:
         alternation = "|".join(re.escape(form) for form in _path_forms(path))
-        anchored = rf"(?<![\w/-])`?(?:{alternation})`?(?![\w/-])"
-        pattern = re.compile(
-            rf"{_REMOVAL_VERB_PRE}\s+(?:the\s+)?(?:file\s+)?"
-            rf"{_OBJECT_FILLER}{anchored}"
-            rf"|{anchored}\s+{_REMOVAL_VERB_POST}"
-        )
-        m = pattern.search(text)
+        m = _removal_object_pattern(alternation).search(text)
         if m is not None:
             hits.append((m.start(), path))
     hits.sort()
@@ -2480,6 +2491,234 @@ def apply_removal_claim_check(
             )
             continue
         out.append(f)
+    return out
+
+
+# What a removal claim may name that the head tree can settle (#116): a code
+# identifier (backticked, or bare when it is visibly code: camelCase, an
+# underscore, a ``$``) or a file path (a slash, or a basename with an
+# extension). Plain English words are never objects: "the removed guard" is not
+# a claim about a symbol named ``guard``.
+_HEAD_SYMBOL_TICKED_RE = re.compile(r"`([A-Za-z_$][\w$]*)`")
+_HEAD_SYMBOL_BARE_RE = re.compile(r"(?<![\w$/.`-])([A-Za-z_$][\w$]*)(?![\w$/`-])")
+_HEAD_SYMBOL_CODE_RE = re.compile(r"[a-z0-9][A-Z]|[A-Z]{2}[a-z]|_|\$")
+_HEAD_PATH_RE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)+[\w.-]*\w|[\w-]+(?:\.[\w-]+)*\.[A-Za-z][A-Za-z0-9]{0,5})(?![\w/-])"
+)
+# After a verb-takes-object match, the symbol must end the claim or be followed
+# by a noun naming the definition itself. "removed `validate` call" removes a
+# call, not the function, and is left alone.
+_HEAD_SYMBOL_FOLLOW_RE = re.compile(
+    r"`?\s*(?:$|[.,;:!?)\]]"
+    r"|(?:hook|function|method|class|component|helper|module|type|interface|constant"
+    r"|export|symbol|util|utility|definition|variable|enum|struct|trait|alias)s?\b)"
+)
+# Before a subject-of-removal match, a stop word means the symbol is not the
+# subject: "the call to `foo` was removed".
+_HEAD_SYMBOL_LEAD_RE = re.compile(rf"(?:^|\W)(?:{_OBJECT_STOP})\s+`?$")
+_HEAD_DEFINITION_PREFIX = (
+    r"^[ \t]*(?:(?:export|default|declare|async|abstract|public|private|protected"
+    r"|static|final|sealed|open|data|internal|pub(?:\([\w:]+\))?)\s+)*"
+)
+_HEAD_DEFINITION_KEYWORDS = (
+    r"(?:function\*?|class|interface|type|enum|const|let|var|def|struct|trait|fn|func"
+    r"|object|record)"
+)
+_HEAD_INDEX_STEMS = frozenset({"index", "__init__", "mod", "main"})
+_HEAD_MAX_CANDIDATES = 5
+
+
+def _fold_name(name: str) -> str:
+    """A name compared across spellings: lowercase, letters and digits only."""
+    return re.sub(r"[^0-9a-z]", "", name.lower())
+
+
+def _head_stem_key(path: str) -> str:
+    """The folded name a listing path could define: its stem, or its directory's for an index file."""
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1]
+    stem = base.split(".", 1)[0] if not base.startswith(".") else base
+    if stem in _HEAD_INDEX_STEMS and len(parts) > 1:
+        stem = parts[-2]
+    return _fold_name(stem)
+
+
+def _head_governed(text: str, obj: str, *, symbol: bool) -> bool:
+    """True when a removal verb governs ``obj`` in the lowercase ``text``.
+
+    The grammar is :func:`_removal_object_pattern`'s. A symbol also needs
+    :data:`_HEAD_SYMBOL_FOLLOW_RE` after a verb-takes-object match and no
+    :data:`_HEAD_SYMBOL_LEAD_RE` stop word before a subject match.
+    """
+    pattern = _removal_object_pattern(re.escape(obj.lower()))
+    for m in pattern.finditer(text):
+        if not symbol:
+            return True
+        if re.match(_REMOVAL_VERB_PRE, m.group(0)):
+            if _HEAD_SYMBOL_FOLLOW_RE.match(text, m.end()):
+                return True
+        elif not _HEAD_SYMBOL_LEAD_RE.search(text, 0, m.start()):
+            return True
+    return False
+
+
+def _head_removal_objects(f: Finding, diff_forms: set[str]) -> tuple[list[str], list[str]] | None:
+    """``(symbols, paths)`` a removal verb governs in ``f``, or ``None`` when it names a diff path.
+
+    A diff path is :func:`apply_removal_claim_check`'s to judge, so a claim
+    naming one is left to it.
+    """
+    raw = f"{f.title or ''} {f.body or ''}".replace("\\", "/")
+    text = raw.lower()
+    paths: list[str] = []
+    for m in _HEAD_PATH_RE.finditer(raw):
+        path = m.group(1).removeprefix("./")
+        if path.lower() in diff_forms:
+            if _head_governed(text, path, symbol=False):
+                return None
+            continue
+        if path not in paths and _head_governed(text, path, symbol=False):
+            paths.append(path)
+    names = [m.group(1) for m in _HEAD_SYMBOL_TICKED_RE.finditer(raw)]
+    names += [
+        m.group(1) for m in _HEAD_SYMBOL_BARE_RE.finditer(raw)
+        if _HEAD_SYMBOL_CODE_RE.search(m.group(1))
+    ]
+    symbols = [
+        name for name in dict.fromkeys(names)
+        if _head_governed(text, name, symbol=True)
+    ]
+    return symbols, paths
+
+
+def _head_definition_line(text: str, name: str) -> int | None:
+    """The 1-based line of the first definition or export of ``name`` in ``text``, case-sensitive."""
+    escaped = re.escape(name)
+    pattern = re.compile(
+        rf"{_HEAD_DEFINITION_PREFIX}{_HEAD_DEFINITION_KEYWORDS}\s+{escaped}(?![\w$])"
+        rf"|^{escaped}\s*(?::[^=\n]*)?=(?!=)",
+        re.MULTILINE,
+    )
+    m = pattern.search(text)
+    if m is None:
+        return None
+    return text.count("\n", 0, m.start()) + 1
+
+
+def apply_head_removal_claim_check(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff],
+    read: Callable[[str], str | None] | None,
+    listing: Collection[str] | None,
+) -> list[Finding]:
+    """Drop removal claims about symbols and files the HEAD tree still has (#116).
+
+    :func:`apply_removal_claim_check` judges only paths in the diff. A worker
+    that takes "the `useDraftLock` hook was removed" from the PR description
+    or a stale doc line, about a file the PR never touches, gets past it.
+    This pass settles those claims from the head tree:
+
+    - a FILE path a removal verb governs, not in the diff, that the
+      ``listing`` holds (exactly, or as a ``/``-suffix of one listed path)
+      or that ``read`` returns, contradicts the claim;
+    - a SYMBOL a removal verb governs (a backticked identifier, or a bare
+      one that is visibly code), whose definition or export
+      (``export function useDraftLock``, ``def name``, ``class Name``,
+      ``const name =``, ...) :func:`_head_definition_line` finds in a listed
+      file whose stem folds to the same name (``use-draft-lock.tsx``,
+      ``useDraftLock/index.ts``), contradicts the claim.
+
+    The removal verb must GOVERN the object, by
+    :func:`_removal_object_pattern`, the grammar of
+    :func:`apply_removal_claim_check`: "the removed null check in
+    ``src/app.py``" claims nothing about ``src/app.py``. A symbol must also
+    end the clause or be followed by a definition noun ("hook", "function",
+    "class", ...), so "removed the `validate` call" is left alone. A finding
+    is dropped only when EVERY governed object is contradicted, with a
+    ``drop_reason`` naming each head location; any object not found, a
+    claim naming a diff path, a deterministic check's finding
+    (:func:`prxref.heuristics.is_deterministic`) or one already dropped is
+    left as it was. Every severity is judged.
+
+    ``read`` None and ``listing`` None (no head tree) change nothing; with
+    ``read`` alone only file claims are judged, since a symbol needs the
+    listing to find its file. A read that raises counts as not found.
+    Pure apart from ``read``, order-preserving, the same length in and out.
+    """
+    if read is None and listing is None:
+        return list(findings)
+    diff_forms = {form for path in _diff_path_candidates(files) for form in _path_forms(path)}
+    listed = sorted({p.replace("\\", "/") for p in listing}) if listing is not None else None
+    by_stem: dict[str, list[str]] | None = None
+    reads: dict[str, str | None] = {}
+
+    def fetch(path: str) -> str | None:
+        if read is None:
+            return None
+        if path not in reads:
+            try:
+                text = read(path)
+            except Exception:  # noqa: BLE001 -- a failed read is "not found"
+                text = None
+            reads[path] = text if isinstance(text, str) else None
+        return reads[path]
+
+    def file_at_head(path: str) -> str | None:
+        if listed is not None:
+            if path in listed:
+                return path
+            hits = [p for p in listed if p.endswith("/" + path)]
+            if len(hits) == 1:
+                return hits[0]
+        if "/" in path and fetch(path) is not None:
+            return path
+        return None
+
+    def symbol_at_head(name: str) -> str | None:
+        nonlocal by_stem
+        if listed is None or read is None:
+            return None
+        if by_stem is None:
+            by_stem = {}
+            for p in listed:
+                by_stem.setdefault(_head_stem_key(p), []).append(p)
+        for path in by_stem.get(_fold_name(name), [])[:_HEAD_MAX_CANDIDATES]:
+            text = fetch(path)
+            line = _head_definition_line(text, name) if text is not None else None
+            if line is not None:
+                return f"{path}:{line} ({name})"
+        return None
+
+    out: list[Finding] = []
+    for f in findings:
+        if (
+            f.drop_reason is not None
+            or heuristics.is_deterministic(f)
+            or not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}")
+        ):
+            out.append(f)
+            continue
+        objects = _head_removal_objects(f, diff_forms)
+        if objects is None or not (objects[0] or objects[1]):
+            out.append(f)
+            continue
+        symbols, paths = objects
+        found: list[str] = []
+        for path in paths:
+            where = file_at_head(path)
+            if where is None:
+                break
+            found.append(f"a file present at head: {where}")
+        else:
+            for name in symbols:
+                where = symbol_at_head(name)
+                if where is None:
+                    break
+                found.append(f"a symbol defined at head: {where}")
+        if len(found) != len(paths) + len(symbols):
+            out.append(f)
+            continue
+        out.append(replace(f, drop_reason="claims removal of " + "; ".join(found)))
     return out
 
 

@@ -716,11 +716,15 @@ class TestCliWiring:
 # byte-identical (the slot blanks), so "main" and "summary_only" do not
 # move; only "override" does, because its override templates are derived
 # from the live ones, so their recorded sha256/chars gained the slot.
+# Issue #116's one-line note in worker.md and systemic.md moved "main" (the
+# rendered prompt shas) and "override" (those shas plus the override
+# templates' sha256 and chars, +134 each); nothing else in either capture
+# changed.
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {
-    "main": "f47fd27bc00cc6438473cbb7d4cc4ab24cbcd80ee27458cb64a26415c44c6a92",
-    "override": "ab6a1d14b46cf52f6d1cef13a68d9e09e60fb80a40966ab710c69f49925ab6dc",
+    "main": "0718b6b3aeff07cea1ed460d11fc59faee125c079f2cbcf500931b4fe8e3163f",
+    "override": "1cca8655f4e11ab470db667818f08d910cb681cbe307e1141625c18722c4662a",
     "summary_only": "1539f1e036492cf3437e08b9263413c6cf9f1cb4f5378753dcc602fff62715a5",
 }
 

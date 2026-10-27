@@ -22,6 +22,11 @@ Issue #67 re-recorded the seven worker SYSTEM texts in the golden (its
 version, forge reads, counts and user texts are still 0.16.0's): each is the
 earlier text with exactly the "Matching rules" section inserted above
 "## Style" in worker.md, and every sweep prompt is byte-identical.
+
+Issue #116 re-recorded the seven worker SYSTEM texts and the sweep SYSTEM text again:
+each is the earlier text with exactly its one-line note (claims about
+deleted or renamed code are to be checked) added to worker.md's
+"## No Speculation" and above systemic.md's "## Style".
 """
 from __future__ import annotations
 

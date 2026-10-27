@@ -522,13 +522,15 @@ class TestCliWiring:
 # "rules", "scoped" and "rules_grouping" were re-derived again for issue
 # #67's "Matching rules" section in worker.md: the worker prompt system
 # hashes (and the unit-file hashes that embed them) are the only movers;
-# "rules_summary_only" renders no prompt.
+# "rules_summary_only" renders no prompt. The same three were re-derived for
+# issue #116's one-line note in worker.md and systemic.md: the worker and
+# sweep system hashes (and the unit-file hashes) are the only movers.
 # ---------------------------------------------------------------------------
 
 RULES_GOLDEN = {
-    "rules": "6acc0129ea93f326127144e2dffdd25d664e2aa291c3f9e40b7e06a851a34dcb",
-    "scoped": "d6611e9593732d5bde616c90ae4824bcaf2a1310684fd61be72ac8c03db6a9c9",
-    "rules_grouping": "d7e0a11230d8826bb4f4ca0b33c5c97ed7c4a90e6bc9b30651aa19fd3fa9f01b",
+    "rules": "1d3c9ced1bfaaaccfaa471131f3e9bc0c0f431f0e76d28989414ec25e466f73e",
+    "scoped": "75a392d896c350e4c96a343554dc1d9a86a25f8529304c427be377c505e39f47",
+    "rules_grouping": "1fa51d66e292ce034d9f85032f60b717df4e84e0a2506ddc5d342121c581fdd5",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 
@@ -626,7 +628,7 @@ class TestOffPathMatchesBase:
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
-            "error_verification",
+            "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "failed_chunks", *CHUNK_KEYS,
         }
@@ -637,7 +639,8 @@ class TestOffPathMatchesBase:
         at = A81_JSON_KEYS.index("chunks_failed") + 1
         assert payload == [*A81_JSON_KEYS[:at], "failed_chunks", *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
                            "rule_scope_cleared",
-                           "repo_context", "parse_retries", "context_followup", "error_verification", "suggestions",
+                           "repo_context", "parse_retries", "context_followup", "error_verification",
+                           "removal_claims", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
                            "metadata_rules", "config_file", "review_depth",
                            "learnings", "describe", "sampling"]

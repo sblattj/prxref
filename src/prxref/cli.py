@@ -1336,6 +1336,7 @@ def _build_json_result(result: Any) -> dict:
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),
         "error_verification": result.get("error_verification"),
+        "removal_claims": result.get("removal_claims"),
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
         "ci_wiring": result.get("ci_wiring"),

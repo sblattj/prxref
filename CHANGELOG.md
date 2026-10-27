@@ -25,6 +25,13 @@ tracker.
 
 - A sweep finding with the same file, anchored line and non-null rule id as a chunk finding of at least its severity is dropped as a duplicate, however the two are worded; `apply_sweep_dedup` gains `same_rule` (on by default). (#110)
 - A worker or sweep reply that is a bare empty list (`[]`, fenced or not) is read as `{"findings": []}`: a clean review in one call, where it used to fail the chunk with "not an object: list" and mark the run Incomplete. A non-empty list, `null` or a number still fails. (#134)
+- A finding that claims a symbol or a file was removed is checked against the PR head
+  before it counts: when the head tree still defines the symbol (a definition or export
+  found through the repository listing) or still holds the file, the finding is dropped and
+  its drop reason names the head `file:line`. The claim is usually copied from the PR
+  description or stale doc prose, so the worker and sweep prompts now say such claims are
+  to be checked against the code shown. The run record's new `removal_claims` entry counts
+  the drops (#116).
 
 ## [0.38.0] - 2026-10-21
 

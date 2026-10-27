@@ -278,7 +278,8 @@ class TestJsonKey:
                                             "sampling": {"seed": 1}, "replay": {}}))
         assert keys.index("repo_context") == keys.index("rule_scope_cleared") + 1
         assert keys[keys.index("repo_context") + 1:] == [
-            "parse_retries", "context_followup", "error_verification", "suggestions", "incremental", "ci_wiring",
+            "parse_retries", "context_followup", "error_verification",
+            "removal_claims", "suggestions", "incremental", "ci_wiring",
             "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
             "learnings", "describe", "sampling", "replay",
         ]

@@ -42,6 +42,7 @@ BASE_JSON = (
     '"prompt_templates": null, "scoped_rules": null, "rule_counts": null, '
     '"rule_scope_cleared": null, '
     '"repo_context": null, "parse_retries": null, "context_followup": null, "error_verification": null, '
+    '"removal_claims": null, '
     '"suggestions": null, "incremental": null, "degraded": null}\n'
 )
 
