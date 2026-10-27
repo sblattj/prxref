@@ -65,7 +65,7 @@ from .chunk_context import sibling_summary_block
 from .costs import combine_reported, valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
-from .parser import loads_lenient
+from .parser import loads_lenient, strip_json_fences
 from .quality import MAX_SUGGESTION_LINES
 from .triage import (
     RULE_MAX_CHARS,
@@ -705,11 +705,28 @@ def _remove_stale_attempts(base: str, first: int) -> None:
 _NO_FINDINGS_ERROR = "worker review JSON has no findings list"
 
 
+def _is_whole_empty_list(text: str) -> bool:
+    """True when the reply, minus code fences, is exactly the JSON value ``[]``.
+
+    :func:`loads_lenient` also digs a balanced span out of a malformed
+    object (its ``"escalations": []`` tail), so a parsed ``[]`` alone does
+    not prove the model answered with nothing.
+    """
+    try:
+        return json.loads(strip_json_fences(text if isinstance(text, str) else "")) == []
+    except ValueError:
+        return False
+
+
 def _read_reply(result: Any, *, require_findings: bool) -> tuple[Any, str, bool]:
     """Parse one reply into ``(parsed, problem, unparseable)``.
 
     ``problem`` is ``""`` for a usable reply: one that parses to a JSON
-    object and, when ``require_findings``, holds a ``findings`` list.
+    object and, when ``require_findings``, holds a ``findings`` list. A
+    bare EMPTY list (the whole reply is ``[]``, fenced or not) is read as
+    ``{"findings": []}``: the model said "nothing to report" in the one
+    shape it had to hand, so it is a clean reply and earns no retry. Any
+    other non-object (a non-empty list, ``null``, a number) is not usable.
     Otherwise it is the error the unit reports for this reply when the
     budget is not to blame, and ``unparseable`` is true when no strategy of
     :func:`prxref.parser.loads_lenient` produced JSON at all.
@@ -718,6 +735,8 @@ def _read_reply(result: Any, *, require_findings: bool) -> tuple[Any, str, bool]
         parsed = loads_lenient(result.text)
     except Exception as e:  # noqa: BLE001
         return None, f"{type(e).__name__}: {e}", True
+    if isinstance(parsed, list) and not parsed and _is_whole_empty_list(result.text):
+        parsed = {"findings": []}
     if not isinstance(parsed, dict):
         return parsed, f"worker review JSON is not an object: {type(parsed).__name__}", False
     if require_findings and not isinstance(parsed.get("findings"), list):

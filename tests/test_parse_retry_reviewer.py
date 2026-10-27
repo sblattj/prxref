@@ -273,10 +273,38 @@ class TestWrongShape:
         assert _warnings(caplog)[-1] == NO_FINDINGS_ERROR
 
     def test_a_list_twice_fails_the_unit_with_the_shape_error(self, unit):
-        llm = ScriptedLLM(reply("[]"), reply("[1, 2]"))
+        llm = ScriptedLLM(reply("[1]"), reply("[1, 2]"))
         findings, meta = unit.review(llm, parse_retries=1)
         assert len(llm.calls) == 2
         assert findings == []
+        assert meta["error"] == LIST_ERROR
+
+    @pytest.mark.parametrize("text", ["[]", "```json\n[]\n```"])
+    def test_a_bare_empty_list_is_a_clean_review_in_one_call(self, unit, text):
+        llm = ScriptedLLM(reply(text))
+        findings, meta = unit.review(llm, parse_retries=1)
+        assert len(llm.calls) == 1
+        assert findings == []
+        assert meta["error"] == ""
+        assert "first_error" not in meta
+
+    def test_a_bare_empty_list_needs_no_retry_budget(self, unit):
+        llm = ScriptedLLM(reply("[]"))
+        findings, meta = unit.review(llm, parse_retries=0)
+        assert len(llm.calls) == 1
+        assert findings == []
+        assert meta["error"] == ""
+
+    def test_an_empty_list_dug_out_of_a_malformed_object_is_still_unusable(self, unit):
+        bad = '{"findings":[{"file":"a.py","line":7"}],"escalations":[]}'
+        llm = ScriptedLLM(reply(bad))
+        _findings, meta = unit.review(llm, parse_retries=0)
+        assert meta["error"] == LIST_ERROR
+
+    def test_a_non_empty_list_still_errors(self, unit):
+        llm = ScriptedLLM(reply("[1, 2]"))
+        _findings, meta = unit.review(llm, parse_retries=0)
+        assert len(llm.calls) == 1
         assert meta["error"] == LIST_ERROR
 
     def test_an_empty_findings_list_is_a_clean_review_in_one_call(self, unit):
@@ -410,7 +438,7 @@ class TestOneSharedBudget:
         ]
 
     def test_n_of_two_succeeds_on_the_third_call(self, unit):
-        llm = ScriptedLLM(reply("[]"), reply(""), reply(VALID))
+        llm = ScriptedLLM(reply("[1]"), reply(""), reply(VALID))
         findings, meta = unit.review(llm, parse_retries=2)
         assert len(llm.calls) == 3
         assert len(findings) == 1
@@ -488,7 +516,7 @@ class TestZeroIsTheOldBehaviour:
         assert list(meta) == BASE_META_KEYS
 
     def test_a_list_is_one_call_and_the_shape_error(self, unit, zero):
-        llm = ScriptedLLM(reply("[]"))
+        llm = ScriptedLLM(reply("[1]"))
         findings, meta = unit.review(llm, **zero)
         assert len(llm.calls) == 1
         assert meta["error"] == LIST_ERROR

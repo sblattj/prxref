@@ -27,7 +27,7 @@ from tests.test_run_record import PATHS, SCOPED_PATHS, _run
 
 VALID = json.dumps({"findings": []})
 BAD = "not json at all"
-LIST = "[]"
+LIST = "[1]"
 ONE_FINDING = json.dumps({"findings": [{
     "file": "src/app.py", "line": 3, "severity": "warning", "confidence": 0.9,
     "title": "Unchecked data write", "body": "The data line is written without validation.",
@@ -391,3 +391,31 @@ class TestTheCliPath:
         assert result["verdict"] == "Error"
         assert result["parse_retries"] is None
         assert cli._build_json_result(result)["parse_retries"] is None
+
+
+class TestBareEmptyListReply:
+    """Issue #134: a chunk whose model always answers ``[]`` is a clean chunk."""
+
+    def test_one_chunk_always_replying_an_empty_list_is_not_incomplete(self):
+        class PerUnitLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+                self.calls += 1
+                text = "[]" if "src/big1.py" in user else VALID
+                return InvokeResult(
+                    text=text, input_tokens=100, output_tokens=50, model="test-model-1",
+                    backend="fake", elapsed_ms=1, finish_reason="stop",
+                )
+
+        llm = PerUnitLLM()
+        res = orchestrate_review(
+            FakeForge(diff=multi_chunk_diff(2)), REF, llm, post=False, max_workers=1,
+            llm_parse_retries=1,
+        )
+        assert res["chunk_count"] == 3
+        assert res["verdict"] != "Incomplete"
+        assert res["chunks_failed"] == 0
+        assert res["chunks_reviewed"] == res["chunk_count"]
+        assert llm.calls == 3

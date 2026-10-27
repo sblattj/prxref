@@ -24,6 +24,7 @@ tracker.
 ### Fixed
 
 - A sweep finding with the same file, anchored line and non-null rule id as a chunk finding of at least its severity is dropped as a duplicate, however the two are worded; `apply_sweep_dedup` gains `same_rule` (on by default). (#110)
+- A worker or sweep reply that is a bare empty list (`[]`, fenced or not) is read as `{"findings": []}`: a clean review in one call, where it used to fail the chunk with "not an object: list" and mark the run Incomplete. A non-empty list, `null` or a number still fails. (#134)
 
 ## [0.38.0] - 2026-10-21
 
