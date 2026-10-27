@@ -2739,7 +2739,7 @@ def _removal_claim_listing(
         try:
             listing = source.listing()
         except Exception as e:  # noqa: BLE001 -- a failed listing is "no listing"
-            logger.info("removal claims: %s listing failed: %s", source.kind, e)
+            logger.warning("removal claims: %s listing failed: %s", source.kind, e)
             continue
         if listing is not None:
             return listing.paths, source.kind
@@ -2788,7 +2788,7 @@ def _check_removal_claims(
         try:
             fallback = fallback_listing()
         except Exception as e:  # noqa: BLE001 -- a failed listing is "no listing"
-            logger.info("removal claims: listing failed: %s", e)
+            logger.warning("removal claims: listing failed: %s", e)
             fallback = None
         if fallback is not None:
             listing, source = fallback
