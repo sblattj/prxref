@@ -21,6 +21,10 @@ tracker.
   exact `sub`, immutable form included) and an optional OIDC provider, and `deploy.sh`
   gains `--no-profile` to use the credentials already in the environment.
 
+### Fixed
+
+- A sweep finding with the same file, anchored line and non-null rule id as a chunk finding of at least its severity is dropped as a duplicate, however the two are worded; `apply_sweep_dedup` gains `same_rule` (on by default). (#110)
+
 ## [0.38.0] - 2026-10-21
 
 ### Added

@@ -1741,6 +1741,7 @@ def apply_sweep_dedup(
     *,
     similarity: float | None = None,
     code_overlap: bool = False,
+    same_rule: bool = True,
 ) -> list[Finding]:
     """Drop systemic-sweep findings that restate a chunk finding.
 
@@ -1806,6 +1807,9 @@ def apply_sweep_dedup(
     a bare call stays the exact tier plus the optional reworded tier; the
     review pipeline turns it on through ``dedup_code_overlap``, which
     defaults to on.
+
+    ``same_rule`` (default on, issue #110) adds a final structural tier:
+    see :func:`_dedup_same_rule`.
     """
     start = max(0, sweep_start)
     chunk_keys = {
@@ -1829,6 +1833,8 @@ def apply_sweep_dedup(
         result = _dedup_reworded(result, start, similarity)
     if code_overlap:
         result = _dedup_code_overlap(result, start)
+    if same_rule:
+        result = _dedup_same_rule(result, start)
     return result
 
 
@@ -2004,6 +2010,35 @@ def _dedup_code_overlap(findings: list[Finding], start: int) -> list[Finding]:
                     f,
                     drop_reason=f"duplicate of chunk finding (same line, shared code: {named})",
                 )
+                break
+    return result
+
+
+def _dedup_same_rule(findings: list[Finding], start: int) -> list[Finding]:
+    """Drop a sweep finding with a chunk finding's file, line and rule (#110).
+
+    Titles and bodies are not read: the chunk pass and the sweep applied
+    the same rule to the same anchored line, so the sweep copy adds no
+    recall however it is worded. Compares each active sweep finding with
+    the active chunk findings in the same file on the same positive line
+    whose non-null rule id equals its own and whose severity is at least
+    as high; a MORE severe sweep copy is kept. A null rule on either side,
+    or a file-level (line 0) finding, never matches. Only across the
+    chunk/sweep boundary; a chunk finding is never dropped.
+    """
+    chunk_by_key: dict[tuple[str, int, str], list[int]] = {}
+    for i, f in enumerate(findings[:start]):
+        if f.drop_reason is None and (f.line or 0) > 0 and f.rule:
+            chunk_by_key.setdefault((f.file, f.line, f.rule), []).append(i)
+    result = list(findings)
+    for i in range(start, len(findings)):
+        f = findings[i]
+        if f.drop_reason is not None or (f.line or 0) <= 0 or not f.rule:
+            continue
+        rank = _reworded_severity_rank(f)
+        for k in chunk_by_key.get((f.file, f.line, f.rule), ()):
+            if _reworded_severity_rank(findings[k]) <= rank:
+                result[i] = replace(f, drop_reason="duplicate of chunk finding")
                 break
     return result
 
