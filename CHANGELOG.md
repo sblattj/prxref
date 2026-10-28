@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-10-27
+
 ### Fixed
 
 - `PRXREF_LLM_REQUIRE_MODELS` on the `litellm` backend names the chain entry that
