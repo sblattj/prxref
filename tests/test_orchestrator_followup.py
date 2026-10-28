@@ -509,7 +509,7 @@ class TestTheCli:
             "context_followup", "error_verification",
             "removal_claims", "suggestions", "incremental", "ci_wiring", "evidence",
             "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
-            "learnings", "describe", "sampling", "replay",
+            "learnings", "describe", "eval_pins", "sampling", "replay",
         ]
         assert cli._build_json_result({"context_followup": record})["context_followup"] == record
 

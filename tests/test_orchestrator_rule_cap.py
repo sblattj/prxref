@@ -643,7 +643,7 @@ class TestOffPathMatchesBase:
                            "removal_claims", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
                            "metadata_rules", "config_file", "review_depth",
-                           "learnings", "describe", "sampling"]
+                           "learnings", "describe", "eval_pins", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

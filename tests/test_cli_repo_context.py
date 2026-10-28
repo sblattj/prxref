@@ -281,7 +281,7 @@ class TestJsonKey:
             "parse_retries", "context_followup", "error_verification",
             "removal_claims", "suggestions", "incremental", "ci_wiring",
             "evidence", "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
-            "learnings", "describe", "sampling", "replay",
+            "learnings", "describe", "eval_pins", "sampling", "replay",
         ]
 
     @pytest.mark.parametrize("result", [{}, None, {"verdict": "Approved"}, {"repo_context": None}])

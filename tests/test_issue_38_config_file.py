@@ -42,6 +42,7 @@ EXPECTED_ENV_ONLY = {
     "gate_watchdog_seconds": "gate",
     "gate_reconcile_minutes": "gate",
     "review_skip_globs": "gate",
+    "eval_pins": "override",
     "trace_file": "local write",
     "trace_dir": "local write",
     "fallback": "local write",

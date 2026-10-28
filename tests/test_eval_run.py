@@ -194,6 +194,7 @@ class TestLayout:
             "post": False, "no_threads": True, "rules_file": rules_file,
             "scoped_rules": None, "prompts_dir": None, "repo_dir": None, "config_file": None,
             "ci_wiring": "off", "routing_probe": "off", "context_standards_globs": [],
+            "eval_pins": "on",
         }
         assert review.calls == [
             {

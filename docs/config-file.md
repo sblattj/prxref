@@ -319,6 +319,7 @@ instead, even when the value is empty.
 | `gate_watchdog_seconds` | gate | The gate's repair interval. |
 | `gate_reconcile_minutes` | gate | The gate's open-PR reconcile interval. |
 | `review_skip_globs` | gate | Removes files from review; a PR could otherwise exempt its own changes. |
+| `eval_pins` | override | Overrides other keys (`ci_wiring`, `routing_probe`, `context_standards_globs`) above every layer, so a file that set it would override the file's own values. |
 
 ## Paths
 

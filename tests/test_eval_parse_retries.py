@@ -99,7 +99,7 @@ class TestTheRunRecordsTheSetting:
         keys = list(evals.RUN_CONFIG_KEYS)
         assert KEY in keys
         assert keys.index(KEY) == keys.index("llm_max_tokens") + 1
-        assert len(keys) == 29  # 27, then #126 appended verify_errors and verify_errors_max
+        assert len(keys) == 30  # 27, #126 appended verify_errors and verify_errors_max, #137 added llm_require_models
         assert KEY in config._DEFAULTS and KEY in config._INT_KEYS
 
     @pytest.mark.parametrize("value,expected", [(None, 1), ("0", 0), ("3", 3)])
@@ -117,7 +117,7 @@ class TestTheRunRecordsTheSetting:
     def test_the_documented_allowlist_names_the_key_in_place(self):
         row = next(line for line in DOC.splitlines() if line.startswith("| `config` |"))
         assert "`llm_max_tokens`, `llm_parse_retries`, `max_chunks`" in row
-        assert "`config` is an allowlist of the twenty-nine settings above" in FLAT_DOC
+        assert "`config` is an allowlist of the thirty settings above" in FLAT_DOC
 
 
 class TestTheJudgeGetsTheBudget:

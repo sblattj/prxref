@@ -447,6 +447,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--eval-pins",
+        action="store_true",
+        help=(
+            "apply the settings prxref eval run pins (CI wiring check, "
+            "routing probe and standards discovery off), over the "
+            "environment, the config file and any flag that sets them "
+            "(PRXREF_EVAL_PINS=on does the same)"
+        ),
+    )
+    rev.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -1227,7 +1237,8 @@ def _build_json_result(result: Any) -> dict:
     ``context_followup``, ``error_verification``, ``suggestions``,
     ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
-    ``config_file``, ``review_depth``, ``learnings``, ``describe``, then ``sampling`` and
+    ``config_file``, ``review_depth``, ``learnings``, ``describe``,
+    ``eval_pins``, then ``sampling`` and
     ``replay`` when present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH``
     value the run used (``"standard"`` or ``"thorough"``), ``null`` only
     when the result carries none. ``learnings`` is the learnings-file record
@@ -1235,6 +1246,8 @@ def _build_json_result(result: Any) -> dict:
     ``describe`` is the PR auto-description record (#37), ``null`` when
     ``PRXREF_DESCRIBE`` is ``off``; otherwise ``{mode, written, reason,
     head, labels_mode, labels_applied, labels_reason, error}``.
+    ``eval_pins`` (#137) is the pinned mapping a ``--eval-pins`` or
+    ``PRXREF_EVAL_PINS=on`` run applied, ``null`` when the pins were off.
     ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
     ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
@@ -1352,6 +1365,7 @@ def _build_json_result(result: Any) -> dict:
         "review_depth": result.get("review_depth"),
         "learnings": result.get("learnings"),
         "describe": result.get("describe"),
+        "eval_pins": result.get("eval_pins"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1832,6 +1846,7 @@ def _run_review(
     routing_probe: str | None = None,
     metadata_rules: str | None = None,
     forge: Any = None,
+    eval_pins: str | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1867,6 +1882,13 @@ def _run_review(
     # _check_ranges and make every range guarantee conditional on nobody using
     # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
     # orchestrate_review has no timeout parameter.
+    pins = _resolve_eval_pins(eval_pins)
+    pinned = _apply_eval_pins(
+        pins,
+        ci_wiring=ci_wiring,
+        context_standards_globs=context_standards_globs,
+        routing_probe=routing_probe,
+    )
     cfg, layers = load_config_with_sources(
         config_file=config_file,
         max_chunks=max_chunks,
@@ -1878,12 +1900,11 @@ def _run_review(
         ticket_context_file=context_file,
         prompts_dir=prompts_dir,
         review_depth=review_depth,
-        ci_wiring=ci_wiring,
         ci_wiring_globs=ci_wiring_globs,
         evidence_files=evidence_files,
-        context_standards_globs=context_standards_globs,
-        routing_probe=routing_probe,
         metadata_rules=metadata_rules,
+        eval_pins=eval_pins,
+        **pinned,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1900,6 +1921,8 @@ def _run_review(
             "evidence_files": "--evidence-file",
             "context_standards_globs": "--context-standards-globs",
             "metadata_rules": "--metadata-rules",
+            "eval_pins": "--eval-pins",
+            **dict.fromkeys(pins or (), "--eval-pins"),
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -2056,7 +2079,49 @@ def _run_review(
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
+        result["eval_pins"] = pins
     return result
+
+
+_PIN_FLAGS = {
+    "ci_wiring": "--ci-wiring",
+    "context_standards_globs": "--context-standards-globs",
+}
+
+
+def _resolve_eval_pins(eval_pins: str | None) -> dict[str, Any] | None:
+    """The eval pins a review applies (#137): ``None`` unless they are on.
+
+    ``eval_pins`` is ``--eval-pins`` (``"on"``) or ``None``, which leaves
+    ``PRXREF_EVAL_PINS`` to decide. The value is resolved before the main
+    config load because it decides that load's overrides. When on, the
+    mapping is a fresh copy of :data:`prxref.evals.EVAL_PINS` from the same
+    helper ``eval run`` uses, so the two can never apply different pins.
+    """
+    resolved = load_config(eval_pins=eval_pins, source_labels={"eval_pins": "--eval-pins"})
+    if resolved["eval_pins"] != "on":
+        return None
+    return importlib.import_module("prxref.evals")._pins()
+
+
+def _apply_eval_pins(pins: dict[str, Any] | None, **given: Any) -> dict[str, Any]:
+    """The pinnable overrides of one review, with ``pins`` laid over them.
+
+    ``eval run`` passes the pins as the top keyword layer, above the
+    environment and the config file, and so does this: a pin also wins over
+    a flag that sets the same key, as nothing in an eval run can override
+    one. A flag the pins override is logged at WARNING, naming it.
+    """
+    overrides = dict(given)
+    for key, value in (pins or {}).items():
+        explicit = overrides.get(key)
+        if explicit is not None and explicit != value:
+            logger.warning(
+                "--eval-pins: %s %r is overridden by the eval pin %r",
+                _PIN_FLAGS.get(key, key), explicit, value,
+            )
+        overrides[key] = value
+    return overrides
 
 
 def _config_file_stamp(path: Path | None) -> dict[str, Any] | None:
@@ -2325,6 +2390,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             evidence_files=args.evidence_file,
             context_standards_globs=_standards_globs_arg(args.context_standards_globs),
             metadata_rules=args.metadata_rules,
+            eval_pins="on" if args.eval_pins else None,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

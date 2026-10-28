@@ -149,6 +149,20 @@ LLM / pipeline:
                                 ``prxref review --trace-dir DIR`` is the
                                 per-run equivalent and wins when both are
                                 set.
+  PRXREF_EVAL_PINS              "on" applies the eval harness's pins
+                                (prxref.evals.EVAL_PINS: ci_wiring "off",
+                                routing_probe "off", context_standards_globs
+                                empty) to ``prxref review`` and the webhook
+                                daemon, exactly as ``prxref eval run`` applies
+                                them: above the environment, the config file
+                                and any flag that sets the same key, so a CI
+                                review runs with the settings a rules pack was
+                                measured under (#137). "off" (the default)
+                                pins nothing; ``--eval-pins`` is the per-run
+                                equivalent. Matched exactly, like
+                                PRXREF_FAIL_ON. Environment-only: it overrides
+                                other keys, so a config file setting it would
+                                override its own values.
   PRXREF_DRY_RUN                literal "1" reviews without writing anything
                                 to the forge — no summary, no inline comments
                                 (default off). Applies to the webhook daemon
@@ -846,7 +860,8 @@ Config file (#38):
   only (no walk up the tree). The value ``off`` (any case) in the flag or the
   variable disables the file. PRXREF_CONFIG_FILE is read only there; it is
   not a config key. Credentials, endpoints, executables, local writes, local
-  reads and the gate stay environment-only (:data:`ENV_ONLY_KEYS`), paths
+  reads, the gate and ``eval_pins`` (which overrides other keys) stay
+  environment-only (:data:`ENV_ONLY_KEYS`), paths
   set by the file must stay inside its directory, ``spec_sources`` in the
   file takes local paths only, and an unknown key is an error.
   ``llm_temperature`` takes a TOML number or a string. See
@@ -982,6 +997,8 @@ _DEFAULTS: dict[str, object] = {
     "suggestions": "off",
     "review_depth": "standard",
     "routing_probe": "on",
+    # Eval pins on review (#137): applies prxref.evals.EVAL_PINS.
+    "eval_pins": "off",
     "incremental": "off",
     # PR auto-description and auto-labels (#37): both opt-in. Vocabularies
     # restated from prxref.describe.DESCRIBE_MODES / LABEL_MODES (config
@@ -1143,6 +1160,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "suggestions": frozenset({"off", "on"}),
     "review_depth": frozenset({"standard", "thorough"}),
     "routing_probe": frozenset({"off", "on"}),
+    "eval_pins": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "describe": frozenset({"off", "empty", "force"}),
     "labels": frozenset({"off", "existing", "create"}),
@@ -1332,6 +1350,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "allow_unsigned": "gate",
     "rules_source": "gate",
     "review_skip_globs": "gate",
+    "eval_pins": "override",
     "gate_app_id": "credential",
     "gate_private_key_file": "credential",
     "gate_installation_ids": "gate",
@@ -1372,7 +1391,8 @@ _ENV_ONLY_REASONS: dict[str, str] = {
 #: Keys only the pipeline may set (#38). A repository file is controlled by
 #: whoever can change the repository, a PR author included when CI reads the
 #: PR's checkout, so credentials, endpoints, executables, local reads and
-#: writes, and the gate never come from it.
+#: writes, and the gate never come from it, nor does ``eval_pins``, which
+#: overrides other keys and so would override the file's own values (#137).
 ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 
 _FILE_PATH_KEYS = frozenset({

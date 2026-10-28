@@ -59,6 +59,7 @@ RUN_PROMPTS = ("worker", "systemic", "summary")
 RUN_CONFIG_KEYS = (
     "llm_backend",
     "llm_models",
+    "llm_require_models",
     "llm_max_tokens",
     "llm_parse_retries",
     "max_chunks",
@@ -298,6 +299,7 @@ def _run_case(
             repo_dir=case.repo_dir,
             config_file=config_file,
             evidence_files=[],
+            eval_pins="on",
             **_pins(),
         )
         if result is None:

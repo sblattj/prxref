@@ -312,10 +312,10 @@ class TestJson:
         assert keys[keys.index("scoped_rules") + 1] == "rule_counts"
         # sampling trails the whole feature block — stable ids (#71) and
         # metadata rules (#70) included; failed_chunks (#72) sits early,
-        # right after chunks_failed; learnings (#33) and describe (#37) last;
-        # error_verification (#126) follows context_followup, and
-        # removal_claims (#116) follows error_verification.
-        assert keys.index("sampling") == keys.index("scoped_rules") + 19
+        # right after chunks_failed; learnings (#33), describe (#37) and
+        # eval_pins (#137) last; error_verification (#126) follows
+        # context_followup, and removal_claims (#116) follows error_verification.
+        assert keys.index("sampling") == keys.index("scoped_rules") + 20
 
     def test_the_key_is_null_for_a_pre_0_15_result(self):
         assert cli._build_json_result({})["scoped_rules"] is None
