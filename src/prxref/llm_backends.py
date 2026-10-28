@@ -55,6 +55,7 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Sequence
 
 import requests
 
@@ -489,6 +490,7 @@ class OpenAICompatClient(LLMClient):
                     finish_reason=finish_reason,
                     cost_usd=cost_usd,
                     cost_source=cost_source,
+                    requested_model=model,
                 )
                 continue
             logger.info(
@@ -507,6 +509,7 @@ class OpenAICompatClient(LLMClient):
                 finish_reason=finish_reason,
                 cost_usd=cost_usd,
                 cost_source=cost_source,
+                requested_model=model,
             )
         # Exhausting the chain on truncation alone is a last resort, not a
         # failure: the best answer anyone managed is still handed back, with
@@ -514,6 +517,20 @@ class OpenAICompatClient(LLMClient):
         if last_truncated is not None:
             return last_truncated
         raise LLMError("all models failed: " + "; ".join(failures))
+
+
+def _litellm_requested_model(reported: str, available: Sequence[str]) -> str:
+    """The chain entry a litellm answer came from, or ``""`` when unknowable.
+
+    litellm walks ``fallbacks`` inside one call and reports only the
+    provider's model id, so the entry is known for sure in two cases: the
+    chain had one entry, or the reported id is itself an entry. Anything
+    else is ``""`` and :envvar:`PRXREF_LLM_REQUIRE_MODELS` matches the
+    reported id alone (issue #138).
+    """
+    if len(available) == 1:
+        return available[0]
+    return reported if reported in available else ""
 
 
 class LiteLLMClient(LLMClient):
@@ -624,17 +641,19 @@ class LiteLLMClient(LLMClient):
         hidden = getattr(response, "_hidden_params", None)
         raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else getattr(hidden, "response_cost", None)
         cost_usd = None if isinstance(raw_cost, str) else costs.valid_usd(raw_cost)
+        reported = getattr(response, "model", "") or available[0]
         return InvokeResult(
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
-            model=getattr(response, "model", "") or available[0],
+            model=reported,
             backend="litellm",
             elapsed_ms=elapsed_ms,
             # Absent on a provider that does not report one; never guessed.
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
             cost_usd=cost_usd,
             cost_source="litellm" if cost_usd is not None else "",
+            requested_model=_litellm_requested_model(reported, available),
         )
 
     def _maybe_mark_unavailable(

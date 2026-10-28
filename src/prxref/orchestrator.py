@@ -198,7 +198,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    still in the code, only the repeat comment is suppressed); else ``"Incomplete"``
    when any review unit failed (issue #72: a partial review used to read
    as ``"Approved"`` because the failed chunk simply contributed no
-   findings); else ``"Approved"``. A partial failure also degrades the
+   findings) or, with ``PRXREF_LLM_REQUIRE_MODELS`` set, any review unit
+   was answered by a model outside it (issue #138: ``degraded.cause ==
+   "model"``, one ``models`` row per offending unit, a summary banner, and
+   the head is not recorded as reviewed); else ``"Approved"``. A partial failure also degrades the
    run record (``degraded.cause == "partial"``, one ``chunks`` row per
    failed unit) and the summary declares reduced coverage AND itemizes
    each failed chunk with the files it took unreviewed plus its reason
@@ -658,6 +661,7 @@ def orchestrate_review(
     rules_source: str = "head",
     describe_mode: str = "off",
     labels_mode: str = "off",
+    llm_require_models: Sequence[str] = (),
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -704,6 +708,17 @@ def orchestrate_review(
     reason, head, labels_mode, labels_applied, labels_reason, error}``. The
     describe call's cost and tokens join the run's. A failure there is
     recorded in ``error`` and never changes the verdict.
+
+    ``llm_require_models`` (``PRXREF_LLM_REQUIRE_MODELS``, issue #138) names
+    the models allowed to answer a review unit (a chunk, the systemic sweep,
+    an error-verification call). Empty, the default, checks nothing. When a
+    unit that did not fail was answered by a model outside it, see
+    :func:`_model_violations`, the verdict is ``"Incomplete"`` unless an
+    error finding makes it ``"Request-Changes"``, the run record's
+    ``degraded`` names each offending unit and model, the summary says so,
+    and the head is not recorded as reviewed. The describe call is not a
+    review unit and is not checked. ``sampling.models`` still names the
+    configured chain, never the models that answered.
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists, and on
@@ -2324,6 +2339,7 @@ def orchestrate_review(
     # an error the head file contradicts must not consume ``max_errors`` or
     # fold a title group. Runs after severity consistency, so a downgraded
     # member can leave its title group mixed.
+    verify_units: list[dict[str, Any]] = []
     if verify_errors != "off":
         findings, input_tokens, output_tokens, cost_label = _verify_error_findings(
             llm, findings, reader, run_inputs,
@@ -2333,6 +2349,7 @@ def orchestrate_review(
             cost_units=[*results, *cost_units_extra],
             price_table=price_table, post_cost=post_cost,
             tokens=(input_tokens, output_tokens), cost_label=cost_label, tracer=tracer,
+            unit_sink=verify_units,
         )
     # Its own guard (#75), independent of grouping and the cap: any loaded
     # rules file that declares a section scope (any rule at all, for the
@@ -2431,18 +2448,31 @@ def orchestrate_review(
     # beats a coverage gap), and the total-failure "Error" verdict left at
     # the all-failed exit above can never be shadowed from here. An error
     # still open in an existing thread counts as active here (issue #117).
+    # Issue #138: a unit answered by a model outside PRXREF_LLM_REQUIRE_MODELS
+    # is a review that did not happen the way the operator required, so it
+    # reads as Incomplete under the same precedence as a failed unit, and
+    # the head is not marked reviewed for incremental review.
+    model_violations = _model_violations(
+        chunks, results, verify_units, llm_require_models,
+    )
+    if model_violations:
+        logger.error(
+            "%d review unit(s) answered by a model outside PRXREF_LLM_REQUIRE_MODELS: %s",
+            len(model_violations), _violation_text(model_violations),
+        )
     verdict = (
         "Request-Changes"
         if open_thread_errors
         or any(f.severity == "error" for f in findings_active)
         else "Incomplete"
-        if chunks_failed
+        if chunks_failed or model_violations
         else "Approved"
     )
 
     elapsed_ms = _elapsed_ms(t0)
     reviewed_head = _mark_reviewed_head(
-        run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
+        run_inputs, scope, pr, post_mode=post_mode,
+        complete=chunks_failed == 0 and not model_violations,
     )
     incremental_note = _incremental_note(scope, len(files))
     evidence_note = _evidence_note(
@@ -2472,6 +2502,7 @@ def orchestrate_review(
             # Each failed chunk's reason AND file list reach the banner:
             # "findings may be incomplete" without which-files acts on nothing.
             failed_chunks=failed_chunks,
+            model_violations=model_violations,
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
@@ -2537,6 +2568,7 @@ def orchestrate_review(
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
             failed_chunks=failed_chunks,
+            model_violations=model_violations,
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
@@ -2562,13 +2594,14 @@ def orchestrate_review(
             logger.error("summary re-post with inline accounting failed: %s", e)
             post_failures.append(("summary", post_failure_cause(e)))
 
-    degraded = _degraded_record(post_failures, failed_chunk_rows)
+    degraded = _degraded_record(post_failures, failed_chunk_rows, model_violations)
     if degraded is not None and fallback_summary is None:
         fallback_summary = _render_summary(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
             failed_chunks=failed_chunks,
+            model_violations=model_violations,
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
@@ -3094,30 +3127,42 @@ def post_failure_cause(exc: BaseException) -> str:
 def _degraded_record(
     failures: Sequence[tuple[str, str]],
     failed_chunk_rows: Sequence[Mapping[str, object]] = (),
+    model_violations: Sequence[Mapping[str, object]] = (),
 ) -> dict | None:
-    """The run record's ``degraded`` value from failed posts and failed chunks.
+    """The run record's ``degraded`` value from failed posts, failed chunks and model violations.
 
     ``None`` when nothing failed. ``failed`` keeps each post kind once, in
     the order it first failed, after ``"chunk"`` when any review unit
-    failed (the chunk fails before any post is attempted). ``cause`` is
+    failed (the chunk fails before any post is attempted) and ``"model"``
+    when any unit was answered by a model outside
+    ``PRXREF_LLM_REQUIRE_MODELS`` (issue #138). ``cause`` is
     ``"permission"`` when any post failure was (a blocked write outranks
-    everything: it is the one the operator must act on), else ``"partial"``
+    everything: it is the one the operator must act on), else ``"model"``
+    when a model violation exists (the run broke the operator's model
+    policy, which a coverage gap does not explain away), else ``"partial"``
     when a chunk failed (issue #72: the review only partially happened),
     else ``"error"``. ``fallback`` and ``annotations`` start empty for the
     CLI to fill. ``chunks`` carries one ``{"index", "files", "error"}`` row
     per failed review unit, and appears only when at least one did, so the
-    #48 post-failure shape is unchanged.
+    #48 post-failure shape is unchanged. ``models`` carries the
+    :func:`_model_violations` rows (``{"unit", "index", "files", "model",
+    "requested_model"}``, plus ``line`` on a verify row) and appears only
+    when there is at least one.
     """
-    if not failures and not failed_chunk_rows:
+    if not failures and not failed_chunk_rows and not model_violations:
         return None
     failed: list[str] = []
     if failed_chunk_rows:
         failed.append("chunk")
+    if model_violations:
+        failed.append("model")
     for kind, _ in failures:
         if kind not in failed:
             failed.append(kind)
     if any(c == "permission" for _, c in failures):
         cause = "permission"
+    elif model_violations:
+        cause = "model"
     elif failed_chunk_rows:
         cause = "partial"
     else:
@@ -3127,6 +3172,8 @@ def _degraded_record(
     }
     if failed_chunk_rows:
         record["chunks"] = [dict(row) for row in failed_chunk_rows]
+    if model_violations:
+        record["models"] = [dict(row) for row in model_violations]
     return record
 
 
@@ -3564,7 +3611,8 @@ def _mark_reviewed_head(
     ``None`` whenever ``scope`` is ``None`` (``PRXREF_INCREMENTAL`` off, the
     record left untouched) or ``post_mode`` posts no summary. Otherwise the
     PR head, lowercased, when ``complete`` (every review unit of the run
-    succeeded) and the head is a hex SHA :data:`REVIEWED_HEAD_RE` can read
+    succeeded and, under ``PRXREF_LLM_REQUIRE_MODELS``, was answered by an
+    allowed model) and the head is a hex SHA :data:`REVIEWED_HEAD_RE` can read
     back; else the previous marker's SHA, so the files a failed unit covered
     are re-reviewed on the next push, or ``None`` when there was none.
     """
@@ -4248,6 +4296,7 @@ def _verify_error_findings(
     tokens: tuple[int, int],
     cost_label: str,
     tracer: Tracer,
+    unit_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Finding], int, int, str]:
     """Run the error-verification pass (#126): ``(findings, input_tokens, output_tokens, cost_label)``.
 
@@ -4259,6 +4308,8 @@ def _verify_error_findings(
     ``verify ok`` trace event with the totals. When tier 1 made calls, their
     units join ``cost_units`` and the run is priced again, exactly as the
     describe call is, so the tokens, cost and cost label cover them.
+    ``unit_sink``, when given, receives those units, so the allowed-model
+    guard (issue #138) can check which model answered each.
     """
     listing_paths = repo_plan.listing_paths if repo_plan is not None else None
     listing_complete = repo_plan.listing_complete if repo_plan is not None else False
@@ -4272,6 +4323,8 @@ def _verify_error_findings(
         listing_complete=listing_complete, exclude=exclude, max_workers=max_workers,
     )
     run_inputs["error_verification"] = record
+    if unit_sink is not None:
+        unit_sink.extend(units)
     if record is not None:
         tracer.event("verify", "ok", **{k: v for k, v in record.items() if k != "detail"})
         if record["name_refuted"] or record["refuted"]:
@@ -4502,6 +4555,88 @@ def _run_workers(
             done.set()
 
 
+def _model_violations(
+    chunks: Sequence[Sequence[Any]],
+    results: Sequence[Mapping[str, Any]],
+    verify_units: Sequence[Mapping[str, Any]],
+    allowed: Sequence[str],
+) -> list[dict[str, Any]]:
+    """One row per review unit answered by a model outside ``allowed`` (issue #138).
+
+    ``[]`` when ``allowed`` is empty (the guard is off). ``results`` are the
+    chunk results in chunk order followed by the systemic sweep, as
+    :func:`orchestrate_review` builds them; ``verify_units`` are the
+    error-verification calls that came back. A unit that failed is skipped:
+    it already makes the run ``Incomplete`` and no model answered it.
+
+    A reply is allowed when its ``requested_model`` (the
+    ``PRXREF_LLM_MODELS`` entry the backend sent the request to) or its
+    ``model`` (the id the provider reported) is in ``allowed``, exactly as
+    written. Matching the chain entry is what makes ``anthropic/claude-x``
+    work when the provider answers as ``claude-x-20250929``; matching the
+    reported id is what makes the guard usable on a backend that cannot name
+    the entry (litellm after an internal fallback). A reply naming neither
+    is not allowed: the guard fails closed. A unit merged from two replies
+    (the context follow-up) is checked once per reply, through its
+    ``answered_by`` pairs.
+
+    Each row is ``{"unit", "index", "files", "model", "requested_model"}``:
+    ``unit`` is ``"chunk"``, ``"sweep"`` or ``"verify"``; ``index`` is the
+    1-based chunk index (the sweep's is ``len(chunks) + 1``, as in the
+    ``degraded.chunks`` rows) or the verification call's 1-based position;
+    ``files`` the chunk's files, ``[]`` for the sweep, or the verified
+    finding's file, whose ``line`` a verify row adds.
+    """
+    allow = {m for m in allowed if m}
+    if not allow:
+        return []
+    rows: list[dict[str, Any]] = []
+
+    def check(kind: str, index: int, files: list[str], unit: Mapping[str, Any], extra: dict) -> None:
+        if unit.get("error"):
+            return
+        pairs = unit.get("answered_by") or [
+            [unit.get("requested_model") or "", unit.get("model") or ""],
+        ]
+        for requested, model in pairs:
+            if requested in allow or model in allow:
+                continue
+            row = {
+                "unit": kind, "index": index, "files": files,
+                "model": str(model or ""), "requested_model": str(requested or ""),
+                **extra,
+            }
+            if row not in rows:
+                rows.append(row)
+
+    for i, (chunk, r) in enumerate(zip(chunks, results, strict=False), start=1):
+        check("chunk", i, [f.path for f in chunk], r, {})
+    if len(results) > len(chunks):
+        check("sweep", len(chunks) + 1, [], results[-1], {})
+    for k, unit in enumerate(verify_units, start=1):
+        file = str(unit.get("file") or "")
+        check("verify", k, [file] if file else [], unit, {"line": unit.get("line")})
+    return rows
+
+
+def _violation_text(rows: Sequence[Mapping[str, Any]]) -> str:
+    """``chunk 2 (model-b), sweep (model-b)``: each offending unit and the model that answered it."""
+    parts = []
+    for row in rows:
+        if row["unit"] == "chunk":
+            where = f"chunk {row['index']}"
+        elif row["unit"] == "verify":
+            files = row.get("files") or ["?"]
+            where = f"verification of {files[0]}:{row.get('line')}"
+        else:
+            where = "sweep"
+        who = row.get("requested_model") or row.get("model") or "an unidentified model"
+        if row.get("requested_model") and row.get("model") and row["model"] != row["requested_model"]:
+            who = f"{row['requested_model']}, reported as {row['model']}"
+        parts.append(f"{where} ({who})")
+    return ", ".join(parts)
+
+
 def _failed_chunks(chunks: Sequence[Sequence[Any]], results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The review units that failed, in review order (issue #72).
 
@@ -4557,6 +4692,20 @@ def _retry_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "parse_retries": meta["parse_retries"],
         "first_error": meta.get("first_error", ""),
+    }
+
+
+def _answer_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """The answering-model keys a unit result carries over (issue #138).
+
+    ``requested_model`` (the ``PRXREF_LLM_MODELS`` entry the used reply came
+    from) and ``answered_by`` (every ``[requested_model, model]`` pair whose
+    reply the unit used, set by a context follow-up that merged two replies),
+    each only when present, so a backend that reports no chain entry leaves
+    the result with exactly its earlier keys.
+    """
+    return {
+        key: meta[key] for key in ("requested_model", "answered_by") if meta.get(key)
     }
 
 
@@ -4641,6 +4790,7 @@ def _invoke_chunk(
             "cost_usd": meta.get("cost_usd"),
             "cost_source": meta.get("cost_source", ""),
             **_retry_meta(meta),
+            **_answer_meta(meta),
         }
 
     findings = []
@@ -4663,6 +4813,7 @@ def _invoke_chunk(
         "cost_usd": res.get("cost_usd"),
         "cost_source": res.get("cost_source", ""),
         **_retry_meta(res),
+        **_answer_meta(res),
     }
 
 
@@ -4852,6 +5003,7 @@ def _run_worker(
         "cost_usd": res["cost_usd"],
         "cost_source": res["cost_source"],
         **_retry_meta(res),
+        **_answer_meta(res),
     }
 
 
@@ -4968,6 +5120,7 @@ def _run_sweep(
         "cost_usd": meta.get("cost_usd"),
         "cost_source": meta.get("cost_source", ""),
         **_retry_meta(meta),
+        **_answer_meta(meta),
     }
 
 
@@ -5017,6 +5170,7 @@ def _render_summary(
     chunks_reviewed: int = 0,
     chunks_failed: int = 0,
     failed_chunks: Sequence[tuple[str, Sequence[str]]] = (),
+    model_violations: Sequence[Mapping[str, Any]] = (),
     include_verdict: bool = True,
     inline_accounting: str | None = None,
     thread_accounting: str = "",
@@ -5095,7 +5249,10 @@ def _render_summary(
     attribution and a ``---`` rule directly over it) when the body has one
     (:func:`_insert_before_footer`); a template that dropped
     ``{attribution}`` gets them at the end of the body and the attribution
-    after them. The partial-review banner comes last.
+    after them. The partial-review banner comes last, followed, when
+    ``model_violations`` (:func:`_model_violations`, issue #138) is
+    non-empty, by a ``> ⚠️ Not the required model:`` blockquote naming each
+    unit and the model that answered it; empty leaves the body unchanged.
     """
     try:
         template = summary_template or reviewer.load_prompt("summary")
@@ -5214,6 +5371,13 @@ def _render_summary(
         reason_lines = _failure_reason_lines(failed_chunks)
         if reason_lines:
             rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
+    if model_violations:
+        rendered = (
+            f"{rendered}\n\n> ⚠️ Not the required model: "
+            f"{len(model_violations)} review unit(s) were answered by a model "
+            f"outside PRXREF_LLM_REQUIRE_MODELS: {_violation_text(model_violations)}. "
+            "Those findings did not come from a model this review requires."
+        )
     return f"{size_advisory_line}{incremental_note}{rendered}"
 
 

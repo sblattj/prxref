@@ -1280,7 +1280,11 @@ def _build_json_result(result: Any) -> dict:
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
     ``{"index", "files", "error"}`` rows — ``cause`` is ``"partial"``
-    there unless a blocked write makes it ``"permission"`` — see
+    there unless a blocked write makes it ``"permission"`` — and, when a
+    review unit was answered by a model outside
+    ``PRXREF_LLM_REQUIRE_MODELS`` (#138), a ``models`` list of ``{"unit",
+    "index", "files", "model", "requested_model"}`` rows with ``cause``
+    ``"model"`` unless a blocked write makes it ``"permission"`` — see
     :func:`_emit_fallback`), and so is
     ``config_file`` (#38: ``null`` when the run read no repository config
     file; otherwise ``{"path", "sha256", "keys"}``, see
@@ -2048,6 +2052,7 @@ def _run_review(
         rules_source=cfg["rules_source"],
         describe_mode=cfg["describe"],
         labels_mode=cfg["labels"],
+        llm_require_models=cfg["llm_require_models"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp

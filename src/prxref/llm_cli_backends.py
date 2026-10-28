@@ -294,6 +294,8 @@ class _CLIClient(LLMClient):
             if outcome.reported is not None:
                 received.append(outcome.reported)
             result = outcome.result
+            if result is not None:
+                result = dataclasses.replace(result, requested_model=model)
             if result is None:
                 logger.warning(
                     "llm attempt %d/%d failed: backend=%s %s",

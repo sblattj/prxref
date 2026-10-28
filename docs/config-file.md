@@ -146,6 +146,7 @@ its `PRXREF_` name.
 | Key | Type | Meaning |
 |---|---|---|
 | `llm_models` | array of strings | Model fallback chain, cheapest first ([more](env-vars.md#llm--pipeline)). |
+| `llm_require_models` | array of strings | Models allowed to answer a review unit; another one answering makes the verdict `Incomplete` ([more](env-vars.md#llm--pipeline)). |
 | `llm_reasoning_effort` | string | Reasoning effort sent to reasoning models ([more](env-vars.md#llm--pipeline)). |
 | `llm_max_tokens` | integer | Completion-token budget of each worker call ([more](env-vars.md#llm--pipeline)). |
 | `llm_timeout` | number | Per-model deadline in seconds ([more](env-vars.md#llm--pipeline)). |

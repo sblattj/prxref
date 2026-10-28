@@ -17,6 +17,10 @@ LLM / pipeline:
   PRXREF_LLM_MODELS             Comma- or whitespace-separated model fallback
                                 chain, first that answers wins; required by
                                 every backend
+  PRXREF_LLM_REQUIRE_MODELS     Comma- or whitespace-separated models allowed
+                                to answer a review unit; a unit answered by
+                                any other model makes the verdict Incomplete
+                                (empty = no check, the default)
   PRXREF_LLM_REASONING_EFFORT   Reasoning effort for models that cannot
                                 disable reasoning; provider-specific string,
                                 passed through unvalidated; empty = omit
@@ -888,6 +892,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_base_url": "",
     "llm_api_key": "",
     "llm_models": [],
+    "llm_require_models": [],
     "llm_reasoning_effort": "",
     "llm_max_tokens": 4096,
     "llm_timeout": 120.0,
@@ -1116,7 +1121,8 @@ _BOOL_KEYS = frozenset({
     "stable_ids", "dedup_code_overlap",
 })
 _LIST_KEYS = frozenset({
-    "llm_models", "spec_sources", "size_ignore_globs", "review_skip_globs", "scoped_rules",
+    "llm_models", "llm_require_models", "spec_sources", "size_ignore_globs",
+    "review_skip_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
     "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
     "context_standards_globs", "gate_installation_ids", "gate_repos",
@@ -1288,7 +1294,7 @@ CONFIG_DOCS_URL = "https://github.com/sblattj/prxref/blob/main/docs/config-file.
 #: Keys a repository config file may set (#38). Listed by hand, like
 #: :data:`ENV_ONLY_KEYS`, so a new key must be classified before it loads.
 FILE_KEYS = frozenset({
-    "llm_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
+    "llm_models", "llm_require_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
     "llm_timeout_per_1k",
     "llm_temperature", "llm_seed", "llm_cli_concurrency", "llm_parse_retries",
     "confidence_floor", "max_error_findings", "max_warning_findings",

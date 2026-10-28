@@ -247,10 +247,26 @@ def _fold_retry_usage(meta: dict, result: Any) -> None:
     meta["input_tokens"] = (meta["input_tokens"] or 0) + (result.input_tokens or 0)
     meta["output_tokens"] = (meta["output_tokens"] or 0) + (result.output_tokens or 0)
     meta["model"] = result.model
+    _stamp_requested_model(meta, result)
     meta["cost_usd"], meta["cost_source"] = combine_reported([
         (meta["cost_usd"], meta["cost_source"]),
         _result_cost(result),
     ])
+
+
+def _stamp_requested_model(meta: dict, result: Any) -> None:
+    """Set ``meta["requested_model"]`` to the chain entry ``result`` answered from.
+
+    The key follows ``model``: it names the call whose reply the unit used,
+    and it is present only when the backend reported an entry (a stub result
+    without one leaves ``meta`` exactly as it was before issue #138), so a
+    retry that answered without one removes an earlier call's entry.
+    """
+    requested = str(getattr(result, "requested_model", "") or "")
+    if requested:
+        meta["requested_model"] = requested
+    else:
+        meta.pop("requested_model", None)
 
 
 def load_prompt(name: str) -> str:
@@ -903,6 +919,7 @@ def _invoke_and_parse(
             meta["input_tokens"] = result.input_tokens
             meta["output_tokens"] = result.output_tokens
             meta["model"] = result.model
+            _stamp_requested_model(meta, result)
             meta["cost_usd"], meta["cost_source"] = _result_cost(result)
 
         stop_reason = _budget_stop_reason(result)
