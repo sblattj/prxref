@@ -10,6 +10,21 @@ tracker.
 
 ## [Unreleased]
 
+### Added
+
+- `PRXREF_LLM_REQUIRE_MODELS` (config-file key `llm_require_models`) names the models
+  allowed to answer. When a review unit (chunk, systemic sweep or verification call) was
+  answered by any other model, for example a fallback after the first model failed, the
+  verdict is `Incomplete`, the summary says which units, and `degraded` gets cause `model`
+  plus a `models` list naming each unit, the model that answered and the chain entry that
+  was asked. A reply passes when either name is in the list. Unset, the default, checks
+  nothing. `PRXREF_FAIL_ON=error|any` exits 1 on it like any incomplete run (#138).
+- `prxref review --eval-pins` (or `PRXREF_EVAL_PINS=on`, env-only) applies the settings
+  `prxref eval run` pins (`EVAL_PINS`: CI wiring check, routing probe and standards
+  discovery off) at the same layer, so a CI review runs with the settings an eval run
+  measured. A conflicting flag loses to the pin with a warning, and `--format json` gains
+  `eval_pins`. Eval runs now record `llm_require_models` in `run.json`'s `config` (#137).
+
 ## [0.39.0] - 2026-10-26
 
 ### Added
