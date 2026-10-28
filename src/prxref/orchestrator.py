@@ -1692,7 +1692,7 @@ def orchestrate_review(
         if post:
             run_inputs["describe"], describe_unit = _describe_step(
                 forge, ref, pr, llm, raw, mode=describe_mode, labels_mode=labels_mode,
-                max_tokens=max_tokens, tracer=tracer,
+                max_tokens=max_tokens, tracer=tracer, require_models=llm_require_models,
             )
         else:
             run_inputs["describe"]["reason"] = "posting is off (--no-post, PRXREF_DRY_RUN or a replay)"
@@ -3319,6 +3319,7 @@ def _describe_step(
     labels_mode: str,
     max_tokens: int | None,
     tracer: Any,
+    require_models: Sequence[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Draft the PR description and labels (#37): ``(record, cost_unit)``.
 
@@ -3330,7 +3331,11 @@ def _describe_step(
     the forge's ``update_description`` with the body composed from the
     split original, shortened to the forge's ``max_description_chars``.
     Labels follow when ``labels_mode`` is not ``off``, the description was
-    written and the forge has ``add_labels``. ``cost_unit`` is the model
+    written and the forge has ``add_labels``. With ``require_models``
+    (``PRXREF_LLM_REQUIRE_MODELS``, issue #138) set, a reply answered by a
+    model it does not allow (:func:`_answer_allowed`) is neither written nor
+    labelled: ``record["reason"]`` names the model and one WARNING is
+    logged; the verdict is unaffected. ``cost_unit`` is the model
     call's run-cost unit, ``None`` when no call was made. Never raises: any
     failure is logged and lands in ``record["error"]``, and the review goes
     on unchanged.
@@ -3366,6 +3371,15 @@ def _describe_step(
         if not res.body:
             record["reason"] = "the model returned no usable description"
             record["error"] = res.error or "empty description"
+            return record, unit
+        allow = {m for m in require_models if m}
+        if allow and not _answer_allowed(allow, res.requested_model, res.model):
+            who = _answerer_text(res.requested_model, res.model)
+            record["reason"] = (
+                f"the description was answered by {who}, "
+                "which PRXREF_LLM_REQUIRE_MODELS does not allow"
+            )
+            logger.warning("describe: %s; not written", record["reason"])
             return record, unit
         body = _fit_description(
             res.body, parts.original, head_sha=head, at=_describe_now(),
@@ -4555,6 +4569,24 @@ def _run_workers(
             done.set()
 
 
+def _answer_allowed(allow: Collection[str], requested: object, model: object) -> bool:
+    """True when ``requested`` (the chain entry) or ``model`` (the reported id) is in ``allow``.
+
+    The one matching rule of :envvar:`PRXREF_LLM_REQUIRE_MODELS` (issue
+    #138), shared by the review guard and the PR-description call: exact
+    comparison, and a reply naming neither is not allowed.
+    """
+    return bool(requested) and requested in allow or bool(model) and model in allow
+
+
+def _answerer_text(requested: object, model: object) -> str:
+    """``entry, reported as id`` when both are known and differ, else whichever is known."""
+    who = requested or model or "an unidentified model"
+    if requested and model and model != requested:
+        who = f"{requested}, reported as {model}"
+    return str(who)
+
+
 def _model_violations(
     chunks: Sequence[Sequence[Any]],
     results: Sequence[Mapping[str, Any]],
@@ -4599,7 +4631,7 @@ def _model_violations(
             [unit.get("requested_model") or "", unit.get("model") or ""],
         ]
         for requested, model in pairs:
-            if requested in allow or model in allow:
+            if _answer_allowed(allow, requested, model):
                 continue
             row = {
                 "unit": kind, "index": index, "files": files,
@@ -4630,9 +4662,7 @@ def _violation_text(rows: Sequence[Mapping[str, Any]]) -> str:
             where = f"verification of {files[0]}:{row.get('line')}"
         else:
             where = "sweep"
-        who = row.get("requested_model") or row.get("model") or "an unidentified model"
-        if row.get("requested_model") and row.get("model") and row["model"] != row["requested_model"]:
-            who = f"{row['requested_model']}, reported as {row['model']}"
+        who = _answerer_text(row.get("requested_model"), row.get("model"))
         parts.append(f"{where} ({who})")
     return ", ".join(parts)
 

@@ -56,6 +56,7 @@ import secrets
 import threading
 import time
 from collections.abc import Sequence
+from typing import Any
 
 import requests
 
@@ -519,17 +520,45 @@ class OpenAICompatClient(LLMClient):
         raise LLMError("all models failed: " + "; ".join(failures))
 
 
-def _litellm_requested_model(reported: str, available: Sequence[str]) -> str:
+def _litellm_fallback_count(hidden: Any) -> int | None:
+    """litellm's ``x-litellm-attempted-fallbacks`` count from hidden params, or ``None``.
+
+    ``hidden`` may be a dict or an attribute object; ``additional_headers``
+    may be missing, ``None`` or not a mapping, and the header absent (older
+    litellm). Only a real ``int`` counts: a ``bool`` or a string does not.
+    """
+    headers = (
+        hidden.get("additional_headers") if isinstance(hidden, dict)
+        else getattr(hidden, "additional_headers", None)
+    )
+    if not isinstance(headers, dict):
+        return None
+    count = headers.get("x-litellm-attempted-fallbacks")
+    return count if isinstance(count, int) and not isinstance(count, bool) else None
+
+
+def _litellm_requested_model(
+    reported: str, available: Sequence[str], hidden: Any = None,
+) -> str:
     """The chain entry a litellm answer came from, or ``""`` when unknowable.
 
     litellm walks ``fallbacks`` inside one call and reports only the
-    provider's model id, so the entry is known for sure in two cases: the
-    chain had one entry, or the reported id is itself an entry. Anything
-    else is ``""`` and :envvar:`PRXREF_LLM_REQUIRE_MODELS` matches the
-    reported id alone (issue #138).
+    provider's model id (prefix stripped, so ``anthropic/claude-x`` comes
+    back as ``claude-x``). The entry is named in this order: the chain had
+    one entry; litellm's ``x-litellm-attempted-fallbacks`` count in the
+    response's hidden params, an ``int`` index into ``available`` because
+    the call is made with ``model=available[0]`` and
+    ``fallbacks=available[1:]``; the reported id is itself an entry.
+    Anything else, such as a litellm too old to report the count, is ``""``
+    and :envvar:`PRXREF_LLM_REQUIRE_MODELS` matches the reported id alone
+    (issue #138). ``litellm_model_name`` is never used: it keeps naming the
+    primary after a fallback answered.
     """
     if len(available) == 1:
         return available[0]
+    count = _litellm_fallback_count(hidden)
+    if count is not None and 0 <= count < len(available):
+        return available[count]
     return reported if reported in available else ""
 
 
@@ -653,7 +682,7 @@ class LiteLLMClient(LLMClient):
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
             cost_usd=cost_usd,
             cost_source="litellm" if cost_usd is not None else "",
-            requested_model=_litellm_requested_model(reported, available),
+            requested_model=_litellm_requested_model(reported, available, hidden),
         )
 
     def _maybe_mark_unavailable(

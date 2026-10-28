@@ -359,6 +359,78 @@ class TestBackendsCarryTheChainEntry:
     def test_litellm_names_the_entry_only_when_it_can(self, reported, available, expected):
         assert _litellm_requested_model(reported, available) == expected
 
+    @pytest.mark.parametrize(
+        ("hidden", "expected"),
+        [
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": 0}}, "a/one"),
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": 1}}, "b/two"),
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": 2}}, "c/three"),
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": 3}}, ""),
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": -1}}, ""),
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": True}}, ""),
+            ({"additional_headers": {"x-litellm-attempted-fallbacks": "1"}}, ""),
+            ({"additional_headers": {}}, ""),
+            ({"additional_headers": None}, ""),
+            ({"additional_headers": "x-litellm-attempted-fallbacks: 1"}, ""),
+            ({}, ""),
+            (None, ""),
+            (SimpleNamespace(additional_headers={"x-litellm-attempted-fallbacks": 1}), "b/two"),
+            (SimpleNamespace(additional_headers=None), ""),
+            (SimpleNamespace(), ""),
+            ({"litellm_model_name": "a/one"}, ""),
+        ],
+    )
+    def test_litellm_names_the_entry_from_its_fallback_count(self, hidden, expected):
+        available = ["a/one", "b/two", "c/three"]
+        assert _litellm_requested_model("unrelated-id", available, hidden) == expected
+
+    def test_a_listed_reported_id_still_names_the_entry_without_a_count(self):
+        assert _litellm_requested_model("b/two", ["a/one", "b/two"], {}) == "b/two"
+
+    def test_the_count_wins_over_a_reported_id_that_is_another_entry(self):
+        hidden = {"additional_headers": {"x-litellm-attempted-fallbacks": 0}}
+        assert _litellm_requested_model("b/two", ["a/one", "b/two"], hidden) == "a/one"
+
+
+class TestLiteLLMChainAcceptance:
+    CHAIN = ["anthropic/claude-x", "openai/gpt-y"]
+
+    def _invoke(self, monkeypatch, reported, attempted):
+        import sys
+        import types
+
+        from prxref.llm_backends import LiteLLMClient
+
+        def fake_completion(**kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"), finish_reason="stop")],
+                usage=SimpleNamespace(prompt_tokens=8, completion_tokens=4),
+                model=reported,
+                _hidden_params={
+                    "litellm_model_name": self.CHAIN[0],
+                    "additional_headers": {"x-litellm-attempted-fallbacks": attempted},
+                },
+            )
+
+        monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion))
+        return LiteLLMClient(models=self.CHAIN).invoke("s", "u")
+
+    @staticmethod
+    def _rows(res, allowed):
+        unit = {"model": res.model, "requested_model": res.requested_model, "error": ""}
+        return _model_violations([[]], [unit], [], allowed)
+
+    def test_a_primary_answer_reported_without_its_prefix_is_allowed(self, monkeypatch):
+        res = self._invoke(monkeypatch, "claude-x", 0)
+        assert res.requested_model == "anthropic/claude-x"
+        assert self._rows(res, ["anthropic/claude-x"]) == []
+
+    def test_a_fallback_answer_names_the_second_entry_and_violates(self, monkeypatch):
+        res = self._invoke(monkeypatch, "gpt-y", 1)
+        assert res.requested_model == "openai/gpt-y"
+        rows = self._rows(res, ["anthropic/claude-x"])
+        assert [(r["requested_model"], r["model"]) for r in rows] == [("openai/gpt-y", "gpt-y")]
+
 
 class TestUnitPlumbing:
     def test_reviewer_meta_carries_the_entry_only_when_reported(self):

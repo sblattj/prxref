@@ -10,6 +10,18 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- `PRXREF_LLM_REQUIRE_MODELS` on the `litellm` backend names the chain entry that
+  answered from litellm's own fallback count, so a primary answer that litellm reports
+  without its provider prefix (`claude-x` for `anthropic/claude-x`) no longer makes a
+  review `Incomplete` when the entry is listed. A litellm too old to report the count
+  still matches the reported id or a one-entry chain only (#138).
+- The PR-description call (`PRXREF_DESCRIBE`) is now checked against
+  `PRXREF_LLM_REQUIRE_MODELS`: a description answered by a model outside the list is not
+  written and no labels are applied, `describe.reason` names the model, and the verdict
+  and exit code are unaffected (#138).
+
 ## [0.40.0] - 2026-10-27
 
 ### Added

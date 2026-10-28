@@ -572,7 +572,9 @@ conventional labels. The forge capabilities differ:
 neutral colour. The token must be allowed to edit the pull request (and, for `create`, to
 create repository labels). A failed write, a refused permission, or a label list that
 cannot be read is logged and recorded in the run record's `describe.error`; it never
-changes the verdict or the exit code. Replays and local diffs never write. The
+changes the verdict or the exit code. With `PRXREF_LLM_REQUIRE_MODELS` set, a description
+answered by a model outside the list is not written and gets no labels; `describe.reason`
+names the model. Replays and local diffs never write. The
 [review gate](../README.md#review-gate-github-app) does not write descriptions or labels:
 its review runs on a capturing forge that refuses every write but the summary and inline
 comments it publishes itself.
