@@ -10,6 +10,8 @@ tracker.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-27
+
 ### Added
 
 - `PRXREF_LLM_REQUIRE_MODELS` (config-file key `llm_require_models`) names the models

@@ -44,7 +44,7 @@ a failing PR. A review that cannot finish fails closed: the check concludes
 
 ## Prerequisites
 
-1. **Install the extra:** `uv tool install 'prxref[github-app,litellm]==0.39.0'`. Without
+1. **Install the extra:** `uv tool install 'prxref[github-app,litellm]==0.40.0'`. Without
    `github-app`, `prxref gate serve` exits 2 naming the extra.
 2. **Tunnel:** a Cloudflare zone, `cloudflared tunnel login`, `cloudflared tunnel create sdlc`,
    and `cloudflared tunnel route dns sdlc <webhook-host>`. The webhook URL is
