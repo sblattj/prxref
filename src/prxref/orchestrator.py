@@ -2036,6 +2036,7 @@ def orchestrate_review(
             ))
         merged = stability.merge_passes(
             pass_results, min_agree=stability_min_agree, seeds=seeds,
+            chunk_paths=[[fd.path for fd in chunk if fd.path] for chunk in chunks],
         )
         results = merged.results
         stability_dropped = merged.dropped

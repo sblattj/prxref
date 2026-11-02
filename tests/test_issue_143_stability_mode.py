@@ -457,3 +457,45 @@ class TestEvals:
         text = (ROOT / "docs" / "evals.md").read_text()
         assert "PRXREF_STABILITY_PASSES" in text
         assert "stability" in text
+
+
+T_SAME = "`client.fetch` swallows `TimeoutException`"
+B_SAME = "`client.fetch` raises `TimeoutException` and the handler reads `response.body` of `data`."
+
+
+@pytest.mark.usefixtures("contract_stubs")
+class TestPathSpellingAndLineDrift:
+    def _two(self, first, second):
+        script = {B1: [[first], [second]], B2: [[], []]}
+        return _review(ScriptLLM(script), 2, 2)
+
+    def test_a_shortened_path_merges_with_the_full_one(self):
+        res, _ = self._two(_raw(B1, 10, T_SAME, B_SAME), _raw("big1.py", 10, T_SAME, B_SAME))
+        (kept,) = res["findings_active"]
+        assert (kept.file, kept.agreement) == (B1, 2)
+        assert res["findings_dropped"] == []
+
+    def test_identical_text_merges_at_any_line(self):
+        res, _ = self._two(_raw(B1, 10, T_SAME, B_SAME), _raw(B1, 20, T_SAME, B_SAME))
+        (kept,) = res["findings_active"]
+        assert kept.agreement == 2
+
+    def test_control_lines_ten_and_twelve_still_merge(self):
+        res, _ = self._two(_raw(B1, 10, T_SAME, B_SAME), _raw(B1, 12, T_SAME, B_SAME))
+        assert [f.agreement for f in res["findings_active"]] == [2]
+
+    def test_reworded_findings_far_apart_do_not_merge(self):
+        res, _ = self._two(_raw(B1, 10, T_SAME, B_SAME), _raw(B1, 20, T_SAME, B_SAME + " Also x."))
+        assert res["findings_active"] == []
+
+    def test_an_unresolvable_path_clusters_only_with_itself(self):
+        res, _ = self._two(_raw("nowhere.py", 10, T_SAME, B_SAME), _raw("nowhere.py", 10, T_SAME, B_SAME))
+        # prior behaviour: it merges with itself, then location validation drops it
+        assert [f.file for f in res["findings_active"]] == []
+        assert [f.drop_reason.startswith("malformed") for f in res["findings_dropped"]] == [True]
+
+    def test_an_unresolvable_spelling_is_not_merged_into_a_resolvable_one(self):
+        res, _ = self._two(_raw(B1, 10, T_SAME, B_SAME), _raw("elsewhere/zzz.py", 10, T_SAME, B_SAME))
+        reasons = sorted(f.drop_reason for f in res["findings_dropped"])
+        assert res["findings_active"] == []
+        assert all(r.startswith(STABILITY_DROP_PREFIX) for r in reasons) and len(reasons) == 2
