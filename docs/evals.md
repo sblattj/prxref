@@ -245,8 +245,12 @@ process by the same code `prxref review` runs, as a replay with
   standards discovery (`PRXREF_CONTEXT_STANDARDS_GLOBS`) are on by default
   for `prxref review`, and every case runs with them off, whatever the
   environment or the config file says, so a baseline stays comparable
-  across releases and machines. `run.json`'s `config` records the pinned
-  values, and each case's `record.json` carries them under `eval_pins`.
+  across releases and machines. `PRXREF_TICKET_IDS_FROM_TITLE` is pinned
+  `off` as well: it is off by default, but a lane that turned it on would
+  otherwise reach a Jira host from an eval run, or exit `2` without Jira
+  settings. `run.json`'s `config` records the pinned values (except that
+  one), and each case's `record.json` carries all of them under
+  `eval_pins`.
   These pins are `prxref.evals.EVAL_PINS`; `prxref review --eval-pins` (or
   `PRXREF_EVAL_PINS=on`) applies the same mapping, at the same layer, to a
   normal review, so a CI lane can run with the settings a rules pack was

@@ -7,7 +7,8 @@ fetched (:func:`prxref.title_tickets.with_title_tickets`) and joined after the f
 the same cap; the summary then lists the keys read and the keys that could
 not be read. A ticket that was only partly read (a listed key failed, or the
 text was cut at the cap) never lets a finding be marked ``out``: see
-:attr:`TicketContext.complete`. When the context has text, every
+:attr:`TicketContext.complete`; with the key off, a text cut at the cap
+still gets a one-sentence summary note saying so. When the context has text, every
 review unit sees it as fenced, untrusted data and is asked to mark each
 finding ``in``, ``out`` or ``unknown`` of the ticket's scope. An empty or
 whitespace-only file is the EMPTY state, "this PR has no ticket": nothing is
@@ -199,7 +200,8 @@ class TicketContext:
         :data:`NOTE_EMPTY` for an EMPTY ticket, :data:`NOTE_NO_AC` for text
         without acceptance criteria, and ``""`` when it has them. With
         ``PRXREF_TICKET_IDS_FROM_TITLE=on`` a line listing what was read
-        follows (:meth:`sources_line`).
+        follows, and a text cut at the cap gets a line saying so with the key
+        off too (:meth:`sources_line`).
         """
         if not self.active:
             return NOTE_EMPTY + self.sources_line()
@@ -207,13 +209,25 @@ class TicketContext:
         return base + self.sources_line()
 
     def sources_line(self) -> str:
-        """The summary line naming what was read; ``""`` unless ``from_title``.
+        """The summary line naming what was read, or why nothing is marked out.
 
-        It lists the ticket file (never its path) and the title keys read,
-        then the keys that could not be read, then a cut at the cap, and says
-        when findings are therefore not marked outside the ticket.
+        With ``from_title`` it lists the ticket file (never its path) and the
+        title keys read, then the keys that could not be read, then a cut at
+        the cap, and says when findings are therefore not marked outside the
+        ticket. Without it, only a text cut at the cap gets a line, the one
+        sentence saying where it was cut and that findings are not marked
+        outside a ticket that was not fully read; it never lists sources.
+        Otherwise ``""``.
         """
-        if not self.from_title or (not self.active and not self.ids_failed):
+        if not self.from_title:
+            if not self.capped.truncated:
+                return ""
+            return (
+                f"> ℹ️ The ticket was cut at {self.capped.max_chars} of "
+                f"{self.capped.chars} characters; findings are not marked outside "
+                "a ticket that was not fully read.\n"
+            )
+        if not self.active and not self.ids_failed:
             return ""
         read = ([TICKET_FILE_LABEL] if self.path else []) + list(self.ids_loaded)
         parts = ["Tickets read: " + (", ".join(read) if read else "none")]

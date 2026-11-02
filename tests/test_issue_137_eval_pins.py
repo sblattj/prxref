@@ -101,7 +101,10 @@ class TestTheSameMapping:
         assert _pinned(review_call) == _pinned(eval_call) == evals._pins()
 
     def test_the_pins_come_from_the_eval_helper_not_a_copy(self, repo, recorder, monkeypatch, capsys):
-        swapped = {"ci_wiring": "on", "routing_probe": "off", "context_standards_globs": ["X.md"]}
+        swapped = {
+            "ci_wiring": "on", "routing_probe": "off", "context_standards_globs": ["X.md"],
+            "ticket_ids_from_title": "off",
+        }
         monkeypatch.setattr(evals, "EVAL_PINS", swapped)
         monkeypatch.setenv("PRXREF_CI_WIRING", "off")
         _eval_run(repo)
@@ -118,6 +121,7 @@ class TestTheSameMapping:
         (call,) = recorder
         assert _pinned(call) == {
             "ci_wiring": "on", "routing_probe": "on", "context_standards_globs": [STANDARDS],
+            "ticket_ids_from_title": "off",
         }
         assert _pinned(call) != evals._pins()
 
@@ -155,7 +159,8 @@ class TestTheResolvedConfig:
         assert _review() == 0
         (cfg,) = resolved
 
-        assert {k: cfg[k] for k in PINNED} != {k: recorded[k] for k in PINNED}
+        recorded_pins = [k for k in PINNED if k in recorded]
+        assert {k: cfg[k] for k in recorded_pins} != {k: recorded[k] for k in recorded_pins}
 
     def test_the_allowlist_records_the_required_models(self, repo, recorder, monkeypatch, capsys):
         monkeypatch.setenv("PRXREF_LLM_REQUIRE_MODELS", "model-a,model-b")

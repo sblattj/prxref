@@ -451,7 +451,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "apply the settings prxref eval run pins (CI wiring check, "
-            "routing probe and standards discovery off), over the "
+            "routing probe, standards discovery and title ticket ids off), over the "
             "environment, the config file and any flag that sets them "
             "(PRXREF_EVAL_PINS=on does the same)"
         ),
@@ -1844,6 +1844,7 @@ def _run_review(
     evidence_files: list[str] | None = None,
     context_standards_globs: list[str] | None = None,
     routing_probe: str | None = None,
+    ticket_ids_from_title: str | None = None,
     metadata_rules: str | None = None,
     forge: Any = None,
     eval_pins: str | None = None,
@@ -1888,6 +1889,7 @@ def _run_review(
         ci_wiring=ci_wiring,
         context_standards_globs=context_standards_globs,
         routing_probe=routing_probe,
+        ticket_ids_from_title=ticket_ids_from_title,
     )
     cfg, layers = load_config_with_sources(
         config_file=config_file,
@@ -2099,8 +2101,13 @@ def _resolve_eval_pins(eval_pins: str | None) -> dict[str, Any] | None:
     config load because it decides that load's overrides. When on, the
     mapping is a fresh copy of :data:`prxref.evals.EVAL_PINS` from the same
     helper ``eval run`` uses, so the two can never apply different pins.
+    This load only reads ``eval_pins``, so it holds ``ticket_ids_from_title``
+    off: a Jira setup the pins are about to switch off must not exit 2 here.
     """
-    resolved = load_config(eval_pins=eval_pins, source_labels={"eval_pins": "--eval-pins"})
+    resolved = load_config(
+        eval_pins=eval_pins, ticket_ids_from_title="off",
+        source_labels={"eval_pins": "--eval-pins"},
+    )
     if resolved["eval_pins"] != "on":
         return None
     return importlib.import_module("prxref.evals")._pins()
@@ -2349,13 +2356,15 @@ def _cmd_review(args: argparse.Namespace) -> int:
     # The policy is resolved before the run, not taken from _run_review's
     # config: a review that fails to complete is precisely the outcome the
     # knob must gate, so the value has to be known before orchestration can
-    # fail. load_config is a pure read of the same environment, and
+    # fail. The title ticket key is held off here: this read needs only
+    # fail_on and fallback, and _run_review validates the key after any eval
+    # pin has switched it off. load_config is a pure read of the same environment, and
     # _run_review loads it again with the flag overrides — within one process
     # the two cannot disagree. fail_on and fallback can only be set in the
     # environment, so the policy never needs the repository config file.
     try:
         config_file = _resolve_config_file(args)
-        policy = load_config()
+        policy = load_config(ticket_ids_from_title="off")
         fail_on = policy["fail_on"]
         fallback = policy["fallback"]
     except ConfigError as exc:

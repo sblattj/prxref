@@ -20,7 +20,7 @@ import pytest
 from prxref import cli, config, orchestrator, specs
 from prxref.llm import ConfigError
 from prxref.text_inputs import cap_text
-from prxref.ticket import TicketContext
+from prxref.ticket import NOTE_EMPTY, NOTE_NO_AC, TicketContext
 from tests.test_issue_64_ticket_context import FINDING, _RecordingLLM
 from tests.test_orchestrator import REF, FakeForge, FakeLLM, _added_file_diff, make_pr
 from tests.test_specs import _FakeResponse
@@ -379,3 +379,121 @@ class TestCli:
         cli._webhook_handler(REF.url)
         assert len(rig.jira.calls) == 3
         assert "T-1, T-2, T-3" in rig.forge.summaries[0]
+
+
+class TestEvalPins:
+    """The eval pins hold ``ticket_ids_from_title`` off before the Jira check runs (#145)."""
+
+    DATASET = "tests/fixtures/issue17/cases.json"
+    DIFF = "tests/fixtures/issue17/pr.diff"
+
+    @pytest.fixture
+    def keyed(self, monkeypatch, tmp_path, no_http):
+        """Key on, no Jira settings anywhere, orchestrator and LLM stubbed; yields the recorded kwargs."""
+        calls: list[dict] = []
+
+        def _orchestrate(**kwargs):
+            calls.append(kwargs)
+            return {
+                "verdict": "Approved", "findings_active": [], "findings_dropped": [],
+                "chunk_count": 1, "chunks_reviewed": 1, "chunks_failed": 0, "elapsed_ms": 5,
+                "input_tokens": 10, "output_tokens": 2, "posted": False,
+            }
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("prxref.orchestrator.orchestrate_review", _orchestrate)
+        monkeypatch.setattr("prxref.llm_backends.create_llm_client", lambda cfg: object())
+        monkeypatch.setattr(cli, "make_forge", lambda ref: object())
+        monkeypatch.setenv("PRXREF_TICKET_IDS_FROM_TITLE", "on")
+        for name in ("PRXREF_JIRA_BASE_URL", "PRXREF_JIRA_EMAIL", "PRXREF_JIRA_API_TOKEN",
+                     "PRXREF_EVAL_PINS", config.CONFIG_FILE_ENV):
+            monkeypatch.delenv(name, raising=False)
+        return calls
+
+    def _root(self):
+        from pathlib import Path
+
+        return Path(__file__).resolve().parent.parent
+
+    def test_the_pin_is_in_the_mapping(self):
+        from prxref import evals
+
+        assert evals.EVAL_PINS["ticket_ids_from_title"] == "off"
+
+    def test_eval_run_does_not_exit_2_and_fetches_nothing(self, keyed, no_http, tmp_path):
+        argv = ["eval", "run", "--cases", str(self._root() / self.DATASET),
+                "--label", "L", "--out", str(tmp_path / "out")]
+        assert cli.main(argv) == 0
+        assert keyed and all(c["ticket_ids_from_title"] == "off" for c in keyed)
+        assert no_http == []
+
+    def test_review_with_eval_pins_does_not_exit_2_and_fetches_nothing(self, keyed, no_http):
+        argv = ["review", "--diff-file", str(self._root() / self.DIFF), "--no-post", "--eval-pins"]
+        assert cli.main(argv) == 0
+        assert keyed and keyed[0]["ticket_ids_from_title"] == "off"
+        assert no_http == []
+
+    def test_the_variable_pins_it_too(self, keyed, monkeypatch):
+        monkeypatch.setenv("PRXREF_EVAL_PINS", "on")
+        argv = ["review", "--diff-file", str(self._root() / self.DIFF), "--no-post"]
+        assert cli.main(argv) == 0
+        assert keyed[0]["ticket_ids_from_title"] == "off"
+
+    def test_control_without_pins_it_still_exits_2_naming_the_variable(self, keyed, capsys):
+        argv = ["review", "--diff-file", str(self._root() / self.DIFF), "--no-post"]
+        assert cli.main(argv) == 2
+        assert keyed == []
+        assert "PRXREF_TICKET_IDS_FROM_TITLE" in capsys.readouterr().err
+
+
+class TestCutTicketWithTheKeyOff:
+    """A cut ticket file says why nothing is marked out of scope, key off or on (#145)."""
+
+    def _cut(self):
+        text = "word " * 200
+        return TicketContext(
+            path="t.md", capped=cap_text(text, 100), text=text[:100], has_acceptance_criteria=True,
+        )
+
+    def test_the_key_off_note_is_only_the_cut_sentence(self):
+        note = self._cut().note()
+        assert note == (
+            "> ℹ️ The ticket was cut at 100 of 1000 characters; "
+            "findings are not marked outside a ticket that was not fully read.\n"
+        )
+        assert "Tickets read" not in note
+
+    def test_the_cut_sentence_follows_the_no_ac_note(self):
+        text = "word " * 200
+        ctx = TicketContext(
+            path="t.md", capped=cap_text(text, 100), text=text[:100], has_acceptance_criteria=False,
+        )
+        assert ctx.note().startswith(NOTE_NO_AC) and "cut at 100 of 1000" in ctx.note()
+
+    def test_under_the_cap_and_empty_notes_are_byte_identical(self):
+        full = TicketContext(path="t.md", capped=cap_text("ok", 100), text="ok", has_acceptance_criteria=True)
+        no_ac = TicketContext(path="t.md", capped=cap_text("ok", 100), text="ok", has_acceptance_criteria=False)
+        empty = TicketContext(path="t.md", capped=cap_text("", 100), text="", has_acceptance_criteria=False)
+        assert full.note() == ""
+        assert no_ac.note() == NOTE_NO_AC
+        assert empty.note() == NOTE_EMPTY
+
+    def test_the_summary_carries_it_with_the_key_off(self, tmp_path):
+        from prxref.ticket import load_ticket_context
+
+        path = tmp_path / "ticket.md"
+        path.write_text("word " * 200, encoding="utf-8")
+        base = load_ticket_context(str(path), max_chars=100, source="--context-file")
+        forge, _, res = _run(mode=None, findings=[OUT_FINDING], ticket=base)
+        assert "cut at 100 of 1000 characters" in forge.summaries[0]
+        assert "Tickets read" not in forge.summaries[0]
+        assert _scopes(res) == ["unknown"]
+
+    def test_an_untruncated_file_adds_no_line(self, tmp_path):
+        from prxref.ticket import load_ticket_context
+
+        path = tmp_path / "ticket.md"
+        path.write_text("short ticket\n", encoding="utf-8")
+        base = load_ticket_context(str(path), max_chars=100, source="--context-file")
+        forge, _, _ = _run(mode=None, findings=[IN_FINDING], ticket=base)
+        assert "not fully read" not in forge.summaries[0]

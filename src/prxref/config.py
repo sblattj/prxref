@@ -152,7 +152,7 @@ LLM / pipeline:
   PRXREF_EVAL_PINS              "on" applies the eval harness's pins
                                 (prxref.evals.EVAL_PINS: ci_wiring "off",
                                 routing_probe "off", context_standards_globs
-                                empty) to ``prxref review`` and the webhook
+                                empty, ticket_ids_from_title "off") to ``prxref review`` and the webhook
                                 daemon, exactly as ``prxref eval run`` applies
                                 them: above the environment, the config file
                                 and any flag that sets the same key, so a CI
