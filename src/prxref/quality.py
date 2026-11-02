@@ -1,16 +1,16 @@
 """Deterministic quality passes over worker findings.
 
-Twenty-one passes run before posting, in the order ``orchestrate_review``
+Twenty-two passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
 severity map, pass 15 only when
 the loaded rules file declares at least
-one section scope, pass 16 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on, and pass 17 only when a team rules file is loaded
-and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 18
+one section scope, pass 17 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 18 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 19
 (``apply_anchor_snap`` and ``apply_location_verification``) do only what
 the head-file reader can serve: without one they change nothing. A
-twenty-second deterministic check, the release-shaped-PR heuristic, and a
-twenty-third, the pinned-toggle heuristic, are not passes at all:
+twenty-third deterministic check, the release-shaped-PR heuristic, and a
+twenty-fourth, the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
 before pass 1, and each then flows through every pass below like a model
@@ -156,7 +156,20 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
      right after on every section of the loaded rules, scoped or not, and
      clears a label whose rule names another kind of defect than the
      finding's title (``rules.claim_kinds``), keeping it on any ambiguity.
-16. ``apply_rule_grouping``: fold chunk findings in one file that name the
+16. ``apply_root_cause_fold`` (#142, #144): fold chunk findings that restate
+    one root cause into the most specific of them, which takes the group's
+    highest severity and confidence and lists the others under ``Also at:``;
+    the others are dropped as ``same root cause as <file>:<line>
+    (<evidence>)``. In one file the anchors must sit within
+    :data:`ROOT_CAUSE_LINE_WINDOW` lines and the pair needs covered shared
+    code, a similar title or one rule with overlapping bodies; across files
+    it needs covered shared code on rare tokens plus one rule, one
+    suggestion, one route in both titles or two title words outside code
+    names. A pair whose titles each name code the other claim never mentions
+    never folds, nor does a similar title over different numbers. Always on. It runs
+    after the label checks and before grouping and every cap, so a repeat
+    spends none of them. Sweep findings stay with ``apply_sweep_dedup``.
+17. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -164,7 +177,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-17. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+18. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
     chunk findings per ``rule`` (casefolded), or per normalized title for
     findings that name none, across every file of the review. The kept
     findings are the most severe, then the most confident; the rest are
@@ -175,7 +188,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     it on: a team rules file is loaded and the cap is above 0. It runs
     after grouping, so a group counts once, and before the gate, so the
     severity caps count what it kept.
-18. ``apply_location_verification``: grouping and the cap list a folded
+19. ``apply_location_verification``: grouping and the cap list a folded
     member's location on their representative without ever checking the
     site against a source (issue #74). This pass re-runs pass 7's search
     for the representative's own quoted snippets within
@@ -187,7 +200,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     snippet parseable keep every site; nothing is dropped from the review.
     It runs once, after grouping and the cap (``locations`` is final
     there) and before the gate.
-19. ``apply_quality_gate``: drop findings below the confidence floor
+20. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -196,7 +209,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-20. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+21. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -216,7 +229,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     their claims share at least two code identifiers and their titles
     share three words or a problem class
     (``duplicate of chunk finding (same line, shared code: a, b)``).
-21. ``apply_containment_note``: a finding that asserts a throw, panic,
+22. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
@@ -224,7 +237,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     changes ``drop_reason`` or severity.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
-runs after pass 17 (after line alignment, anchor snapping and every fold, so
+runs after pass 18 (after line alignment, anchor snapping and every fold, so
 ``locations`` is final) and before the gate. It drops nothing: a code
 suggestion (#30) that fails one of its rules is cleared and the finding is
 kept, so it posts as a plain comment.
@@ -1829,7 +1842,8 @@ def apply_sweep_dedup(
     cap later drops its representative. So does a chunk finding
     :func:`apply_rule_cap` folded (``drop_reason`` ``rule cap exceeded (max
     <n>): listed at <file>:<line>``), whose location the best kept finding
-    of its rule now lists.
+    of its rule now lists, and one :func:`apply_root_cause_fold` folded
+    (``same root cause as <file>:<line> (<evidence>)``).
 
     ``similarity`` switches on a second, reworded tier that runs after the
     exact tier; ``None`` (the default) skips it entirely, so the pass is
@@ -1884,6 +1898,7 @@ def apply_sweep_dedup(
         if f.drop_reason is None
         or f.drop_reason.startswith(GROUPED_INTO_PREFIX)
         or f.drop_reason.startswith(RULE_CAP_PREFIX)
+        or f.drop_reason.startswith(ROOT_CAUSE_PREFIX)
     }
     result: list[Finding] = []
     for i, f in enumerate(findings):
@@ -3276,6 +3291,14 @@ rule, whose ``locations`` and ``Also at:`` paragraph now list the folded
 finding's own location.
 """
 
+ROOT_CAUSE_PREFIX: str = "same root cause as "
+"""``drop_reason`` prefix of a finding :func:`apply_root_cause_fold` folded away.
+
+The full reason is ``same root cause as <file>:<line> (<evidence>)``, naming
+the kept finding's location, which now lists the folded finding's own, and
+what bound the two: ``shared code: a, b``, ``similar title`` or ``same rule``.
+"""
+
 RULE_CAP_LISTED_LOCATIONS: int = 5
 """Most locations the ``Also at:`` paragraph of :func:`apply_rule_cap` names.
 
@@ -3352,6 +3375,7 @@ def _fold_group(
     anchor = min(members, key=lambda i: _group_anchor_key(findings, i))
     representative = findings[anchor]
     anchor_line = _grouping_line(representative) or 0
+    inherited = {loc for i in members for loc in _own_locations(findings[i])}
     top_severity = min(
         (findings[i].severity.strip().lower() for i in members),
         key=lambda s: _SEVERITY_RANK[s],
@@ -3366,7 +3390,14 @@ def _fold_group(
         if (line := _grouping_line(findings[i]) or 0) > 0 and line != anchor_line
     })
     body = representative.body or ""
-    if other_lines:
+    merged = tuple((representative.file, line) for line in other_lines)
+    if inherited:
+        merged = tuple(sorted(
+            (inherited | set(merged)) - {(representative.file, anchor_line)}
+        ))
+        if merged:
+            body = _rule_cap_body(representative, merged)
+    elif other_lines:
         locations = ", ".join(
             f"`{representative.file}:{line}`" for line in other_lines
         )
@@ -3377,7 +3408,7 @@ def _fold_group(
         severity=top_severity,
         confidence=findings[most_confident].confidence,
         body=body,
-        locations=tuple((representative.file, line) for line in other_lines),
+        locations=merged,
     )
     reason = f"{GROUPED_INTO_PREFIX}{representative.file}:{anchor_line}"
     for i in members:
@@ -3525,10 +3556,13 @@ def _rule_cap_body(
     own = _own_locations(best)
     if own:
         grouped = "Also at: " + ", ".join(f"`{file}:{line}`" for file, line in own)
-        if body == grouped:
-            body = ""
-        elif body.endswith("\n\n" + grouped):
-            body = body[: -len("\n\n" + grouped)]
+        for listed in (grouped, _also_at_paragraph(own)):
+            if body == listed:
+                body = ""
+                break
+            if body.endswith("\n\n" + listed):
+                body = body[: -len("\n\n" + listed)]
+                break
     also_at = _also_at_paragraph(merged)
     return f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
 
@@ -3692,6 +3726,353 @@ def _strip_also_at(body: str) -> str:
     """
     match = _ALSO_AT_PARAGRAPH_RE.search(body)
     return body[: match.start()] if match else body
+
+
+ROOT_CAUSE_LINE_WINDOW: int = 3
+"""Most lines apart two findings of one file may sit and still be compared.
+
+Three is the widest gap the #142 and #144 repeats show (1384 against 1387). The
+sibling-function A/B that made posting every site a measured win has its
+sites six lines apart, so the window has to stay under that.
+"""
+
+ROOT_CAUSE_TITLE_SIMILARITY: float = 0.5
+"""Lowest stemmed-title Jaccard index that binds two anchors a few lines apart."""
+
+ROOT_CAUSE_CODE_COVERAGE: float = 0.75
+"""Share of the smaller claim's code tokens the other claim must also name.
+
+Two defects in one block name the block's calls and also what each is about,
+so neither claim is covered by the other. A restatement names little that its
+twin does not. Two tokens out of three, the shape of one pattern at two sites,
+is under the bar.
+"""
+
+ROOT_CAUSE_BODY_OVERLAP: float = 0.5
+"""Lowest evidence-token Jaccard index between two bodies under one rule."""
+
+ROOT_CAUSE_CROSS_FILE_TITLE_TOKENS: int = 2
+"""Fewest stemmed title words, code names excluded, that count across files.
+
+Lower than :data:`TITLE_MIN_SHARED_TOKENS` because a cross-file pair must also
+clear the code coverage bar on tokens no more than three claims name. A word
+from a code name does not count: that name is already in the coverage bar, and
+one bug at two sites shares the name without sharing the prose around it.
+"""
+
+ROOT_CAUSE_TOKEN_RARITY_MAX: int = 3
+"""Most claims a code token may appear in and still bind a pair across files.
+
+One root cause is seldom restated more often than this; a name in more claims
+is a pattern at many sites, which is what the per-rule cap is for.
+"""
+
+_ROOT_CAUSE_LITERAL_RE = re.compile(r'"([A-Za-z_][\w.\-]{3,})"')
+_ROOT_CAUSE_ROUTE_RE = re.compile(r"(?<![\w.])/[\w{}.\-]+(?:/[\w{}.\-]+)+")
+_ROOT_CAUSE_INCONSISTENCY_RE = re.compile(
+    r"contradict|reconcil|mismatch|inconsisten|disagree", re.IGNORECASE
+)
+_ROOT_CAUSE_NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)")
+
+
+def _root_cause_candidate(finding: Finding, floor: float) -> bool:
+    return (
+        _grouping_candidate_key(finding, floor) is not None
+        and not heuristics.is_deterministic(finding)
+    )
+
+
+def _root_cause_keep_key(
+    finding: Finding,
+) -> tuple[int, int, tuple[float, str, int, str], str]:
+    return (
+        0 if (_grouping_line(finding) or 0) > 0 else 1,
+        _reworded_severity_rank(finding),
+        finding_rank_key(finding),
+        repr(finding),
+    )
+
+
+def _root_cause_code(text: str) -> set[str]:
+    stripped = _CITATION_RE.sub(" ", text)
+    literals = {
+        raw.lower()
+        for raw in _ROOT_CAUSE_LITERAL_RE.findall(stripped)
+        if raw.lower() not in _CODE_STOPWORDS
+    }
+    routes = {raw.lower() for raw in _ROOT_CAUSE_ROUTE_RE.findall(stripped)}
+    return _code_tokens(text) | literals | routes
+
+
+def _root_cause_claim(finding: Finding) -> set[str]:
+    suggestion = finding.suggestion if isinstance(finding.suggestion, str) else ""
+    return _root_cause_code(f"{finding.title or ''} {finding.body or ''} {suggestion}")
+
+
+def _stemmed_title_tokens(title: str) -> set[str]:
+    return {
+        word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+        for word in _title_tokens(title)
+    }
+
+
+def _title_prose_tokens(title: str) -> set[str]:
+    from_code = {
+        part
+        for token in _root_cause_code(title)
+        for part in _stemmed_title_tokens(token)
+    }
+    return _stemmed_title_tokens(title) - from_code
+
+
+def _same_title_route(a: Finding, b: Finding) -> bool:
+    routes_a = {raw.lower() for raw in _ROOT_CAUSE_ROUTE_RE.findall(a.title or "")}
+    routes_b = {raw.lower() for raw in _ROOT_CAUSE_ROUTE_RE.findall(b.title or "")}
+    return bool(routes_a & routes_b)
+
+
+def _numbers_disagree(a: Finding, b: Finding) -> bool:
+    numbers_a, numbers_b = (
+        set(_ROOT_CAUSE_NUMBER_RE.findall(
+            _CITATION_RE.sub(" ", f"{f.title or ''} {f.body or ''}")
+        ))
+        for f in (a, b)
+    )
+    return bool(numbers_a - numbers_b and numbers_b - numbers_a)
+
+
+def _same_label(a: Finding, b: Finding) -> bool:
+    label_a = " ".join((a.rule or "").split()).casefold()
+    return bool(label_a) and label_a == " ".join((b.rule or "").split()).casefold()
+
+
+def _same_remedy(a: Finding, b: Finding) -> bool:
+    if not (isinstance(a.suggestion, str) and isinstance(b.suggestion, str)):
+        return False
+    remedy = " ".join(a.suggestion.split())
+    return bool(remedy) and remedy == " ".join(b.suggestion.split())
+
+
+def _shared_problem_class(a: Finding, b: Finding) -> bool:
+    title_a, title_b = a.title or "", b.title or ""
+    if _problem_classes(title_a) & _problem_classes(title_b):
+        return True
+    return bool(
+        _ROOT_CAUSE_INCONSISTENCY_RE.search(title_a)
+        and _ROOT_CAUSE_INCONSISTENCY_RE.search(title_b)
+    )
+
+
+def _titles_name_different_code(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str]
+) -> bool:
+    return bool(
+        _root_cause_code(a.title or "") - claim_b
+        and _root_cause_code(b.title or "") - claim_a
+    )
+
+
+def _code_covered(shared: set[str], claim_a: set[str], claim_b: set[str]) -> bool:
+    return (
+        len(shared) >= CODE_OVERLAP_MIN_SHARED
+        and len(shared) >= ROOT_CAUSE_CODE_COVERAGE * min(len(claim_a), len(claim_b))
+    )
+
+
+def _shared_code_reason(shared: set[str]) -> str:
+    named = ", ".join(sorted(shared)[:CODE_OVERLAP_REASON_TOKENS])
+    return f"shared code: {named}"
+
+
+def _same_file_evidence(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str]
+) -> str | None:
+    line_a, line_b = _grouping_line(a) or 0, _grouping_line(b) or 0
+    if (line_a == 0) != (line_b == 0) or abs(line_a - line_b) > ROOT_CAUSE_LINE_WINDOW:
+        return None
+    shared = claim_a & claim_b
+    covered = _code_covered(shared, claim_a, claim_b)
+    words_a = _stemmed_title_tokens(a.title or "")
+    words_b = _stemmed_title_tokens(b.title or "")
+    common = len(words_a & words_b)
+    title_code = _root_cause_code(a.title or "") & _root_cause_code(b.title or "")
+    if covered and (
+        common >= TITLE_MIN_SHARED_TOKENS or title_code or _shared_problem_class(a, b)
+    ):
+        return _shared_code_reason(shared)
+    if claim_a and claim_b and not (
+        covered or (shared and min(len(claim_a), len(claim_b)) == 1)
+    ):
+        return None
+    if _numbers_disagree(a, b):
+        return None
+    if common >= TITLE_MIN_SHARED_TOKENS and (
+        line_a == line_b
+        or common / len(words_a | words_b) >= ROOT_CAUSE_TITLE_SIMILARITY
+    ):
+        return "similar title"
+    if _same_label(a, b):
+        body_a = _evidence_tokens(a.body or "")
+        body_b = _evidence_tokens(b.body or "")
+        overlap = len(body_a & body_b)
+        if (
+            overlap >= SETTLED_MIN_SHARED_TOKENS
+            and overlap / len(body_a | body_b) >= ROOT_CAUSE_BODY_OVERLAP
+        ):
+            return "same rule"
+    return None
+
+
+def _cross_file_evidence(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str], rare: set[str]
+) -> str | None:
+    shared = claim_a & claim_b & rare
+    if not _code_covered(shared, claim_a, claim_b):
+        return None
+    common = _title_prose_tokens(a.title or "") & _title_prose_tokens(b.title or "")
+    if (
+        len(common) >= ROOT_CAUSE_CROSS_FILE_TITLE_TOKENS
+        or _same_label(a, b)
+        or _same_remedy(a, b)
+        or _same_title_route(a, b)
+    ):
+        return _shared_code_reason(shared)
+    return None
+
+
+def _root_cause_evidence(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str], rare: set[str]
+) -> str | None:
+    if _titles_name_different_code(a, b, claim_a, claim_b):
+        return None
+    if a.file == b.file:
+        return _same_file_evidence(a, b, claim_a, claim_b)
+    return _cross_file_evidence(a, b, claim_a, claim_b, rare)
+
+
+def _fold_root_cause(
+    findings: Sequence[Finding],
+    kept: int,
+    folded: Sequence[tuple[int, str]],
+    result: list[Finding],
+) -> None:
+    best = findings[kept]
+    best_line = _grouping_line(best) or 0
+    members = [kept, *(i for i, _ in folded)]
+    merged = set(_own_locations(best))
+    for i, evidence in folded:
+        member = findings[i]
+        merged.add((member.file, _grouping_line(member) or 0))
+        merged.update(_own_locations(member))
+        result[i] = replace(
+            member,
+            drop_reason=f"{ROOT_CAUSE_PREFIX}{best.file}:{best_line} ({evidence})",
+        )
+    merged.discard((best.file, best_line))
+    ordered = tuple(sorted(merged))
+    result[kept] = replace(
+        best,
+        severity=min(
+            (findings[i].severity.strip().lower() for i in members),
+            key=lambda s: _SEVERITY_RANK[s],
+        ),
+        confidence=max(_grouping_confidence(findings[i]) or 0.0 for i in members),
+        locations=ordered,
+        body=_rule_cap_body(best, ordered) if ordered else best.body,
+    )
+
+
+def apply_root_cause_fold(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[Finding]:
+    """Fold reworded findings about one root cause into one finding (#142, #144).
+
+    Always on, with no knob, and independent of ``PRXREF_DEDUP_SIMILARITY``,
+    whose reworded tier compares only one exact line. A candidate meets
+    :func:`apply_rule_grouping`'s terms (active, a known severity, at or above
+    the confidence floor, chunk side) and is not a deterministic check's
+    finding. Sweep findings stay with :func:`apply_sweep_dedup`.
+
+    A claim's code tokens are :func:`_code_tokens` over its title, body and
+    suggestion, plus double-quoted identifier literals and multi-segment
+    routes. Whatever the two files, a pair is never folded when each title
+    names a code token the other claim never mentions: their subjects differ.
+
+    **In one file** the anchors must be within :data:`ROOT_CAUSE_LINE_WINDOW`
+    lines (two file-level findings count as one line; a file-level finding is
+    not compared with an anchored one), and one of these must hold:
+
+    - *shared code*: at least :data:`CODE_OVERLAP_MIN_SHARED` shared tokens
+      that cover :data:`ROOT_CAUSE_CODE_COVERAGE` of the smaller claim, and
+      the titles agree: :data:`TITLE_MIN_SHARED_TOKENS` stemmed words, a
+      common code token, or a common problem class (contradiction included).
+    - *similar title*: :data:`TITLE_MIN_SHARED_TOKENS` stemmed words shared,
+      with :data:`ROOT_CAUSE_TITLE_SIMILARITY` Jaccard unless on one line.
+    - *same rule*: the same ``rule``, and bodies sharing at least
+      :data:`SETTLED_MIN_SHARED_TOKENS` :func:`_evidence_tokens` at
+      :data:`ROOT_CAUSE_BODY_OVERLAP` Jaccard.
+
+    The last two are off when both claims name code and it disagrees: no
+    shared token, or several tokens each with too little in common. That is
+    how sibling functions under one title stay apart. They are also off when
+    each claim states a number the other does not (one title over the limits
+    42 and 43 is two values at two sites).
+
+    **Across files** the shared tokens, counting only those at most
+    :data:`ROOT_CAUSE_TOKEN_RARITY_MAX` candidate claims name, must clear the
+    same count and coverage bars, and the pair must also have the same
+    ``rule``, the same suggestion, one route in both titles, or
+    :data:`ROOT_CAUSE_CROSS_FILE_TITLE_TOKENS` stemmed title words in common
+    that do not come from a code name. A shared problem class is no signal
+    here: one injection at two call sites has the class and the names too.
+
+    Candidates are walked in a fixed order: anchored before file-level, more
+    severe first, then :func:`finding_rank_key`, then the finding's ``repr``.
+    Each is compared only with findings already kept and folds onto the first
+    match, so the result does not depend on input order and a dropped copy
+    never drops a third. A kept finding takes its group's highest severity and
+    highest confidence, and lists every folded ``(file, line)`` and every
+    location those findings already listed in ``locations`` and a last
+    ``Also at:`` paragraph, so no location is lost. A folded finding keeps its
+    identity and gains ``drop_reason`` ``same root cause as <file>:<line>
+    (<evidence>)``.
+
+    Runs after the rule-scope and rule-category checks, so a wrong label never
+    binds a pair, and before grouping, the per-rule cap and the gate, so a
+    repeat spends none of them. Pure apart from reading
+    ``PRXREF_CONFIDENCE_FLOOR`` when ``confidence_floor`` is ``None``; the
+    result has the input's length and order, and a finding it does not change
+    is returned as the same object.
+    """
+    floor = _resolve_confidence_floor(confidence_floor)
+    candidates = [
+        i for i, f in enumerate(findings[:max(0, sweep_start)])
+        if _root_cause_candidate(f, floor)
+    ]
+    claims = {i: _root_cause_claim(findings[i]) for i in candidates}
+    counts: Counter[str] = Counter()
+    for tokens in claims.values():
+        counts.update(tokens)
+    rare = {tok for tok, n in counts.items() if n <= ROOT_CAUSE_TOKEN_RARITY_MAX}
+    folded: dict[int, list[tuple[int, str]]] = {}
+    for i in sorted(candidates, key=lambda c: _root_cause_keep_key(findings[c])):
+        for k in folded:
+            evidence = _root_cause_evidence(
+                findings[k], findings[i], claims[k], claims[i], rare,
+            )
+            if evidence is not None:
+                folded[k].append((i, evidence))
+                break
+        else:
+            folded[i] = []
+    result = list(findings)
+    for kept, members in folded.items():
+        if members:
+            _fold_root_cause(findings, kept, members, result)
+    return result
 
 
 def _location_verified(

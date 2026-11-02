@@ -108,9 +108,11 @@ class Finding:
     or the answer was not usable. ``locations`` is set only on the
     representative of a group that :func:`prxref.quality.apply_rule_grouping`
     folded (the ``(file, line)`` of every location its ``Also at:`` paragraph
-    lists, in the same order) or on the best finding
+    lists, in the same order), on the best finding
     :func:`prxref.quality.apply_rule_cap` kept for a rule (every location it
-    folded in, across files, sorted), and is ``()`` on every other finding.
+    folded in, across files, sorted), or on the finding
+    :func:`prxref.quality.apply_root_cause_fold` kept for a root cause (the
+    same, sorted), and is ``()`` on every other finding.
     It is not part of any identity or dedup key. ``suggestion`` is replacement
     text for the new-file lines ``line`` through ``suggestion_end_line``
     (``0`` means ``line`` alone), lines joined by newlines, ``""`` deleting

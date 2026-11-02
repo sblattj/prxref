@@ -87,7 +87,7 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through twenty more deterministic passes: the example-echo check, location validation, `package.json` claim
+through twenty-one more deterministic passes: the example-echo check, location validation, `package.json` claim
 checks, line alignment, anchor snapping (verifying a finding's line against
 the code it quotes in the head file), thread dedup, settled-thread
 suppression, stable finding ids (always on; see
@@ -95,7 +95,7 @@ suppression, stable finding ids (always on; see
 `PRXREF_LEARNINGS_FILE`; see [docs/learnings.md](docs/learnings.md)), severity
 consistency, the removal-claim check, the hedge gate, error verification (on
 by default; `PRXREF_VERIFY_ERRORS`), the rule-scope check
-(clearing a `rule` label no scoped team-rules section covers, or whose rule names another kind of defect), finding grouping (opt-in
+(clearing a `rule` label no scoped team-rules section covers, or whose rule names another kind of defect), the root cause fold, finding grouping (opt-in
 with `PRXREF_GROUP_FINDINGS`), the per-rule cap (on by default when review
 rules are loaded; `PRXREF_MAX_FINDINGS_PER_RULE`), Also-at location
 verification, the quality gate, sweep

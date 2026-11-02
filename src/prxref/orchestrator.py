@@ -137,6 +137,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    and the run record's ``rule_scope_cleared`` count the cleared labels of
    both halves — ``None`` when the scope half did not run and the
    category half cleared nothing) →
+   ``apply_root_cause_fold`` (#142, #144: chunk findings restating one root
+   cause, a few lines apart in one file or across files, fold into the most
+   specific one, which lists the rest under ``Also at:``; the rest are dropped
+   as ``same root cause as <file>:<line> (<evidence>)``, before grouping and
+   every cap can count a repeat) →
    ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
    in one file that break one rule, or that name no rule and share a
    normalized title, fold into one representative that lists
@@ -327,6 +332,7 @@ from .quality import (
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
+    apply_root_cause_fold,
     apply_rule_cap,
     apply_rule_category_check,
     apply_rule_grouping,
@@ -2374,6 +2380,14 @@ def orchestrate_review(
     if rule_sections or category_cleared:
         tracer.event("rulescope", "ok", cleared=cleared_labels + category_cleared, category=category_cleared)
         run_inputs["rule_scope_cleared"] = cleared_labels + category_cleared
+    # AFTER line align, the thread gates and the label checks (#142, #144), so
+    # it reads final anchors and cleared labels, and BEFORE grouping and every
+    # cap, so a repeat of one root cause spends none of them. 1:1 and
+    # order-preserving, so sweep_start still marks the boundary.
+    findings = _fold_root_causes(
+        findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+        tracer=tracer,
+    )
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
@@ -2937,6 +2951,32 @@ def _rule_index(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
         for rules_file in getattr(scoped_rules, "files", ()) or ():
             sections += getattr(rules_file, "index", ()) or ()
     return sections
+
+
+def _fold_root_causes(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+    tracer: Tracer,
+) -> list[Finding]:
+    """Run :func:`quality.apply_root_cause_fold` and report what it folded.
+
+    Each folded finding keeps its identity and carries its reason in
+    ``drop_reason``, so the run record is the audit. One INFO line and one
+    ``rootcause ok`` trace event appear only when something folded.
+    """
+    folded = apply_root_cause_fold(
+        findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    count = sum(
+        1 for before, after in zip(findings, folded, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    if count:
+        logger.info("root cause fold: folded %d reworded finding(s)", count)
+        tracer.event("rootcause", "ok", folded=count)
+    return folded
 
 
 def _group_findings(
