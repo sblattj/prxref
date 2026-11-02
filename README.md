@@ -87,7 +87,7 @@ computes one class of finding directly from the parsed diff — the
 release-shaped-PR check — and then runs every finding, model-authored or not,
 through the team severity map (only when the review rules declare one) and
 spec grounding, two passes that relabel a severity and drop nothing, and then
-through twenty-one more deterministic passes: the example-echo check, location validation, `package.json` claim
+through twenty-two more deterministic passes: the example-echo check, location validation, `package.json` claim
 checks, line alignment, anchor snapping (verifying a finding's line against
 the code it quotes in the head file), thread dedup, settled-thread
 suppression, stable finding ids (always on; see
@@ -99,7 +99,9 @@ by default; `PRXREF_VERIFY_ERRORS`), the rule-scope check
 with `PRXREF_GROUP_FINDINGS`), the per-rule cap (on by default when review
 rules are loaded; `PRXREF_MAX_FINDINGS_PER_RULE`), Also-at location
 verification, the quality gate, sweep
-dedup, and the containment note. A filtered finding is never discarded
+dedup, the containment note, and the guard fix check (a fix that would
+remove or relocate an auth, tenant or validation guard is tagged
+`Unverified fix:`, never dropped). A filtered finding is never discarded
 silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
 

@@ -1,6 +1,6 @@
 """Deterministic quality passes over worker findings.
 
-Twenty-two passes run before posting, in the order ``orchestrate_review``
+Twenty-three passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
 severity map, pass 15 only when
 the loaded rules file declares at least
@@ -9,8 +9,8 @@ finding grouping on, and pass 18 only when a team rules file is loaded
 and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 19
 (``apply_anchor_snap`` and ``apply_location_verification``) do only what
 the head-file reader can serve: without one they change nothing. A
-twenty-third deterministic check, the release-shaped-PR heuristic, and a
-twenty-fourth, the pinned-toggle heuristic, are not passes at all:
+twenty-fourth deterministic check, the release-shaped-PR heuristic, and a
+twenty-fifth, the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
 before pass 1, and each then flows through every pass below like a model
@@ -240,6 +240,11 @@ does not move.
     ``" [containment boundary not stated]"`` — a purely textual
     decoration, run on active and dropped findings alike, that never
     changes ``drop_reason`` or severity.
+23. ``apply_guard_fix_check`` (#147): always on, no key. A fix that advises
+    removing or relocating a guard gets the line ``Unverified fix: ...``
+    appended to its body, and a code suggestion that replaces a guard line
+    without keeping its identifiers is cleared. Runs last, never drops a
+    finding and never changes severity or confidence.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
 runs after pass 18 (after line alignment, anchor snapping and every fold, so
@@ -2173,6 +2178,146 @@ def apply_containment_note(findings: Sequence[Finding]) -> list[Finding]:
         else:
             result.append(replace(f, body=f.body + CONTAINMENT_NOTE_SUFFIX))
     return result
+
+
+GUARD_FIX_LINE: str = (
+    "Unverified fix: confirm the replacement enforces the same check, by reading "
+    "its definition, before removing this guard."
+)
+GUARD_FIX_REASONS: tuple[str, ...] = ("suggestion_drops_guard", "advises_guard_removal")
+
+_GUARD_CLAUSE = r"[^.;!?\n]"
+_GUARD_NOUN = (
+    r"(?<!health )(?<!type )(?<!spell )(?<!lint )(?<!status )"
+    r"\b(?:checks?|guards?|validations?|verification|enforcement|assertions?"
+    r"|authori[sz]ation|authentication|authz|authn|acl)\b"
+)
+_GUARD_THEME = (
+    r"\b(?:scope|security|auth\w*|tenant\w*|permissions?|roles?|access[- ]control"
+    r"|polic(?:y|ies)|validation|ownership)\b"
+)
+_ADVICE_LEAD = (
+    r"(?:(?:^|[.;:!?\n]|,)\s*|\b(?:and|then|or|please|should|can|could|may|might"
+    r"|consider|suggest|recommend|try|prefer|safe to|fine to|ok to)\s+)"
+    r"(?:(?:just|simply|safely|also|then|instead)\s+)*"
+)
+_GUARD_REMOVE_RE = re.compile(
+    _ADVICE_LEAD
+    + rf"(?:(?:remove|drop|delete|eliminate|skip|bypass|strip|relocate|move|disable)"
+    rf"|(?:removing|dropping|deleting|eliminating|skipping|bypassing|stripping"
+    rf"|relocating|moving|disabling))\b"
+    rf"{_GUARD_CLAUSE}{{0,60}}?{_GUARD_NOUN}",
+    re.IGNORECASE,
+)
+_GUARD_RELY_RE = re.compile(
+    _ADVICE_LEAD + rf"(?:rely|relying|defer|deferring)\s+(?:on|to)\b{_GUARD_CLAUSE}{{0,60}}?{_GUARD_THEME}",
+    re.IGNORECASE,
+)
+_GUARD_PASSIVE_RE = re.compile(
+    rf"{_GUARD_NOUN}{_GUARD_CLAUSE}{{0,60}}?\b(?:can|could|should|may|might)\s+"
+    rf"(?:safely\s+)?be\s+(?:removed|deleted|dropped|eliminated|skipped|relocated|moved)\b",
+    re.IGNORECASE,
+)
+_GUARD_LINE_WORD_RE = re.compile(
+    r"tenant|auth|permission|role|scope|owner|access|acl|principal|admin|"
+    r"valid|sanitiz|forbidden|unauthori[sz]ed",
+    re.IGNORECASE,
+)
+_GUARD_LINE_CONTROL_RE = re.compile(
+    r"\b(?:if|unless|assert\w*|require\w*|guard|check\w*|throw|raise|reject\w*|deny|forbid\w*"
+    r"|abort|ensure|verify)\b|\b40[13]\b|\bpreconditions?\b|@\w*(?:Secured|PreAuthorize|RolesAllowed)",
+    re.IGNORECASE,
+)
+_GUARD_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _advises_guard_removal(text: str) -> bool:
+    return any(
+        pattern.search(text)
+        for pattern in (_GUARD_REMOVE_RE, _GUARD_RELY_RE, _GUARD_PASSIVE_RE)
+    )
+
+
+def _guard_identifiers(lines: Sequence[str]) -> set[str]:
+    """Guard-bearing identifiers on the head lines of ``lines``, casefolded."""
+    found: set[str] = set()
+    for line in lines:
+        if not (_GUARD_LINE_CONTROL_RE.search(line) and _GUARD_LINE_WORD_RE.search(line)):
+            continue
+        for token in _GUARD_IDENT_RE.findall(line):
+            if len(token) >= 4 and _GUARD_LINE_WORD_RE.search(token):
+                found.add(token.casefold())
+    return found
+
+
+def _suggestion_drops_guard(finding: Finding, by_path: Mapping[str, FileDiff]) -> bool:
+    text = finding.suggestion
+    if text is None or finding.line <= 0 or finding.locations:
+        return False
+    end = finding.suggestion_end_line or finding.line
+    if end < finding.line:
+        return False
+    current = _hunk_new_side(by_path.get(finding.file), finding.line, end)
+    if current is None:
+        return False
+    guard = _guard_identifiers(current)
+    if not guard:
+        return False
+    kept = text.casefold()
+    return not any(ident in kept for ident in guard)
+
+
+def apply_guard_fix_check(
+    findings: Sequence[Finding], files: Sequence[FileDiff],
+) -> tuple[list[Finding], list[tuple[str, ...]]]:
+    """Mark a suggested fix that would remove a guard without proof (#147).
+
+    Two checks, neither of which drops a finding or moves its severity or
+    confidence. ``reasons`` is the length of the input and in its order; each
+    entry is the tuple of :data:`GUARD_FIX_REASONS` that fired, empty for a
+    finding passed through as the same object.
+
+    ``suggestion_drops_guard``: the head lines a code suggestion replaces
+    hold a guard (a line with a control word such as ``if``, ``throw`` or
+    ``require`` and a guard word such as tenant, auth, permission, role,
+    scope, owner, access or valid), and the suggestion text keeps none of
+    that guard's identifiers. The suggestion is cleared (``suggestion`` is
+    ``None``, ``suggestion_end_line`` 0) and the body gets
+    :data:`GUARD_FIX_LINE`.
+
+    ``advises_guard_removal``: the title or body ADVISES removing or
+    relocating a guard: an imperative or modal removal verb (``drop``,
+    ``remove``, ``move``...) reaching a check, guard or validation noun in
+    one clause; ``rely on`` or ``defer to`` a scope, security, auth, tenant,
+    permission, role, policy or validation; or a check noun that ``can`` or
+    ``should be`` removed. A negated advice (``do not remove``) and a report
+    (``this PR removes``, ``was dropped``, ``add a tenant check``) do not
+    match. The body gets :data:`GUARD_FIX_LINE` after a blank line.
+
+    A body that already holds ``Unverified fix:`` gets no second line, so the
+    pass is idempotent and a model that followed the worker prompt is left
+    alone. Dropped findings pass through untouched.
+    """
+    by_path = {f.path: f for f in files}
+    out: list[Finding] = []
+    reasons: list[tuple[str, ...]] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            out.append(f)
+            reasons.append(())
+            continue
+        fired: list[str] = []
+        updated = f
+        if _suggestion_drops_guard(f, by_path):
+            fired.append("suggestion_drops_guard")
+            updated = replace(updated, suggestion=None, suggestion_end_line=0)
+        if _advises_guard_removal(f"{f.title}. {f.body}"):
+            fired.append("advises_guard_removal")
+        if fired and "Unverified fix:" not in (f.body or ""):
+            updated = replace(updated, body=f"{f.body}\n\n{GUARD_FIX_LINE}" if f.body else GUARD_FIX_LINE)
+        out.append(updated)
+        reasons.append(tuple(fired))
+    return out, reasons
 
 
 def _problem_classes(title: str) -> set[str]:

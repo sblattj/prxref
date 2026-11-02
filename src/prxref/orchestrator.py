@@ -184,7 +184,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
    it touches both the active and dropped copies of chunk and sweep
-   findings alike). Dropped findings are retained in the result with
+   findings alike) → ``apply_guard_fix_check`` (#147: a fix that advises
+   removing a guard gets an ``Unverified fix:`` line, a suggestion that
+   replaces a guard without its identifiers is cleared; nothing is dropped).
+   Dropped findings are retained in the result with
    ``drop_reason`` set, never silently discarded, and both lists come out
    sorted by ``finding_sort_key``. Every result — including an error or
    summary-only exit — carries a ``sampling`` record naming the
@@ -325,6 +328,7 @@ from .quality import (
     apply_containment_note,
     apply_evidence_drops,
     apply_example_echo_check,
+    apply_guard_fix_check,
     apply_head_removal_claim_check,
     apply_hedge_gate,
     apply_learning_suppression,
@@ -2536,6 +2540,23 @@ def orchestrate_review(
     # content, and running last means both the posted comment body and the
     # dropped-audit copy carry the same suffixed text.
     findings = apply_containment_note(findings)
+    # AFTER every pass that reads title/body or drops (#147): it only appends
+    # a line and clears a suggestion, so nothing downstream can be tripped by
+    # the added words, and it never touches drop_reason, severity or
+    # confidence. The record key exists only when it fired.
+    before_guard = findings
+    findings, guard_reasons = apply_guard_fix_check(findings, files)
+    guard_cleared = sum("suggestion_drops_guard" in r for r in guard_reasons)
+    guard_tagged = sum(
+        after.body != before.body for before, after in zip(before_guard, findings, strict=True)
+    )
+    if guard_tagged or guard_cleared:
+        logger.info(
+            "guard fix check: %d finding(s) marked unverified, %d suggestion(s) cleared",
+            guard_tagged, guard_cleared,
+        )
+        tracer.event("guardfix", "ok", tagged=guard_tagged, suggestions_cleared=guard_cleared)
+        run_inputs["guard_fix"] = {"tagged": guard_tagged, "suggestions_cleared": guard_cleared}
 
     stability_note = (
         stability.summary_line(stability_passes, stability_min_agree)
