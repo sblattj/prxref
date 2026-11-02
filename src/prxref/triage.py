@@ -151,6 +151,12 @@ class Finding:
     was freshly computed and matched nothing. A finding whose id a
     loaded verdict store holds refuted is dropped as ``refuted in
     earlier run (<id>)``.
+
+    ``agreement`` and ``passes_ok`` are the stability-mode fields (issue
+    #143, ``PRXREF_STABILITY_PASSES`` above 1): how many passes raised the
+    finding and how many passes of its chunk did not fail. Both are ``0`` on
+    every finding of a run with the mode off, and neither is part of any
+    identity or dedup key or of ``repr``.
     """
 
     file: str
@@ -170,6 +176,8 @@ class Finding:
     id: str | None = None
     anchor_block: str | None = None
     id_reused_from: str | None = None
+    agreement: int = field(default=0, repr=False)
+    passes_ok: int = field(default=0, repr=False)
 
 
 @dataclass

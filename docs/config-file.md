@@ -303,6 +303,8 @@ instead, even when the value is empty.
 | `trace_dir` | local write | Writes prompt and response files into a chosen directory. |
 | `fallback` | local write | `auto` writes `gl-code-quality-report.json` into the working directory and emits CI annotations. |
 | `price_table` | local read | Its value may be a path to any JSON file on the runner. |
+| `stability_passes` | spend | Runs every chunk review that many times; a file could multiply the lane's token spend. |
+| `stability_min_agree` | gate | Decides which findings are listed and so what `PRXREF_FAIL_ON` sees. |
 | `fail_on` | gate | The pipeline's exit-code policy. |
 | `dry_run` | gate | The switch that suppresses every forge write. |
 | `allow_unsigned` | gate | The webhook signature safety switch. |

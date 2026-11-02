@@ -26,6 +26,8 @@ EXPECTED_ENV_ONLY = {
     "llm_api_key": "credential",
     "llm_cli_path": "executable",
     "fail_on": "gate",
+    "stability_passes": "spend",
+    "stability_min_agree": "gate",
     "dry_run": "gate",
     "allow_unsigned": "gate",
     "rules_source": "gate",

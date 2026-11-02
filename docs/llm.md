@@ -265,6 +265,13 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
   run, and backends do not promise determinism. A review that says "no issues
   found" is one sample, not a pass. `PRXREF_LLM_SEED=<n>` narrows run-to-run
   differences on backends that honour it and guarantees nothing.
+- **Stability mode (#143).** `PRXREF_STABILITY_PASSES=N` (1-5, default 1 = off)
+  runs the chunk workers N times and merges the passes per chunk, so a finding
+  reports `Seen in X of N passes.`. `PRXREF_STABILITY_MIN_AGREE=K` lists only
+  findings at least K passes raised (a failed pass lowers K to the passes that
+  answered). Spend is about N times the chunk tokens; the whole-PR sweep runs
+  once. With an integer `PRXREF_LLM_SEED`, pass p sends seed+p, recorded in the
+  run record's `stability.seeds`; `off` sends none. Both keys are env-only.
 - The `sampling` field in the run record — `{"temperature", "seed", "models"}`,
   present on every exit including a failed run — tells you which knobs were
   actually in force for the run you are looking at. The posted comment's footer

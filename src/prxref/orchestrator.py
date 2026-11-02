@@ -266,6 +266,7 @@ from . import (
     repo_unit,
     reviewer,
     specs,
+    stability,
     systemic,
     verdicts,
     verify,
@@ -671,6 +672,8 @@ def orchestrate_review(
     describe_mode: str = "off",
     labels_mode: str = "off",
     llm_require_models: Sequence[str] = (),
+    stability_passes: int = 1,
+    stability_min_agree: int = 1,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -728,6 +731,18 @@ def orchestrate_review(
     and the head is not recorded as reviewed. The describe call is not a
     review unit and is not checked. ``sampling.models`` still names the
     configured chain, never the models that answered.
+
+    ``stability_passes`` (``PRXREF_STABILITY_PASSES``, issue #143) above 1
+    runs the chunk workers that many times over the same chunks and prompts,
+    one pass after the other, and the sweep once. An integer client seed
+    becomes ``seed + pass`` for each pass. :mod:`prxref.stability` merges the
+    passes per chunk before any quality pass: ``stability_min_agree`` is the
+    number of passes that must raise a finding for it to be listed (1 is the
+    union), lowered to the chunk's ok passes when one failed, and a finding
+    below it is kept as a dropped row with a ``stability`` reason. Tokens and
+    cost sum across passes. The run record gains a ``stability`` key and each
+    finding ``agreement`` and ``passes_ok``, only then; at 1 pass the run is
+    byte for byte what it was without the mode.
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists, and on
@@ -1975,16 +1990,38 @@ def orchestrate_review(
             followup_records = [None] * len(chunks)
         else:
             logger.warning(FOLLOWUP_INACTIVE_WARNING)
+    worker_args: dict[str, Any] = {
+        "max_tokens": max_tokens, "max_workers": max_workers,
+        "context_lines": context_lines, "tracer": tracer,
+        "reader": reader, "all_files": files, "trace_dir": trace_dir,
+        "prompt_context": prompt_context, "scoped_blocks": scoped_blocks,
+        "repo_plan": repo_plan, "parse_retries": llm_parse_retries,
+        "followup_floor": followup_floor, "evidence_blocks": evidence_blocks,
+    }
     results = _run_workers(
-        llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
-        context_lines=context_lines, tracer=tracer,
-        reader=reader, all_files=files, trace_dir=trace_dir,
-        prompt_context=prompt_context, scoped_blocks=scoped_blocks,
-        repo_plan=repo_plan, unit_records=unit_records,
-        parse_retries=llm_parse_retries,
-        followup_floor=followup_floor, followup_records=followup_records,
-        evidence_blocks=evidence_blocks,
+        llm, chunks, pr, unit_records=unit_records,
+        followup_records=followup_records, **worker_args,
     )
+    stability_dropped: list[Finding] = []
+    if stability_passes > 1 and chunks:
+        seeds = stability.pass_seeds(getattr(llm, "seed", None), stability_passes)
+        pass_results = [results]
+        for p in range(1, stability_passes):
+            logger.info("stability pass %d/%d", p + 1, stability_passes)
+            pass_results.append(_run_workers(
+                stability.pass_client(llm, seeds[p], p), chunks, pr,
+                pass_index=p, **worker_args,
+            ))
+        merged = stability.merge_passes(
+            pass_results, min_agree=stability_min_agree, seeds=seeds,
+        )
+        results = merged.results
+        stability_dropped = merged.dropped
+        run_inputs["stability"] = merged.record
+        tracer.event(
+            "stability", "ok", passes=stability_passes, min_agree=stability_min_agree,
+            dropped=len(stability_dropped),
+        )
     if repo_plan is not None and unit_records is not None:
         run_inputs["repo_context"] = _repo_context_record(
             run_inputs["repo_context"], repo_plan, unit_records,
@@ -2474,9 +2511,14 @@ def orchestrate_review(
     # dropped-audit copy carry the same suffixed text.
     findings = apply_containment_note(findings)
 
+    stability_note = (
+        stability.summary_line(stability_passes, stability_min_agree)
+        if stability_passes > 1 and chunks else ""
+    )
     findings_active = sorted(active(findings), key=finding_sort_key)
     findings_dropped = sorted(
-        (f for f in findings if f.drop_reason is not None), key=finding_sort_key
+        [*(f for f in findings if f.drop_reason is not None), *stability_dropped],
+        key=finding_sort_key,
     )
     if suggestions == "on":
         run_inputs["suggestions"] = _suggestion_record(findings_active, cleared_suggestions)
@@ -2550,6 +2592,7 @@ def orchestrate_review(
             cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
+            stability_note=stability_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -2616,6 +2659,7 @@ def orchestrate_review(
             cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
+            stability_note=stability_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
@@ -2649,6 +2693,7 @@ def orchestrate_review(
             cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
+            stability_note=stability_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -4627,6 +4672,7 @@ def _run_workers(
     followup_floor: float | None = None,
     followup_records: list[dict[str, Any] | None] | None = None,
     evidence_blocks: Sequence[str] | None = None,
+    pass_index: int = 0,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -4661,7 +4707,8 @@ def _run_workers(
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
                 max_tokens, context_lines, tracer, reader, all_files,
-                trace_label=f"chunk{i}", trace_dir=trace_dir,
+                trace_label=f"chunk{i}" if pass_index == 0 else f"chunk{i}.pass{pass_index}",
+                trace_dir=trace_dir,
                 prompt_context=prompt_context,
                 scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
                 repo_plan=repo_plan, unit_records=unit_records,
@@ -5337,6 +5384,7 @@ def _render_summary(
     incremental_note: str = "",
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
     metadata_section: str = "",
+    stability_note: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -5366,7 +5414,9 @@ def _render_summary(
     ``metadata_section`` (:func:`_metadata_section`, ``""`` when the
     PR-metadata checks are off or found nothing) goes above the footer on
     every template, ahead of any other appended block, so an empty one
-    leaves the summary byte-identical.
+    leaves the summary byte-identical. ``stability_note``
+    (:func:`prxref.stability.summary_line`, issue #143, ``""`` with the mode
+    off) rides the same slot, right after it.
     ``summary_template`` is an operator override of ``summary.md``
     (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
     the packaged template through ``reviewer.load_prompt``, and only that
@@ -5496,6 +5546,8 @@ def _render_summary(
     uncovered = uncovered_summary_groups(found)
     stray = [f for f in findings_active if _summary_group_of(f) in uncovered]
     extras: list[str] = [metadata_section] if metadata_section else []
+    if stability_note:
+        extras.append(stability_note)
     if stray:
         logger.warning(
             "summary template has no {findings} and no slot for the %s finding group(s); "
@@ -5950,6 +6002,9 @@ def _summary_group_of(f: Finding) -> str:
 def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
     block = format_suggestion_block(f, suggestion_style)
     suggestion = f"{block}\n\n" if block else ""
+    seen = stability.seen_line(f)
+    if seen:
+        suggestion = f"{suggestion}{seen}\n\n"
     # The previously-raised note (issue #73) is a SUFFIX, after the footer:
     # the header, body, suggestion and attribution lines are pinned by frozen
     # tests that prefix-match or compare the leading body, and the note is

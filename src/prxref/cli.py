@@ -1199,10 +1199,15 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     stable ids off, and on a finding object without the attribute; a
     finding whose id a loaded verdict store holds refuted still carries
     its id on the dropped row.
+
+    ``agreement`` and ``passes_ok`` (issue #143) follow only on a row of a
+    stability-mode run (``PRXREF_STABILITY_PASSES`` above 1): the passes that
+    raised the finding and the passes of its chunk that did not fail. A
+    default run's rows have neither key.
     """
     locations = getattr(f, "locations", None) or ()
     suggestion = getattr(f, "suggestion", None)
-    return {
+    row = {
         "file": f.file,
         "line": f.line,
         "severity": f.severity,
@@ -1220,6 +1225,10 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "body": f.body,
         "drop_reason": drop_reason,
     }
+    if getattr(f, "agreement", 0) > 0:
+        row["agreement"] = f.agreement
+        row["passes_ok"] = f.passes_ok
+    return row
 
 
 def _build_json_result(result: Any) -> dict:
@@ -1311,9 +1320,13 @@ def _build_json_result(result: Any) -> dict:
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
-    ``sampling`` and ``replay`` are forwarded only when the result already
-    carries them. ``replay`` is on replay runs only, so a normal run's
-    payload has no ``replay`` key at all.
+    ``sampling``, ``stability`` and ``replay`` are forwarded only when the
+    result already carries them. ``replay`` is on replay runs only, so a
+    normal run's payload has no ``replay`` key at all. ``stability`` (#143) is
+    on runs with ``PRXREF_STABILITY_PASSES`` above 1 only: ``{passes,
+    min_agree, seeds, findings_per_pass, dropped}``, and each row of
+    ``findings`` then also carries ``agreement`` and ``passes_ok`` (see
+    :func:`_finding_json`).
     """
     if not isinstance(result, dict):
         result = {}
@@ -1369,6 +1382,8 @@ def _build_json_result(result: Any) -> dict:
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
+    if "stability" in result:
+        payload["stability"] = result["stability"]
     if "replay" in result:
         payload["replay"] = result["replay"]
     return payload
@@ -2080,6 +2095,8 @@ def _run_review(
         describe_mode=cfg["describe"],
         labels_mode=cfg["labels"],
         llm_require_models=cfg["llm_require_models"],
+        stability_passes=cfg["stability_passes"],
+        stability_min_agree=cfg["stability_min_agree"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp

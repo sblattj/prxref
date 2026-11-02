@@ -508,6 +508,20 @@ LLM / pipeline:
   PRXREF_VERIFY_ERRORS_MAX      Error verification (#126): model calls one
                                 run may make at "llm", most confident errors
                                 first; non-negative int (default 5)
+  PRXREF_STABILITY_PASSES       Stability mode (#143): how many times the chunk
+                                workers run over the same chunks and prompts;
+                                integer 1 to 5 (default 1, which is off and
+                                leaves the run exactly as it was). Above 1,
+                                each extra pass costs about one more run of
+                                the chunk tokens, and a fixed integer seed
+                                becomes seed, seed+1, ... one per pass.
+                                Environment-only: it multiplies token spend.
+  PRXREF_STABILITY_MIN_AGREE    Stability mode (#143): passes that must raise
+                                a finding for it to post; integer 1 to 5 (default
+                                1, the union: nothing is removed), at most
+                                PRXREF_STABILITY_PASSES or the run exits 2.
+                                A pass that failed shrinks the bar for its
+                                chunk. Environment-only: it removes findings.
   PRXREF_SUGGESTIONS            Code suggestions (#30): "off" (the default)
                                 leaves every prompt, call and finding as
                                 before, and the run record's "suggestions"
@@ -878,7 +892,8 @@ Config file (#38):
   only (no walk up the tree). The value ``off`` (any case) in the flag or the
   variable disables the file. PRXREF_CONFIG_FILE is read only there; it is
   not a config key. Credentials, endpoints, executables, local writes, local
-  reads, the gate and ``eval_pins`` (which overrides other keys) stay
+  reads, the gate, ``eval_pins`` (which overrides other keys) and the two
+  stability keys (token spend, and the removal of findings) stay
   environment-only (:data:`ENV_ONLY_KEYS`), paths
   set by the file must stay inside its directory, ``spec_sources`` in the
   file takes local paths only, and an unknown key is an error.
@@ -1018,6 +1033,9 @@ _DEFAULTS: dict[str, object] = {
     "routing_probe": "on",
     # Eval pins on review (#137): applies prxref.evals.EVAL_PINS.
     "eval_pins": "off",
+    # Stability mode (#143): 1 pass is off.
+    "stability_passes": 1,
+    "stability_min_agree": 1,
     "incremental": "off",
     # PR auto-description and auto-labels (#37): both opt-in. Vocabularies
     # restated from prxref.describe.DESCRIBE_MODES / LABEL_MODES (config
@@ -1147,7 +1165,7 @@ _INT_KEYS = frozenset({
     "max_areas_per_pr", "evidence_max_chars", "verify_errors_max",
     "context_standards_max_chars",
     "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
-    "gate_reconcile_minutes",
+    "gate_reconcile_minutes", "stability_passes", "stability_min_agree",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -1296,6 +1314,8 @@ _RANGES: dict[str, _Range] = {
     "max_outofscope_findings": _Range(0, low_inclusive=True),
     "max_findings_per_rule": _Range(0, low_inclusive=True),
     "verify_errors_max": _Range(0, low_inclusive=True),
+    "stability_passes": _Range(1, 5, low_inclusive=True),
+    "stability_min_agree": _Range(1, 5, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
     "repo_context_max_chars": _Range(0),
     "repo_context_max_reads": _Range(0),
@@ -1371,6 +1391,8 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "rules_source": "gate",
     "review_skip_globs": "gate",
     "eval_pins": "override",
+    "stability_passes": "spend",
+    "stability_min_agree": "gate",
     "gate_app_id": "credential",
     "gate_private_key_file": "credential",
     "gate_installation_ids": "gate",
@@ -1773,6 +1795,21 @@ def _check_post_mode(cfg: dict[str, object], sources: dict[str, str]) -> None:
         )
 
 
+def _check_stability(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Require ``stability_min_agree`` to be at most ``stability_passes`` (#143).
+
+    A bar above the pass count could never be met. Same doctrine as
+    :func:`_check_post_mode`: a ``ConfigError`` (exit 2) naming the variable
+    that supplied ``stability_min_agree``, before anything is reviewed.
+    """
+    passes, agree = cfg["stability_passes"], cfg["stability_min_agree"]
+    if agree > passes:
+        raise ConfigError(
+            f"{sources['stability_min_agree']}: must be at most "
+            f"{sources['stability_passes']} ({passes}), got {agree}"
+        )
+
+
 def _check_title_tickets(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """With ``ticket_ids_from_title`` on, require a usable Jira setup (#145).
 
@@ -2046,6 +2083,7 @@ def load_config_with_sources(
     _check_ranges(cfg, sources)
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
+    _check_stability(cfg, sources)
     _check_title_tickets(cfg, sources)
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)

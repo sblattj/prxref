@@ -3950,6 +3950,43 @@ def _root_cause_evidence(
     return _cross_file_evidence(a, b, claim_a, claim_b, rare)
 
 
+def severity_rank(finding: Finding) -> int:
+    """0 for ``error``, then ``warning``, ``spec``, ``outofscope``; a severity outside them ranks last."""
+    return _reworded_severity_rank(finding)
+
+
+def same_cause_in_file(a: Finding, b: Finding) -> str | None:
+    """Why two findings of one file raise the same cause, or ``None`` (#143).
+
+    The stability merge's match test. It is :func:`_root_cause_evidence` for
+    one file, so the anchors must sit within :data:`ROOT_CAUSE_LINE_WINDOW`
+    lines and every veto of the fold applies: titles naming different code,
+    claims that disagree, and numbers that differ. On top of it, two findings
+    with the same normalized title match when their claims share enough code
+    tokens to clear the fold's coverage bar, so a short title that names no
+    three words still merges with its own rewording. Findings of different
+    files never match. Pure: it reads only the two findings.
+    """
+    if a.file != b.file:
+        return None
+    claim_a, claim_b = _root_cause_claim(a), _root_cause_claim(b)
+    evidence = _root_cause_evidence(a, b, claim_a, claim_b, set())
+    if evidence is not None:
+        return evidence
+    line_a, line_b = _grouping_line(a) or 0, _grouping_line(b) or 0
+    if (line_a == 0) != (line_b == 0) or abs(line_a - line_b) > ROOT_CAUSE_LINE_WINDOW:
+        return None
+    title = normalize_title(a.title or "")
+    if not title or title != normalize_title(b.title or ""):
+        return None
+    if _titles_name_different_code(a, b, claim_a, claim_b) or _numbers_disagree(a, b):
+        return None
+    shared = claim_a & claim_b
+    if _code_covered(shared, claim_a, claim_b):
+        return _shared_code_reason(shared)
+    return None
+
+
 def _fold_root_cause(
     findings: Sequence[Finding],
     kept: int,

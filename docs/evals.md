@@ -259,6 +259,15 @@ process by the same code `prxref review` runs, as a replay with
   given with `--eval-pins` is overridden, with a WARNING naming the flag.
   That review's `--format json` output records the mapping under
   `eval_pins` (`null` without the pins).
+- **Stability mode** (`PRXREF_STABILITY_PASSES`, `PRXREF_STABILITY_MIN_AGREE`,
+  #143) is not an eval pin. An eval run honours the two environment keys like
+  any review, so a lane that sets them reviews every case that many times, and
+  the case's `record.json` then carries a `stability` object (passes, bar,
+  seeds, per-pass finding counts, dropped findings) and each finding its
+  `agreement` and `passes_ok`. Without the keys the record has none of these.
+  The keys are not in `prxref.evals.EVAL_PINS` or `RUN_CONFIG_KEYS`, so a
+  baseline run under them is not marked as such in `run.json`'s `config`:
+  compare like with like.
 - **A diff-file case** contacts no forge. It has no threads, and no file
   context unless it has a `repo_dir`, which serves its chunk context
   (dependency versions, definitions). A `git format-patch` file supplies the

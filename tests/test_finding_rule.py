@@ -140,6 +140,7 @@ class TestFindingRuleField:
             "rule", "locations", "suggestion", "suggestion_end_line",
             "previous_thread", "anchor_unverified",
             "id", "anchor_block", "id_reused_from",
+            "agreement", "passes_ok",
         ]
         assert Finding("a.py", 1, "error", 0.9, "t", "b").rule is None
         # Issue #73's previously-raised note trails everything.
