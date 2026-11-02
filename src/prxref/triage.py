@@ -608,6 +608,43 @@ def est_tokens(f: FileDiff) -> int:
     return max(by_lines, by_chars)
 
 
+def split_by_hunk(f: FileDiff, token_budget: int) -> list[FileDiff]:
+    """Split one file's diff into pieces whose estimate fits ``token_budget``.
+
+    Hunks stay whole and in order; each piece is a :class:`FileDiff` with the
+    original's path, status and rename fields and a consecutive slice of its
+    hunks, whose line numbers are untouched, so anchors and per-file passes
+    see the same lines as before. A file that already fits, or has a single
+    hunk, comes back as ``[f]`` itself. A hunk that alone exceeds the budget
+    gets a piece of its own.
+    """
+    if len(f.hunks) < 2 or est_tokens(f) <= token_budget:
+        return [f]
+    groups: list[list[Hunk]] = [[]]
+    lines = chars = 0
+    for h in f.hunks:
+        changed = [ln for ln in h.lines if ln.kind != " "]
+        h_lines = len(changed)
+        h_chars = sum(len(ln.text) for ln in changed)
+        est = max(
+            (lines + h_lines) * _TOKENS_PER_LINE,
+            (chars + h_chars) // _CHARS_PER_TOKEN,
+        )
+        if groups[-1] and est > token_budget:
+            groups.append([])
+            lines = chars = 0
+        groups[-1].append(h)
+        lines += h_lines
+        chars += h_chars
+    return [
+        FileDiff(
+            path=f.path, old_path=f.old_path, new_path=f.new_path,
+            status=f.status, is_binary=f.is_binary, hunks=group,
+        )
+        for group in groups
+    ]
+
+
 @dataclass(frozen=True)
 class ChunkPlan:
     """The outcome of one :func:`plan_chunks` placement pass.
@@ -642,6 +679,25 @@ class ChunkPlan:
         return max(self.chunk_tokens, default=0)
 
 
+def _rejoin_pieces(chunk: list[FileDiff], split_paths: set[str]) -> list[FileDiff]:
+    """Merge pieces of one split file that landed in the same chunk, hunks in order."""
+    out: list[FileDiff] = []
+    at: dict[str, int] = {}
+    for f in chunk:
+        if f.path in split_paths and f.path in at:
+            first = out[at[f.path]]
+            out[at[f.path]] = FileDiff(
+                path=first.path, old_path=first.old_path, new_path=first.new_path,
+                status=first.status, is_binary=first.is_binary,
+                hunks=[*first.hunks, *f.hunks],
+            )
+            continue
+        if f.path in split_paths:
+            at[f.path] = len(out)
+        out.append(f)
+    return out
+
+
 def plan_chunks(
     files: list[FileDiff],
     max_chunks: int = 8,
@@ -657,15 +713,29 @@ def plan_chunks(
     from a second simulation, so ``overflow_files`` counts the very
     placements that produced ``chunks``. A pass with no non-binary file
     returns an empty plan.
+
+    A file whose estimate exceeds ``token_budget`` and that has more than one
+    hunk is first split by hunk (:func:`split_by_hunk`) and its pieces are
+    placed like files, all scored as the whole file; a single hunk over the
+    budget still goes alone and counts in ``chunks_over_budget``. Pieces of
+    one file that share a chunk are merged back into one entry.
     """
     candidates = [f for f in files if not f.is_binary]
     if not candidates:
         return ChunkPlan(chunks=[], chunk_tokens=(), overflow_files=0, token_budget=token_budget)
 
     churn = churn_by_path or {}
-    sorted_files = sorted(
-        candidates, key=lambda f: score_file(f, churn.get(f.path, 0)), reverse=True
-    )
+    scored: list[tuple[float, FileDiff]] = []
+    split_paths: set[str] = set()
+    for f in candidates:
+        score = score_file(f, churn.get(f.path, 0))
+        pieces = split_by_hunk(f, token_budget)
+        if len(pieces) > 1:
+            split_paths.add(f.path)
+        scored.extend((score, piece) for piece in pieces)
+    sorted_files = [
+        f for _, f in sorted(scored, key=lambda item: item[0], reverse=True)
+    ]
 
     chunks: list[list[FileDiff]] = []
     chunk_tokens: list[int] = []
@@ -697,6 +767,9 @@ def plan_chunks(
             chunks[smallest].append(f)
             chunk_tokens[smallest] += ftokens
             overflow_files += 1
+
+    if split_paths:
+        chunks = [_rejoin_pieces(chunk, split_paths) for chunk in chunks]
 
     return ChunkPlan(
         chunks=chunks,
