@@ -352,3 +352,121 @@ class TestConfig:
     def test_it_is_a_file_key_not_env_only(self):
         assert "default_branch_check" in config.FILE_KEYS
         assert "default_branch_check" not in config.ENV_ONLY_KEYS
+
+
+OLD_API = "src/old_api.py"
+RENAME_DIFF = (
+    f"diff --git a/{OLD_API} b/{API}\n"
+    "similarity index 80%\n"
+    f"rename from {OLD_API}\n"
+    f"rename to {API}\n"
+    f"--- a/{OLD_API}\n"
+    f"+++ b/{API}\n"
+    "@@ -1,5 +1,5 @@\n"
+    " import web\n"
+    " \n"
+    '-@route("/v1/widgets")\n'
+    '+@route("/v2/widgets")\n'
+    " def widgets():\n"
+    "     return data\n"
+)
+MAIN_OLD = 'import web\n\n@route("/v1/widgets")\ndef widgets():\n    return data\n'
+
+
+@pytest.mark.usefixtures("contract_stubs")
+class TestARenamedFile:
+    def test_the_read_uses_the_old_path_and_the_error_stays(self):
+        forge = BranchForge(diff=RENAME_DIFF, files={OLD_API: (True, MAIN_OLD)})
+        res = run(forge)
+        f = only(res)
+        assert forge.reads == [(OLD_API, "main")]
+        assert f.severity == "error" and f.body.endswith(PRESENT)
+        assert _fail_on_exit(res, "error")[0] == 1
+
+    def test_the_old_path_absent_too_is_lowered_as_before(self):
+        forge = BranchForge(diff=RENAME_DIFF, files={})
+        res = run(forge)
+        f = only(res)
+        assert forge.reads == [(OLD_API, "main")]
+        assert f.severity == "outofscope" and f.body.endswith(NOTE_A)
+
+    def test_the_old_path_without_the_surface_is_lowered_with_variant_b(self):
+        forge = BranchForge(diff=RENAME_DIFF, files={OLD_API: (True, "import web\n")})
+        f = only(run(forge))
+        assert f.severity == "outofscope" and f.body.endswith(NOTE_B)
+
+    def test_control_a_file_that_was_not_renamed_reads_its_own_path(self):
+        forge = BranchForge(diff=route_diff(API), files={API: (True, MAIN_OLD)})
+        f = only(run(forge))
+        assert forge.reads == [(API, "main")]
+        assert f.severity == "error" and f.body.endswith(PRESENT)
+
+    def test_the_cache_keys_on_the_path_read(self):
+        from prxref.default_branch import apply_default_branch_check
+        from prxref.triage import parse_unified_diff
+
+        forge = BranchForge(diff=RENAME_DIFF, files={OLD_API: (True, MAIN_OLD)})
+        a = Finding(file=API, line=4, severity="error", confidence=0.9,
+                    title="Moved URIs need a new API version",
+                    body="`/v1/widgets` was taken away here; `data` shows no versioned route.")
+        b = Finding(file=API, line=5, severity="warning", confidence=0.9,
+                    title="Renamed route needs a new API version",
+                    body="`/v1/widgets` was renamed here without a new version.")
+        out, outcome = apply_default_branch_check(
+            [a, b], files=parse_unified_diff(RENAME_DIFF), forge=forge, ref=REF,
+            target_branch="stack/base",
+        )
+        assert forge.reads == [(OLD_API, "main")]
+        assert [f.severity for f in out] == ["error", "warning"]
+        assert outcome.present == 2
+
+
+SPEC_PATH = "api/openapi.yaml"
+CTRL = "src/ThingsController.java"
+ORDER_DIFF = (
+    f"diff --git a/{SPEC_PATH} b/{SPEC_PATH}\n"
+    f"--- a/{SPEC_PATH}\n"
+    f"+++ b/{SPEC_PATH}\n"
+    "@@ -1,4 +1,4 @@\n"
+    " openapi: 3.0.0\n"
+    "-  /v1/things:\n"
+    "+  /v2/things:\n"
+    "   get: {}\n"
+    " done: true\n"
+    f"diff --git a/{CTRL} b/{CTRL}\n"
+    f"--- a/{CTRL}\n"
+    f"+++ b/{CTRL}\n"
+    "@@ -1,4 +1,4 @@\n"
+    " class ThingsController {\n"
+    '-  @GetMapping("/v1/things")\n'
+    '+  @GetMapping("/v2/things")\n'
+    "   void list() {}\n"
+    " }\n"
+)
+
+
+@pytest.mark.usefixtures("contract_stubs")
+class TestEachFindingAnswersForItsOwnFile:
+    def _run(self):
+        spec = raw(SPEC_PATH, "error", "Removing `GET /v1/things` needs a new API version for existing clients",
+                   "The spec drops `GET /v1/things`, and the deleted `ThingsController` was "
+                   "its only handler.", line=2)
+        ctrl = raw(CTRL, "warning", "Deleted controller removes the `GET /v1/things` route",
+                   "`ThingsController` served `GET /v1/things`, and existing clients still "
+                   "call it.", line=2)
+        forge = BranchForge(
+            diff=ORDER_DIFF,
+            files={CTRL: (True, 'class ThingsController { @GetMapping("/v1/things") }')},
+        )
+        llm = FakeLLM({SPEC_PATH: [spec], CTRL: [ctrl]})
+        res = orchestrate_review(
+            forge, REF, llm, post=True, max_workers=1, default_branch_check="on",
+        )
+        return res, forge
+
+    def test_a_lowered_keeper_does_not_hide_its_sibling(self):
+        res, forge = self._run()
+        assert (SPEC_PATH, "main") in forge.reads and (CTRL, "main") in forge.reads
+        active = [(f.file, f.severity) for f in res["findings_active"]]
+        assert (CTRL, "warning") in active
+        assert all(f.severity != "error" for f in res["findings_active"])

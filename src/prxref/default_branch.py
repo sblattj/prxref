@@ -103,6 +103,18 @@ def removed_text(files: Sequence[FileDiff], path: str) -> str:
     return "\n".join(out)
 
 
+def read_path(files: Sequence[FileDiff], path: str) -> str:
+    """The path to read ``path`` at on the default branch: the old path of a renamed file.
+
+    A file the PR renamed does not exist at its new path on the default branch,
+    so the read goes to the path it had before. Any other file reads at its own.
+    """
+    for fd in files:
+        if path in (fd.path, fd.new_path) and fd.old_path and fd.old_path != path:
+            return fd.old_path
+    return path
+
+
 def surface_tokens(finding: Finding, removed: str) -> list[str]:
     """Backticked and URL-path-like strings of the finding that occur in ``removed``.
 
@@ -150,7 +162,7 @@ def apply_default_branch_check(
     Does nothing (and reads nothing) when the forge cannot name its default
     branch, or the PR already targets it. Otherwise, for each active
     ``error``/``warning`` finding that reads as a compatibility concern, reads
-    its file at the default branch (one read per distinct path, at most
+    its file at the default branch (a renamed file at its old path; one read per distinct path, at most
     ``max_paths`` paths per run): a 404 lowers it (note variant A); a file
     that holds none of the finding's surface tokens lowers it (variant B); a
     file that holds one keeps the severity and adds a "still present" line;
@@ -185,16 +197,17 @@ def apply_default_branch_check(
         ):
             out.append(f)
             continue
-        if f.file not in cache:
+        path = read_path(files, f.file)
+        if path not in cache:
             if len(cache) >= max_paths:
-                cache[f.file] = None
+                cache[path] = None
             else:
                 try:
-                    cache[f.file] = get_file(ref, f.file, branch)
+                    cache[path] = get_file(ref, path, branch)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("default branch read of %s failed: %s", f.file, e)
-                    cache[f.file] = (True, None)
-        result = cache[f.file]
+                    logger.warning("default branch read of %s failed: %s", path, e)
+                    cache[path] = (True, None)
+        result = cache[path]
         if result is None or result[0] is True and result[1] is None:
             outcome.unknown += 1
             out.append(f)
