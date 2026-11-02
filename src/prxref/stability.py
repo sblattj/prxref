@@ -18,7 +18,12 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from prxref.costs import combine_reported, unit_cost
-from prxref.quality import same_cause_in_file, severity_rank
+from prxref.quality import (
+    normalize_title,
+    resolve_diff_path,
+    same_cause_in_file,
+    severity_rank,
+)
 from prxref.triage import Finding
 
 STABILITY_DROP_PREFIX = "stability: "
@@ -69,6 +74,22 @@ def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _same_text(a: Finding, b: Finding) -> bool:
+    """Same file, same normalized title and same body: one claim whatever line it sits on."""
+    title = normalize_title(a.title or "")
+    return (
+        a.file == b.file
+        and bool(title)
+        and title == normalize_title(b.title or "")
+        and " ".join((a.body or "").split()) == " ".join((b.body or "").split())
+        and bool((a.body or "").strip())
+    )
+
+
+def _same_cluster(a: Finding, b: Finding) -> bool:
+    return _same_text(a, b) or same_cause_in_file(a, b) is not None
+
+
 def _clusters(ok: Sequence[tuple[int, Mapping[str, Any]]]) -> list[list[tuple[int, int, Finding]]]:
     """Group the findings of the ok passes into same-cause clusters.
 
@@ -82,7 +103,7 @@ def _clusters(ok: Sequence[tuple[int, Mapping[str, Any]]]) -> list[list[tuple[in
         touched: set[int] = set()
         for j, f in enumerate(res["findings"]):
             for ci, cluster in enumerate(clusters):
-                if ci not in touched and same_cause_in_file(cluster[0][2], f) is not None:
+                if ci not in touched and _same_cluster(cluster[0][2], f):
                     cluster.append((p, j, f))
                     touched.add(ci)
                     break
@@ -147,8 +168,31 @@ def _merge_result(passes: Sequence[Mapping[str, Any]], findings: list[Finding]) 
     return merged
 
 
+def _normalized(
+    ok: Sequence[tuple[int, Mapping[str, Any]]], diff_paths: Sequence[str] | None,
+) -> list[tuple[int, Mapping[str, Any]]]:
+    """``ok`` with every finding's file resolved to a diff path of the chunk (#143).
+
+    Uses :func:`prxref.quality.resolve_diff_path`, the resolver location repair
+    uses, so ``big1.py`` and ``src/big1.py`` cluster as one file. A path that
+    resolves to nothing is left as the model wrote it and so clusters only with
+    the same spelling; location validation still drops it later.
+    """
+    if not diff_paths:
+        return list(ok)
+    out: list[tuple[int, Mapping[str, Any]]] = []
+    for p, res in ok:
+        fixed = []
+        for f in res["findings"]:
+            path = resolve_diff_path(f.file, diff_paths)
+            fixed.append(f if path is None or path == f.file else replace(f, file=path))
+        out.append((p, {**res, "findings": fixed}))
+    return out
+
+
 def merge_chunk(
     passes: Sequence[Mapping[str, Any]], *, min_agree: int,
+    diff_paths: Sequence[str] | None = None,
 ) -> tuple[dict, list[Finding], list[dict[str, Any]]]:
     """Merge one chunk's pass results into ``(result, dropped, dropped_rows)``.
 
@@ -165,6 +209,7 @@ def merge_chunk(
     ok = [(p, res) for p, res in enumerate(passes) if not res["error"]]
     if not ok:
         return _merge_result(passes, []), [], []
+    ok = _normalized(ok, diff_paths)
     passes_ok = len(ok)
     need = min(min_agree, passes_ok)
     kept: list[Finding] = []
@@ -195,6 +240,7 @@ def merge_chunk(
 def merge_passes(
     pass_results: Sequence[Sequence[Mapping[str, Any]]],
     *, min_agree: int, seeds: Sequence[int | None],
+    chunk_paths: Sequence[Sequence[str]] | None = None,
 ) -> StabilityOutcome:
     """Merge ``pass_results[p][i]`` (pass ``p``, chunk ``i``) into one result per chunk.
 
@@ -209,7 +255,10 @@ def merge_passes(
     dropped: list[Finding] = []
     rows: list[dict[str, Any]] = []
     for i in range(chunks):
-        merged, gone, gone_rows = merge_chunk([p[i] for p in pass_results], min_agree=min_agree)
+        merged, gone, gone_rows = merge_chunk(
+            [p[i] for p in pass_results], min_agree=min_agree,
+            diff_paths=chunk_paths[i] if chunk_paths is not None else None,
+        )
         results.append(merged)
         dropped.extend(gone)
         rows.extend({"chunk": i + 1, **row} for row in gone_rows)

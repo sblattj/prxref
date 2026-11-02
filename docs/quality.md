@@ -135,8 +135,9 @@ it (noted in the table).
 
 Opt-in (`PRXREF_DEFAULT_BRANCH_CHECK=on`, also a `.prxref.toml` key). It is a step
 beside the numbered passes, not one of them, so the pass count above does not move.
-It runs right after pass 15 (so a reworded duplicate is already folded and costs no
-read) and before grouping, the caps and the gate (so a lowered finding spends no
+It runs right before pass 15, the root-cause fold (so each finding answers for its own
+file: a keeper lowered because its file is absent cannot absorb a sibling whose file is
+there, and a duplicate costs a read), and before grouping, the caps and the gate (so a lowered finding spends no
 `max_errors`, does not make the verdict `Request-Changes` and does not trip
 `PRXREF_FAIL_ON=error`).
 
@@ -146,8 +147,8 @@ or `warning` whose title or body matches a compatibility pattern (breaking chang
 backwards compatibility, a new or bumped API version, a versioned route, a removed,
 renamed or moved route, endpoint or public API, "keep or version"). A finding about a
 removed null check or a SQL bug does not match. For each such finding the check reads
-its own file at the default branch's tip (`get_file_at_branch`, one read per distinct
-path, at most 20 paths per run; later ones count as unknown):
+its own file at the default branch's tip (`get_file_at_branch`; a renamed file is read at
+its old path; one read per distinct path read, at most 20 paths per run; later ones count as unknown):
 
 | Default branch has | Result |
 |---|---|

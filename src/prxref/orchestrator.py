@@ -1244,7 +1244,7 @@ def orchestrate_review(
     Off makes no forge call and adds no record key. On, a PR whose target
     branch is not the repository's default branch has its versioning findings
     checked against the default branch (see :mod:`prxref.default_branch`) right
-    after the root-cause fold, and the record gains a ``default_branch_check``
+    before the root-cause fold, and the record gains a ``default_branch_check``
     key: ``{branch, stacked, checked, lowered, present, unknown,
     lowered_findings}``.
 
@@ -2036,6 +2036,7 @@ def orchestrate_review(
             ))
         merged = stability.merge_passes(
             pass_results, min_agree=stability_min_agree, seeds=seeds,
+            chunk_paths=[[fd.path for fd in chunk if fd.path] for chunk in chunks],
         )
         results = merged.results
         stability_dropped = merged.dropped
@@ -2465,22 +2466,25 @@ def orchestrate_review(
     if rule_sections or category_cleared:
         tracer.event("rulescope", "ok", cleared=cleared_labels + category_cleared, category=category_cleared)
         run_inputs["rule_scope_cleared"] = cleared_labels + category_cleared
-    # AFTER line align, the thread gates and the label checks (#142, #144), so
-    # it reads final anchors and cleared labels, and BEFORE grouping and every
+    # AFTER line align, the thread gates and the label checks, so it reads
+    # final anchors and cleared labels, and BEFORE the root-cause fold (#146):
+    # each finding answers for its own file, so a keeper lowered because its
+    # file is absent on the default branch cannot absorb a sibling whose file
+    # is there. A duplicate now costs a read (the cache and the path cap
+    # stand). BEFORE grouping, the caps and the gate: a lowered finding must
+    # not spend ``max_errors`` or count toward the error verdict and
+    # ``PRXREF_FAIL_ON``. 1:1 and order-preserving, so sweep_start still holds.
+    if default_branch_check == "on":
+        findings = _default_branch_check(
+            findings, files, forge, ref, pr, run_inputs, tracer,
+        )
+    # AFTER the default-branch check (#142, #144), BEFORE grouping and every
     # cap, so a repeat of one root cause spends none of them. 1:1 and
     # order-preserving, so sweep_start still marks the boundary.
     findings = _fold_root_causes(
         findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
         tracer=tracer,
     )
-    # AFTER the fold (a duplicate is already folded, so it costs no read) and
-    # BEFORE grouping, the caps and the gate (#146): a lowered finding must not
-    # spend ``max_errors`` or count toward the error verdict and
-    # ``PRXREF_FAIL_ON``. 1:1 and order-preserving, so sweep_start still holds.
-    if default_branch_check == "on":
-        findings = _default_branch_check(
-            findings, files, forge, ref, pr, run_inputs, tracer,
-        )
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,

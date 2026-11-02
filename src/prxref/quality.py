@@ -405,12 +405,27 @@ def apply_location_validation(
         if f.drop_reason is not None or f.file in known:
             result.append(f)
             continue
-        candidates = _repair_candidates(f.file, known)
-        if len(candidates) == 1:
-            result.append(replace(f, file=candidates[0]))
+        resolved = resolve_diff_path(f.file, known)
+        if resolved is not None:
+            result.append(replace(f, file=resolved))
             continue
         result.append(replace(f, drop_reason=f"malformed location: {f.file!r}"))
     return result
+
+
+def resolve_diff_path(file: str, diff_paths: Iterable[str]) -> str | None:
+    """The diff path ``file`` names, or ``None`` when none or several could be it.
+
+    ``file`` itself when it is a diff path, else the one diff path
+    :func:`_repair_candidates` finds for a mangled spelling. The resolver
+    :func:`apply_location_validation` repairs with, and the stability merge
+    (#143) normalizes with before it clusters.
+    """
+    known = set(diff_paths)
+    if file in known:
+        return file
+    candidates = _repair_candidates(file, known)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _repair_candidates(file: str, diff_paths: Iterable[str]) -> list[str]:
