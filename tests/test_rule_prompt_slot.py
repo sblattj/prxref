@@ -113,7 +113,7 @@ CONTEXTS = {
 # "## Matching rules" and "## Style"; every USER and sweep hash is unchanged.
 BASE_GOLDEN = {
     "worker/off": (
-        "fcfda8e6db5e034e5e74e1e1e15fde4d607cd36e35895f880a4cd3bfca93ffc4",
+        "5d1a72048893c9451c42b7ada1f7ee842d411d83bb9d139cf170eb2c6622352c",
         "4efbc87d908fc50b2ea9adb6dbc43b58e144a8c99734cef5790e425851b2f0f4",
     ),
     "sweep/off": (
@@ -121,7 +121,7 @@ BASE_GOLDEN = {
         "577820a0c654d7ac50edab15990cf9d527c83317ad90aa16a6ded0f4dc8aa80f",
     ),
     "worker/scope": (
-        "1ef82fd7195aed2016002efffef4ef71f54d5a0e3d9e2f6a77fa86133cf267bb",
+        "3f2ab37f2141b82e49d382d8ac93c01b993738fcc6716bdcfa5f61c9acdbe6e9",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/scope": (
@@ -129,7 +129,7 @@ BASE_GOLDEN = {
         "971380d4218e5aaebd8afd76787b1e57ba08697d910d30547dd7ac219fb70103",
     ),
     "worker/full": (
-        "72159732627ddea7b6b21ac7237464a093a9b394b28cd42e3e678208e6aa4293",
+        "652999c815ef9914471e9ce5aad570ae94506eca332bd580ce3c04cbaa615c64",
         "118d48be8eeac397b8246b5c6bfc3afb1478100f678c2a540648e41a37f4b715",
     ),
     "sweep/full": (
@@ -137,7 +137,7 @@ BASE_GOLDEN = {
         "3dcf3ce2490de05559933421db5beb8ab046a884f1d38d7470cf06921874732a",
     ),
     "worker/override": (
-        "a375f52db88e701f603fbc8b5e0514fd5d37aec24c88abc69a67a4414c218dad",
+        "4dafeecfcc12efd0f108729723414724305e1fdefbca428f005f7b47bc32d21c",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/override": (
@@ -149,7 +149,7 @@ BASE_GOLDEN = {
         "69f464cf7517584bb8630547fde874febcff84f0498e95d7292a175952383c43",
     ),
     "orchestrator/1": (
-        "fcfda8e6db5e034e5e74e1e1e15fde4d607cd36e35895f880a4cd3bfca93ffc4",
+        "5d1a72048893c9451c42b7ada1f7ee842d411d83bb9d139cf170eb2c6622352c",
         "0113e78e0815af17dbbc6f2e642bfacc237f9464ead72197801a6c23799b2239",
     ),
 }
