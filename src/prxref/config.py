@@ -492,6 +492,17 @@ LLM / pipeline:
                                 repository reader, the run logs one WARNING
                                 and the follow-up stays off for that run. Any
                                 other value is a configuration error
+  PRXREF_DEFAULT_BRANCH_CHECK   Default-branch check (#146): "off" (the
+                                default) makes no extra call and leaves the
+                                run exactly as it was. "on": on a stacked PR
+                                (target branch is not the repository's default
+                                branch), a versioning finding whose own file,
+                                or the surface it names, is absent from the
+                                default branch is lowered to the minor tier
+                                (outofscope) with a note, never dropped; at
+                                most 20 files are read per run and there is
+                                no release-tag check. Any other value is a
+                                configuration error
   PRXREF_VERIFY_ERRORS          Error verification (#126): checks every
                                 active model error at or above the
                                 confidence floor against the head file
@@ -1024,6 +1035,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_reads": 200,
     "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
+    "default_branch_check": "off",
     # Error verification (#126): vocabulary restated from
     # prxref.verify.VERIFY_MODES (config stays a leaf module).
     "verify_errors": "names",
@@ -1192,6 +1204,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
+    "default_branch_check": frozenset({"off", "on"}),
     "verify_errors": frozenset({"off", "names", "llm"}),
     "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
@@ -1369,7 +1382,7 @@ FILE_KEYS = frozenset({
     "ticket_context_file", "ticket_context_max_chars",
     "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
-    "verify_errors", "verify_errors_max",
+    "default_branch_check", "verify_errors", "verify_errors_max",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "routing_probe", "incremental", "describe", "labels",
     "context_contract_globs", "context_exclude_globs",

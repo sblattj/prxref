@@ -258,6 +258,7 @@ from urllib.parse import urlparse
 from . import (
     chunk_context,
     costs,
+    default_branch,
     describe,
     followup,
     heuristics,
@@ -649,6 +650,7 @@ def orchestrate_review(
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
     llm_parse_retries: int = 0,
     context_followup: str = "off",
+    default_branch_check: str = "off",
     verify_errors: str = verify.DEFAULT_MODE,
     verify_errors_max: int = verify.DEFAULT_MAX_CALLS,
     suggestions: str = "off",
@@ -1233,6 +1235,15 @@ def orchestrate_review(
     context block, over its own capped per-chunk reader. A chunk that took
     the timeout retry is skipped. The sweep never gets a follow-up.
 
+    ``default_branch_check`` (``PRXREF_DEFAULT_BRANCH_CHECK``, issue #146) is
+    ``"off"`` (the default) or ``"on"``; any other value raises ``ValueError``.
+    Off makes no forge call and adds no record key. On, a PR whose target
+    branch is not the repository's default branch has its versioning findings
+    checked against the default branch (see :mod:`prxref.default_branch`) right
+    after the root-cause fold, and the record gains a ``default_branch_check``
+    key: ``{branch, stacked, checked, lowered, present, unknown,
+    lowered_findings}``.
+
     The ``context_followup`` key, when on, is ``{"active", "calls",
     "confirmed", "unconfirmed", "discarded", "input_tokens",
     "output_tokens", "chunks"}``. ``active`` is false, the counts are 0 and
@@ -1338,6 +1349,11 @@ def orchestrate_review(
         raise ValueError(
             f"context_followup must be one of {FOLLOWUP_MODES}, got {context_followup!r}"
         )
+    if default_branch_check not in default_branch.DEFAULT_BRANCH_CHECK_MODES:
+        raise ValueError(
+            "default_branch_check must be one of "
+            f"{default_branch.DEFAULT_BRANCH_CHECK_MODES}, got {default_branch_check!r}"
+        )
     if suggestions not in SUGGESTION_MODES:
         raise ValueError(
             f"suggestions must be one of {SUGGESTION_MODES}, got {suggestions!r}"
@@ -1412,6 +1428,8 @@ def orchestrate_review(
             _describe_record(describe_mode, labels_mode) if describe_mode != "off" else None
         ),
     }
+    if default_branch_check == "on":
+        run_inputs["default_branch_check"] = default_branch.CheckOutcome().record()
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
     # still recorded and still noted; it just asks the model for no scope.
@@ -2451,6 +2469,14 @@ def orchestrate_review(
         findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
         tracer=tracer,
     )
+    # AFTER the fold (a duplicate is already folded, so it costs no read) and
+    # BEFORE grouping, the caps and the gate (#146): a lowered finding must not
+    # spend ``max_errors`` or count toward the error verdict and
+    # ``PRXREF_FAIL_ON``. 1:1 and order-preserving, so sweep_start still holds.
+    if default_branch_check == "on":
+        findings = _default_branch_check(
+            findings, files, forge, ref, pr, run_inputs, tracer,
+        )
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
@@ -3097,6 +3123,44 @@ def _fold_root_causes(
         logger.info("root cause fold: folded %d reworded finding(s)", count)
         tracer.event("rootcause", "ok", folded=count)
     return folded
+
+
+def _default_branch_check(
+    findings: Sequence[Finding],
+    files: Sequence[Any],
+    forge: Forge,
+    ref: PRRef,
+    pr: PRData,
+    run_inputs: dict[str, Any],
+    tracer: Tracer,
+) -> list[Finding]:
+    """Run :func:`default_branch.apply_default_branch_check` and record what it did.
+
+    Fails open: any exception leaves ``findings`` as they were. Writes the
+    run record's ``default_branch_check`` key and emits one
+    ``default_branch_check ok`` trace event.
+    """
+    try:
+        checked, outcome = default_branch.apply_default_branch_check(
+            findings, files=files, forge=forge, ref=ref,
+            target_branch=getattr(pr, "target_branch", "") or "",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("default branch check failed, findings unchanged: %s", e)
+        tracer.event("default_branch_check", "error", error=str(e))
+        return list(findings)
+    run_inputs["default_branch_check"] = outcome.record()
+    tracer.event(
+        "default_branch_check", "ok", branch=outcome.branch, stacked=outcome.stacked,
+        checked=outcome.checked, lowered=outcome.lowered, present=outcome.present,
+        unknown=outcome.unknown,
+    )
+    if outcome.lowered:
+        logger.info(
+            "default branch check: lowered %d versioning finding(s) against %s",
+            outcome.lowered, outcome.branch,
+        )
+    return checked
 
 
 def _group_findings(

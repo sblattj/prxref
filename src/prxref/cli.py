@@ -1326,7 +1326,8 @@ def _build_json_result(result: Any) -> dict:
     on runs with ``PRXREF_STABILITY_PASSES`` above 1 only: ``{passes,
     min_agree, seeds, findings_per_pass, dropped}``, and each row of
     ``findings`` then also carries ``agreement`` and ``passes_ok`` (see
-    :func:`_finding_json`).
+    :func:`_finding_json`). ``default_branch_check`` (#146) is forwarded the
+    same way, and only on runs with ``PRXREF_DEFAULT_BRANCH_CHECK=on``.
     """
     if not isinstance(result, dict):
         result = {}
@@ -1384,6 +1385,8 @@ def _build_json_result(result: Any) -> dict:
         payload["sampling"] = result["sampling"]
     if "stability" in result:
         payload["stability"] = result["stability"]
+    if "default_branch_check" in result:
+        payload["default_branch_check"] = result["default_branch_check"]
     if "replay" in result:
         payload["replay"] = result["replay"]
     return payload
@@ -2076,6 +2079,7 @@ def _run_review(
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
+        default_branch_check=cfg["default_branch_check"],
         verify_errors=cfg["verify_errors"],
         verify_errors_max=cfg["verify_errors_max"],
         rule_scoping=cfg["rule_scoping"],

@@ -17,6 +17,11 @@ before pass 1, and each then flows through every pass below like a model
 finding, except that pass 12 leaves it out. Every ``drop_reason`` prefix
 these passes emit is tabulated for operators in ``docs/quality.md``.
 
+The opt-in default-branch check (#146, ``PRXREF_DEFAULT_BRANCH_CHECK``) is not a
+numbered pass: ``prxref.default_branch`` runs from the orchestrator right after
+pass 15 and only lowers a versioning finding on a stacked PR, so the count above
+does not move.
+
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the
    map gives it (``error``), compared after whitespace collapsing and

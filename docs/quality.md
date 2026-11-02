@@ -130,6 +130,47 @@ it (noted in the table).
 | 20 | `apply_sweep_dedup` | Drops a sweep finding that restates a chunk finding which **survived** the gate, on file plus normalized title. A chunk finding that grouping folded away (`grouped into <file>:<line>`) the per-rule cap folded away (`rule cap exceeded (max <n>): listed at <file>:<line>`) or the root cause fold folded away (`same root cause as <file>:<line> (<evidence>)`) still counts here, because the finding it was folded into lists its location. With `PRXREF_DEDUP_SIMILARITY` set, a second tier also drops a **reworded** duplicate: two active findings in the same file and on the same line — or two file-level (line 0) findings of the same file, which compare since #74 — whose titles reach that Jaccard similarity over a dedicated title tokenizer and share at least 3 title tokens. A chunk copy is kept over a sweep copy of equal or lower severity, and a more severe sweep copy is kept alongside it, so the tier never lowers a review's worst severity. Within one side the more severe, then the more confident, copy is kept. Unset, only the exact tier runs. A third tier, the **code-overlap** tier (`PRXREF_DEDUP_CODE_OVERLAP`, #113, on by default), runs last and only across the chunk/sweep boundary: an active sweep finding on the same file and positive line as an active chunk finding of equal or higher severity is dropped when the two claims (title plus body) share at least 2 code identifiers (backticked names, snake_case, camelCase, dotted names) AND the titles share at least 3 title tokens or a problem class (injection, null, race, ...). It catches a sweep restatement whose title wording falls under the 3-token floor, such as `SQL injection in find_orders query` against `SQL injection via f-string interpolation of customer_name`. A chunk finding is never dropped, two sweep findings are never compared, and file-level (line 0) findings are never compared. |
 | 21 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
 
+## Default-branch check on stacked PRs (#146)
+
+Opt-in (`PRXREF_DEFAULT_BRANCH_CHECK=on`, also a `.prxref.toml` key). It is a step
+beside the numbered passes, not one of them, so the pass count above does not move.
+It runs right after pass 15 (so a reworded duplicate is already folded and costs no
+read) and before grouping, the caps and the gate (so a lowered finding spends no
+`max_errors`, does not make the verdict `Request-Changes` and does not trip
+`PRXREF_FAIL_ON=error`).
+
+On a PR stacked on another PR (its target branch is not the repository's default
+branch), nothing tags a versioning finding, so it is found by text: an active `error`
+or `warning` whose title or body matches a compatibility pattern (breaking change,
+backwards compatibility, a new or bumped API version, a versioned route, a removed,
+renamed or moved route, endpoint or public API, "keep or version"). A finding about a
+removed null check or a SQL bug does not match. For each such finding the check reads
+its own file at the default branch's tip (`get_file_at_branch`, one read per distinct
+path, at most 20 paths per run; later ones count as unknown):
+
+| Default branch has | Result |
+|---|---|
+| the file is not there (404) | severity `outofscope` (the minor tier), line A appended |
+| the file, none of the finding's surface strings | severity `outofscope`, line B appended |
+| the file, one of them | severity kept, `Checked against <branch>: still present there.` appended |
+| no surface strings, an unknown read, an exception | unchanged, no note |
+
+A surface string is a backticked string or a URL-path-like string (`/v1/widgets`) in
+the finding's text that also occurs in the removed lines of the PR diff for the same
+file. Line A: `Checked against <branch>: this file is not there, so no released client
+should depend on it. If it moved earlier in this stack, this check cannot tell. Docs
+that mention it may still need updating.` Line B replaces `this file is not there` with
+`what this finding names is not in this file there`. A finding is lowered, never
+dropped. The run record and `--format json` carry `default_branch_check`: `branch`,
+`stacked`, `checked`, `lowered`, `present`, `unknown` and `lowered_findings` (file and
+reason per lowered finding); the key is absent when the check is off.
+
+Known limits: only the finding's own file is checked. There is no repo-wide search over
+forge APIs and no release-tag check, because reading release tags has no
+provider-neutral cheap path, so "no released client" means "nothing on the default
+branch". A route that moved files can look absent, which is why the outcome lowers a
+finding instead of dropping it.
+
 Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
 its own findings against prxref's own stale comments and then delete them.
