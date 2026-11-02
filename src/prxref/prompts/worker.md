@@ -49,8 +49,6 @@ are UUIDs, a more specific rule already handles them), report nothing.
 
 Before suggesting that a guard (auth, tenant, validation) be removed or moved, confirm the replacement enforces the same thing by reading its definition in the diff or the context blocks. If the definition is not shown, do not suggest the removal; say what to check instead.
 
-A "do X instead" fix that depends on framework behaviour either quotes the code that makes it work or starts with `Unverified fix:`. The finding stays when its fix is unverified.
-
 ## Style
 
 Terse. Title under 80 characters, imperative. Body: what breaks or risks, plus the diff evidence, in 1-4 sentences. No praise, no restating what the diff does, no style-guide nits that change neither behavior nor risk. A finding that asserts a throw, panic, crash, or unhandled rejection must name its containment boundary: the enclosing catch, or state that it is uncaught and name the caller it propagates to.

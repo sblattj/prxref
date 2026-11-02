@@ -324,8 +324,8 @@ class TestWorkerPromptRule:
         section = self._system().partition("## Suggested fixes")[2].partition("\n## ")[0]
         assert "confirm the replacement enforces the same thing by reading its definition" in section
         assert "do not suggest the removal; say what to check instead" in section
-        assert "quotes the code that makes it work or starts with `Unverified fix:`" in section
-        assert "The finding stays when its fix is unverified." in section
+        assert "do X instead" not in section
+        assert "framework behaviour" not in section
 
     def test_the_section_sits_between_matching_rules_and_style(self):
         system = self._system()
