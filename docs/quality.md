@@ -131,6 +131,12 @@ it (noted in the table).
 | 21 | `apply_containment_note` | Decoration only: suffixes a throw/panic/crash finding that never named its containment boundary. |
 | 22 | `apply_guard_fix_check` | #147. Always on, no key. Never drops a finding and never moves its severity or confidence. When the title or body ADVISES removing or relocating a guard (`drop the inline check and rely on the endpoint's declared security scope`, `the auth check is redundant and can be deleted`, `move validation to the caller`), it appends one line, `Unverified fix: confirm the replacement enforces the same check, by reading its definition, before removing this guard.` A report (`this PR removes the tenant check`, `the auth guard was dropped`), an addition (`add a tenant check here`) and advice about anything that is not a check, guard or validation (`remove the unused import`) match nothing. When a code suggestion (#30) replaces head lines that hold a guard (a control word such as `if` or `throw` plus a tenant, auth, permission, role, scope, owner, access or validation word) and keeps none of that guard's identifiers, the suggestion is cleared and the finding kept, with the same line. A body that already holds `Unverified fix:` gets no second line. The run record gains `guard_fix` (`{"tagged": n, "suggestions_cleared": n}`) only when the pass changed something; a run with no match carries no new key. Runs after pass 21 so it sees final text and anchors. It reads advice by shape, so it misses a removal worded as a rewrite (`inline the call and let the middleware handle it`) and any passive form without a modal. |
 
+Known limit of the root-cause fold (pass 15): it folds only findings that are in the
+run. On an incremental push that touches only a sibling file, the keeper (in a file the
+push did not touch) is not in the run, so that sibling posts one new comment instead of
+folding. It does not accumulate: later pushes that touch it again do not post more. This
+is documented, not fixed.
+
 ## Default-branch check on stacked PRs (#146)
 
 Opt-in (`PRXREF_DEFAULT_BRANCH_CHECK=on`, also a `.prxref.toml` key). It is a step
@@ -163,7 +169,8 @@ file. Line A: `Checked against <branch>: this file is not there, so no released 
 should depend on it. If it moved earlier in this stack, this check cannot tell. Docs
 that mention it may still need updating.` Line B replaces `this file is not there` with
 `what this finding names is not in this file there`. A finding is lowered, never
-dropped. The run record and `--format json` carry `default_branch_check`: `branch`,
+dropped by this check; with `PRXREF_MAX_OUTOFSCOPE_FINDINGS=0` the cap that runs later
+drops a lowered finding as `outofscope cap exceeded`. The run record and `--format json` carry `default_branch_check`: `branch`,
 `stacked`, `checked`, `lowered`, `present`, `unknown` and `lowered_findings` (file and
 reason per lowered finding); the key is absent when the check is off.
 
@@ -596,6 +603,7 @@ replay never posts. See the README's "Replay Mode (Evaluation)".
 | `hedged: "<matched phrase>"` | `apply_hedge_gate` | The finding's own text conditions the defect on something the model never established. |
 | `contradicted by head file: <path>:<line> binds "<name>"` | `apply_undefined_name_check` (error verification) | #126, at `PRXREF_VERIFY_ERRORS` `names` (the default) or `llm`. An active model `error` at or above the floor claims a name is unbound (`NameError`, "not imported", "not defined", ...), and the head file binds every backticked name it names at module scope; several names are joined with `; `. A tier-1 refutation is not a drop: the finding stays active as a `warning` whose body ends `[downgraded: verification refuted: <path>:<line>]`. |
 | `same root cause as <file>:<line> (<evidence>)` | `apply_root_cause_fold` | #142, #144. Another chunk finding restates this one's root cause; the finding at `<file>:<line>` lists this location under `Also at:`. `<evidence>` says what bound them: `shared code: <a>, <b>`, `similar title` or `same rule`. |
+| `stability: seen in <x> of <n> passes, needs <k>` | stability merge (`prxref.stability`) | Only with `PRXREF_STABILITY_PASSES` above 1 (#143). Fewer passes than `PRXREF_STABILITY_MIN_AGREE` raised this finding, so it is dropped. |
 | `grouped into <file>:<line>` | `apply_rule_grouping` | Only with `PRXREF_GROUP_FINDINGS` set to `1`. Another chunk finding in the same file breaks the same rule (or, with no rule named, has the same normalized title), and this one was folded into it. `<file>:<line>` is where the group's anchor sits: the member on the smallest positive line, which carries the group's highest severity and confidence and lists this finding's line under `Also at:`, unless this finding is file-level or on the anchor's own line. Sweep findings never carry it. |
 | `rule cap exceeded (max <n>): listed at <file>:<line>` | `apply_rule_cap` | Only with a review rules file loaded and `PRXREF_MAX_FINDINGS_PER_RULE` above 0 (default 2). The same rule (or, with no rule named, the same normalized title) already has `<n>` better-ranked findings in the review, in any file, and this one was folded into the best of them. `<file>:<line>` is where that best finding sits; its `locations` carries this finding's location, and its `Also at:` paragraph shows it unless five others come first. Sweep findings never carry it. |
 | `invalid severity: '<sev>'` | `apply_quality_gate` | Severity outside {`error`, `warning`, `spec`, `outofscope`}. |
