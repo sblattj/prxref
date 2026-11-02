@@ -986,6 +986,8 @@ def _routed_session(summary_feed):
             })
         if url.endswith("/issues/42/comments"):
             return _mock_response(json_data=summary_feed)
+        if url.endswith("/repos/acme/api"):
+            return _mock_response(json_data={"default_branch": "main"})
         if url.endswith("/repos/acme/api/labels"):
             return _mock_response(json_data=[{"name": "fix"}])
         if url.endswith("/pulls/42/comments"):
@@ -1039,6 +1041,10 @@ def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
         "get_file_content": lambda: forge.get_file_content(
             ref, "src/app.py", sha=HEAD_SHA
         ) == "x = 1\n",
+        "get_default_branch": lambda: forge.get_default_branch(ref) == "main",
+        "get_file_at_branch": lambda: forge.get_file_at_branch(
+            ref, "src/app.py", "main"
+        ) == (True, "x = 1\n"),
         "prune_inline_comments": lambda: forge.prune_inline_comments(ref) == 1,
         "get_summary": lambda: (
             forge.get_summary(ref) is None

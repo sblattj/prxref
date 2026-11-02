@@ -298,6 +298,24 @@ class FeedReadError(RuntimeError):
     """
 
 
+def branch_file_result(
+    status_code: int, content: bytes, *, max_bytes: int
+) -> tuple[bool, str | None]:
+    """Classify one file-read response for ``get_file_at_branch``.
+
+    Only HTTP 404 reads as absence, ``(False, None)``. Every other non-2xx
+    status, a body over ``max_bytes`` and one holding a NUL byte read as
+    "could not read", ``(True, None)``. A 2xx text body is ``(True, text)``.
+    """
+    if status_code == 404:
+        return False, None
+    if not 200 <= status_code < 300:
+        return True, None
+    if len(content) > max_bytes or b"\x00" in content:
+        return True, None
+    return True, content.decode("utf-8", errors="replace")
+
+
 def with_summary_marker(body: str) -> str:
     """Return ``body`` guaranteed to carry ``SUMMARY_MARKER``.
 
@@ -366,6 +384,34 @@ class Forge(Protocol):
         None)``, so a Forge without it is still valid. Return ``None`` when
         the file is missing, binary, too large, or cannot be fetched for any
         other reason — this method never raises.
+        """
+        ...
+
+    def get_default_branch(self, ref: PRRef) -> str | None:
+        """Return the repository's default branch as a bare name (issue #146).
+
+        Optional: callers resolve it with ``getattr(forge, "get_default_branch",
+        None)``, so a Forge without it is still valid, and no adapter calls it
+        on its own (construction and ``get_pr`` make no extra request). The
+        name carries no ``refs/heads/`` prefix. Returns ``None`` when it is
+        unknown, including after a transport failure, a non-2xx status or a
+        body that is not the expected JSON; those log a warning. Never raises.
+        """
+        ...
+
+    def get_file_at_branch(
+        self, ref: PRRef, path: str, branch: str
+    ) -> tuple[bool, str | None]:
+        """Return ``(found, text)`` for ``path`` at the tip of ``branch`` (issue #146).
+
+        Optional: callers resolve it with ``getattr(forge, "get_file_at_branch",
+        None)``. ``found`` is ``False`` only on a real HTTP 404, meaning the
+        file is absent; ``(False, None)`` is the one answer that may lower a
+        finding. ``(True, text)`` is the file. ``(True, None)`` means unknown:
+        a transport failure, any other non-2xx status, a body that is binary
+        or over 512 KiB, an empty ``branch`` or ``path``. A 404 can also mean
+        the branch is missing or the token cannot see the repository. Never
+        raises.
         """
         ...
 

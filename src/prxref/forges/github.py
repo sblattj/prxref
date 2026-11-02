@@ -29,6 +29,7 @@ from .base import (
     PRRef,
     Thread,
     TitleRename,
+    branch_file_result,
     says_wont_fix,
     with_summary_marker,
 )
@@ -1006,6 +1007,59 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return content.decode("utf-8", errors="replace")
+
+    def get_default_branch(self, ref: PRRef) -> str | None:
+        """Return the repository's default branch from ``GET /repos/{owner}/{repo}``.
+
+        Reads ``default_branch``, already a bare name. One request, made only
+        when called. A transport failure, a non-2xx status or a body without
+        a string ``default_branch`` logs a warning and gives ``None``. Never
+        raises.
+        """
+        url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+        where = f"{ref.owner}/{ref.repo}"
+        try:
+            resp = self.session.get(url, headers=self._headers(ref.host), timeout=_REQUEST_TIMEOUT)
+            if not resp.ok:
+                logger.warning("default branch lookup got HTTP %s for %s", resp.status_code, where)
+                return None
+            body = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning("default branch lookup failed for %s: %s", where, e)
+            return None
+        name = body.get("default_branch") if isinstance(body, dict) else None
+        if not isinstance(name, str) or not name:
+            logger.warning("default branch lookup found no default_branch for %s", where)
+            return None
+        return name
+
+    def get_file_at_branch(self, ref: PRRef, path: str, branch: str) -> tuple[bool, str | None]:
+        """Return ``(found, text)`` for ``path`` at the tip of ``branch``.
+
+        The contents API takes a branch name as ``ref``. Only HTTP 404 gives
+        ``(False, None)``; a transport failure, any other non-2xx status, a
+        JSON envelope (a directory), a binary or oversized body and an empty
+        ``path`` or ``branch`` give ``(True, None)``. Never raises.
+        """
+        if not path or not branch:
+            return True, None
+        url = (
+            f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/contents/"
+            f"{quote(path, safe='/')}"
+        )
+        headers = self._headers(ref.host, {"Accept": "application/vnd.github.raw+json"})
+        try:
+            resp = self.session.get(
+                url, headers=headers, params={"ref": branch}, timeout=_REQUEST_TIMEOUT
+            )
+        except requests.RequestException as e:
+            logger.debug("get_file_at_branch failed for %s@%s: %s", path, branch, e)
+            return True, None
+        if resp.ok and _is_json_envelope(resp.headers.get("Content-Type") or ""):
+            return True, None
+        return branch_file_result(
+            resp.status_code, resp.content, max_bytes=_MAX_FILE_CONTENT_BYTES
+        )
 
     def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
         """Return every file path in the repository at commit ``sha``, best-effort.

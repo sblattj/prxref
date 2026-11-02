@@ -579,6 +579,26 @@ names the model. Replays and local diffs never write. The
 its review runs on a capturing forge that refuses every write but the summary and inline
 comments it publishes itself.
 
+## Default branch and branch file reads
+
+Two optional forge capabilities (issue #146) let a later pass read a file from the
+repository's default branch. Nothing calls them in a default review: constructing a forge
+and `get_pr` make no request for them. `get_default_branch(ref)` returns the bare branch
+name or `None` (any failure, with a logged warning). `get_file_at_branch(ref, path,
+branch)` returns `(found, text)`: `(False, None)` only on HTTP 404, `(True, text)` for a
+file, and `(True, None)` when the answer is unknown (transport failure, any other status,
+a binary or over-512 KiB body). A 404 can also mean the branch is missing or the token
+cannot see the repository. Replays and local diffs answer `None` and `(True, None)`.
+
+| Forge | Default branch | File at a branch |
+|---|---|---|
+| GitHub & GitHub Enterprise Server | `GET /repos/{owner}/{repo}`, `default_branch` | `GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` |
+| GitLab | `GET /projects/{id}`, `default_branch` | `GET /projects/{id}/repository/files/{path}/raw?ref={branch}` |
+| Gitea / Forgejo | `GET /repos/{owner}/{repo}`, `default_branch` | `GET /repos/{owner}/{repo}/raw/{path}?ref={branch}` |
+| Bitbucket Cloud | `GET /repositories/{workspace}/{repo}`, `mainbranch.name` | `GET /repositories/{workspace}/{repo}/src/{branch}/{path}` (branch percent-encoded, slashes included) |
+| Bitbucket Server / Data Center | `GET .../repos/{repo}/default-branch`, `displayId`; a 404 retries once on `.../branches/default` | `GET .../repos/{repo}/raw/{path}?at={branch}` |
+| Azure DevOps | `GET .../repositories/{repo}`, `defaultBranch` with `refs/heads/` stripped | `GET .../items?path={path}&versionDescriptor.version={branch}&versionDescriptor.versionType=branch` |
+
 ## When prxref cannot post
 
 Some setups give prxref a token that can read a pull request but not comment on it: a

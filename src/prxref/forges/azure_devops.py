@@ -40,6 +40,7 @@ from prxref.forges.base import (
     PRData,
     PRRef,
     Thread,
+    branch_file_result,
     says_wont_fix,
     with_summary_marker,
 )
@@ -649,6 +650,70 @@ class ForgeImpl:
             logger.debug("get_file_content body looked binary for %s@%s", path, sha)
             return None
         return bytes(buf).decode("utf-8", errors="replace")
+
+    def get_default_branch(self, ref: PRRef) -> str | None:
+        """Return the repository's default branch from the repository resource.
+
+        Reads ``defaultBranch`` (``refs/heads/x``) from ``GET
+        .../repositories/{repo}`` and strips the prefix with ``_strip_heads``.
+        One request, made only when called. A transport failure, a non-2xx
+        status, a 203 sign-in page or other non-JSON body, or a body without
+        a string ``defaultBranch`` (an empty repository has none) logs a
+        warning and gives ``None``. Never raises.
+        """
+        where = f"{ref.owner}/{ref.repo}"
+        try:
+            body = self._json(self._get(self._api_base(ref)), "repository")
+        except (requests.RequestException, ValueError) as e:
+            logger.warning("default branch lookup failed for %s: %s", where, e)
+            return None
+        raw = body.get("defaultBranch")
+        name = _strip_heads(raw) if isinstance(raw, str) else ""
+        if not name:
+            logger.warning("default branch lookup found no defaultBranch for %s", where)
+            return None
+        return name
+
+    def get_file_at_branch(self, ref: PRRef, path: str, branch: str) -> tuple[bool, str | None]:
+        """Return ``(found, text)`` for ``path`` at the tip of ``branch``.
+
+        Reads the ``items`` endpoint with ``versionDescriptor.versionType=branch``
+        and the bare branch name (a ``refs/heads/`` prefix is stripped). Only
+        HTTP 404 gives ``(False, None)``; a transport failure, any other
+        non-2xx status, a binary or oversized body and an empty ``path`` or
+        ``branch`` give ``(True, None)``. Never raises.
+        """
+        name = _strip_heads(branch)
+        if not path or not name:
+            return True, None
+        try:
+            resp = self._get(
+                f"{self._api_base(ref)}/items",
+                {
+                    "path": "/" + path.lstrip("/"),
+                    "versionDescriptor.version": name,
+                    "versionDescriptor.versionType": "branch",
+                    "download": "true",
+                },
+                accept="application/octet-stream",
+                stream=True,
+            )
+            try:
+                buf = bytearray()
+                if resp.ok:
+                    for chunk in resp.iter_content(64 * 1024):
+                        buf += chunk
+                        if len(buf) > _MAX_FILE_CONTENT_BYTES:
+                            return True, None
+                status = resp.status_code
+            finally:
+                resp.close()
+        except (requests.RequestException, ValueError) as e:
+            logger.debug("get_file_at_branch failed for %s@%s: %s", path, name, e)
+            return True, None
+        if b"\x00" in buf[:_BINARY_SNIFF_BYTES]:
+            return True, None
+        return branch_file_result(status, bytes(buf), max_bytes=_MAX_FILE_CONTENT_BYTES)
 
     def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
         """Return every file path in the repository at commit ``sha``, best-effort.
