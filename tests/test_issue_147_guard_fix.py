@@ -75,6 +75,9 @@ ADVICE = [
     "The role check is redundant and should be removed.",
     "Relocate the input validation into the controller.",
     "Rely on the gateway's tenant policy instead.",
+    "Removing the tenant check is safe because the scope enforces it.",
+    "Consider removing the auth check.",
+    "Removing the tenant check is fine. The scope enforces it and that lets us simplify.",
 ]
 
 CONTROLS = [
@@ -91,6 +94,16 @@ CONTROLS = [
     "Keep the auth check and add a test for it.",
     "The tenant check is skipped when the header is missing.",
     "Validation is moved to the caller in this diff, which leaves the endpoint unprotected.",
+    "Removing the tenant check lets any user read data.",
+    "Dropping the auth guard exposes the endpoint.",
+    "Deleting the role check means anyone can start a run.",
+    "Bypassing the permission check allows any caller to write.",
+    "Skipping the ownership validation would let a user edit another account.",
+    "Disabling the auth check opens the admin route.",
+    "Removing the scope check enables cross-tenant reads.",
+    "Eliminating the role guard leaves the endpoint open.",
+    "Stripping the tenant check breaks isolation.",
+    "Deleting the authorization check causes silent data exposure.",
 ]
 
 

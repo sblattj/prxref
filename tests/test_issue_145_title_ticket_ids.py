@@ -497,3 +497,79 @@ class TestCutTicketWithTheKeyOff:
         base = load_ticket_context(str(path), max_chars=100, source="--context-file")
         forge, _, _ = _run(mode=None, findings=[IN_FINDING], ticket=base)
         assert "not fully read" not in forge.summaries[0]
+
+
+class TestFetchBounds:
+    """A title cannot buy unbounded serial Jira fetches: 10 keys, 60 s in all."""
+
+    def test_the_constants(self):
+        assert specs.TITLE_TICKET_MAX_KEYS == 10
+        assert specs.TITLE_TICKET_BUDGET_S == 60
+
+    def test_twelve_ids_fetch_ten_and_report_two_unread(self, monkeypatch):
+        keys = [f"T-{i}" for i in range(1, 13)]
+        router = JiraRouter(texts={k: f"Text of {k}." for k in keys})
+        monkeypatch.setattr(specs, "_create_default_session", lambda: router)
+        title = "".join(f"[{k}]" for k in keys) + " docs: spec update"
+        forge, _, res = _run(title, findings=[OUT_FINDING])
+        assert res["verdict"] != "Error"
+        assert len(router.calls) == 10
+        assert res["ticket_context"]["ids_loaded"] == keys[:10]
+        assert res["ticket_context"]["ids_failed"] == ["T-11", "T-12"]
+        assert "T-11, T-12 could not be read" in forge.summaries[0]
+        assert "not fully read" in forge.summaries[0]
+        assert _scopes(res) == ["unknown"]
+
+    def test_the_unread_sources_say_why(self, monkeypatch):
+        router = JiraRouter(texts={f"T-{i}": "x" for i in range(1, 13)})
+        monkeypatch.setattr(specs, "_create_default_session", lambda: router)
+        out = specs.fetch_jira_tickets(
+            [f"T-{i}" for i in range(1, 13)], jira_base_url=JIRA,
+        )
+        assert [bool(s.error) for s in out] == [False] * 10 + [True] * 2
+        assert "not fetched" in out[10].error
+        assert out[10].text == ""
+
+    def test_a_spent_budget_leaves_the_rest_unread(self, monkeypatch):
+        now = [1000.0]
+        fetched: list[str] = []
+
+        def fake_fetch(src, ref, *a, **kw):
+            fetched.append(ref.key)
+            now[0] += 25.0
+            src.text = f"Text of {ref.key}."
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return now[0]
+
+        monkeypatch.setattr(specs, "time", Clock)
+        monkeypatch.setattr(specs, "_fetch_jira", fake_fetch)
+        monkeypatch.setattr(specs, "_create_default_session", lambda: object())
+        keys = [f"T-{i}" for i in range(1, 6)]
+        out = specs.fetch_jira_tickets(keys, jira_base_url=JIRA)
+        assert fetched == ["T-1", "T-2", "T-3"]
+        assert [bool(s.error) for s in out] == [False, False, False, True, True]
+        assert "budget" in out[3].error
+
+    def test_a_spent_budget_still_completes_the_review(self, monkeypatch):
+        now = [0.0]
+
+        def slow_fetch(src, ref, *a, **kw):
+            now[0] += 100.0
+            src.text = f"Text of {ref.key}."
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return now[0]
+
+        monkeypatch.setattr(specs, "time", Clock)
+        monkeypatch.setattr(specs, "_fetch_jira", slow_fetch)
+        monkeypatch.setattr(specs, "_create_default_session", lambda: object())
+        forge, _, res = _run(findings=[OUT_FINDING])
+        assert res["verdict"] != "Error"
+        assert res["ticket_context"]["ids_loaded"] == ["T-1"]
+        assert res["ticket_context"]["ids_failed"] == ["T-2", "T-3"]
+        assert _scopes(res) == ["unknown"]

@@ -662,7 +662,8 @@ class ChunkPlan:
     ``chunks`` is exactly what :func:`build_chunks` returns. ``chunk_tokens``
     holds each chunk's :func:`est_tokens` total, in chunk order, as the
     placement pass accumulated it. ``overflow_files`` counts the files the
-    pass placed through its overflow branch: the chunk count had reached
+    pass placed through its overflow branch, each path once however many of
+    its split pieces overflowed: the chunk count had reached
     ``max_chunks`` and no chunk had room (under ``token_budget`` and under
     ``max_files_per_chunk``), so the file joined the smallest chunk anyway.
     ``token_budget`` is the budget the pass placed against.
@@ -749,7 +750,7 @@ def plan_chunks(
 
     chunks: list[list[FileDiff]] = []
     chunk_tokens: list[int] = []
-    overflow_files = 0
+    overflow_paths: set[str] = set()
 
     for f in sorted_files:
         ftokens = est_tokens(f)
@@ -776,7 +777,7 @@ def plan_chunks(
             smallest = min(range(len(chunks)), key=lambda k: chunk_tokens[k])
             chunks[smallest].append(f)
             chunk_tokens[smallest] += ftokens
-            overflow_files += 1
+            overflow_paths.add(f.path)
 
     if split_paths:
         chunks = [_rejoin_pieces(chunk, split_paths) for chunk in chunks]
@@ -784,7 +785,7 @@ def plan_chunks(
     return ChunkPlan(
         chunks=chunks,
         chunk_tokens=tuple(chunk_tokens),
-        overflow_files=overflow_files,
+        overflow_files=len(overflow_paths),
         token_budget=token_budget,
     )
 
