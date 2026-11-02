@@ -10,6 +10,51 @@ tracker.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-01
+
+### Added
+
+- `PRXREF_STABILITY_PASSES` and `PRXREF_STABILITY_MIN_AGREE` (off by default, env only):
+  run the chunk reviews several times, keep a finding that enough passes agree on, and
+  say `Seen in X of Y passes.` on it. A finding below the bar is dropped with reason
+  `stability: seen in X of Y passes, needs K` (#143).
+- `PRXREF_TICKET_IDS_FROM_TITLE` (off by default, env only): load every ticket id in the
+  PR title, up to 10 per run within a shared 60 s budget. A ticket that could not be read
+  fully stops findings being marked outside it. PR title authors are untrusted, so scope
+  the token on shared deployments (#145).
+- `PRXREF_DEFAULT_BRANCH_CHECK` (off by default): on a stacked PR, a versioning finding
+  about a surface absent from the default branch is lowered to `outofscope`. This covers
+  the default branch only; release tags and repo-wide search are not checked, and the
+  forge lookups have only run against stubbed transport so far (#146).
+
+### Changed
+
+- The footer shows ` · seed=N` when a seed was sent, and API backends send one by
+  default, so default runs now show it. The docs say a single pass is a sample (#143).
+- The worker prompt has a new `## Suggested fixes` section: confirm a guard's replacement
+  by reading its definition before suggesting the guard be removed or moved. On 47 mined
+  cases over 3 repeats, mean strict precision was 60% with it and 61% without, and it
+  showed no measured reduction in guard-removal advice on two issue-shaped cases (#147).
+
+### Fixed
+
+- A finding stays on its own valid line when its body cites sibling sites. A line cited
+  after a sibling still moves (#149).
+- A file over the token budget is split by hunk, so the rest of the PR is reviewed on the
+  first run. `overflow_files` counts files, not pieces (#148).
+- Reworded findings about one root cause fold into one comment with `Also at`, within a
+  file and across files. A sweep finding and a chunk finding in different files are not
+  folded, and an incremental push touching only a sibling file posts one new comment
+  (#142, #144).
+- A finding is never marked outside a ticket that was cut or not fully read. A key-shaped
+  word such as `UTF-8` in a title fails its fetch and counts as not read (#145).
+- A suggested fix that advises removing or moving a guard gets the line `Unverified fix:
+  confirm the replacement enforces the same check, by reading its definition, before
+  removing this guard.` This check is a phrase match, so it misses rewrites and passive
+  wording and can tag advice to remove a duplicate check. A framework-dependent "do X
+  instead" fix is still not checked: a prompt rule for it lowered mean strict precision
+  from 61% to 46% and was left out (#147).
+
 ## [0.40.1] - 2026-10-27
 
 ### Fixed
