@@ -172,3 +172,20 @@ def test_a_failed_piece_keeps_the_other_findings_and_names_the_skipped_file(monk
     assert res["chunks_failed"] == 1
     assert [f.line for f in res["findings_active"] if f.file == BIG] == [first]
     assert BIG in res["failed_chunks"][0]["files"]
+
+
+@pytest.mark.parametrize("hunks", [40, 80, 160])
+def test_overflow_files_counts_the_path_once_not_its_pieces(hunks):
+    plan = _plan(_many_hunk_file(hunks=hunks), max_chunks=1)
+    assert plan.overflow_files == 1
+
+
+def test_overflow_files_counts_each_file_once_for_several_files():
+    diff = _many_hunk_file("src/a.py", 40) + _many_hunk_file("src/b.py", 40) + _small_files(2)
+    plan = _plan(diff, max_chunks=1)
+    assert plan.overflow_files == 4
+
+
+def test_overflow_files_control_whole_files_count_once_each():
+    plan = _plan(_small_files(4), max_chunks=1, max_files_per_chunk=1)
+    assert plan.overflow_files == 3
