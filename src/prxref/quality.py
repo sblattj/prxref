@@ -2246,9 +2246,26 @@ _GUARD_LINE_CONTROL_RE = re.compile(
 _GUARD_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+_GUARD_CONSEQUENCE_RE = re.compile(
+    r"(?:^|(?<=[.;:!?\n]))\s*"
+    r"(?:removing|dropping|deleting|eliminating|skipping|bypassing|stripping|relocating|moving|disabling)\b"
+    rf"{_GUARD_CLAUSE}*?\b(?:would\s+)?"
+    r"(?:lets?|allows?|exposes?|breaks?|means?|opens?|enables?|leaves?|causes?)\b"
+    rf"{_GUARD_CLAUSE}*",
+    re.IGNORECASE,
+)
+
+
 def _advises_guard_removal(text: str) -> bool:
+    """True when ``text`` advises removing or relying past a guard.
+
+    A sentence that opens with a gerund and goes on to a consequence
+    (``Removing the tenant check lets any user read data.``) reports a defect,
+    not a fix, so it is blanked before the removal pattern runs.
+    """
+    advice = _GUARD_CONSEQUENCE_RE.sub(" ", text)
     return any(
-        pattern.search(text)
+        pattern.search(advice)
         for pattern in (_GUARD_REMOVE_RE, _GUARD_RELY_RE, _GUARD_PASSIVE_RE)
     )
 

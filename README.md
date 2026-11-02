@@ -346,7 +346,7 @@ Acceptance criteria are recognized by any one of these: a heading or label stand
 
 **What is recorded.** The `ticket_context` key of `--format json` and the run's `ticket ok` trace event (`ticket title` when the title's tickets were added) hold the path, the SHA-256 of the file's raw bytes, its length in characters, the cap, whether it was truncated, whether it has acceptance criteria, and whether it was empty; with `PRXREF_TICKET_IDS_FROM_TITLE=on` also `ids_loaded` and `ids_failed`. The `-v` line shows the path, the start of the SHA-256, the length, and the active findings' `in`/`out`/`unknown` counts. None of these ever holds the ticket text. The text does appear in the prompt files that `--trace-dir` writes (`chunk0.user.md`, `sweep.user.md`), so treat that directory like the ticket itself.
 
-**The webhook daemon ignores the file.** One file cannot describe every PR a daemon sees, so `prxref serve` never reads `PRXREF_TICKET_CONTEXT_FILE` and logs a warning once at startup when it is set. `PRXREF_TICKET_IDS_FROM_TITLE` is per PR, so the daemon does honour it.
+**The webhook daemon ignores the file.** One file cannot describe every PR a daemon sees, so `prxref serve` never reads `PRXREF_TICKET_CONTEXT_FILE` and logs a warning once at startup when it is set. `PRXREF_TICKET_IDS_FROM_TITLE` is per PR, so the daemon does honour it. At most 10 distinct keys are fetched per run within one 60 s budget; the rest count as not read. PR title authors are untrusted: a title can name any ticket the Jira token can read, and its text enters the prompt as fenced data and can surface in a posted finding, so on a shared deployment use a token scoped to the project.
 
 ## Team Review Rules
 

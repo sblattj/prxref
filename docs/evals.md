@@ -263,8 +263,8 @@ process by the same code `prxref review` runs, as a replay with
   #143) is not an eval pin. An eval run honours the two environment keys like
   any review, so a lane that sets them reviews every case that many times, and
   the case's `record.json` then carries a `stability` object (passes, bar,
-  seeds, per-pass finding counts, dropped findings) and each finding its
-  `agreement` and `passes_ok`. Without the keys the record has none of these.
+  seeds, per-pass finding counts, dropped findings) and each chunk finding its
+  `agreement` and `passes_ok` (the sweep row has neither). Without the keys the record has none of these.
   The keys are not in `prxref.evals.EVAL_PINS` or `RUN_CONFIG_KEYS`, so a
   baseline run under them is not marked as such in `run.json`'s `config`:
   compare like with like.

@@ -766,6 +766,10 @@ def title_ticket_ids(title: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+TITLE_TICKET_MAX_KEYS = 10
+TITLE_TICKET_BUDGET_S = 60
+
+
 def fetch_jira_tickets(
     keys: Sequence[str],
     *,
@@ -784,6 +788,10 @@ def fetch_jira_tickets(
     (default 120000, the ``PRXREF_SPEC_MAX_CHARS`` default): the caller's
     context cap is applied to the joined text, so a long ticket is cut there,
     visibly, and is never reported as unreadable.
+    At most :data:`TITLE_TICKET_MAX_KEYS` distinct keys are fetched, and
+    only while :data:`TITLE_TICKET_BUDGET_S` seconds of wall clock, counted
+    across all the fetches, remain. A key past either limit is not attempted:
+    it comes back with ``error`` set, so the caller counts it as not read.
     No session is built for no keys.
     """
     if not keys:
@@ -791,9 +799,20 @@ def fetch_jira_tickets(
     active = session if session is not None else _create_default_session()
     base = jira_base_url.rstrip("/")
     out: list[SpecSource] = []
+    started = time.monotonic()
+    attempted: set[str] = set()
     for key in keys:
         url = f"{base}/browse/{key}"
         src = SpecSource(origin=url, kind="jira", text="", error="")
+        if key not in attempted and len(attempted) >= TITLE_TICKET_MAX_KEYS:
+            src.error = f"not fetched: over the {TITLE_TICKET_MAX_KEYS}-ticket cap for one run"
+            out.append(src)
+            continue
+        if time.monotonic() - started >= TITLE_TICKET_BUDGET_S:
+            src.error = f"not fetched: the {TITLE_TICKET_BUDGET_S:g} s ticket budget was spent"
+            out.append(src)
+            continue
+        attempted.add(key)
         try:
             _fetch_jira(
                 src, TicketRef(base_url=base, key=key, url=url),
