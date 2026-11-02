@@ -260,9 +260,18 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
   hardware, MoE routing shifts with batch composition, and many gateways accept
   an unknown top-level `seed` and ignore it. Two identical runs may still return
   different findings, and `prxref` cannot detect a gateway that dropped the seed.
+- **A single pass is a sample.** Identical input can give different findings
+  between runs even at temperature 0: an unset `PRXREF_LLM_SEED` differs per
+  run, and backends do not promise determinism. A review that says "no issues
+  found" is one sample, not a pass. `PRXREF_LLM_SEED=<n>` narrows run-to-run
+  differences on backends that honour it and guarantees nothing.
 - The `sampling` field in the run record — `{"temperature", "seed", "models"}`,
   present on every exit including a failed run — tells you which knobs were
-  actually in force for the run you are looking at.
+  actually in force for the run you are looking at. The posted comment's footer
+  carries the same seed as `· seed=N` (after the elapsed time, before the cost),
+  so the footer and `sampling.seed` tell a flip between two runs apart from a
+  config change. No footer seed means the client had none: `PRXREF_LLM_SEED=off`
+  or a CLI backend.
 - What *is* deterministic is everything downstream of the model: findings are
   ordered by `(file, line, title)`, and the error and inline-comment caps break
   ties by finding content (confidence first, then file, line, and normalized

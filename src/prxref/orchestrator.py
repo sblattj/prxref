@@ -2547,7 +2547,7 @@ def orchestrate_review(
             spec_note=spec_note,
             ticket_note=ticket_note,
             evidence_note=evidence_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             summary_template=summary_template,
@@ -2613,7 +2613,7 @@ def orchestrate_review(
             spec_note=spec_note,
             ticket_note=ticket_note,
             evidence_note=evidence_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             summary_template=summary_template,
@@ -2646,7 +2646,7 @@ def orchestrate_review(
             spec_note=spec_note,
             ticket_note=ticket_note,
             evidence_note=evidence_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             summary_template=summary_template,
@@ -3554,7 +3554,7 @@ def _apply_labels(
 
 
 def _attribution(
-    model: str, tokens: int, elapsed_ms: int, *, cost_label: str = "",
+    model: str, tokens: int, elapsed_ms: int, *, seed: object = None, cost_label: str = "",
 ) -> str:
     """The attribution line every posted comment carries.
 
@@ -3564,8 +3564,16 @@ def _attribution(
     fields keep their order, so a consumer that parses ``model=`` or the
     token count, and the prune pass that matches ``ATTRIBUTION_MARKER`` as a
     prefix, see the same line whether or not cost is posted.
+
+    ``seed`` is the sampling seed the client had in force (``sampling.seed``
+    in the run record). An integer, ``0`` included, is shown as `` · seed=N``
+    right after the elapsed field and before the cost label; ``None`` (no
+    seed, ``PRXREF_LLM_SEED=off``, claude-cli) or anything that is not an
+    integer leaves the line exactly as it was.
     """
     line = f"{ATTRIBUTION_MARKER} · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
+    if isinstance(seed, int) and not isinstance(seed, bool):
+        line = f"{line} · seed={seed}"
     return f"{line} · {cost_label}" if cost_label else line
 
 
@@ -5323,6 +5331,7 @@ def _render_summary(
     ticket_note: str = "",
     evidence_note: str = "",
     cost_label: str = "",
+    seed: object = None,
     size_advisory_line: str = "",
     summary_template: str = "",
     incremental_note: str = "",
@@ -5348,7 +5357,8 @@ def _render_summary(
     ``No in-ticket findings.`` stands in for the first list. Without an
     active ticket every scope is ``"unknown"``, so the list stays flat.
     ``cost_label`` is the attribution's last field
-    (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
+    (:func:`_attribution`), and ``seed`` (the client's integer sampling seed
+    or ``None``) is the field before it. ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
     ``""``) is prepended to the finished body, after the partial-review
     banner, so it is the first thing under the forge's summary marker.
     ``incremental_note`` (:func:`_incremental_note`, ``""`` on every run that
@@ -5459,7 +5469,7 @@ def _render_summary(
 
     head_sha = getattr(pr, "source_sha", "") or ""
     attribution = _attribution(
-        model, input_tokens + output_tokens, elapsed_ms, cost_label=cost_label,
+        model, input_tokens + output_tokens, elapsed_ms, seed=seed, cost_label=cost_label,
     )
     rendered = fill_template(template, {
         "verdict": verdict,
@@ -6086,7 +6096,7 @@ def _summary_only_run(
             chunks_reviewed=0, chunks_failed=0,
             include_verdict=post_verdict,
             ticket_note=ticket_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=(sampling or {}).get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             summary_template=summary_template,
@@ -6160,7 +6170,7 @@ def _error_run(
     if wanted:
         attribution = _attribution(
             model, input_tokens + output_tokens, elapsed_ms,
-            cost_label=cost_label,
+            seed=(sampling or {}).get("seed"), cost_label=cost_label,
         )
         # The same redaction the partial banner uses: this notice interpolates
         # the reason into a public comment, and the caller has already logged
