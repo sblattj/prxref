@@ -2031,6 +2031,8 @@ def _run_review(
         jira_api_token=cfg["jira_api_token"],
         rules=rules,
         ticket=ticket,
+        ticket_ids_from_title=cfg["ticket_ids_from_title"],
+        ticket_context_max_chars=cfg["ticket_context_max_chars"],
         # Already parsed by load_config into {model: costs.ModelPrice}.
         price_table=cfg["price_table"],
         post_cost=cfg["post_cost"],

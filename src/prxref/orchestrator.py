@@ -355,6 +355,7 @@ from .quality import (
 from .repo_context import exclude_predicate
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .stable_ids import REUSED_FROM_THREAD, REUSED_FROM_VERDICT, apply_stable_ids, stable_id_collisions
+from .title_tickets import with_title_tickets
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
@@ -618,6 +619,8 @@ def orchestrate_review(
     jira_api_token: str = "",
     rules: Any = None,
     ticket: Any = None,
+    ticket_ids_from_title: str = "off",
+    ticket_context_max_chars: int = 6000,
     price_table: Mapping[str, Any] | None = None,
     post_cost: bool = False,
     size_warn_lines: int | None = None,
@@ -832,7 +835,12 @@ def orchestrate_review(
     ACTIVE ticket (``ticket.active``) adds its ``scope_block()`` and
     ``prompt_block()`` to every unit, which is what lets a finding carry a
     ``scope`` of ``in`` or ``out``; otherwise every scope is forced to
-    ``unknown`` (:func:`_enforce_scope`). A configured ticket's ``note()``
+    ``unknown`` (:func:`_enforce_scope`). With ``ticket_ids_from_title="on"``
+    (#145) every Jira key in the PR title is fetched once ``get_pr`` has
+    answered and added to the ticket (:func:`_with_title_tickets`, capped at
+    ``ticket_context_max_chars``); a ticket that is then not ``complete``
+    (a key unread, or the text cut) never leaves a finding ``out``. A
+    configured ticket's ``note()``
     rides the summary after the spec note, on the main and summary-only
     posts but never the error notice, and an active ticket's scope counts
     ride the ``run ok`` event.
@@ -1469,6 +1477,23 @@ def orchestrate_review(
             cost_label=_cost_label(run_inputs, post_cost),
         ), run_inputs)
 
+    # Issue #145: the title is only known now, so the title's tickets are
+    # added here and everything derived from the ticket above is redone. Off
+    # (the default) skips the block, so nothing below moves.
+    if ticket_ids_from_title == "on":
+        ticket = _with_title_tickets(
+            ticket, getattr(pr, "title", "") or "", max_chars=ticket_context_max_chars,
+            jira_base_url=jira_base_url, jira_email=jira_email, jira_api_token=jira_api_token,
+        )
+        run_inputs["ticket_context"] = ticket.record() if ticket is not None else None
+        ticket_active = ticket is not None and bool(ticket.active)
+        ticket_note = ticket.note() if ticket is not None else ""
+        if ticket_note and not ticket_note.endswith("\n"):
+            ticket_note += "\n"
+        if run_inputs["ticket_context"] is not None:
+            tracer.event("ticket", "title", **run_inputs["ticket_context"])
+    ticket_complete = bool(getattr(ticket, "complete", True))
+
     try:
         with tracer.span("forge.get_diff") as sp:
             raw = forge.get_diff(ref)
@@ -2049,6 +2074,7 @@ def orchestrate_review(
     )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
     findings = _enforce_scope(findings, ticket_active)
+    findings = _enforce_ticket_complete(findings, ticket_complete)
     findings = _enforce_rule(findings, rule_active)
     findings = _enforce_suggestion(findings, suggestions == "on", sweep_start=sweep_start)
 
@@ -2731,6 +2757,39 @@ def _split_at_sweep(
     return chunk_part, sweep_part
 
 
+def _with_title_tickets(
+    ticket: Any, title: str, *, max_chars: int,
+    jira_base_url: str, jira_email: str, jira_api_token: str,
+) -> Any:
+    """Add the Jira tickets named in ``title`` to ``ticket`` (#145); never raises.
+
+    Each key is read through :func:`specs.fetch_jira_tickets`, the spec-source
+    Jira path. A key that cannot be read is logged and recorded on the result
+    as failed, so the summary names it and no finding is left ``out`` of it.
+    Any other failure here returns ``ticket`` unchanged.
+    """
+    try:
+        keys = specs.title_ticket_ids(title)
+        if keys:
+            sources = specs.fetch_jira_tickets(
+                keys, jira_base_url=jira_base_url,
+                jira_email=jira_email, jira_api_token=jira_api_token,
+            )
+            for src, key in zip(sources, keys, strict=True):
+                if src.error:
+                    logger.warning(
+                        "ticket %s from the PR title could not be read (best-effort): %s",
+                        key, redact_for_post(src.error),
+                    )
+            fetched = [(key, None if src.error else src.text) for key, src in zip(keys, sources, strict=True)]
+        else:
+            fetched = []
+        return with_title_tickets(ticket, fetched, max_chars=max_chars)
+    except Exception as e:  # noqa: BLE001 -- title tickets never fail a review
+        logger.error("title ticket loading failed (best-effort): %s", e)
+        return ticket
+
+
 def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
     """Hold every finding's ``scope`` to what the run asked the model for.
 
@@ -2747,6 +2806,22 @@ def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
         scope = normalize_scope(f.scope) if active else SCOPE_UNKNOWN
         out.append(f if scope == f.scope else replace(f, scope=scope))
     return out
+
+
+def _enforce_ticket_complete(findings: Sequence[Finding], complete: bool) -> list[Finding]:
+    """Never leave a finding ``out`` of a ticket that was only partly read (#145).
+
+    The twin of :func:`_enforce_scope`, run right after it. A ticket that is
+    not ``complete`` (a listed ticket could not be read, or its text was cut
+    at the cap) cannot say what the unread part asks for, so a scope of
+    ``out`` becomes ``unknown``; ``in`` and ``unknown`` are untouched. A
+    complete ticket returns the findings as they are.
+    """
+    if complete:
+        return list(findings)
+    return [
+        replace(f, scope=SCOPE_UNKNOWN) if f.scope == SCOPE_OUT else f for f in findings
+    ]
 
 
 def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:

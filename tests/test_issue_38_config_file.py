@@ -47,6 +47,7 @@ EXPECTED_ENV_ONLY = {
     "trace_dir": "local write",
     "fallback": "local write",
     "price_table": "local read",
+    "ticket_ids_from_title": "endpoint",
     "jira_base_url": "endpoint",
     "jira_email": "credential",
     "jira_api_token": "credential",

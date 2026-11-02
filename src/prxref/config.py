@@ -395,6 +395,24 @@ LLM / pipeline:
                                 Characters of ticket text kept in the
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
+  PRXREF_TICKET_IDS_FROM_TITLE  ``off`` (default) or ``on`` (#145). ``on``
+                                fetches every Jira key in the PR title
+                                (``[T-1][T-2] ...``) through the spec
+                                Jira path, joins the tickets after any
+                                ticket file under
+                                PRXREF_TICKET_CONTEXT_MAX_CHARS, and lists
+                                the keys read, and any that could not be
+                                read, in the summary and the run record.
+                                Needs PRXREF_JIRA_BASE_URL (an http(s)
+                                URL); PRXREF_JIRA_EMAIL and
+                                PRXREF_JIRA_API_TOKEN go together or not at
+                                all; a missing or malformed one is a
+                                configuration error. A key that cannot be
+                                read never fails the review. Anything
+                                shaped like a key counts (``UTF-8``), and
+                                its failed fetch makes the ticket partial.
+                                Environment only: it reaches a network
+                                host. Matched exactly.
   PRXREF_EVIDENCE_FILES         Execution evidence (#69): paths to files of
                                 commands the caller ran (a CI step, an
                                 agent, a script) — nginx -t, helm lint, the
@@ -978,6 +996,7 @@ _DEFAULTS: dict[str, object] = {
     "prompts_dir": None,
     "ticket_context_file": "",
     "ticket_context_max_chars": 6000,
+    "ticket_ids_from_title": "off",
     # Execution evidence (#69): caller-run command results as review
     # context. The list mirrors spec_sources/scoped_rules (paths from the
     # environment or the repeatable --evidence-file flag, which replaces
@@ -1166,6 +1185,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "labels": frozenset({"off", "existing", "create"}),
     "fallback": frozenset({"auto", "off"}),
     "ci_wiring": frozenset({"off", "on"}),
+    "ticket_ids_from_title": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
@@ -1367,6 +1387,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "trace_dir": "local write",
     "fallback": "local write",
     "price_table": "local read",
+    "ticket_ids_from_title": "endpoint",
     "jira_base_url": "endpoint",
     "jira_email": "credential",
     "jira_api_token": "credential",
@@ -1752,6 +1773,34 @@ def _check_post_mode(cfg: dict[str, object], sources: dict[str, str]) -> None:
         )
 
 
+def _check_title_tickets(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """With ``ticket_ids_from_title`` on, require a usable Jira setup (#145).
+
+    A bare key has no URL to fall back to, so ``jira_base_url`` must be an
+    http(s) URL, and ``jira_email`` and ``jira_api_token`` must be set
+    together or not at all. Same doctrine as :func:`_check_post_mode`: a
+    ``ConfigError`` (exit 2) naming the variable that supplied the value, and
+    the key itself, before anything is reviewed.
+    """
+    if cfg["ticket_ids_from_title"] != "on":
+        return
+    key = sources["ticket_ids_from_title"]
+    base = cfg["jira_base_url"]
+    if not isinstance(base, str) or not base.strip():
+        raise ConfigError(
+            f"{key}: on needs {sources['jira_base_url']} to name the Jira to read the tickets from"
+        )
+    if not re.match(r"https?://[^/\s]+", base.strip()):
+        raise ConfigError(
+            f"{sources['jira_base_url']}: must be an http(s) URL when {key} is on, got {base!r}"
+        )
+    if bool(cfg["jira_email"]) != bool(cfg["jira_api_token"]):
+        raise ConfigError(
+            f"{key}: on needs {sources['jira_email']} and {sources['jira_api_token']} "
+            "set together, or neither"
+        )
+
+
 def _check_price_table(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """Parse ``price_table`` in place, rejecting a malformed table.
 
@@ -1997,6 +2046,7 @@ def load_config_with_sources(
     _check_ranges(cfg, sources)
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
+    _check_title_tickets(cfg, sources)
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)

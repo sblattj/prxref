@@ -296,6 +296,7 @@ instead, even when the value is empty.
 | `azure_devops_webhook_secret` | credential | Azure DevOps service-hook secret. |
 | `llm_base_url` | endpoint | The host the diff and the prompts are sent to. |
 | `jira_base_url` | endpoint | The host Jira credentials are sent to. |
+| `ticket_ids_from_title` | endpoint | Fetches every Jira key in the PR title from that host (`PRXREF_TICKET_IDS_FROM_TITLE`). |
 | `llm_backend` | executable | Can select `claude-cli` or `kiro-cli`, which run a local binary, and picks where the diff goes. |
 | `llm_cli_path` | executable | The path of a binary prxref runs. |
 | `trace_file` | local write | Appends a JSONL trace at a chosen path. |

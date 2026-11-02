@@ -42,6 +42,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from email.message import Message
 from html.parser import HTMLParser
@@ -744,6 +745,67 @@ def fetch_specs(
         except Exception as exc:  # noqa: BLE001 - a failed source is data, not an abort
             src.text = ""
             src.error = _exc_reason(exc)
+        out.append(src)
+    return out
+
+
+_TITLE_KEY_RE = re.compile(rf"(?<![A-Za-z0-9_])(?:{_KEY})(?![A-Za-z0-9_])")
+
+
+def title_ticket_ids(title: str) -> tuple[str, ...]:
+    """Return every Jira key in ``title``, in order of first appearance, without repeats.
+
+    A key is the spec-source shape (uppercase letters, digits and underscores,
+    a hyphen, digits) standing on its own: one glued to a word, as in
+    ``iOS-14``, is not a key. Anything shaped like a key counts, including
+    ``UTF-8`` or ``SHA-256``; the fetch then fails for it.
+    """
+    seen: dict[str, None] = {}
+    for match in _TITLE_KEY_RE.finditer(title or ""):
+        seen.setdefault(match.group(0))
+    return tuple(seen)
+
+
+def fetch_jira_tickets(
+    keys: Sequence[str],
+    *,
+    max_chars: int = 120_000,
+    jira_base_url: str,
+    jira_email: str = "",
+    jira_api_token: str = "",
+    session: requests.Session | None = None,
+) -> list[SpecSource]:
+    """Fetch each Jira ``key`` from ``jira_base_url`` through the spec-source Jira path.
+
+    One :class:`SpecSource` per key, in order, never raising: a key that
+    cannot be fetched, or whose ticket has no text, comes back with ``error``
+    set and empty ``text``. The fetch is :func:`_fetch_jira`, so credentials
+    go only to ``jira_base_url``. ``max_chars`` is the per-ticket text cap
+    (default 120000, the ``PRXREF_SPEC_MAX_CHARS`` default): the caller's
+    context cap is applied to the joined text, so a long ticket is cut there,
+    visibly, and is never reported as unreadable.
+    No session is built for no keys.
+    """
+    if not keys:
+        return []
+    active = session if session is not None else _create_default_session()
+    base = jira_base_url.rstrip("/")
+    out: list[SpecSource] = []
+    for key in keys:
+        url = f"{base}/browse/{key}"
+        src = SpecSource(origin=url, kind="jira", text="", error="")
+        try:
+            _fetch_jira(
+                src, TicketRef(base_url=base, key=key, url=url),
+                jira_base_url, jira_email, jira_api_token, active, max_chars=max_chars,
+            )
+            if not src.error and not src.text.strip():
+                src.error = f"Jira returned an empty ticket for {key}"
+        except Exception as exc:  # noqa: BLE001 - a failed ticket is data, not an abort
+            src.text = ""
+            src.error = _exc_reason(exc)
+        if src.error:
+            src.text = ""
         out.append(src)
     return out
 
