@@ -838,7 +838,7 @@ def _is_own_file_citation(path: str, file: str) -> bool:
     a sibling file's ``other.ts:12`` never does. A bare path with no
     ``:line`` never reaches this check.
     """
-    cited = path.replace("\\", "/").lower()
+    cited = path.replace("\\", "/").lower().lstrip("`'\"([<")
     own = file.replace("\\", "/").lower()
     if cited.startswith("./"):
         cited = cited[2:]
@@ -875,6 +875,52 @@ def _hunk_tokens(hunk: Hunk) -> set[str]:
     return tokens
 
 
+def _site_evidence(
+    hunks: Sequence[Hunk], evidence: set[str], line: int, tolerance: int
+) -> tuple[int, int]:
+    """Breadth and longest token of the claim evidence at or beside ``line``.
+
+    Reads the non-removed lines within ``tolerance`` of ``line`` and
+    returns ``(shared token count, longest shared token)``, the same
+    ranking key :func:`_best_candidate` uses; ``(0, 0)`` when nothing
+    is shared.
+    """
+    shared: set[str] = set()
+    for h in hunks:
+        for ln in h.lines:
+            if (
+                ln.kind != "-"
+                and ln.new_line is not None
+                and abs(ln.new_line - line) <= tolerance
+            ):
+                shared |= evidence & _line_tokens(ln)
+    return (len(shared), max(map(len, shared))) if shared else (0, 0)
+
+
+def _line_field_holds(
+    finding: Finding,
+    hunks: Sequence[Hunk],
+    added: set[int],
+    evidence: set[str],
+    cited: Sequence[int],
+    tolerance: int,
+) -> bool:
+    """True when the ``line`` field is a corroborated added line.
+
+    Issue #149: the field names an added line and the finding's own
+    evidence tokens appear at or beside it, and the body does not name that
+    line itself. Citations of other sites are then sibling mentions of a
+    recurring pattern, never corrections, unless the cited site carries
+    strictly more of the claim evidence than the field's line does.
+    """
+    if finding.line <= 0 or finding.line not in added:
+        return False
+    if finding.line in cited:
+        return False
+    key = _site_evidence(hunks, evidence, finding.line, tolerance)
+    return key != (0, 0)
+
+
 def _resolve_body_cited_anchor(
     finding: Finding,
     hunks: Sequence[Hunk],
@@ -884,8 +930,8 @@ def _resolve_body_cited_anchor(
     """The anchor a corroborated in-body line citation demands, or None.
 
     Issue #28: the model's ``line`` field drifts while its own body still
-    names the right line. The first body citation — ``line N`` or an
-    own-file ``path:line`` — whose cited line sits on an added line (or a
+    names the right line. The first body citation, ``line N`` or an
+    own-file ``path:line``, whose cited line sits on an added line (or a
     context line within ``tolerance`` of one) of this file AND whose
     containing hunk shares a non-generic evidence token with the claim
     wins; its snapped anchor outranks the ``line`` field. A citation that
@@ -893,12 +939,28 @@ def _resolve_body_cited_anchor(
     sends the caller down the shipped resolution path unchanged. A
     citation never lands on a blank or pure-punctuation anchor while the
     file carries token-bearing added lines.
+
+    Issue #149: that precedence is a rescue for a drifted field, so it
+    yields when the field already holds up. When ``line`` is an added line
+    with claim evidence at or beside it (:func:`_site_evidence`) and the
+    body does not cite that line itself, a citation moves the anchor only
+    if the cited site carries strictly more of the claim evidence than the
+    field's line; one that carries the same or less is a sibling mention
+    and is skipped. The test reads evidence tokens and line numbers only,
+    never the citing phrase.
     """
     evidence = _evidence_tokens(f"{finding.title} {finding.body}")
     if not evidence:
         return None
     blank_guard = _file_has_token_bearing_add(hunks)
-    for cited in _body_cited_lines(finding):
+    citations = _body_cited_lines(finding)
+    holds = _line_field_holds(
+        finding, hunks, added, evidence, citations, tolerance
+    )
+    field_key = (
+        _site_evidence(hunks, evidence, finding.line, tolerance) if holds else None
+    )
+    for cited in citations:
         anchor = snap_line(cited, added, tolerance=tolerance)
         if anchor <= 0:
             continue
@@ -906,6 +968,10 @@ def _resolve_body_cited_anchor(
         if hunk is None or not (_hunk_tokens(hunk) & evidence):
             continue
         if blank_guard and _line_is_blankish(hunks, anchor):
+            continue
+        if field_key is not None and (
+            _site_evidence(hunks, evidence, anchor, tolerance) <= field_key
+        ):
             continue
         return anchor
     return None
