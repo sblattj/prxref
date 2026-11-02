@@ -76,8 +76,8 @@ SWEEP_CONTENT = json.dumps({"findings": []})
 # Recorded at 43ec560 with PRXREF_REPO_CONTEXT=repo, PRXREF_CONTEXT_FOLLOWUP
 # unset, over tests/fixtures/issue22/pr.patch against the route below.
 EXPECTED_REQUEST_COUNT = 3
-PRE_29_SHA = "7104a3fd41e7ca2c4dddd91f17bd4cc800cb06e5e74eb369c25535eeea953a2c"
-POST_29_SHA = "28f3dfcd3b3e670c57e5e8221958de7e43ef0b4d863a80a6c63e904b907b88c9"
+PRE_29_SHA = "ae00b326b3ea94aba727d3c310a52ba79d623a92a8fa5c5a1c8c5d93757097e5"
+POST_29_SHA = "a3ac0991db24159523ca18f290de71b78f4ff00ef120cef4a9bd83c1e463893d"
 ISSUE_29_LINE = "assistant/engine.py:12: class Step:\n"
 EXPECTED_MESSAGE_SHAS = [
     # Every sha was re-recorded at issue #116's one-line prompt note (see the
@@ -86,7 +86,7 @@ EXPECTED_MESSAGE_SHAS = [
     # "Matching rules" section (was 575f52b8... and, for the annotated one
     # below, 92ed30e3...): stripping that one section from each worker system
     # message reproduces the earlier recording byte for byte.
-    "1eebfde8a174b267ec3d8faf9e97a18527c1c5660685684907290eb9bbb38e13",
+    "9b11af916279a409d8734bb8ec60daa733a896306dcabdf08e43bd8cd9ec0b58",
     # Re-recorded at 0.20.0: issue #29 gives this diff-file plus repo-dir
     # replay chunk context, so this prompt gains exactly
     # ``assistant/engine.py:12: class Step:``; it was PRE_29_SHA at 0.17.0.

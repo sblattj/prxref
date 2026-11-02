@@ -528,9 +528,9 @@ class TestCliWiring:
 # ---------------------------------------------------------------------------
 
 RULES_GOLDEN = {
-    "rules": "1d3c9ced1bfaaaccfaa471131f3e9bc0c0f431f0e76d28989414ec25e466f73e",
-    "scoped": "75a392d896c350e4c96a343554dc1d9a86a25f8529304c427be377c505e39f47",
-    "rules_grouping": "1fa51d66e292ce034d9f85032f60b717df4e84e0a2506ddc5d342121c581fdd5",
+    "rules": "bf6d4fe28d1bf0679608829d12b4c9cd876386b2e5f730b1e79919cd698d9dc2",
+    "scoped": "4193ff0a79ef955a0022baff25027a8d07209564db683738a39e6a409c40285e",
+    "rules_grouping": "f2aa9ed947d5818ffb10595eb644dafcc16ee3e131f54bb3c5b2cbd919e6b33f",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 

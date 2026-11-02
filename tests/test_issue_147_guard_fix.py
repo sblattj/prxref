@@ -291,3 +291,34 @@ class TestThroughTheOrchestrator:
         (f,) = res["findings_active"]
         assert "Unverified fix" not in f.body
         assert "guard_fix" not in res
+
+
+class TestWorkerPromptRule:
+    """The prose half of #147 cannot be detected after the fact, so the worker is asked."""
+
+    def _system(self) -> str:
+        from tests.test_rule_prompt_slot import _Recorder
+
+        llm = _Recorder()
+        orchestrator.orchestrate_review(
+            FakeForge(diff=SERVICE_DIFF), REF, llm, post=False, max_workers=1,
+        )
+        workers = [s for s, _u in llm.prompts if "## Suggested fixes" in s]
+        assert len(workers) == 1
+        return workers[0]
+
+    def test_the_rendered_system_prompt_carries_both_requirements(self):
+        section = self._system().partition("## Suggested fixes")[2].partition("\n## ")[0]
+        assert "confirm the replacement enforces the same thing by reading its definition" in section
+        assert "do not suggest the removal; say what to check instead" in section
+        assert "quotes the code that makes it work or starts with `Unverified fix:`" in section
+        assert "The finding stays when its fix is unverified." in section
+
+    def test_the_section_sits_between_matching_rules_and_style(self):
+        system = self._system()
+        assert system.index("## Matching rules") < system.index("## Suggested fixes") < system.index("## Style")
+
+    def test_the_sweep_prompt_is_untouched(self):
+        from prxref.reviewer import load_prompt
+
+        assert "## Suggested fixes" not in load_prompt("systemic.md")

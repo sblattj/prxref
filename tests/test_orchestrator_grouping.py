@@ -723,8 +723,8 @@ class TestCliWiring:
 # ---------------------------------------------------------------------------
 
 BASE_GOLDEN = {
-    "main": "0718b6b3aeff07cea1ed460d11fc59faee125c079f2cbcf500931b4fe8e3163f",
-    "override": "1cca8655f4e11ab470db667818f08d910cb681cbe307e1141625c18722c4662a",
+    "main": "07f81c672fcb6035f72d29c62bedfbdac4c7828380b726f5f06239481926195c",
+    "override": "c7c98e069da275026733bb41b18be6801f2a6cb7803e9c6a42c80f0cc051e022",
     "summary_only": "1539f1e036492cf3437e08b9263413c6cf9f1cb4f5378753dcc602fff62715a5",
 }
 
