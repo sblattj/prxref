@@ -208,7 +208,7 @@ def apply_default_branch_check(
                     logger.warning("default branch read of %s failed: %s", path, e)
                     cache[path] = (True, None)
         result = cache[path]
-        if result is None or result[0] is True and result[1] is None:
+        if result is None or (result[0] is True and result[1] is None):
             outcome.unknown += 1
             out.append(f)
             continue
