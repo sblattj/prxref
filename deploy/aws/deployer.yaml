@@ -14,7 +14,9 @@ Parameters:
   DeployerUserName:
     Type: String
     Default: prxref-deployer
-    Description: IAM user allowed to assume the deployer role (console sign-in, no access keys).
+    Description: >-
+      IAM user allowed to assume the deployer role (console sign-in, no access keys). Empty: no
+      user; only the GitHub Actions job in GitHubDeploySubject can deploy.
   GitHubDeploySubject:
     Type: String
     Default: ""
@@ -31,7 +33,16 @@ Parameters:
       ARN of an existing token.actions.githubusercontent.com OIDC provider (one per account).
       Empty: this stack creates it when GitHubDeploySubject is set.
 
+Rules:
+  SomeoneCanDeploy:
+    Assertions:
+      - Assert: !Or
+          - !Not [!Equals [!Ref DeployerUserName, ""]]
+          - !Not [!Equals [!Ref GitHubDeploySubject, ""]]
+        AssertDescription: Set DeployerUserName, GitHubDeploySubject or both; with neither, no one can deploy.
+
 Conditions:
+  HasDeployerUser: !Not [!Equals [!Ref DeployerUserName, ""]]
   GitHubDeploy: !Not [!Equals [!Ref GitHubDeploySubject, ""]]
   CreateGitHubProvider: !And
     - !Condition GitHubDeploy
@@ -331,10 +342,13 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
-            Principal:
-              AWS: !GetAtt DeployerUser.Arn
-            Action: sts:AssumeRole
+          - !If
+            - HasDeployerUser
+            - Effect: Allow
+              Principal:
+                AWS: !GetAtt DeployerUser.Arn
+              Action: sts:AssumeRole
+            - !Ref AWS::NoValue
           - !If
             - GitHubDeploy
             - Sid: GitHubActions
@@ -448,6 +462,7 @@ Resources:
   # -- a person signs in as this user, then assumes the deployer role -------------------
   DeployerUser:
     Type: AWS::IAM::User
+    Condition: HasDeployerUser
     Properties:
       UserName: !Ref DeployerUserName
       Policies:

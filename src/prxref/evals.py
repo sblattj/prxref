@@ -59,6 +59,7 @@ RUN_PROMPTS = ("worker", "systemic", "summary")
 RUN_CONFIG_KEYS = (
     "llm_backend",
     "llm_models",
+    "llm_require_models",
     "llm_max_tokens",
     "llm_parse_retries",
     "max_chunks",
@@ -91,6 +92,7 @@ EVAL_PINS: Mapping[str, Any] = {
     "ci_wiring": "off",
     "routing_probe": "off",
     "context_standards_globs": [],
+    "ticket_ids_from_title": "off",
 }
 SCORE_VERSION = 1
 SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "scoped_rules", "config")
@@ -143,7 +145,8 @@ def eval_run(
     environment's ticket and spec inputs cannot leak into a case. The
     default-on features that would move a baseline are pinned off for every
     case by :data:`EVAL_PINS` (OD2): ``ci_wiring="off"``,
-    ``routing_probe="off"`` and ``context_standards_globs=[]`` reach
+    ``routing_probe="off"``, ``context_standards_globs=[]`` and
+    ``ticket_ids_from_title="off"`` reach
     ``run_review`` as overrides, and the same values are the ``load_config``
     overrides ``run.json``'s ``config`` is read from, so it records what
     ran whatever the environment or the config file says.
@@ -298,6 +301,7 @@ def _run_case(
             repo_dir=case.repo_dir,
             config_file=config_file,
             evidence_files=[],
+            eval_pins="on",
             **_pins(),
         )
         if result is None:

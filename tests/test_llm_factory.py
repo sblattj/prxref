@@ -476,7 +476,8 @@ class TestInvokeResultCostFields:
 
     def test_the_fields_follow_finish_reason(self):
         names = [f.name for f in dataclasses.fields(InvokeResult)]
-        assert names[-3:] == ["finish_reason", "cost_usd", "cost_source"]
+        # #138 appended requested_model after them, keeping positional order.
+        assert names[-4:] == ["finish_reason", "cost_usd", "cost_source", "requested_model"]
 
     def test_existing_positional_constructions_keep_working(self):
         result = InvokeResult("t", 1, 2, "m", "b", 3, "stop")

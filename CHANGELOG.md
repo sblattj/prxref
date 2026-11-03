@@ -10,8 +10,89 @@ tracker.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-01
+
 ### Added
 
+- `PRXREF_STABILITY_PASSES` and `PRXREF_STABILITY_MIN_AGREE` (off by default, env only):
+  run the chunk reviews several times, keep a finding that enough passes agree on, and
+  say `Seen in X of Y passes.` on it. A finding below the bar is dropped with reason
+  `stability: seen in X of Y passes, needs K` (#143).
+- `PRXREF_TICKET_IDS_FROM_TITLE` (off by default, env only): load every ticket id in the
+  PR title, up to 10 per run within a shared 60 s budget. A ticket that could not be read
+  fully stops findings being marked outside it. PR title authors are untrusted, so scope
+  the token on shared deployments (#145).
+- `PRXREF_DEFAULT_BRANCH_CHECK` (off by default): on a stacked PR, a versioning finding
+  about a surface absent from the default branch is lowered to `outofscope`. This covers
+  the default branch only; release tags and repo-wide search are not checked, and the
+  forge lookups have only run against stubbed transport so far (#146).
+
+### Changed
+
+- The footer shows ` · seed=N` when a seed was sent, and API backends send one by
+  default, so default runs now show it. The docs say a single pass is a sample (#143).
+- The worker prompt has a new `## Suggested fixes` section: confirm a guard's replacement
+  by reading its definition before suggesting the guard be removed or moved. On 47 mined
+  cases over 3 repeats, mean strict precision was 60% with it and 61% without, and it
+  showed no measured reduction in guard-removal advice on two issue-shaped cases (#147).
+
+### Fixed
+
+- A finding stays on its own valid line when its body cites sibling sites. A line cited
+  after a sibling still moves (#149).
+- A file over the token budget is split by hunk, so the rest of the PR is reviewed on the
+  first run. `overflow_files` counts files, not pieces (#148).
+- Reworded findings about one root cause fold into one comment with `Also at`, within a
+  file and across files. A sweep finding and a chunk finding in different files are not
+  folded, and an incremental push touching only a sibling file posts one new comment
+  (#142, #144).
+- A finding is never marked outside a ticket that was cut or not fully read. A key-shaped
+  word such as `UTF-8` in a title fails its fetch and counts as not read (#145).
+- A suggested fix that advises removing or moving a guard gets the line `Unverified fix:
+  confirm the replacement enforces the same check, by reading its definition, before
+  removing this guard.` This check is a phrase match, so it misses rewrites and passive
+  wording and can tag advice to remove a duplicate check. A framework-dependent "do X
+  instead" fix is still not checked: a prompt rule for it lowered mean strict precision
+  from 61% to 46% and was left out (#147).
+
+## [0.40.1] - 2026-10-27
+
+### Fixed
+
+- `PRXREF_LLM_REQUIRE_MODELS` on the `litellm` backend names the chain entry that
+  answered from litellm's own fallback count, so a primary answer that litellm reports
+  without its provider prefix (`claude-x` for `anthropic/claude-x`) no longer makes a
+  review `Incomplete` when the entry is listed. A litellm too old to report the count
+  still matches the reported id or a one-entry chain only (#138).
+- The PR-description call (`PRXREF_DESCRIBE`) is now checked against
+  `PRXREF_LLM_REQUIRE_MODELS`: a description answered by a model outside the list is not
+  written and no labels are applied, `describe.reason` names the model, and the verdict
+  and exit code are unaffected (#138).
+
+## [0.40.0] - 2026-10-27
+
+### Added
+
+- `PRXREF_LLM_REQUIRE_MODELS` (config-file key `llm_require_models`) names the models
+  allowed to answer. When a review unit (chunk, systemic sweep or verification call) was
+  answered by any other model, for example a fallback after the first model failed, the
+  verdict is `Incomplete`, the summary says which units, and `degraded` gets cause `model`
+  plus a `models` list naming each unit, the model that answered and the chain entry that
+  was asked. A reply passes when either name is in the list. Unset, the default, checks
+  nothing. `PRXREF_FAIL_ON=error|any` exits 1 on it like any incomplete run (#138).
+- `prxref review --eval-pins` (or `PRXREF_EVAL_PINS=on`, env-only) applies the settings
+  `prxref eval run` pins (`EVAL_PINS`: CI wiring check, routing probe and standards
+  discovery off) at the same layer, so a CI review runs with the settings an eval run
+  measured. A conflicting flag loses to the pin with a warning, and `--format json` gains
+  `eval_pins`. Eval runs now record `llm_require_models` in `run.json`'s `config` (#137).
+
+## [0.39.0] - 2026-10-26
+
+### Added
+
+- `deployer.yaml`'s IAM user is optional: an empty `DeployerUserName` leaves only the
+  GitHub Actions OIDC deploy, and the template refuses an update that would leave no one able
+  to deploy.
 - The gate deploys itself from GitHub Actions with no stored AWS keys:
   `.github/workflows/deploy-gate.yml` assumes the deployer role over GitHub OIDC on every
   push to main that touches the gate. `deployer.yaml` gains `GitHubDeploySubject` (the
@@ -31,6 +112,20 @@ tracker.
 - The rule-name request says never to stretch the closest-sounding team rule onto a
   finding: a rule is named only when the defect it describes is the finding's defect,
   otherwise `rule` is left out.
+
+### Fixed
+
+- A sweep finding with the same file, anchored line and non-null rule id as a chunk finding of at least its severity is dropped as a duplicate, however the two are worded; `apply_sweep_dedup` gains `same_rule` (on by default). (#110)
+- A worker or sweep reply that is a bare empty list (`[]`, fenced or not) is read as `{"findings": []}`: a clean review in one call, where it used to fail the chunk with "not an object: list" and mark the run Incomplete. A non-empty list, `null` or a number still fails. (#134)
+- A finding that claims a symbol or a file was removed is checked against the PR head
+  before it counts: when the head tree still defines the symbol (a definition or export
+  found through the repository listing) or still holds the file, the finding is dropped and
+  its drop reason names the head `file:line`. This works with `PRXREF_REPO_CONTEXT` off,
+  the default: the check then lists the tree through the forge, or `--repo-dir`, and only
+  when a finding claims a symbol was removed. The claim is usually copied from the PR
+  description or stale doc prose, so the worker and sweep prompts now say such claims are
+  to be checked against the code shown. The run record's new `removal_claims` entry counts
+  the drops and names the listing source (#116).
 
 ## [0.38.0] - 2026-10-21
 

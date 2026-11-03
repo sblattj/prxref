@@ -1,21 +1,26 @@
 """Deterministic quality passes over worker findings.
 
-Twenty-one passes run before posting, in the order ``orchestrate_review``
+Twenty-three passes run before posting, in the order ``orchestrate_review``
 applies them; pass 1 runs only when the team review rules declare a
 severity map, pass 15 only when
 the loaded rules file declares at least
-one section scope, pass 16 only when ``PRXREF_GROUP_FINDINGS`` turns
-finding grouping on, and pass 17 only when a team rules file is loaded
-and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 18
+one section scope, pass 17 only when ``PRXREF_GROUP_FINDINGS`` turns
+finding grouping on, and pass 18 only when a team rules file is loaded
+and ``PRXREF_MAX_FINDINGS_PER_RULE`` is above 0. Passes 7 and 19
 (``apply_anchor_snap`` and ``apply_location_verification``) do only what
 the head-file reader can serve: without one they change nothing. A
-twenty-second deterministic check, the release-shaped-PR heuristic, and a
-twenty-third, the pinned-toggle heuristic, are not passes at all:
+twenty-fourth deterministic check, the release-shaped-PR heuristic, and a
+twenty-fifth, the pinned-toggle heuristic, are not passes at all:
 ``heuristics.release_shape_findings`` and
 ``heuristics.toggle_pinned_off_findings`` each ADDS its own finding
 before pass 1, and each then flows through every pass below like a model
 finding, except that pass 12 leaves it out. Every ``drop_reason`` prefix
 these passes emit is tabulated for operators in ``docs/quality.md``.
+
+The opt-in default-branch check (#146, ``PRXREF_DEFAULT_BRANCH_CHECK``) is not a
+numbered pass: ``prxref.default_branch`` runs from the orchestrator right after
+pass 15 and only lowers a versioning finding on a stacked PR, so the count above
+does not move.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the
@@ -156,7 +161,20 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
      right after on every section of the loaded rules, scoped or not, and
      clears a label whose rule names another kind of defect than the
      finding's title (``rules.claim_kinds``), keeping it on any ambiguity.
-16. ``apply_rule_grouping``: fold chunk findings in one file that name the
+16. ``apply_root_cause_fold`` (#142, #144): fold chunk findings that restate
+    one root cause into the most specific of them, which takes the group's
+    highest severity and confidence and lists the others under ``Also at:``;
+    the others are dropped as ``same root cause as <file>:<line>
+    (<evidence>)``. In one file the anchors must sit within
+    :data:`ROOT_CAUSE_LINE_WINDOW` lines and the pair needs covered shared
+    code, a similar title or one rule with overlapping bodies; across files
+    it needs covered shared code on rare tokens plus one rule, one
+    suggestion, one route in both titles or two title words outside code
+    names. A pair whose titles each name code the other claim never mentions
+    never folds, nor does a similar title over different numbers. Always on. It runs
+    after the label checks and before grouping and every cap, so a repeat
+    spends none of them. Sweep findings stay with ``apply_sweep_dedup``.
+17. ``apply_rule_grouping``: fold chunk findings in one file that name the
     same ``rule`` (casefolded), or that name none and share a normalized
     title, into one finding at the group's smallest positive line, with
     the group's highest severity and highest confidence and an
@@ -164,7 +182,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     the other members are dropped as ``grouped into <file>:<line>``. Sweep
     findings are never grouped. It runs before the gate, so the caps count
     groups rather than lines.
-17. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
+18. ``apply_rule_cap``: keep at most ``PRXREF_MAX_FINDINGS_PER_RULE``
     chunk findings per ``rule`` (casefolded), or per normalized title for
     findings that name none, across every file of the review. The kept
     findings are the most severe, then the most confident; the rest are
@@ -175,7 +193,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     it on: a team rules file is loaded and the cap is above 0. It runs
     after grouping, so a group counts once, and before the gate, so the
     severity caps count what it kept.
-18. ``apply_location_verification``: grouping and the cap list a folded
+19. ``apply_location_verification``: grouping and the cap list a folded
     member's location on their representative without ever checking the
     site against a source (issue #74). This pass re-runs pass 7's search
     for the representative's own quoted snippets within
@@ -187,7 +205,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     snippet parseable keep every site; nothing is dropped from the review.
     It runs once, after grouping and the cap (``locations`` is final
     there) and before the gate.
-19. ``apply_quality_gate``: drop findings below the confidence floor
+20. ``apply_quality_gate``: drop findings below the confidence floor
     (``confidence 0.40 below floor 0.60``), cap errors per review
     (``error cap exceeded (max N)``), optionally cap warnings and
     outofscope findings the same way (``warning cap exceeded (max N)``,
@@ -196,7 +214,7 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     (``invalid severity: '<value>'``). It RETURNS its findings sorted by
     ``finding_sort_key``, so the caller re-derives the chunk/sweep
     boundary from finding identity rather than carrying an index across it.
-20. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
+21. ``apply_sweep_dedup``: drop a sweep finding that restates a chunk
     finding which SURVIVED the gate, on file + normalized title
     (``duplicate of chunk finding``). It runs after the gate so a
     sub-floor chunk finding cannot suppress its higher-confidence sweep
@@ -216,15 +234,20 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
     their claims share at least two code identifiers and their titles
     share three words or a problem class
     (``duplicate of chunk finding (same line, shared code: a, b)``).
-21. ``apply_containment_note``: a finding that asserts a throw, panic,
+22. ``apply_containment_note``: a finding that asserts a throw, panic,
     crash, or unhandled rejection and never names where it is caught or
     where it propagates to has its body suffixed with
     ``" [containment boundary not stated]"`` — a purely textual
     decoration, run on active and dropped findings alike, that never
     changes ``drop_reason`` or severity.
+23. ``apply_guard_fix_check`` (#147): always on, no key. A fix that advises
+    removing or relocating a guard gets the line ``Unverified fix: ...``
+    appended to its body, and a code suggestion that replaces a guard line
+    without keeping its identifiers is cleared. Runs last, never drops a
+    finding and never changes severity or confidence.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
-runs after pass 17 (after line alignment, anchor snapping and every fold, so
+runs after pass 18 (after line alignment, anchor snapping and every fold, so
 ``locations`` is final) and before the gate. It drops nothing: a code
 suggestion (#30) that fails one of its rules is cleared and the finding is
 kept, so it posts as a plain comment.
@@ -241,7 +264,7 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
@@ -382,12 +405,27 @@ def apply_location_validation(
         if f.drop_reason is not None or f.file in known:
             result.append(f)
             continue
-        candidates = _repair_candidates(f.file, known)
-        if len(candidates) == 1:
-            result.append(replace(f, file=candidates[0]))
+        resolved = resolve_diff_path(f.file, known)
+        if resolved is not None:
+            result.append(replace(f, file=resolved))
             continue
         result.append(replace(f, drop_reason=f"malformed location: {f.file!r}"))
     return result
+
+
+def resolve_diff_path(file: str, diff_paths: Iterable[str]) -> str | None:
+    """The diff path ``file`` names, or ``None`` when none or several could be it.
+
+    ``file`` itself when it is a diff path, else the one diff path
+    :func:`_repair_candidates` finds for a mangled spelling. The resolver
+    :func:`apply_location_validation` repairs with, and the stability merge
+    (#143) normalizes with before it clusters.
+    """
+    known = set(diff_paths)
+    if file in known:
+        return file
+    candidates = _repair_candidates(file, known)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _repair_candidates(file: str, diff_paths: Iterable[str]) -> list[str]:
@@ -838,7 +876,7 @@ def _is_own_file_citation(path: str, file: str) -> bool:
     a sibling file's ``other.ts:12`` never does. A bare path with no
     ``:line`` never reaches this check.
     """
-    cited = path.replace("\\", "/").lower()
+    cited = path.replace("\\", "/").lower().lstrip("`'\"([<")
     own = file.replace("\\", "/").lower()
     if cited.startswith("./"):
         cited = cited[2:]
@@ -875,6 +913,52 @@ def _hunk_tokens(hunk: Hunk) -> set[str]:
     return tokens
 
 
+def _site_evidence(
+    hunks: Sequence[Hunk], evidence: set[str], line: int, tolerance: int
+) -> tuple[int, int]:
+    """Breadth and longest token of the claim evidence at or beside ``line``.
+
+    Reads the non-removed lines within ``tolerance`` of ``line`` and
+    returns ``(shared token count, longest shared token)``, the same
+    ranking key :func:`_best_candidate` uses; ``(0, 0)`` when nothing
+    is shared.
+    """
+    shared: set[str] = set()
+    for h in hunks:
+        for ln in h.lines:
+            if (
+                ln.kind != "-"
+                and ln.new_line is not None
+                and abs(ln.new_line - line) <= tolerance
+            ):
+                shared |= evidence & _line_tokens(ln)
+    return (len(shared), max(map(len, shared))) if shared else (0, 0)
+
+
+def _line_field_holds(
+    finding: Finding,
+    hunks: Sequence[Hunk],
+    added: set[int],
+    evidence: set[str],
+    cited: Sequence[int],
+    tolerance: int,
+) -> bool:
+    """True when the ``line`` field is a corroborated added line.
+
+    Issue #149: the field names an added line and the finding's own
+    evidence tokens appear at or beside it, and the body does not name that
+    line itself. Citations of other sites are then sibling mentions of a
+    recurring pattern, never corrections, unless the cited site carries
+    strictly more of the claim evidence than the field's line does.
+    """
+    if finding.line <= 0 or finding.line not in added:
+        return False
+    if finding.line in cited:
+        return False
+    key = _site_evidence(hunks, evidence, finding.line, tolerance)
+    return key != (0, 0)
+
+
 def _resolve_body_cited_anchor(
     finding: Finding,
     hunks: Sequence[Hunk],
@@ -884,8 +968,8 @@ def _resolve_body_cited_anchor(
     """The anchor a corroborated in-body line citation demands, or None.
 
     Issue #28: the model's ``line`` field drifts while its own body still
-    names the right line. The first body citation — ``line N`` or an
-    own-file ``path:line`` — whose cited line sits on an added line (or a
+    names the right line. The first body citation, ``line N`` or an
+    own-file ``path:line``, whose cited line sits on an added line (or a
     context line within ``tolerance`` of one) of this file AND whose
     containing hunk shares a non-generic evidence token with the claim
     wins; its snapped anchor outranks the ``line`` field. A citation that
@@ -893,12 +977,28 @@ def _resolve_body_cited_anchor(
     sends the caller down the shipped resolution path unchanged. A
     citation never lands on a blank or pure-punctuation anchor while the
     file carries token-bearing added lines.
+
+    Issue #149: that precedence is a rescue for a drifted field, so it
+    yields when the field already holds up. When ``line`` is an added line
+    with claim evidence at or beside it (:func:`_site_evidence`) and the
+    body does not cite that line itself, a citation moves the anchor only
+    if the cited site carries strictly more of the claim evidence than the
+    field's line; one that carries the same or less is a sibling mention
+    and is skipped. The test reads evidence tokens and line numbers only,
+    never the citing phrase.
     """
     evidence = _evidence_tokens(f"{finding.title} {finding.body}")
     if not evidence:
         return None
     blank_guard = _file_has_token_bearing_add(hunks)
-    for cited in _body_cited_lines(finding):
+    citations = _body_cited_lines(finding)
+    holds = _line_field_holds(
+        finding, hunks, added, evidence, citations, tolerance
+    )
+    field_key = (
+        _site_evidence(hunks, evidence, finding.line, tolerance) if holds else None
+    )
+    for cited in citations:
         anchor = snap_line(cited, added, tolerance=tolerance)
         if anchor <= 0:
             continue
@@ -906,6 +1006,10 @@ def _resolve_body_cited_anchor(
         if hunk is None or not (_hunk_tokens(hunk) & evidence):
             continue
         if blank_guard and _line_is_blankish(hunks, anchor):
+            continue
+        if field_key is not None and (
+            _site_evidence(hunks, evidence, anchor, tolerance) <= field_key
+        ):
             continue
         return anchor
     return None
@@ -1741,6 +1845,7 @@ def apply_sweep_dedup(
     *,
     similarity: float | None = None,
     code_overlap: bool = False,
+    same_rule: bool = True,
 ) -> list[Finding]:
     """Drop systemic-sweep findings that restate a chunk finding.
 
@@ -1762,7 +1867,8 @@ def apply_sweep_dedup(
     cap later drops its representative. So does a chunk finding
     :func:`apply_rule_cap` folded (``drop_reason`` ``rule cap exceeded (max
     <n>): listed at <file>:<line>``), whose location the best kept finding
-    of its rule now lists.
+    of its rule now lists, and one :func:`apply_root_cause_fold` folded
+    (``same root cause as <file>:<line> (<evidence>)``).
 
     ``similarity`` switches on a second, reworded tier that runs after the
     exact tier; ``None`` (the default) skips it entirely, so the pass is
@@ -1806,6 +1912,9 @@ def apply_sweep_dedup(
     a bare call stays the exact tier plus the optional reworded tier; the
     review pipeline turns it on through ``dedup_code_overlap``, which
     defaults to on.
+
+    ``same_rule`` (default on, issue #110) adds a final structural tier:
+    see :func:`_dedup_same_rule`.
     """
     start = max(0, sweep_start)
     chunk_keys = {
@@ -1814,6 +1923,7 @@ def apply_sweep_dedup(
         if f.drop_reason is None
         or f.drop_reason.startswith(GROUPED_INTO_PREFIX)
         or f.drop_reason.startswith(RULE_CAP_PREFIX)
+        or f.drop_reason.startswith(ROOT_CAUSE_PREFIX)
     }
     result: list[Finding] = []
     for i, f in enumerate(findings):
@@ -1829,6 +1939,8 @@ def apply_sweep_dedup(
         result = _dedup_reworded(result, start, similarity)
     if code_overlap:
         result = _dedup_code_overlap(result, start)
+    if same_rule:
+        result = _dedup_same_rule(result, start)
     return result
 
 
@@ -2008,6 +2120,35 @@ def _dedup_code_overlap(findings: list[Finding], start: int) -> list[Finding]:
     return result
 
 
+def _dedup_same_rule(findings: list[Finding], start: int) -> list[Finding]:
+    """Drop a sweep finding with a chunk finding's file, line and rule (#110).
+
+    Titles and bodies are not read: the chunk pass and the sweep applied
+    the same rule to the same anchored line, so the sweep copy adds no
+    recall however it is worded. Compares each active sweep finding with
+    the active chunk findings in the same file on the same positive line
+    whose non-null rule id equals its own and whose severity is at least
+    as high; a MORE severe sweep copy is kept. A null rule on either side,
+    or a file-level (line 0) finding, never matches. Only across the
+    chunk/sweep boundary; a chunk finding is never dropped.
+    """
+    chunk_by_key: dict[tuple[str, int, str], list[int]] = {}
+    for i, f in enumerate(findings[:start]):
+        if f.drop_reason is None and (f.line or 0) > 0 and f.rule:
+            chunk_by_key.setdefault((f.file, f.line, f.rule), []).append(i)
+    result = list(findings)
+    for i in range(start, len(findings)):
+        f = findings[i]
+        if f.drop_reason is not None or (f.line or 0) <= 0 or not f.rule:
+            continue
+        rank = _reworded_severity_rank(f)
+        for k in chunk_by_key.get((f.file, f.line, f.rule), ()):
+            if _reworded_severity_rank(findings[k]) <= rank:
+                result[i] = replace(f, drop_reason="duplicate of chunk finding")
+                break
+    return result
+
+
 _THROW_CLASS_RE = re.compile(
     r"\bthrows?\b|\bthrowing\b|\bpanics?\b|\bcrash(es|ed)?\b"
     r"|unhandled rejection|uncaught exception|\braises?\b",
@@ -2052,6 +2193,163 @@ def apply_containment_note(findings: Sequence[Finding]) -> list[Finding]:
         else:
             result.append(replace(f, body=f.body + CONTAINMENT_NOTE_SUFFIX))
     return result
+
+
+GUARD_FIX_LINE: str = (
+    "Unverified fix: confirm the replacement enforces the same check, by reading "
+    "its definition, before removing this guard."
+)
+GUARD_FIX_REASONS: tuple[str, ...] = ("suggestion_drops_guard", "advises_guard_removal")
+
+_GUARD_CLAUSE = r"[^.;!?\n]"
+_GUARD_NOUN = (
+    r"(?<!health )(?<!type )(?<!spell )(?<!lint )(?<!status )"
+    r"\b(?:checks?|guards?|validations?|verification|enforcement|assertions?"
+    r"|authori[sz]ation|authentication|authz|authn|acl)\b"
+)
+_GUARD_THEME = (
+    r"\b(?:scope|security|auth\w*|tenant\w*|permissions?|roles?|access[- ]control"
+    r"|polic(?:y|ies)|validation|ownership)\b"
+)
+_ADVICE_LEAD = (
+    r"(?:(?:^|[.;:!?\n]|,)\s*|\b(?:and|then|or|please|should|can|could|may|might"
+    r"|consider|suggest|recommend|try|prefer|safe to|fine to|ok to)\s+)"
+    r"(?:(?:just|simply|safely|also|then|instead)\s+)*"
+)
+_GUARD_REMOVE_RE = re.compile(
+    _ADVICE_LEAD
+    + rf"(?:(?:remove|drop|delete|eliminate|skip|bypass|strip|relocate|move|disable)"
+    rf"|(?:removing|dropping|deleting|eliminating|skipping|bypassing|stripping"
+    rf"|relocating|moving|disabling))\b"
+    rf"{_GUARD_CLAUSE}{{0,60}}?{_GUARD_NOUN}",
+    re.IGNORECASE,
+)
+_GUARD_RELY_RE = re.compile(
+    _ADVICE_LEAD + rf"(?:rely|relying|defer|deferring)\s+(?:on|to)\b{_GUARD_CLAUSE}{{0,60}}?{_GUARD_THEME}",
+    re.IGNORECASE,
+)
+_GUARD_PASSIVE_RE = re.compile(
+    rf"{_GUARD_NOUN}{_GUARD_CLAUSE}{{0,60}}?\b(?:can|could|should|may|might)\s+"
+    rf"(?:safely\s+)?be\s+(?:removed|deleted|dropped|eliminated|skipped|relocated|moved)\b",
+    re.IGNORECASE,
+)
+_GUARD_LINE_WORD_RE = re.compile(
+    r"tenant|auth|permission|role|scope|owner|access|acl|principal|admin|"
+    r"valid|sanitiz|forbidden|unauthori[sz]ed",
+    re.IGNORECASE,
+)
+_GUARD_LINE_CONTROL_RE = re.compile(
+    r"\b(?:if|unless|assert\w*|require\w*|guard|check\w*|throw|raise|reject\w*|deny|forbid\w*"
+    r"|abort|ensure|verify)\b|\b40[13]\b|\bpreconditions?\b|@\w*(?:Secured|PreAuthorize|RolesAllowed)",
+    re.IGNORECASE,
+)
+_GUARD_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+_GUARD_CONSEQUENCE_RE = re.compile(
+    r"(?:^|(?<=[.;:!?\n]))\s*"
+    r"(?:removing|dropping|deleting|eliminating|skipping|bypassing|stripping|relocating|moving|disabling)\b"
+    rf"{_GUARD_CLAUSE}*?\b(?:would\s+)?"
+    r"(?:lets?|allows?|exposes?|breaks?|means?|opens?|enables?|leaves?|causes?)\b"
+    rf"{_GUARD_CLAUSE}*",
+    re.IGNORECASE,
+)
+
+
+def _advises_guard_removal(text: str) -> bool:
+    """True when ``text`` advises removing or relying past a guard.
+
+    A sentence that opens with a gerund and goes on to a consequence
+    (``Removing the tenant check lets any user read data.``) reports a defect,
+    not a fix, so it is blanked before the removal pattern runs.
+    """
+    advice = _GUARD_CONSEQUENCE_RE.sub(" ", text)
+    return any(
+        pattern.search(advice)
+        for pattern in (_GUARD_REMOVE_RE, _GUARD_RELY_RE, _GUARD_PASSIVE_RE)
+    )
+
+
+def _guard_identifiers(lines: Sequence[str]) -> set[str]:
+    """Guard-bearing identifiers on the head lines of ``lines``, casefolded."""
+    found: set[str] = set()
+    for line in lines:
+        if not (_GUARD_LINE_CONTROL_RE.search(line) and _GUARD_LINE_WORD_RE.search(line)):
+            continue
+        for token in _GUARD_IDENT_RE.findall(line):
+            if len(token) >= 4 and _GUARD_LINE_WORD_RE.search(token):
+                found.add(token.casefold())
+    return found
+
+
+def _suggestion_drops_guard(finding: Finding, by_path: Mapping[str, FileDiff]) -> bool:
+    text = finding.suggestion
+    if text is None or finding.line <= 0 or finding.locations:
+        return False
+    end = finding.suggestion_end_line or finding.line
+    if end < finding.line:
+        return False
+    current = _hunk_new_side(by_path.get(finding.file), finding.line, end)
+    if current is None:
+        return False
+    guard = _guard_identifiers(current)
+    if not guard:
+        return False
+    kept = text.casefold()
+    return not any(ident in kept for ident in guard)
+
+
+def apply_guard_fix_check(
+    findings: Sequence[Finding], files: Sequence[FileDiff],
+) -> tuple[list[Finding], list[tuple[str, ...]]]:
+    """Mark a suggested fix that would remove a guard without proof (#147).
+
+    Two checks, neither of which drops a finding or moves its severity or
+    confidence. ``reasons`` is the length of the input and in its order; each
+    entry is the tuple of :data:`GUARD_FIX_REASONS` that fired, empty for a
+    finding passed through as the same object.
+
+    ``suggestion_drops_guard``: the head lines a code suggestion replaces
+    hold a guard (a line with a control word such as ``if``, ``throw`` or
+    ``require`` and a guard word such as tenant, auth, permission, role,
+    scope, owner, access or valid), and the suggestion text keeps none of
+    that guard's identifiers. The suggestion is cleared (``suggestion`` is
+    ``None``, ``suggestion_end_line`` 0) and the body gets
+    :data:`GUARD_FIX_LINE`.
+
+    ``advises_guard_removal``: the title or body ADVISES removing or
+    relocating a guard: an imperative or modal removal verb (``drop``,
+    ``remove``, ``move``...) reaching a check, guard or validation noun in
+    one clause; ``rely on`` or ``defer to`` a scope, security, auth, tenant,
+    permission, role, policy or validation; or a check noun that ``can`` or
+    ``should be`` removed. A negated advice (``do not remove``) and a report
+    (``this PR removes``, ``was dropped``, ``add a tenant check``) do not
+    match. The body gets :data:`GUARD_FIX_LINE` after a blank line.
+
+    A body that already holds ``Unverified fix:`` gets no second line, so the
+    pass is idempotent and a model that followed the worker prompt is left
+    alone. Dropped findings pass through untouched.
+    """
+    by_path = {f.path: f for f in files}
+    out: list[Finding] = []
+    reasons: list[tuple[str, ...]] = []
+    for f in findings:
+        if f.drop_reason is not None:
+            out.append(f)
+            reasons.append(())
+            continue
+        fired: list[str] = []
+        updated = f
+        if _suggestion_drops_guard(f, by_path):
+            fired.append("suggestion_drops_guard")
+            updated = replace(updated, suggestion=None, suggestion_end_line=0)
+        if _advises_guard_removal(f"{f.title}. {f.body}"):
+            fired.append("advises_guard_removal")
+        if fired and "Unverified fix:" not in (f.body or ""):
+            updated = replace(updated, body=f"{f.body}\n\n{GUARD_FIX_LINE}" if f.body else GUARD_FIX_LINE)
+        out.append(updated)
+        reasons.append(tuple(fired))
+    return out, reasons
 
 
 def _problem_classes(title: str) -> set[str]:
@@ -2357,6 +2655,23 @@ _REMOVAL_VERB_POST = (
 )
 
 
+def _removal_object_pattern(alternation: str) -> re.Pattern[str]:
+    """A removal verb governing one object spelled by ``alternation`` (lowercase text).
+
+    Either the verb takes the object (``removed the file src/app.py``,
+    ``deleted useDraftLock``), with at most the :data:`_OBJECT_FILLER`
+    tokens between, or the object is the removal's subject
+    (``src/app.py was removed``, ``... no longer exists``). The object may
+    sit in backticks and must not run into a longer word or path.
+    """
+    anchored = rf"(?<![\w/-])`?(?:{alternation})`?(?![\w/-])"
+    return re.compile(
+        rf"{_REMOVAL_VERB_PRE}\s+(?:the\s+)?(?:file\s+)?"
+        rf"{_OBJECT_FILLER}{anchored}"
+        rf"|{anchored}\s+{_REMOVAL_VERB_POST}"
+    )
+
+
 def _path_forms(path: str) -> list[str]:
     """How a body may spell one diff path: full, parent/basename, basename."""
     norm = path.replace("\\", "/").lower()
@@ -2383,13 +2698,7 @@ def _governed_claimed_paths(
     hits: list[tuple[int, str]] = []
     for path in candidates:
         alternation = "|".join(re.escape(form) for form in _path_forms(path))
-        anchored = rf"(?<![\w/-])`?(?:{alternation})`?(?![\w/-])"
-        pattern = re.compile(
-            rf"{_REMOVAL_VERB_PRE}\s+(?:the\s+)?(?:file\s+)?"
-            rf"{_OBJECT_FILLER}{anchored}"
-            rf"|{anchored}\s+{_REMOVAL_VERB_POST}"
-        )
-        m = pattern.search(text)
+        m = _removal_object_pattern(alternation).search(text)
         if m is not None:
             hits.append((m.start(), path))
     hits.sort()
@@ -2445,6 +2754,258 @@ def apply_removal_claim_check(
             )
             continue
         out.append(f)
+    return out
+
+
+# What a removal claim may name that the head tree can settle (#116): a code
+# identifier (backticked, or bare when it is visibly code: camelCase, an
+# underscore, a ``$``) or a file path (a slash, or a basename with an
+# extension). Plain English words are never objects: "the removed guard" is not
+# a claim about a symbol named ``guard``.
+_HEAD_SYMBOL_TICKED_RE = re.compile(r"`([A-Za-z_$][\w$]*)`")
+_HEAD_SYMBOL_BARE_RE = re.compile(r"(?<![\w$/.`-])([A-Za-z_$][\w$]*)(?![\w$/`-])")
+_HEAD_SYMBOL_CODE_RE = re.compile(r"[a-z0-9][A-Z]|[A-Z]{2}[a-z]|_|\$")
+_HEAD_PATH_RE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)+[\w.-]*\w|[\w-]+(?:\.[\w-]+)*\.[A-Za-z][A-Za-z0-9]{0,5})(?![\w/-])"
+)
+# After a verb-takes-object match, the symbol must end the claim or be followed
+# by a noun naming the definition itself. "removed `validate` call" removes a
+# call, not the function, and is left alone.
+_HEAD_SYMBOL_FOLLOW_RE = re.compile(
+    r"`?\s*(?:$|[.,;:!?)\]]"
+    r"|(?:hook|function|method|class|component|helper|module|type|interface|constant"
+    r"|export|symbol|util|utility|definition|variable|enum|struct|trait|alias)s?\b)"
+)
+# Before a subject-of-removal match, a stop word means the symbol is not the
+# subject: "the call to `foo` was removed".
+_HEAD_SYMBOL_LEAD_RE = re.compile(rf"(?:^|\W)(?:{_OBJECT_STOP})\s+`?$")
+_HEAD_DEFINITION_PREFIX = (
+    r"^[ \t]*(?:(?:export|default|declare|async|abstract|public|private|protected"
+    r"|static|final|sealed|open|data|internal|pub(?:\([\w:]+\))?)\s+)*"
+)
+_HEAD_DEFINITION_KEYWORDS = (
+    r"(?:function\*?|class|interface|type|enum|const|let|var|def|struct|trait|fn|func"
+    r"|object|record)"
+)
+_HEAD_INDEX_STEMS = frozenset({"index", "__init__", "mod", "main"})
+_HEAD_MAX_CANDIDATES = 5
+
+
+def _fold_name(name: str) -> str:
+    """A name compared across spellings: lowercase, letters and digits only."""
+    return re.sub(r"[^0-9a-z]", "", name.lower())
+
+
+def _head_stem_key(path: str) -> str:
+    """The folded name a listing path could define: its stem, or its directory's for an index file."""
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1]
+    stem = base.split(".", 1)[0] if not base.startswith(".") else base
+    if stem in _HEAD_INDEX_STEMS and len(parts) > 1:
+        stem = parts[-2]
+    return _fold_name(stem)
+
+
+def _head_governed(text: str, obj: str, *, symbol: bool) -> bool:
+    """True when a removal verb governs ``obj`` in the lowercase ``text``.
+
+    The grammar is :func:`_removal_object_pattern`'s. A symbol also needs
+    :data:`_HEAD_SYMBOL_FOLLOW_RE` after a verb-takes-object match and no
+    :data:`_HEAD_SYMBOL_LEAD_RE` stop word before a subject match.
+    """
+    pattern = _removal_object_pattern(re.escape(obj.lower()))
+    for m in pattern.finditer(text):
+        if not symbol:
+            return True
+        if re.match(_REMOVAL_VERB_PRE, m.group(0)):
+            if _HEAD_SYMBOL_FOLLOW_RE.match(text, m.end()):
+                return True
+        elif not _HEAD_SYMBOL_LEAD_RE.search(text, 0, m.start()):
+            return True
+    return False
+
+
+def _head_removal_objects(f: Finding, diff_forms: set[str]) -> tuple[list[str], list[str]] | None:
+    """``(symbols, paths)`` a removal verb governs in ``f``, or ``None`` when it names a diff path.
+
+    A diff path is :func:`apply_removal_claim_check`'s to judge, so a claim
+    naming one is left to it.
+    """
+    raw = f"{f.title or ''} {f.body or ''}".replace("\\", "/")
+    text = raw.lower()
+    paths: list[str] = []
+    for m in _HEAD_PATH_RE.finditer(raw):
+        path = m.group(1).removeprefix("./")
+        if path.lower() in diff_forms:
+            if _head_governed(text, path, symbol=False):
+                return None
+            continue
+        if path not in paths and _head_governed(text, path, symbol=False):
+            paths.append(path)
+    names = [m.group(1) for m in _HEAD_SYMBOL_TICKED_RE.finditer(raw)]
+    names += [
+        m.group(1) for m in _HEAD_SYMBOL_BARE_RE.finditer(raw)
+        if _HEAD_SYMBOL_CODE_RE.search(m.group(1))
+    ]
+    symbols = [
+        name for name in dict.fromkeys(names)
+        if _head_governed(text, name, symbol=True)
+    ]
+    return symbols, paths
+
+
+def _head_definition_line(text: str, name: str) -> int | None:
+    """The 1-based line of the first definition or export of ``name`` in ``text``, case-sensitive."""
+    escaped = re.escape(name)
+    pattern = re.compile(
+        rf"{_HEAD_DEFINITION_PREFIX}{_HEAD_DEFINITION_KEYWORDS}\s+{escaped}(?![\w$])"
+        rf"|^{escaped}\s*(?::[^=\n]*)?=(?!=)",
+        re.MULTILINE,
+    )
+    m = pattern.search(text)
+    if m is None:
+        return None
+    return text.count("\n", 0, m.start()) + 1
+
+
+def head_removal_claims_name_symbol(findings: Sequence[Finding], files: Sequence[FileDiff]) -> bool:
+    """Whether any finding :func:`apply_head_removal_claim_check` judges claims a SYMBOL was removed.
+
+    The same filter the pass applies (active, not deterministic, a removal
+    claim not about a diff path) with at least one governed symbol. The
+    orchestrator asks this before fetching a repository listing just for the
+    pass, so a review with no such claim makes no listing call (#116). Pure.
+    """
+    diff_forms: set[str] | None = None
+    for f in findings:
+        if (
+            f.drop_reason is not None
+            or heuristics.is_deterministic(f)
+            or not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}")
+        ):
+            continue
+        if diff_forms is None:
+            diff_forms = {form for path in _diff_path_candidates(files) for form in _path_forms(path)}
+        objects = _head_removal_objects(f, diff_forms)
+        if objects is not None and objects[0]:
+            return True
+    return False
+
+
+def apply_head_removal_claim_check(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff],
+    read: Callable[[str], str | None] | None,
+    listing: Collection[str] | None,
+) -> list[Finding]:
+    """Drop removal claims about symbols and files the HEAD tree still has (#116).
+
+    :func:`apply_removal_claim_check` judges only paths in the diff. A worker
+    that takes "the `useDraftLock` hook was removed" from the PR description
+    or a stale doc line, about a file the PR never touches, gets past it.
+    This pass settles those claims from the head tree:
+
+    - a FILE path a removal verb governs, not in the diff, that the
+      ``listing`` holds (exactly, or as a ``/``-suffix of one listed path)
+      or that ``read`` returns, contradicts the claim;
+    - a SYMBOL a removal verb governs (a backticked identifier, or a bare
+      one that is visibly code), whose definition or export
+      (``export function useDraftLock``, ``def name``, ``class Name``,
+      ``const name =``, ...) :func:`_head_definition_line` finds in a listed
+      file whose stem folds to the same name (``use-draft-lock.tsx``,
+      ``useDraftLock/index.ts``), contradicts the claim.
+
+    The removal verb must GOVERN the object, by
+    :func:`_removal_object_pattern`, the grammar of
+    :func:`apply_removal_claim_check`: "the removed null check in
+    ``src/app.py``" claims nothing about ``src/app.py``. A symbol must also
+    end the clause or be followed by a definition noun ("hook", "function",
+    "class", ...), so "removed the `validate` call" is left alone. A finding
+    is dropped only when EVERY governed object is contradicted, with a
+    ``drop_reason`` naming each head location; any object not found, a
+    claim naming a diff path, a deterministic check's finding
+    (:func:`prxref.heuristics.is_deterministic`) or one already dropped is
+    left as it was. Every severity is judged.
+
+    ``read`` None and ``listing`` None (no head tree) change nothing; with
+    ``read`` alone only file claims are judged, since a symbol needs the
+    listing to find its file. A read that raises counts as not found.
+    Pure apart from ``read``, order-preserving, the same length in and out.
+    """
+    if read is None and listing is None:
+        return list(findings)
+    diff_forms = {form for path in _diff_path_candidates(files) for form in _path_forms(path)}
+    listed = sorted({p.replace("\\", "/") for p in listing}) if listing is not None else None
+    by_stem: dict[str, list[str]] | None = None
+    reads: dict[str, str | None] = {}
+
+    def fetch(path: str) -> str | None:
+        if read is None:
+            return None
+        if path not in reads:
+            try:
+                text = read(path)
+            except Exception:  # noqa: BLE001 -- a failed read is "not found"
+                text = None
+            reads[path] = text if isinstance(text, str) else None
+        return reads[path]
+
+    def file_at_head(path: str) -> str | None:
+        if listed is not None:
+            if path in listed:
+                return path
+            hits = [p for p in listed if p.endswith("/" + path)]
+            if len(hits) == 1:
+                return hits[0]
+        if "/" in path and fetch(path) is not None:
+            return path
+        return None
+
+    def symbol_at_head(name: str) -> str | None:
+        nonlocal by_stem
+        if listed is None or read is None:
+            return None
+        if by_stem is None:
+            by_stem = {}
+            for p in listed:
+                by_stem.setdefault(_head_stem_key(p), []).append(p)
+        for path in by_stem.get(_fold_name(name), [])[:_HEAD_MAX_CANDIDATES]:
+            text = fetch(path)
+            line = _head_definition_line(text, name) if text is not None else None
+            if line is not None:
+                return f"{path}:{line} ({name})"
+        return None
+
+    out: list[Finding] = []
+    for f in findings:
+        if (
+            f.drop_reason is not None
+            or heuristics.is_deterministic(f)
+            or not _REMOVAL_CLAIM_RE.search(f"{f.title} {f.body}")
+        ):
+            out.append(f)
+            continue
+        objects = _head_removal_objects(f, diff_forms)
+        if objects is None or not (objects[0] or objects[1]):
+            out.append(f)
+            continue
+        symbols, paths = objects
+        found: list[str] = []
+        for path in paths:
+            where = file_at_head(path)
+            if where is None:
+                break
+            found.append(f"a file present at head: {where}")
+        else:
+            for name in symbols:
+                where = symbol_at_head(name)
+                if where is None:
+                    break
+                found.append(f"a symbol defined at head: {where}")
+        if len(found) != len(paths) + len(symbols):
+            out.append(f)
+            continue
+        out.append(replace(f, drop_reason="claims removal of " + "; ".join(found)))
     return out
 
 
@@ -2912,6 +3473,14 @@ rule, whose ``locations`` and ``Also at:`` paragraph now list the folded
 finding's own location.
 """
 
+ROOT_CAUSE_PREFIX: str = "same root cause as "
+"""``drop_reason`` prefix of a finding :func:`apply_root_cause_fold` folded away.
+
+The full reason is ``same root cause as <file>:<line> (<evidence>)``, naming
+the kept finding's location, which now lists the folded finding's own, and
+what bound the two: ``shared code: a, b``, ``similar title`` or ``same rule``.
+"""
+
 RULE_CAP_LISTED_LOCATIONS: int = 5
 """Most locations the ``Also at:`` paragraph of :func:`apply_rule_cap` names.
 
@@ -2988,6 +3557,7 @@ def _fold_group(
     anchor = min(members, key=lambda i: _group_anchor_key(findings, i))
     representative = findings[anchor]
     anchor_line = _grouping_line(representative) or 0
+    inherited = {loc for i in members for loc in _own_locations(findings[i])}
     top_severity = min(
         (findings[i].severity.strip().lower() for i in members),
         key=lambda s: _SEVERITY_RANK[s],
@@ -3002,7 +3572,14 @@ def _fold_group(
         if (line := _grouping_line(findings[i]) or 0) > 0 and line != anchor_line
     })
     body = representative.body or ""
-    if other_lines:
+    merged = tuple((representative.file, line) for line in other_lines)
+    if inherited:
+        merged = tuple(sorted(
+            (inherited | set(merged)) - {(representative.file, anchor_line)}
+        ))
+        if merged:
+            body = _rule_cap_body(representative, merged)
+    elif other_lines:
         locations = ", ".join(
             f"`{representative.file}:{line}`" for line in other_lines
         )
@@ -3013,7 +3590,7 @@ def _fold_group(
         severity=top_severity,
         confidence=findings[most_confident].confidence,
         body=body,
-        locations=tuple((representative.file, line) for line in other_lines),
+        locations=merged,
     )
     reason = f"{GROUPED_INTO_PREFIX}{representative.file}:{anchor_line}"
     for i in members:
@@ -3161,10 +3738,13 @@ def _rule_cap_body(
     own = _own_locations(best)
     if own:
         grouped = "Also at: " + ", ".join(f"`{file}:{line}`" for file, line in own)
-        if body == grouped:
-            body = ""
-        elif body.endswith("\n\n" + grouped):
-            body = body[: -len("\n\n" + grouped)]
+        for listed in (grouped, _also_at_paragraph(own)):
+            if body == listed:
+                body = ""
+                break
+            if body.endswith("\n\n" + listed):
+                body = body[: -len("\n\n" + listed)]
+                break
     also_at = _also_at_paragraph(merged)
     return f"{body.rstrip()}\n\n{also_at}" if body.strip() else also_at
 
@@ -3328,6 +3908,390 @@ def _strip_also_at(body: str) -> str:
     """
     match = _ALSO_AT_PARAGRAPH_RE.search(body)
     return body[: match.start()] if match else body
+
+
+ROOT_CAUSE_LINE_WINDOW: int = 3
+"""Most lines apart two findings of one file may sit and still be compared.
+
+Three is the widest gap the #142 and #144 repeats show (1384 against 1387). The
+sibling-function A/B that made posting every site a measured win has its
+sites six lines apart, so the window has to stay under that.
+"""
+
+ROOT_CAUSE_TITLE_SIMILARITY: float = 0.5
+"""Lowest stemmed-title Jaccard index that binds two anchors a few lines apart."""
+
+ROOT_CAUSE_CODE_COVERAGE: float = 0.75
+"""Share of the smaller claim's code tokens the other claim must also name.
+
+Two defects in one block name the block's calls and also what each is about,
+so neither claim is covered by the other. A restatement names little that its
+twin does not. Two tokens out of three, the shape of one pattern at two sites,
+is under the bar.
+"""
+
+ROOT_CAUSE_BODY_OVERLAP: float = 0.5
+"""Lowest evidence-token Jaccard index between two bodies under one rule."""
+
+ROOT_CAUSE_CROSS_FILE_TITLE_TOKENS: int = 2
+"""Fewest stemmed title words, code names excluded, that count across files.
+
+Lower than :data:`TITLE_MIN_SHARED_TOKENS` because a cross-file pair must also
+clear the code coverage bar on tokens no more than three claims name. A word
+from a code name does not count: that name is already in the coverage bar, and
+one bug at two sites shares the name without sharing the prose around it.
+"""
+
+ROOT_CAUSE_TOKEN_RARITY_MAX: int = 3
+"""Most claims a code token may appear in and still bind a pair across files.
+
+One root cause is seldom restated more often than this; a name in more claims
+is a pattern at many sites, which is what the per-rule cap is for.
+"""
+
+_ROOT_CAUSE_LITERAL_RE = re.compile(r'"([A-Za-z_][\w.\-]{3,})"')
+_ROOT_CAUSE_ROUTE_RE = re.compile(r"(?<![\w.])/[\w{}.\-]+(?:/[\w{}.\-]+)+")
+_ROOT_CAUSE_INCONSISTENCY_RE = re.compile(
+    r"contradict|reconcil|mismatch|inconsisten|disagree", re.IGNORECASE
+)
+_ROOT_CAUSE_NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)")
+
+
+def _root_cause_candidate(finding: Finding, floor: float) -> bool:
+    return (
+        _grouping_candidate_key(finding, floor) is not None
+        and not heuristics.is_deterministic(finding)
+    )
+
+
+def _root_cause_keep_key(
+    finding: Finding,
+) -> tuple[int, int, tuple[float, str, int, str], str]:
+    return (
+        0 if (_grouping_line(finding) or 0) > 0 else 1,
+        _reworded_severity_rank(finding),
+        finding_rank_key(finding),
+        repr(finding),
+    )
+
+
+def _root_cause_code(text: str) -> set[str]:
+    stripped = _CITATION_RE.sub(" ", text)
+    literals = {
+        raw.lower()
+        for raw in _ROOT_CAUSE_LITERAL_RE.findall(stripped)
+        if raw.lower() not in _CODE_STOPWORDS
+    }
+    routes = {raw.lower() for raw in _ROOT_CAUSE_ROUTE_RE.findall(stripped)}
+    return _code_tokens(text) | literals | routes
+
+
+def _root_cause_claim(finding: Finding) -> set[str]:
+    suggestion = finding.suggestion if isinstance(finding.suggestion, str) else ""
+    return _root_cause_code(f"{finding.title or ''} {finding.body or ''} {suggestion}")
+
+
+def _stemmed_title_tokens(title: str) -> set[str]:
+    return {
+        word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+        for word in _title_tokens(title)
+    }
+
+
+def _title_prose_tokens(title: str) -> set[str]:
+    from_code = {
+        part
+        for token in _root_cause_code(title)
+        for part in _stemmed_title_tokens(token)
+    }
+    return _stemmed_title_tokens(title) - from_code
+
+
+def _same_title_route(a: Finding, b: Finding) -> bool:
+    routes_a = {raw.lower() for raw in _ROOT_CAUSE_ROUTE_RE.findall(a.title or "")}
+    routes_b = {raw.lower() for raw in _ROOT_CAUSE_ROUTE_RE.findall(b.title or "")}
+    return bool(routes_a & routes_b)
+
+
+def _numbers_disagree(a: Finding, b: Finding) -> bool:
+    numbers_a, numbers_b = (
+        set(_ROOT_CAUSE_NUMBER_RE.findall(
+            _CITATION_RE.sub(" ", f"{f.title or ''} {f.body or ''}")
+        ))
+        for f in (a, b)
+    )
+    return bool(numbers_a - numbers_b and numbers_b - numbers_a)
+
+
+def _same_label(a: Finding, b: Finding) -> bool:
+    label_a = " ".join((a.rule or "").split()).casefold()
+    return bool(label_a) and label_a == " ".join((b.rule or "").split()).casefold()
+
+
+def _same_remedy(a: Finding, b: Finding) -> bool:
+    if not (isinstance(a.suggestion, str) and isinstance(b.suggestion, str)):
+        return False
+    remedy = " ".join(a.suggestion.split())
+    return bool(remedy) and remedy == " ".join(b.suggestion.split())
+
+
+def _shared_problem_class(a: Finding, b: Finding) -> bool:
+    title_a, title_b = a.title or "", b.title or ""
+    if _problem_classes(title_a) & _problem_classes(title_b):
+        return True
+    return bool(
+        _ROOT_CAUSE_INCONSISTENCY_RE.search(title_a)
+        and _ROOT_CAUSE_INCONSISTENCY_RE.search(title_b)
+    )
+
+
+def _titles_name_different_code(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str]
+) -> bool:
+    return bool(
+        _root_cause_code(a.title or "") - claim_b
+        and _root_cause_code(b.title or "") - claim_a
+    )
+
+
+def _code_covered(shared: set[str], claim_a: set[str], claim_b: set[str]) -> bool:
+    return (
+        len(shared) >= CODE_OVERLAP_MIN_SHARED
+        and len(shared) >= ROOT_CAUSE_CODE_COVERAGE * min(len(claim_a), len(claim_b))
+    )
+
+
+def _shared_code_reason(shared: set[str]) -> str:
+    named = ", ".join(sorted(shared)[:CODE_OVERLAP_REASON_TOKENS])
+    return f"shared code: {named}"
+
+
+def _same_file_evidence(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str]
+) -> str | None:
+    line_a, line_b = _grouping_line(a) or 0, _grouping_line(b) or 0
+    if (line_a == 0) != (line_b == 0) or abs(line_a - line_b) > ROOT_CAUSE_LINE_WINDOW:
+        return None
+    shared = claim_a & claim_b
+    covered = _code_covered(shared, claim_a, claim_b)
+    words_a = _stemmed_title_tokens(a.title or "")
+    words_b = _stemmed_title_tokens(b.title or "")
+    common = len(words_a & words_b)
+    title_code = _root_cause_code(a.title or "") & _root_cause_code(b.title or "")
+    if covered and (
+        common >= TITLE_MIN_SHARED_TOKENS or title_code or _shared_problem_class(a, b)
+    ):
+        return _shared_code_reason(shared)
+    if claim_a and claim_b and not (
+        covered or (shared and min(len(claim_a), len(claim_b)) == 1)
+    ):
+        return None
+    if _numbers_disagree(a, b):
+        return None
+    if common >= TITLE_MIN_SHARED_TOKENS and (
+        line_a == line_b
+        or common / len(words_a | words_b) >= ROOT_CAUSE_TITLE_SIMILARITY
+    ):
+        return "similar title"
+    if _same_label(a, b):
+        body_a = _evidence_tokens(a.body or "")
+        body_b = _evidence_tokens(b.body or "")
+        overlap = len(body_a & body_b)
+        if (
+            overlap >= SETTLED_MIN_SHARED_TOKENS
+            and overlap / len(body_a | body_b) >= ROOT_CAUSE_BODY_OVERLAP
+        ):
+            return "same rule"
+    return None
+
+
+def _cross_file_evidence(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str], rare: set[str]
+) -> str | None:
+    shared = claim_a & claim_b & rare
+    if not _code_covered(shared, claim_a, claim_b):
+        return None
+    common = _title_prose_tokens(a.title or "") & _title_prose_tokens(b.title or "")
+    if (
+        len(common) >= ROOT_CAUSE_CROSS_FILE_TITLE_TOKENS
+        or _same_label(a, b)
+        or _same_remedy(a, b)
+        or _same_title_route(a, b)
+    ):
+        return _shared_code_reason(shared)
+    return None
+
+
+def _root_cause_evidence(
+    a: Finding, b: Finding, claim_a: set[str], claim_b: set[str], rare: set[str]
+) -> str | None:
+    if _titles_name_different_code(a, b, claim_a, claim_b):
+        return None
+    if a.file == b.file:
+        return _same_file_evidence(a, b, claim_a, claim_b)
+    return _cross_file_evidence(a, b, claim_a, claim_b, rare)
+
+
+def severity_rank(finding: Finding) -> int:
+    """0 for ``error``, then ``warning``, ``spec``, ``outofscope``; a severity outside them ranks last."""
+    return _reworded_severity_rank(finding)
+
+
+def same_cause_in_file(a: Finding, b: Finding) -> str | None:
+    """Why two findings of one file raise the same cause, or ``None`` (#143).
+
+    The stability merge's match test. It is :func:`_root_cause_evidence` for
+    one file, so the anchors must sit within :data:`ROOT_CAUSE_LINE_WINDOW`
+    lines and every veto of the fold applies: titles naming different code,
+    claims that disagree, and numbers that differ. On top of it, two findings
+    with the same normalized title match when their claims share enough code
+    tokens to clear the fold's coverage bar, so a short title that names no
+    three words still merges with its own rewording. Findings of different
+    files never match. Pure: it reads only the two findings.
+    """
+    if a.file != b.file:
+        return None
+    claim_a, claim_b = _root_cause_claim(a), _root_cause_claim(b)
+    evidence = _root_cause_evidence(a, b, claim_a, claim_b, set())
+    if evidence is not None:
+        return evidence
+    line_a, line_b = _grouping_line(a) or 0, _grouping_line(b) or 0
+    if (line_a == 0) != (line_b == 0) or abs(line_a - line_b) > ROOT_CAUSE_LINE_WINDOW:
+        return None
+    title = normalize_title(a.title or "")
+    if not title or title != normalize_title(b.title or ""):
+        return None
+    if _titles_name_different_code(a, b, claim_a, claim_b) or _numbers_disagree(a, b):
+        return None
+    shared = claim_a & claim_b
+    if _code_covered(shared, claim_a, claim_b):
+        return _shared_code_reason(shared)
+    return None
+
+
+def _fold_root_cause(
+    findings: Sequence[Finding],
+    kept: int,
+    folded: Sequence[tuple[int, str]],
+    result: list[Finding],
+) -> None:
+    best = findings[kept]
+    best_line = _grouping_line(best) or 0
+    members = [kept, *(i for i, _ in folded)]
+    merged = set(_own_locations(best))
+    for i, evidence in folded:
+        member = findings[i]
+        merged.add((member.file, _grouping_line(member) or 0))
+        merged.update(_own_locations(member))
+        result[i] = replace(
+            member,
+            drop_reason=f"{ROOT_CAUSE_PREFIX}{best.file}:{best_line} ({evidence})",
+        )
+    merged.discard((best.file, best_line))
+    ordered = tuple(sorted(merged))
+    result[kept] = replace(
+        best,
+        severity=min(
+            (findings[i].severity.strip().lower() for i in members),
+            key=lambda s: _SEVERITY_RANK[s],
+        ),
+        confidence=max(_grouping_confidence(findings[i]) or 0.0 for i in members),
+        locations=ordered,
+        body=_rule_cap_body(best, ordered) if ordered else best.body,
+    )
+
+
+def apply_root_cause_fold(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+) -> list[Finding]:
+    """Fold reworded findings about one root cause into one finding (#142, #144).
+
+    Always on, with no knob, and independent of ``PRXREF_DEDUP_SIMILARITY``,
+    whose reworded tier compares only one exact line. A candidate meets
+    :func:`apply_rule_grouping`'s terms (active, a known severity, at or above
+    the confidence floor, chunk side) and is not a deterministic check's
+    finding. Sweep findings stay with :func:`apply_sweep_dedup`.
+
+    A claim's code tokens are :func:`_code_tokens` over its title, body and
+    suggestion, plus double-quoted identifier literals and multi-segment
+    routes. Whatever the two files, a pair is never folded when each title
+    names a code token the other claim never mentions: their subjects differ.
+
+    **In one file** the anchors must be within :data:`ROOT_CAUSE_LINE_WINDOW`
+    lines (two file-level findings count as one line; a file-level finding is
+    not compared with an anchored one), and one of these must hold:
+
+    - *shared code*: at least :data:`CODE_OVERLAP_MIN_SHARED` shared tokens
+      that cover :data:`ROOT_CAUSE_CODE_COVERAGE` of the smaller claim, and
+      the titles agree: :data:`TITLE_MIN_SHARED_TOKENS` stemmed words, a
+      common code token, or a common problem class (contradiction included).
+    - *similar title*: :data:`TITLE_MIN_SHARED_TOKENS` stemmed words shared,
+      with :data:`ROOT_CAUSE_TITLE_SIMILARITY` Jaccard unless on one line.
+    - *same rule*: the same ``rule``, and bodies sharing at least
+      :data:`SETTLED_MIN_SHARED_TOKENS` :func:`_evidence_tokens` at
+      :data:`ROOT_CAUSE_BODY_OVERLAP` Jaccard.
+
+    The last two are off when both claims name code and it disagrees: no
+    shared token, or several tokens each with too little in common. That is
+    how sibling functions under one title stay apart. They are also off when
+    each claim states a number the other does not (one title over the limits
+    42 and 43 is two values at two sites).
+
+    **Across files** the shared tokens, counting only those at most
+    :data:`ROOT_CAUSE_TOKEN_RARITY_MAX` candidate claims name, must clear the
+    same count and coverage bars, and the pair must also have the same
+    ``rule``, the same suggestion, one route in both titles, or
+    :data:`ROOT_CAUSE_CROSS_FILE_TITLE_TOKENS` stemmed title words in common
+    that do not come from a code name. A shared problem class is no signal
+    here: one injection at two call sites has the class and the names too.
+
+    Candidates are walked in a fixed order: anchored before file-level, more
+    severe first, then :func:`finding_rank_key`, then the finding's ``repr``.
+    Each is compared only with findings already kept and folds onto the first
+    match, so the result does not depend on input order and a dropped copy
+    never drops a third. A kept finding takes its group's highest severity and
+    highest confidence, and lists every folded ``(file, line)`` and every
+    location those findings already listed in ``locations`` and a last
+    ``Also at:`` paragraph, so no location is lost. A folded finding keeps its
+    identity and gains ``drop_reason`` ``same root cause as <file>:<line>
+    (<evidence>)``.
+
+    Runs after the rule-scope and rule-category checks, so a wrong label never
+    binds a pair, and before grouping, the per-rule cap and the gate, so a
+    repeat spends none of them. Pure apart from reading
+    ``PRXREF_CONFIDENCE_FLOOR`` when ``confidence_floor`` is ``None``; the
+    result has the input's length and order, and a finding it does not change
+    is returned as the same object.
+    """
+    floor = _resolve_confidence_floor(confidence_floor)
+    candidates = [
+        i for i, f in enumerate(findings[:max(0, sweep_start)])
+        if _root_cause_candidate(f, floor)
+    ]
+    claims = {i: _root_cause_claim(findings[i]) for i in candidates}
+    counts: Counter[str] = Counter()
+    for tokens in claims.values():
+        counts.update(tokens)
+    rare = {tok for tok, n in counts.items() if n <= ROOT_CAUSE_TOKEN_RARITY_MAX}
+    folded: dict[int, list[tuple[int, str]]] = {}
+    for i in sorted(candidates, key=lambda c: _root_cause_keep_key(findings[c])):
+        for k in folded:
+            evidence = _root_cause_evidence(
+                findings[k], findings[i], claims[k], claims[i], rare,
+            )
+            if evidence is not None:
+                folded[k].append((i, evidence))
+                break
+        else:
+            folded[i] = []
+    result = list(findings)
+    for kept, members in folded.items():
+        if members:
+            _fold_root_cause(findings, kept, members, result)
+    return result
 
 
 def _location_verified(

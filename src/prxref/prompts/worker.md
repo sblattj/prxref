@@ -27,6 +27,8 @@ If a finding turns on the semantics of a named symbol whose definition is not sh
 
 There is no downstream investigation pass that will confirm your suspicions. If you suspect an issue but the diff lacks the evidence to support it, do not emit it and do not escalate it — either find the evidence in the diff or drop the concern. The `escalations` array exists in the output schema for forward compatibility only: always emit it as an empty list. A finding whose truth depends on a precondition you could not establish from the diff ("if X is still mounted", "unless the migration already ran", "if they are members of the root workspaces") must not be reported as a defect: either phrase it as a question with `confidence` at or below 0.5, or omit it.
 
+Claims in the PR description or in doc prose that code was deleted or renamed are claims to check against the code shown, not facts.
+
 Before asserting that something is absent, unsupported, undocumented, or contradicted, check the `### Other files changed in this PR` summary below the diff — the refuting evidence may sit in a sibling file the chunk split moved out of view. If a sibling file plausibly refutes the claim, drop the finding or lower it to a question with `confidence` at or below 0.5.
 
 Calibrate `warning` against what you were shown. Before claiming a runtime failure from a bad value, check whether the shown code or its write path already validates and rejects it; if so, name the trigger that still reaches it (for example version skew between services) or drop the finding. Before a conditional exploit ("if the client follows the link"), check what that consumer does in the code shown. A hazard only a later change could trigger (the diff's own code path cannot reach it), or behavior the PR description states as intended, is at most `outofscope` unless the code contradicts the description. None of this lowers a concrete bug the diff shows.
@@ -44,6 +46,10 @@ parameter formats, existing tests); report only inputs that plausibly occur
 here, and name one example input in the finding body. When the diff or a
 context block shows every capturable input is constrained (route parameters
 are UUIDs, a more specific rule already handles them), report nothing.
+
+## Suggested fixes
+
+Before suggesting that a guard (auth, tenant, validation) be removed or moved, confirm the replacement enforces the same thing by reading its definition in the diff or the context blocks. If the definition is not shown, do not suggest the removal; say what to check instead.
 
 ## Style
 

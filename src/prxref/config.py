@@ -17,6 +17,10 @@ LLM / pipeline:
   PRXREF_LLM_MODELS             Comma- or whitespace-separated model fallback
                                 chain, first that answers wins; required by
                                 every backend
+  PRXREF_LLM_REQUIRE_MODELS     Comma- or whitespace-separated models allowed
+                                to answer a review unit; a unit answered by
+                                any other model makes the verdict Incomplete
+                                (empty = no check, the default)
   PRXREF_LLM_REASONING_EFFORT   Reasoning effort for models that cannot
                                 disable reasoning; provider-specific string,
                                 passed through unvalidated; empty = omit
@@ -145,6 +149,20 @@ LLM / pipeline:
                                 ``prxref review --trace-dir DIR`` is the
                                 per-run equivalent and wins when both are
                                 set.
+  PRXREF_EVAL_PINS              "on" applies the eval harness's pins
+                                (prxref.evals.EVAL_PINS: ci_wiring "off",
+                                routing_probe "off", context_standards_globs
+                                empty, ticket_ids_from_title "off") to ``prxref review`` and the webhook
+                                daemon, exactly as ``prxref eval run`` applies
+                                them: above the environment, the config file
+                                and any flag that sets the same key, so a CI
+                                review runs with the settings a rules pack was
+                                measured under (#137). "off" (the default)
+                                pins nothing; ``--eval-pins`` is the per-run
+                                equivalent. Matched exactly, like
+                                PRXREF_FAIL_ON. Environment-only: it overrides
+                                other keys, so a config file setting it would
+                                override its own values.
   PRXREF_DRY_RUN                literal "1" reviews without writing anything
                                 to the forge — no summary, no inline comments
                                 (default off). Applies to the webhook daemon
@@ -377,6 +395,24 @@ LLM / pipeline:
                                 Characters of ticket text kept in the
                                 prompt; longer is truncated with a visible
                                 marker; positive int (default 6000)
+  PRXREF_TICKET_IDS_FROM_TITLE  ``off`` (default) or ``on`` (#145). ``on``
+                                fetches every Jira key in the PR title
+                                (``[T-1][T-2] ...``) through the spec
+                                Jira path, joins the tickets after any
+                                ticket file under
+                                PRXREF_TICKET_CONTEXT_MAX_CHARS, and lists
+                                the keys read, and any that could not be
+                                read, in the summary and the run record.
+                                Needs PRXREF_JIRA_BASE_URL (an http(s)
+                                URL); PRXREF_JIRA_EMAIL and
+                                PRXREF_JIRA_API_TOKEN go together or not at
+                                all; a missing or malformed one is a
+                                configuration error. A key that cannot be
+                                read never fails the review. Anything
+                                shaped like a key counts (``UTF-8``), and
+                                its failed fetch makes the ticket partial.
+                                Environment only: it reaches a network
+                                host. Matched exactly.
   PRXREF_EVIDENCE_FILES         Execution evidence (#69): paths to files of
                                 commands the caller ran (a CI step, an
                                 agent, a script) — nginx -t, helm lint, the
@@ -456,6 +492,17 @@ LLM / pipeline:
                                 repository reader, the run logs one WARNING
                                 and the follow-up stays off for that run. Any
                                 other value is a configuration error
+  PRXREF_DEFAULT_BRANCH_CHECK   Default-branch check (#146): "off" (the
+                                default) makes no extra call and leaves the
+                                run exactly as it was. "on": on a stacked PR
+                                (target branch is not the repository's default
+                                branch), a versioning finding whose own file,
+                                or the surface it names, is absent from the
+                                default branch is lowered to the minor tier
+                                (outofscope) with a note, never dropped; at
+                                most 20 files are read per run and there is
+                                no release-tag check. Any other value is a
+                                configuration error
   PRXREF_VERIFY_ERRORS          Error verification (#126): checks every
                                 active model error at or above the
                                 confidence floor against the head file
@@ -472,6 +519,20 @@ LLM / pipeline:
   PRXREF_VERIFY_ERRORS_MAX      Error verification (#126): model calls one
                                 run may make at "llm", most confident errors
                                 first; non-negative int (default 5)
+  PRXREF_STABILITY_PASSES       Stability mode (#143): how many times the chunk
+                                workers run over the same chunks and prompts;
+                                integer 1 to 5 (default 1, which is off and
+                                leaves the run exactly as it was). Above 1,
+                                each extra pass costs about one more run of
+                                the chunk tokens, and a fixed integer seed
+                                becomes seed, seed+1, ... one per pass.
+                                Environment-only: it multiplies token spend.
+  PRXREF_STABILITY_MIN_AGREE    Stability mode (#143): passes that must raise
+                                a finding for it to post; integer 1 to 5 (default
+                                1, the union: nothing is removed), at most
+                                PRXREF_STABILITY_PASSES or the run exits 2.
+                                A pass that failed shrinks the bar for its
+                                chunk. Environment-only: it removes findings.
   PRXREF_SUGGESTIONS            Code suggestions (#30): "off" (the default)
                                 leaves every prompt, call and finding as
                                 before, and the run record's "suggestions"
@@ -842,7 +903,9 @@ Config file (#38):
   only (no walk up the tree). The value ``off`` (any case) in the flag or the
   variable disables the file. PRXREF_CONFIG_FILE is read only there; it is
   not a config key. Credentials, endpoints, executables, local writes, local
-  reads and the gate stay environment-only (:data:`ENV_ONLY_KEYS`), paths
+  reads, the gate, ``eval_pins`` (which overrides other keys) and the two
+  stability keys (token spend, and the removal of findings) stay
+  environment-only (:data:`ENV_ONLY_KEYS`), paths
   set by the file must stay inside its directory, ``spec_sources`` in the
   file takes local paths only, and an unknown key is an error.
   ``llm_temperature`` takes a TOML number or a string. See
@@ -888,6 +951,7 @@ _DEFAULTS: dict[str, object] = {
     "llm_base_url": "",
     "llm_api_key": "",
     "llm_models": [],
+    "llm_require_models": [],
     "llm_reasoning_effort": "",
     "llm_max_tokens": 4096,
     "llm_timeout": 120.0,
@@ -958,6 +1022,7 @@ _DEFAULTS: dict[str, object] = {
     "prompts_dir": None,
     "ticket_context_file": "",
     "ticket_context_max_chars": 6000,
+    "ticket_ids_from_title": "off",
     # Execution evidence (#69): caller-run command results as review
     # context. The list mirrors spec_sources/scoped_rules (paths from the
     # environment or the repeatable --evidence-file flag, which replaces
@@ -970,6 +1035,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_reads": 200,
     "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
+    "default_branch_check": "off",
     # Error verification (#126): vocabulary restated from
     # prxref.verify.VERIFY_MODES (config stays a leaf module).
     "verify_errors": "names",
@@ -977,6 +1043,11 @@ _DEFAULTS: dict[str, object] = {
     "suggestions": "off",
     "review_depth": "standard",
     "routing_probe": "on",
+    # Eval pins on review (#137): applies prxref.evals.EVAL_PINS.
+    "eval_pins": "off",
+    # Stability mode (#143): 1 pass is off.
+    "stability_passes": 1,
+    "stability_min_agree": 1,
     "incremental": "off",
     # PR auto-description and auto-labels (#37): both opt-in. Vocabularies
     # restated from prxref.describe.DESCRIBE_MODES / LABEL_MODES (config
@@ -1106,7 +1177,7 @@ _INT_KEYS = frozenset({
     "max_areas_per_pr", "evidence_max_chars", "verify_errors_max",
     "context_standards_max_chars",
     "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
-    "gate_reconcile_minutes",
+    "gate_reconcile_minutes", "stability_passes", "stability_min_agree",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -1116,7 +1187,8 @@ _BOOL_KEYS = frozenset({
     "stable_ids", "dedup_code_overlap",
 })
 _LIST_KEYS = frozenset({
-    "llm_models", "spec_sources", "size_ignore_globs", "review_skip_globs", "scoped_rules",
+    "llm_models", "llm_require_models", "spec_sources", "size_ignore_globs",
+    "review_skip_globs", "scoped_rules",
     "context_contract_globs", "context_exclude_globs",
     "branch_patterns", "area_globs", "ci_wiring_globs", "evidence_files",
     "context_standards_globs", "gate_installation_ids", "gate_repos",
@@ -1132,16 +1204,19 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "fail_on": frozenset({"never", "error", "any"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
+    "default_branch_check": frozenset({"off", "on"}),
     "verify_errors": frozenset({"off", "names", "llm"}),
     "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
     "review_depth": frozenset({"standard", "thorough"}),
     "routing_probe": frozenset({"off", "on"}),
+    "eval_pins": frozenset({"off", "on"}),
     "incremental": frozenset({"off", "on"}),
     "describe": frozenset({"off", "empty", "force"}),
     "labels": frozenset({"off", "existing", "create"}),
     "fallback": frozenset({"auto", "off"}),
     "ci_wiring": frozenset({"off", "on"}),
+    "ticket_ids_from_title": frozenset({"off", "on"}),
 }
 
 # ``llm_seed``'s one non-integer value: send no seed at all. Matched exactly
@@ -1252,6 +1327,8 @@ _RANGES: dict[str, _Range] = {
     "max_outofscope_findings": _Range(0, low_inclusive=True),
     "max_findings_per_rule": _Range(0, low_inclusive=True),
     "verify_errors_max": _Range(0, low_inclusive=True),
+    "stability_passes": _Range(1, 5, low_inclusive=True),
+    "stability_min_agree": _Range(1, 5, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
     "repo_context_max_chars": _Range(0),
     "repo_context_max_reads": _Range(0),
@@ -1288,7 +1365,7 @@ CONFIG_DOCS_URL = "https://github.com/sblattj/prxref/blob/main/docs/config-file.
 #: Keys a repository config file may set (#38). Listed by hand, like
 #: :data:`ENV_ONLY_KEYS`, so a new key must be classified before it loads.
 FILE_KEYS = frozenset({
-    "llm_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
+    "llm_models", "llm_require_models", "llm_reasoning_effort", "llm_max_tokens", "llm_timeout",
     "llm_timeout_per_1k",
     "llm_temperature", "llm_seed", "llm_cli_concurrency", "llm_parse_retries",
     "confidence_floor", "max_error_findings", "max_warning_findings",
@@ -1305,7 +1382,7 @@ FILE_KEYS = frozenset({
     "ticket_context_file", "ticket_context_max_chars",
     "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
-    "verify_errors", "verify_errors_max",
+    "default_branch_check", "verify_errors", "verify_errors_max",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "routing_probe", "incremental", "describe", "labels",
     "context_contract_globs", "context_exclude_globs",
@@ -1326,6 +1403,9 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "allow_unsigned": "gate",
     "rules_source": "gate",
     "review_skip_globs": "gate",
+    "eval_pins": "override",
+    "stability_passes": "spend",
+    "stability_min_agree": "gate",
     "gate_app_id": "credential",
     "gate_private_key_file": "credential",
     "gate_installation_ids": "gate",
@@ -1342,6 +1422,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "trace_dir": "local write",
     "fallback": "local write",
     "price_table": "local read",
+    "ticket_ids_from_title": "endpoint",
     "jira_base_url": "endpoint",
     "jira_email": "credential",
     "jira_api_token": "credential",
@@ -1366,7 +1447,8 @@ _ENV_ONLY_REASONS: dict[str, str] = {
 #: Keys only the pipeline may set (#38). A repository file is controlled by
 #: whoever can change the repository, a PR author included when CI reads the
 #: PR's checkout, so credentials, endpoints, executables, local reads and
-#: writes, and the gate never come from it.
+#: writes, and the gate never come from it, nor does ``eval_pins``, which
+#: overrides other keys and so would override the file's own values (#137).
 ENV_ONLY_KEYS = frozenset(_ENV_ONLY_REASONS)
 
 _FILE_PATH_KEYS = frozenset({
@@ -1726,6 +1808,49 @@ def _check_post_mode(cfg: dict[str, object], sources: dict[str, str]) -> None:
         )
 
 
+def _check_stability(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Require ``stability_min_agree`` to be at most ``stability_passes`` (#143).
+
+    A bar above the pass count could never be met. Same doctrine as
+    :func:`_check_post_mode`: a ``ConfigError`` (exit 2) naming the variable
+    that supplied ``stability_min_agree``, before anything is reviewed.
+    """
+    passes, agree = cfg["stability_passes"], cfg["stability_min_agree"]
+    if agree > passes:
+        raise ConfigError(
+            f"{sources['stability_min_agree']}: must be at most "
+            f"{sources['stability_passes']} ({passes}), got {agree}"
+        )
+
+
+def _check_title_tickets(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """With ``ticket_ids_from_title`` on, require a usable Jira setup (#145).
+
+    A bare key has no URL to fall back to, so ``jira_base_url`` must be an
+    http(s) URL, and ``jira_email`` and ``jira_api_token`` must be set
+    together or not at all. Same doctrine as :func:`_check_post_mode`: a
+    ``ConfigError`` (exit 2) naming the variable that supplied the value, and
+    the key itself, before anything is reviewed.
+    """
+    if cfg["ticket_ids_from_title"] != "on":
+        return
+    key = sources["ticket_ids_from_title"]
+    base = cfg["jira_base_url"]
+    if not isinstance(base, str) or not base.strip():
+        raise ConfigError(
+            f"{key}: on needs {sources['jira_base_url']} to name the Jira to read the tickets from"
+        )
+    if not re.match(r"https?://[^/\s]+", base.strip()):
+        raise ConfigError(
+            f"{sources['jira_base_url']}: must be an http(s) URL when {key} is on, got {base!r}"
+        )
+    if bool(cfg["jira_email"]) != bool(cfg["jira_api_token"]):
+        raise ConfigError(
+            f"{key}: on needs {sources['jira_email']} and {sources['jira_api_token']} "
+            "set together, or neither"
+        )
+
+
 def _check_price_table(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """Parse ``price_table`` in place, rejecting a malformed table.
 
@@ -1971,6 +2096,8 @@ def load_config_with_sources(
     _check_ranges(cfg, sources)
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
+    _check_stability(cfg, sources)
+    _check_title_tickets(cfg, sources)
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)

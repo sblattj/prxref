@@ -41,7 +41,10 @@ class _LLM:
     """Answers the describe prompt with ``describe_reply`` and every review prompt with ``review_reply``."""
 
     def __init__(self, describe_reply: str = DESCRIBE_REPLY, review_reply: str = ONE_FINDING,
-                 describe_error: Exception | None = None):
+                 describe_error: Exception | None = None,
+                 describe_model: str = "fake-model", describe_requested: str = ""):
+        self.describe_model = describe_model
+        self.describe_requested = describe_requested
         self.describe_reply = describe_reply
         self.review_reply = review_reply
         self.describe_error = describe_error
@@ -58,7 +61,9 @@ class _LLM:
         return InvokeResult(
             text=self.describe_reply if is_describe else self.review_reply,
             input_tokens=100 if is_describe else 10, output_tokens=7 if is_describe else 5,
-            model="fake-model", backend="fake", elapsed_ms=1,
+            model=self.describe_model if is_describe else "fake-model",
+            requested_model=self.describe_requested if is_describe else "",
+            backend="fake", elapsed_ms=1,
             cost_usd=0.5 if is_describe else 0.25,
         )
 
@@ -304,6 +309,68 @@ class TestFailureIsolation:
         assert len(forge.descriptions) == 1
         assert res["describe"]["written"] is True
         assert "labels down" in res["describe"]["error"]
+
+
+class TestRequireModels:
+    """Issue #138: a description a disallowed fallback answered is not written."""
+
+    ALLOW = ["fake-model"]
+
+    def test_a_disallowed_fallback_writes_nothing_and_applies_no_labels(self, caplog):
+        base, _ = _run(_WritingForge(""), describe_mode="empty", labels_mode="create")
+        forge = _WritingForge("")
+        llm = _LLM(describe_model="fb-2026", describe_requested="vendor/fallback")
+        with caplog.at_level("WARNING", logger="prxref"):
+            res, _ = _run(
+                forge, llm, describe_mode="empty", labels_mode="create",
+                llm_require_models=self.ALLOW,
+            )
+        assert len(llm.describe_calls) == 1
+        assert forge.descriptions == [] and forge.label_calls == [] and forge.list_calls == 0
+        rec = res["describe"]
+        assert rec["written"] is False and rec["error"] is None
+        assert rec["reason"] == (
+            "the description was answered by vendor/fallback, reported as fb-2026, "
+            "which PRXREF_LLM_REQUIRE_MODELS does not allow"
+        )
+        assert [r.getMessage() for r in caplog.records if "PRXREF_LLM_REQUIRE_MODELS" in r.getMessage()
+                and r.name == "prxref"] == [f"describe: {rec['reason']}; not written"]
+        assert res["verdict"] == base["verdict"]
+        assert res["cost_usd"] is not None
+
+    def test_a_disallowed_model_with_no_chain_entry_is_named_by_its_reported_id(self):
+        forge = _WritingForge("")
+        res, _ = _run(
+            forge, _LLM(describe_model="fb-2026"), describe_mode="empty",
+            llm_require_models=self.ALLOW,
+        )
+        assert forge.descriptions == []
+        assert "answered by fb-2026, which" in res["describe"]["reason"]
+
+    def test_an_allowed_chain_entry_is_written(self):
+        forge = _WritingForge("")
+        llm = _LLM(describe_model="fb-2026", describe_requested="fake-model")
+        res, _ = _run(
+            forge, llm, describe_mode="empty", labels_mode="create",
+            llm_require_models=self.ALLOW,
+        )
+        assert len(forge.descriptions) == 1 and forge.label_calls
+        assert res["describe"]["written"] is True
+
+    def test_an_allowed_reported_id_is_written(self):
+        forge = _WritingForge("")
+        res, _ = _run(
+            forge, _LLM(describe_requested="vendor/other"), describe_mode="empty",
+            llm_require_models=self.ALLOW,
+        )
+        assert len(forge.descriptions) == 1 and res["describe"]["written"] is True
+
+    def test_an_empty_guard_writes_whatever_answered(self):
+        forge = _WritingForge("")
+        llm = _LLM(describe_model="fb-2026", describe_requested="vendor/fallback")
+        res, _ = _run(forge, llm, describe_mode="empty", labels_mode="create", llm_require_models=())
+        assert len(forge.descriptions) == 1 and forge.label_calls
+        assert res["describe"]["written"] is True
 
 
 class TestNoPost:

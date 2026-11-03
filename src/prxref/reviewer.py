@@ -65,7 +65,7 @@ from .chunk_context import sibling_summary_block
 from .costs import combine_reported, valid_usd
 from .forges.base import Thread
 from .llm import LLMClient
-from .parser import loads_lenient
+from .parser import loads_lenient, strip_json_fences
 from .quality import MAX_SUGGESTION_LINES
 from .triage import (
     RULE_MAX_CHARS,
@@ -249,10 +249,26 @@ def _fold_retry_usage(meta: dict, result: Any) -> None:
     meta["input_tokens"] = (meta["input_tokens"] or 0) + (result.input_tokens or 0)
     meta["output_tokens"] = (meta["output_tokens"] or 0) + (result.output_tokens or 0)
     meta["model"] = result.model
+    _stamp_requested_model(meta, result)
     meta["cost_usd"], meta["cost_source"] = combine_reported([
         (meta["cost_usd"], meta["cost_source"]),
         _result_cost(result),
     ])
+
+
+def _stamp_requested_model(meta: dict, result: Any) -> None:
+    """Set ``meta["requested_model"]`` to the chain entry ``result`` answered from.
+
+    The key follows ``model``: it names the call whose reply the unit used,
+    and it is present only when the backend reported an entry (a stub result
+    without one leaves ``meta`` exactly as it was before issue #138), so a
+    retry that answered without one removes an earlier call's entry.
+    """
+    requested = str(getattr(result, "requested_model", "") or "")
+    if requested:
+        meta["requested_model"] = requested
+    else:
+        meta.pop("requested_model", None)
 
 
 def load_prompt(name: str) -> str:
@@ -707,11 +723,28 @@ def _remove_stale_attempts(base: str, first: int) -> None:
 _NO_FINDINGS_ERROR = "worker review JSON has no findings list"
 
 
+def _is_whole_empty_list(text: str) -> bool:
+    """True when the reply, minus code fences, is exactly the JSON value ``[]``.
+
+    :func:`loads_lenient` also digs a balanced span out of a malformed
+    object (its ``"escalations": []`` tail), so a parsed ``[]`` alone does
+    not prove the model answered with nothing.
+    """
+    try:
+        return json.loads(strip_json_fences(text if isinstance(text, str) else "")) == []
+    except ValueError:
+        return False
+
+
 def _read_reply(result: Any, *, require_findings: bool) -> tuple[Any, str, bool]:
     """Parse one reply into ``(parsed, problem, unparseable)``.
 
     ``problem`` is ``""`` for a usable reply: one that parses to a JSON
-    object and, when ``require_findings``, holds a ``findings`` list.
+    object and, when ``require_findings``, holds a ``findings`` list. A
+    bare EMPTY list (the whole reply is ``[]``, fenced or not) is read as
+    ``{"findings": []}``: the model said "nothing to report" in the one
+    shape it had to hand, so it is a clean reply and earns no retry. Any
+    other non-object (a non-empty list, ``null``, a number) is not usable.
     Otherwise it is the error the unit reports for this reply when the
     budget is not to blame, and ``unparseable`` is true when no strategy of
     :func:`prxref.parser.loads_lenient` produced JSON at all.
@@ -720,6 +753,8 @@ def _read_reply(result: Any, *, require_findings: bool) -> tuple[Any, str, bool]
         parsed = loads_lenient(result.text)
     except Exception as e:  # noqa: BLE001
         return None, f"{type(e).__name__}: {e}", True
+    if isinstance(parsed, list) and not parsed and _is_whole_empty_list(result.text):
+        parsed = {"findings": []}
     if not isinstance(parsed, dict):
         return parsed, f"worker review JSON is not an object: {type(parsed).__name__}", False
     if require_findings and not isinstance(parsed.get("findings"), list):
@@ -886,6 +921,7 @@ def _invoke_and_parse(
             meta["input_tokens"] = result.input_tokens
             meta["output_tokens"] = result.output_tokens
             meta["model"] = result.model
+            _stamp_requested_model(meta, result)
             meta["cost_usd"], meta["cost_source"] = _result_cost(result)
 
         stop_reason = _budget_stop_reason(result)

@@ -318,7 +318,12 @@ class TestStates:
         not in view: the note says scope came from the description alone."""
         path = _write(tmp_path / "t.md", AC_TICKET)
         cut = AC_TICKET.index("## Acceptance")
-        assert _load(path, max_chars=cut).note() == NOTE_NO_AC
+        note = _load(path, max_chars=cut).note()
+        assert note.startswith(NOTE_NO_AC)
+        assert note[len(NOTE_NO_AC):] == (
+            f"> ℹ️ The ticket was cut at {cut} of {len(AC_TICKET)} characters; "
+            "findings are not marked outside a ticket that was not fully read.\n"
+        )
         assert _load(path).note() == ""
 
 

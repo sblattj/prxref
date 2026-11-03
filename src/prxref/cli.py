@@ -447,6 +447,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rev.add_argument(
+        "--eval-pins",
+        action="store_true",
+        help=(
+            "apply the settings prxref eval run pins (CI wiring check, "
+            "routing probe, standards discovery and title ticket ids off), over the "
+            "environment, the config file and any flag that sets them "
+            "(PRXREF_EVAL_PINS=on does the same)"
+        ),
+    )
+    rev.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -1189,10 +1199,15 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
     stable ids off, and on a finding object without the attribute; a
     finding whose id a loaded verdict store holds refuted still carries
     its id on the dropped row.
+
+    ``agreement`` and ``passes_ok`` (issue #143) follow only on a row of a
+    stability-mode run (``PRXREF_STABILITY_PASSES`` above 1): the passes that
+    raised the finding and the passes of its chunk that did not fail. A
+    default run's rows have neither key.
     """
     locations = getattr(f, "locations", None) or ()
     suggestion = getattr(f, "suggestion", None)
-    return {
+    row = {
         "file": f.file,
         "line": f.line,
         "severity": f.severity,
@@ -1210,6 +1225,10 @@ def _finding_json(f: Any, *, drop_reason: str | None) -> dict:
         "body": f.body,
         "drop_reason": drop_reason,
     }
+    if getattr(f, "agreement", 0) > 0:
+        row["agreement"] = f.agreement
+        row["passes_ok"] = f.passes_ok
+    return row
 
 
 def _build_json_result(result: Any) -> dict:
@@ -1227,7 +1246,8 @@ def _build_json_result(result: Any) -> dict:
     ``context_followup``, ``error_verification``, ``suggestions``,
     ``incremental``, ``ci_wiring``,
     ``evidence``, ``stable_ids``, ``degraded``, ``metadata_rules``,
-    ``config_file``, ``review_depth``, ``learnings``, ``describe``, then ``sampling`` and
+    ``config_file``, ``review_depth``, ``learnings``, ``describe``,
+    ``eval_pins``, then ``sampling`` and
     ``replay`` when present. ``review_depth`` is the ``PRXREF_REVIEW_DEPTH``
     value the run used (``"standard"`` or ``"thorough"``), ``null`` only
     when the result carries none. ``learnings`` is the learnings-file record
@@ -1235,6 +1255,8 @@ def _build_json_result(result: Any) -> dict:
     ``describe`` is the PR auto-description record (#37), ``null`` when
     ``PRXREF_DESCRIBE`` is ``off``; otherwise ``{mode, written, reason,
     head, labels_mode, labels_applied, labels_reason, error}``.
+    ``eval_pins`` (#137) is the pinned mapping a ``--eval-pins`` or
+    ``PRXREF_EVAL_PINS=on`` run applied, ``null`` when the pins were off.
     ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
     ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
@@ -1280,7 +1302,11 @@ def _build_json_result(result: Any) -> dict:
     nothing was posted; otherwise ``{"cause", "failed", "fallback",
     "annotations"}`` and, when a review unit failed, a ``chunks`` list of
     ``{"index", "files", "error"}`` rows — ``cause`` is ``"partial"``
-    there unless a blocked write makes it ``"permission"`` — see
+    there unless a blocked write makes it ``"permission"`` — and, when a
+    review unit was answered by a model outside
+    ``PRXREF_LLM_REQUIRE_MODELS`` (#138), a ``models`` list of ``{"unit",
+    "index", "files", "model", "requested_model"}`` rows with ``cause``
+    ``"model"`` unless a blocked write makes it ``"permission"`` — see
     :func:`_emit_fallback`), and so is
     ``config_file`` (#38: ``null`` when the run read no repository config
     file; otherwise ``{"path", "sha256", "keys"}``, see
@@ -1294,9 +1320,14 @@ def _build_json_result(result: Any) -> dict:
     ``cost_usd`` is also ``null`` when no source could price the run, never
     ``0``. Every ``findings`` row, active or dropped, carries 0.15's ``rule``
     and ``locations`` the same way (see :func:`_finding_json`).
-    ``sampling`` and ``replay`` are forwarded only when the result already
-    carries them. ``replay`` is on replay runs only, so a normal run's
-    payload has no ``replay`` key at all.
+    ``sampling``, ``stability`` and ``replay`` are forwarded only when the
+    result already carries them. ``replay`` is on replay runs only, so a
+    normal run's payload has no ``replay`` key at all. ``stability`` (#143) is
+    on runs with ``PRXREF_STABILITY_PASSES`` above 1 only: ``{passes,
+    min_agree, seeds, findings_per_pass, dropped}``, and each row of
+    ``findings`` then also carries ``agreement`` and ``passes_ok`` (see
+    :func:`_finding_json`). ``default_branch_check`` (#146) is forwarded the
+    same way, and only on runs with ``PRXREF_DEFAULT_BRANCH_CHECK=on``.
     """
     if not isinstance(result, dict):
         result = {}
@@ -1336,6 +1367,7 @@ def _build_json_result(result: Any) -> dict:
         "parse_retries": result.get("parse_retries"),
         "context_followup": result.get("context_followup"),
         "error_verification": result.get("error_verification"),
+        "removal_claims": result.get("removal_claims"),
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
         "ci_wiring": result.get("ci_wiring"),
@@ -1347,9 +1379,14 @@ def _build_json_result(result: Any) -> dict:
         "review_depth": result.get("review_depth"),
         "learnings": result.get("learnings"),
         "describe": result.get("describe"),
+        "eval_pins": result.get("eval_pins"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
+    if "stability" in result:
+        payload["stability"] = result["stability"]
+    if "default_branch_check" in result:
+        payload["default_branch_check"] = result["default_branch_check"]
     if "replay" in result:
         payload["replay"] = result["replay"]
     return payload
@@ -1825,8 +1862,10 @@ def _run_review(
     evidence_files: list[str] | None = None,
     context_standards_globs: list[str] | None = None,
     routing_probe: str | None = None,
+    ticket_ids_from_title: str | None = None,
     metadata_rules: str | None = None,
     forge: Any = None,
+    eval_pins: str | None = None,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -1862,6 +1901,14 @@ def _run_review(
     # _check_ranges and make every range guarantee conditional on nobody using
     # the bypass. --timeout only ever feeds llm_timeout, for the LLM client:
     # orchestrate_review has no timeout parameter.
+    pins = _resolve_eval_pins(eval_pins)
+    pinned = _apply_eval_pins(
+        pins,
+        ci_wiring=ci_wiring,
+        context_standards_globs=context_standards_globs,
+        routing_probe=routing_probe,
+        ticket_ids_from_title=ticket_ids_from_title,
+    )
     cfg, layers = load_config_with_sources(
         config_file=config_file,
         max_chunks=max_chunks,
@@ -1873,12 +1920,11 @@ def _run_review(
         ticket_context_file=context_file,
         prompts_dir=prompts_dir,
         review_depth=review_depth,
-        ci_wiring=ci_wiring,
         ci_wiring_globs=ci_wiring_globs,
         evidence_files=evidence_files,
-        context_standards_globs=context_standards_globs,
-        routing_probe=routing_probe,
         metadata_rules=metadata_rules,
+        eval_pins=eval_pins,
+        **pinned,
         # The operator typed a flag, so a rejection has to name the flag. Only
         # the CLI knows that spelling; config takes the label and reports it.
         source_labels={
@@ -1895,6 +1941,8 @@ def _run_review(
             "evidence_files": "--evidence-file",
             "context_standards_globs": "--context-standards-globs",
             "metadata_rules": "--metadata-rules",
+            "eval_pins": "--eval-pins",
+            **dict.fromkeys(pins or (), "--eval-pins"),
         },
     )
     # One glyph table per process: review, the webhook daemon (every webhook
@@ -2003,6 +2051,8 @@ def _run_review(
         jira_api_token=cfg["jira_api_token"],
         rules=rules,
         ticket=ticket,
+        ticket_ids_from_title=cfg["ticket_ids_from_title"],
+        ticket_context_max_chars=cfg["ticket_context_max_chars"],
         # Already parsed by load_config into {model: costs.ModelPrice}.
         price_table=cfg["price_table"],
         post_cost=cfg["post_cost"],
@@ -2029,6 +2079,7 @@ def _run_review(
         repo_dir=repo,
         llm_parse_retries=cfg["llm_parse_retries"],
         context_followup=cfg["context_followup"],
+        default_branch_check=cfg["default_branch_check"],
         verify_errors=cfg["verify_errors"],
         verify_errors_max=cfg["verify_errors_max"],
         rule_scoping=cfg["rule_scoping"],
@@ -2047,10 +2098,60 @@ def _run_review(
         rules_source=cfg["rules_source"],
         describe_mode=cfg["describe"],
         labels_mode=cfg["labels"],
+        llm_require_models=cfg["llm_require_models"],
+        stability_passes=cfg["stability_passes"],
+        stability_min_agree=cfg["stability_min_agree"],
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
+        result["eval_pins"] = pins
     return result
+
+
+_PIN_FLAGS = {
+    "ci_wiring": "--ci-wiring",
+    "context_standards_globs": "--context-standards-globs",
+}
+
+
+def _resolve_eval_pins(eval_pins: str | None) -> dict[str, Any] | None:
+    """The eval pins a review applies (#137): ``None`` unless they are on.
+
+    ``eval_pins`` is ``--eval-pins`` (``"on"``) or ``None``, which leaves
+    ``PRXREF_EVAL_PINS`` to decide. The value is resolved before the main
+    config load because it decides that load's overrides. When on, the
+    mapping is a fresh copy of :data:`prxref.evals.EVAL_PINS` from the same
+    helper ``eval run`` uses, so the two can never apply different pins.
+    This load only reads ``eval_pins``, so it holds ``ticket_ids_from_title``
+    off: a Jira setup the pins are about to switch off must not exit 2 here.
+    """
+    resolved = load_config(
+        eval_pins=eval_pins, ticket_ids_from_title="off",
+        source_labels={"eval_pins": "--eval-pins"},
+    )
+    if resolved["eval_pins"] != "on":
+        return None
+    return importlib.import_module("prxref.evals")._pins()
+
+
+def _apply_eval_pins(pins: dict[str, Any] | None, **given: Any) -> dict[str, Any]:
+    """The pinnable overrides of one review, with ``pins`` laid over them.
+
+    ``eval run`` passes the pins as the top keyword layer, above the
+    environment and the config file, and so does this: a pin also wins over
+    a flag that sets the same key, as nothing in an eval run can override
+    one. A flag the pins override is logged at WARNING, naming it.
+    """
+    overrides = dict(given)
+    for key, value in (pins or {}).items():
+        explicit = overrides.get(key)
+        if explicit is not None and explicit != value:
+            logger.warning(
+                "--eval-pins: %s %r is overridden by the eval pin %r",
+                _PIN_FLAGS.get(key, key), explicit, value,
+            )
+        overrides[key] = value
+    return overrides
 
 
 def _config_file_stamp(path: Path | None) -> dict[str, Any] | None:
@@ -2276,13 +2377,15 @@ def _cmd_review(args: argparse.Namespace) -> int:
     # The policy is resolved before the run, not taken from _run_review's
     # config: a review that fails to complete is precisely the outcome the
     # knob must gate, so the value has to be known before orchestration can
-    # fail. load_config is a pure read of the same environment, and
+    # fail. The title ticket key is held off here: this read needs only
+    # fail_on and fallback, and _run_review validates the key after any eval
+    # pin has switched it off. load_config is a pure read of the same environment, and
     # _run_review loads it again with the flag overrides — within one process
     # the two cannot disagree. fail_on and fallback can only be set in the
     # environment, so the policy never needs the repository config file.
     try:
         config_file = _resolve_config_file(args)
-        policy = load_config()
+        policy = load_config(ticket_ids_from_title="off")
         fail_on = policy["fail_on"]
         fallback = policy["fallback"]
     except ConfigError as exc:
@@ -2319,6 +2422,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             evidence_files=args.evidence_file,
             context_standards_globs=_standards_globs_arg(args.context_standards_globs),
             metadata_rules=args.metadata_rules,
+            eval_pins="on" if args.eval_pins else None,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)

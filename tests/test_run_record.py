@@ -53,13 +53,15 @@ RECORD_KEYS = {
     "cost_usd", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
+    "removal_claims",
     "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
     "review_depth", "learnings", "describe",
 }
 NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
     "scoped_rules", "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries",
-    "context_followup", "error_verification", "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids",
+    "context_followup", "error_verification",
+    "removal_claims", "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids",
     "degraded", "learnings", "describe",
 )
 
@@ -223,7 +225,7 @@ class TestTheRecordKeys:
         assert res["verdict"] == VERDICT[path]
         assert set(res) == BASE_KEYS | RECORD_KEYS
         for key in NULL_WHEN_OFF:
-            if key in ("stable_ids", "error_verification") and path == "success":
+            if key in ("stable_ids", "error_verification", "removal_claims") and path == "success":
                 continue
             assert res[key] is None, key
         if path == "success":

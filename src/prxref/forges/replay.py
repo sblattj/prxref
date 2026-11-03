@@ -150,6 +150,14 @@ class LocalDiffForge:
         """Always empty: a diff file has no discussion."""
         return []
 
+    def get_default_branch(self, ref: PRRef) -> str | None:
+        """Always ``None``: a diff file has no repository."""
+        return None
+
+    def get_file_at_branch(self, ref: PRRef, path: str, branch: str) -> tuple[bool, str | None]:
+        """Always ``(True, None)``: unknown, a diff file has no branches."""
+        return True, None
+
     def post_summary(self, ref: PRRef, body: str) -> None:
         """Always raises ``RuntimeError``: a replay never writes to a forge."""
         raise RuntimeError(NEVER_POSTS)
@@ -288,6 +296,14 @@ class ReplayForge:
             return reader(ref, path, sha=sha)
         except Exception:  # noqa: BLE001 - the Protocol says this never raises
             return None
+
+    def get_default_branch(self, ref: PRRef) -> str | None:
+        """Always ``None``: a replay is pinned, and a live default branch would not be."""
+        return None
+
+    def get_file_at_branch(self, ref: PRRef, path: str, branch: str) -> tuple[bool, str | None]:
+        """Always ``(True, None)``: unknown, a replay never reads a moving branch."""
+        return True, None
 
     def list_paths(self, ref: PRRef, *, sha: str) -> PathListing | None:
         """The inner forge's path listing at ``sha``; ``None`` when it has none or it raises."""

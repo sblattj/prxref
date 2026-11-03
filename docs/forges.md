@@ -572,10 +572,33 @@ conventional labels. The forge capabilities differ:
 neutral colour. The token must be allowed to edit the pull request (and, for `create`, to
 create repository labels). A failed write, a refused permission, or a label list that
 cannot be read is logged and recorded in the run record's `describe.error`; it never
-changes the verdict or the exit code. Replays and local diffs never write. The
+changes the verdict or the exit code. With `PRXREF_LLM_REQUIRE_MODELS` set, a description
+answered by a model outside the list is not written and gets no labels; `describe.reason`
+names the model. Replays and local diffs never write. The
 [review gate](../README.md#review-gate-github-app) does not write descriptions or labels:
 its review runs on a capturing forge that refuses every write but the summary and inline
 comments it publishes itself.
+
+## Default branch and branch file reads
+
+Two optional forge capabilities (issue #146) let a later pass read a file from the
+repository's default branch. Nothing calls them in a default review: constructing a forge
+and `get_pr` make no request for them. Only `PRXREF_DEFAULT_BRANCH_CHECK=on` does, and only
+on a PR whose target branch is not the default branch ([the check](quality.md#default-branch-check-on-stacked-prs-146)). `get_default_branch(ref)` returns the bare branch
+name or `None` (any failure, with a logged warning). `get_file_at_branch(ref, path,
+branch)` returns `(found, text)`: `(False, None)` only on HTTP 404, `(True, text)` for a
+file, and `(True, None)` when the answer is unknown (transport failure, any other status,
+a binary or over-512 KiB body). A 404 can also mean the branch is missing or the token
+cannot see the repository. Replays and local diffs answer `None` and `(True, None)`.
+
+| Forge | Default branch | File at a branch |
+|---|---|---|
+| GitHub & GitHub Enterprise Server | `GET /repos/{owner}/{repo}`, `default_branch` | `GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` |
+| GitLab | `GET /projects/{id}`, `default_branch` | `GET /projects/{id}/repository/files/{path}/raw?ref={branch}` |
+| Gitea / Forgejo | `GET /repos/{owner}/{repo}`, `default_branch` | `GET /repos/{owner}/{repo}/raw/{path}?ref={branch}` |
+| Bitbucket Cloud | `GET /repositories/{workspace}/{repo}`, `mainbranch.name` | `GET /repositories/{workspace}/{repo}/src/{branch}/{path}` (branch percent-encoded, slashes included) |
+| Bitbucket Server / Data Center | `GET .../repos/{repo}/default-branch`, `displayId`; a 404 retries once on `.../branches/default` | `GET .../repos/{repo}/raw/{path}?at={branch}` |
+| Azure DevOps | `GET .../repositories/{repo}`, `defaultBranch` with `refs/heads/` stripped | `GET .../items?path={path}&versionDescriptor.version={branch}&versionDescriptor.versionType=branch` |
 
 ## When prxref cannot post
 

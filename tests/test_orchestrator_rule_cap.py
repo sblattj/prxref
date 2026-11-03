@@ -522,13 +522,15 @@ class TestCliWiring:
 # "rules", "scoped" and "rules_grouping" were re-derived again for issue
 # #67's "Matching rules" section in worker.md: the worker prompt system
 # hashes (and the unit-file hashes that embed them) are the only movers;
-# "rules_summary_only" renders no prompt.
+# "rules_summary_only" renders no prompt. The same three were re-derived for
+# issue #116's one-line note in worker.md and systemic.md: the worker and
+# sweep system hashes (and the unit-file hashes) are the only movers.
 # ---------------------------------------------------------------------------
 
 RULES_GOLDEN = {
-    "rules": "b09ab31daa64a1d1a1d9277cc42fac465df13a4b5efdf2fd1880e54ad8ff143a",
-    "scoped": "4c6c6bca90a795593bdb4bd0cd382c3bf228bedf7b305112830cd86fce1dfcd7",
-    "rules_grouping": "5bbbca039de6795197f4612d2e23988fe457e591f261b719ed706e54b9113387",
+    "rules": "848a3c783b74317a7d786654e237d338711adfbf7634be84ff87b44880f20bc2",
+    "scoped": "1a58ee28a23964cc66627833c2e1bdd6e0ecaf65283d60e103e75cb32ba16bf2",
+    "rules_grouping": "b5b500866d5f3cb715198d434868bfd0dce2daaca6dd85aede036da9cafa3557",
     "rules_summary_only": "356a9e6c3d91d4ddb6f728c55589c431d39cf0a217de0e6822a8a84770036196",
 }
 
@@ -626,7 +628,7 @@ class TestOffPathMatchesBase:
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
-            "error_verification",
+            "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "failed_chunks", *CHUNK_KEYS,
         }
@@ -637,10 +639,11 @@ class TestOffPathMatchesBase:
         at = A81_JSON_KEYS.index("chunks_failed") + 1
         assert payload == [*A81_JSON_KEYS[:at], "failed_chunks", *CHUNK_KEYS, *A81_JSON_KEYS[at:-1], "rule_counts",
                            "rule_scope_cleared",
-                           "repo_context", "parse_retries", "context_followup", "error_verification", "suggestions",
+                           "repo_context", "parse_retries", "context_followup", "error_verification",
+                           "removal_claims", "suggestions",
                            "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
                            "metadata_rules", "config_file", "review_depth",
-                           "learnings", "describe", "sampling"]
+                           "learnings", "describe", "eval_pins", "sampling"]
 
     @pytest.mark.parametrize("name", ["rules", "scoped", "rules_grouping"])
     def test_the_golden_is_sensitive_to_the_default_cap(self, name):

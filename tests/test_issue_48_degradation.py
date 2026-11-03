@@ -473,11 +473,13 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
         assert payload.pop("stable_ids") is not None  # #71: ids are on by default
         assert payload.pop("error_verification")["mode"] == "names"  # #126: on by default
+        assert payload.pop("removal_claims")["head_refuted"] == 0  # #116: always counted
         assert payload.pop("metadata_rules") is None  # #70: null when PRXREF_METADATA_RULES is off
         assert payload.pop("failed_chunks") == []
         assert payload.pop("review_depth") == "standard"
         assert payload.pop("learnings") is None  # #33: null when no learnings file is configured
         assert payload.pop("describe") is None  # #37: null when PRXREF_DESCRIBE is off
+        assert payload.pop("eval_pins") is None  # #137: null when PRXREF_EVAL_PINS is off
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]

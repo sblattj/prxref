@@ -94,6 +94,19 @@ def _fold_usage(result: dict, rerun: Mapping[str, Any], row: dict) -> None:
     result["input_tokens"] = _count(result.get("input_tokens")) + extra_in
     result["output_tokens"] = _count(result.get("output_tokens")) + extra_out
     model = rerun.get("model") or ""
+    requested = str(rerun.get("requested_model") or "")
+    if requested or (model and result.get("requested_model")):
+        # Issue #138: the merge keeps findings from BOTH replies, so the
+        # allowed-model guard must see both answering models, not only the
+        # re-run's. Recorded only when a backend reported a chain entry.
+        first = result.get("answered_by") or [
+            [str(result.get("requested_model") or ""), str(result.get("model") or "")],
+        ]
+        result["answered_by"] = [*first, [requested, model]]
+        if requested:
+            result["requested_model"] = requested
+        else:
+            result.pop("requested_model", None)
     if model:
         result["model"] = model
     result["elapsed_ms"] = _count(result.get("elapsed_ms")) + _count(rerun.get("elapsed_ms"))

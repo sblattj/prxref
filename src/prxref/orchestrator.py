@@ -119,7 +119,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    are raised to the group's max severity — the sweep's corroborating
    title counts toward its group) → ``apply_removal_claim_check`` (a
    claim that a NAMED path was removed when the post-image still carries
-   it) → ``apply_hedge_gate`` (a finding whose own text conditions the
+   it) → ``apply_head_removal_claim_check`` (#116, a claim that a symbol
+   or a file outside the diff was removed when the head tree still
+   defines or holds it) → ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
    ``apply_rule_scope_check`` then ``apply_rule_category_check`` (#75,
@@ -135,6 +137,11 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    and the run record's ``rule_scope_cleared`` count the cleared labels of
    both halves — ``None`` when the scope half did not run and the
    category half cleared nothing) →
+   ``apply_root_cause_fold`` (#142, #144: chunk findings restating one root
+   cause, a few lines apart in one file or across files, fold into the most
+   specific one, which lists the rest under ``Also at:``; the rest are dropped
+   as ``same root cause as <file>:<line> (<evidence>)``, before grouping and
+   every cap can count a repeat) →
    ``apply_rule_grouping`` (only with ``group_findings`` on: chunk findings
    in one file that break one rule, or that name no rule and share a
    normalized title, fold into one representative that lists
@@ -177,7 +184,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    catch or its propagation target gets its body suffixed with
    ``" [containment boundary not stated]"``; textual only, runs last so
    it touches both the active and dropped copies of chunk and sweep
-   findings alike). Dropped findings are retained in the result with
+   findings alike) → ``apply_guard_fix_check`` (#147: a fix that advises
+   removing a guard gets an ``Unverified fix:`` line, a suggestion that
+   replaces a guard without its identifiers is cleared; nothing is dropped).
+   Dropped findings are retained in the result with
    ``drop_reason`` set, never silently discarded, and both lists come out
    sorted by ``finding_sort_key``. Every result — including an error or
    summary-only exit — carries a ``sampling`` record naming the
@@ -196,7 +206,10 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    still in the code, only the repeat comment is suppressed); else ``"Incomplete"``
    when any review unit failed (issue #72: a partial review used to read
    as ``"Approved"`` because the failed chunk simply contributed no
-   findings); else ``"Approved"``. A partial failure also degrades the
+   findings) or, with ``PRXREF_LLM_REQUIRE_MODELS`` set, any review unit
+   was answered by a model outside it (issue #138: ``degraded.cause ==
+   "model"``, one ``models`` row per offending unit, a summary banner, and
+   the head is not recorded as reviewed); else ``"Approved"``. A partial failure also degrades the
    run record (``degraded.cause == "partial"``, one ``chunks`` row per
    failed unit) and the summary declares reduced coverage AND itemizes
    each failed chunk with the files it took unreviewed plus its reason
@@ -238,7 +251,7 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -248,6 +261,7 @@ from urllib.parse import urlparse
 from . import (
     chunk_context,
     costs,
+    default_branch,
     describe,
     followup,
     heuristics,
@@ -256,6 +270,7 @@ from . import (
     repo_unit,
     reviewer,
     specs,
+    stability,
     systemic,
     verdicts,
     verify,
@@ -313,6 +328,8 @@ from .quality import (
     apply_containment_note,
     apply_evidence_drops,
     apply_example_echo_check,
+    apply_guard_fix_check,
+    apply_head_removal_claim_check,
     apply_hedge_gate,
     apply_learning_suppression,
     apply_line_align,
@@ -321,6 +338,7 @@ from .quality import (
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
+    apply_root_cause_fold,
     apply_rule_cap,
     apply_rule_category_check,
     apply_rule_grouping,
@@ -334,6 +352,7 @@ from .quality import (
     apply_thread_dedup,
     finding_rank_key,
     finding_sort_key,
+    head_removal_claims_name_symbol,
     open_thread_for_drop,
     previously_discussed_thread,
     prompt_example_titles,
@@ -342,6 +361,7 @@ from .quality import (
 from .repo_context import exclude_predicate
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .stable_ids import REUSED_FROM_THREAD, REUSED_FROM_VERDICT, apply_stable_ids, stable_id_collisions
+from .title_tickets import with_title_tickets
 from .trace import Tracer, get_tracer
 from .triage import (
     DEFAULT_CONTEXT_LINES,
@@ -605,6 +625,8 @@ def orchestrate_review(
     jira_api_token: str = "",
     rules: Any = None,
     ticket: Any = None,
+    ticket_ids_from_title: str = "off",
+    ticket_context_max_chars: int = 6000,
     price_table: Mapping[str, Any] | None = None,
     post_cost: bool = False,
     size_warn_lines: int | None = None,
@@ -632,6 +654,7 @@ def orchestrate_review(
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
     llm_parse_retries: int = 0,
     context_followup: str = "off",
+    default_branch_check: str = "off",
     verify_errors: str = verify.DEFAULT_MODE,
     verify_errors_max: int = verify.DEFAULT_MAX_CALLS,
     suggestions: str = "off",
@@ -654,6 +677,9 @@ def orchestrate_review(
     rules_source: str = "head",
     describe_mode: str = "off",
     labels_mode: str = "off",
+    llm_require_models: Sequence[str] = (),
+    stability_passes: int = 1,
+    stability_min_agree: int = 1,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -700,6 +726,29 @@ def orchestrate_review(
     reason, head, labels_mode, labels_applied, labels_reason, error}``. The
     describe call's cost and tokens join the run's. A failure there is
     recorded in ``error`` and never changes the verdict.
+
+    ``llm_require_models`` (``PRXREF_LLM_REQUIRE_MODELS``, issue #138) names
+    the models allowed to answer a review unit (a chunk, the systemic sweep,
+    an error-verification call). Empty, the default, checks nothing. When a
+    unit that did not fail was answered by a model outside it, see
+    :func:`_model_violations`, the verdict is ``"Incomplete"`` unless an
+    error finding makes it ``"Request-Changes"``, the run record's
+    ``degraded`` names each offending unit and model, the summary says so,
+    and the head is not recorded as reviewed. The describe call is not a
+    review unit and is not checked. ``sampling.models`` still names the
+    configured chain, never the models that answered.
+
+    ``stability_passes`` (``PRXREF_STABILITY_PASSES``, issue #143) above 1
+    runs the chunk workers that many times over the same chunks and prompts,
+    one pass after the other, and the sweep once. An integer client seed
+    becomes ``seed + pass`` for each pass. :mod:`prxref.stability` merges the
+    passes per chunk before any quality pass: ``stability_min_agree`` is the
+    number of passes that must raise a finding for it to be listed (1 is the
+    union), lowered to the chunk's ok passes when one failed, and a finding
+    below it is kept as a dropped row with a ``stability`` reason. Tokens and
+    cost sum across passes. The run record gains a ``stability`` key and each
+    finding ``agreement`` and ``passes_ok``, only then; at 1 pass the run is
+    byte for byte what it was without the mode.
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists, and on
@@ -807,7 +856,12 @@ def orchestrate_review(
     ACTIVE ticket (``ticket.active``) adds its ``scope_block()`` and
     ``prompt_block()`` to every unit, which is what lets a finding carry a
     ``scope`` of ``in`` or ``out``; otherwise every scope is forced to
-    ``unknown`` (:func:`_enforce_scope`). A configured ticket's ``note()``
+    ``unknown`` (:func:`_enforce_scope`). With ``ticket_ids_from_title="on"``
+    (#145) every Jira key in the PR title is fetched once ``get_pr`` has
+    answered and added to the ticket (:func:`_with_title_tickets`, capped at
+    ``ticket_context_max_chars``); a ticket that is then not ``complete``
+    (a key unread, or the text cut) never leaves a finding ``out``. A
+    configured ticket's ``note()``
     rides the summary after the spec note, on the main and summary-only
     posts but never the error notice, and an active ticket's scope counts
     ride the ``run ok`` event.
@@ -1185,6 +1239,15 @@ def orchestrate_review(
     context block, over its own capped per-chunk reader. A chunk that took
     the timeout retry is skipped. The sweep never gets a follow-up.
 
+    ``default_branch_check`` (``PRXREF_DEFAULT_BRANCH_CHECK``, issue #146) is
+    ``"off"`` (the default) or ``"on"``; any other value raises ``ValueError``.
+    Off makes no forge call and adds no record key. On, a PR whose target
+    branch is not the repository's default branch has its versioning findings
+    checked against the default branch (see :mod:`prxref.default_branch`) right
+    before the root-cause fold, and the record gains a ``default_branch_check``
+    key: ``{branch, stacked, checked, lowered, present, unknown,
+    lowered_findings}``.
+
     The ``context_followup`` key, when on, is ``{"active", "calls",
     "confirmed", "unconfirmed", "discarded", "input_tokens",
     "output_tokens", "chunks"}``. ``active`` is false, the counts are 0 and
@@ -1290,6 +1353,11 @@ def orchestrate_review(
         raise ValueError(
             f"context_followup must be one of {FOLLOWUP_MODES}, got {context_followup!r}"
         )
+    if default_branch_check not in default_branch.DEFAULT_BRANCH_CHECK_MODES:
+        raise ValueError(
+            "default_branch_check must be one of "
+            f"{default_branch.DEFAULT_BRANCH_CHECK_MODES}, got {default_branch_check!r}"
+        )
     if suggestions not in SUGGESTION_MODES:
         raise ValueError(
             f"suggestions must be one of {SUGGESTION_MODES}, got {suggestions!r}"
@@ -1347,6 +1415,7 @@ def orchestrate_review(
         ),
         "context_followup": _followup_record() if context_followup == "on" else None,
         "error_verification": None,
+        "removal_claims": None,
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "ci_wiring": None,
@@ -1363,6 +1432,8 @@ def orchestrate_review(
             _describe_record(describe_mode, labels_mode) if describe_mode != "off" else None
         ),
     }
+    if default_branch_check == "on":
+        run_inputs["default_branch_check"] = default_branch.CheckOutcome().record()
     # Resolved once, before the first exit, so every exit records them and the
     # empty-diff summary gets the ticket note. An inactive (empty) ticket is
     # still recorded and still noted; it just asks the model for no scope.
@@ -1442,6 +1513,23 @@ def orchestrate_review(
             post_mode=post_mode, tracer=tracer, sampling=sampling,
             cost_label=_cost_label(run_inputs, post_cost),
         ), run_inputs)
+
+    # Issue #145: the title is only known now, so the title's tickets are
+    # added here and everything derived from the ticket above is redone. Off
+    # (the default) skips the block, so nothing below moves.
+    if ticket_ids_from_title == "on":
+        ticket = _with_title_tickets(
+            ticket, getattr(pr, "title", "") or "", max_chars=ticket_context_max_chars,
+            jira_base_url=jira_base_url, jira_email=jira_email, jira_api_token=jira_api_token,
+        )
+        run_inputs["ticket_context"] = ticket.record() if ticket is not None else None
+        ticket_active = ticket is not None and bool(ticket.active)
+        ticket_note = ticket.note() if ticket is not None else ""
+        if ticket_note and not ticket_note.endswith("\n"):
+            ticket_note += "\n"
+        if run_inputs["ticket_context"] is not None:
+            tracer.event("ticket", "title", **run_inputs["ticket_context"])
+    ticket_complete = bool(getattr(ticket, "complete", True))
 
     try:
         with tracer.span("forge.get_diff") as sp:
@@ -1672,7 +1760,7 @@ def orchestrate_review(
         if post:
             run_inputs["describe"], describe_unit = _describe_step(
                 forge, ref, pr, llm, raw, mode=describe_mode, labels_mode=labels_mode,
-                max_tokens=max_tokens, tracer=tracer,
+                max_tokens=max_tokens, tracer=tracer, require_models=llm_require_models,
             )
         else:
             run_inputs["describe"]["reason"] = "posting is off (--no-post, PRXREF_DRY_RUN or a replay)"
@@ -1924,16 +2012,39 @@ def orchestrate_review(
             followup_records = [None] * len(chunks)
         else:
             logger.warning(FOLLOWUP_INACTIVE_WARNING)
+    worker_args: dict[str, Any] = {
+        "max_tokens": max_tokens, "max_workers": max_workers,
+        "context_lines": context_lines, "tracer": tracer,
+        "reader": reader, "all_files": files, "trace_dir": trace_dir,
+        "prompt_context": prompt_context, "scoped_blocks": scoped_blocks,
+        "repo_plan": repo_plan, "parse_retries": llm_parse_retries,
+        "followup_floor": followup_floor, "evidence_blocks": evidence_blocks,
+    }
     results = _run_workers(
-        llm, chunks, pr, max_tokens=max_tokens, max_workers=max_workers,
-        context_lines=context_lines, tracer=tracer,
-        reader=reader, all_files=files, trace_dir=trace_dir,
-        prompt_context=prompt_context, scoped_blocks=scoped_blocks,
-        repo_plan=repo_plan, unit_records=unit_records,
-        parse_retries=llm_parse_retries,
-        followup_floor=followup_floor, followup_records=followup_records,
-        evidence_blocks=evidence_blocks,
+        llm, chunks, pr, unit_records=unit_records,
+        followup_records=followup_records, **worker_args,
     )
+    stability_dropped: list[Finding] = []
+    if stability_passes > 1 and chunks:
+        seeds = stability.pass_seeds(getattr(llm, "seed", None), stability_passes)
+        pass_results = [results]
+        for p in range(1, stability_passes):
+            logger.info("stability pass %d/%d", p + 1, stability_passes)
+            pass_results.append(_run_workers(
+                stability.pass_client(llm, seeds[p], p), chunks, pr,
+                pass_index=p, **worker_args,
+            ))
+        merged = stability.merge_passes(
+            pass_results, min_agree=stability_min_agree, seeds=seeds,
+            chunk_paths=[[fd.path for fd in chunk if fd.path] for chunk in chunks],
+        )
+        results = merged.results
+        stability_dropped = merged.dropped
+        run_inputs["stability"] = merged.record
+        tracer.event(
+            "stability", "ok", passes=stability_passes, min_agree=stability_min_agree,
+            dropped=len(stability_dropped),
+        )
     if repo_plan is not None and unit_records is not None:
         run_inputs["repo_context"] = _repo_context_record(
             run_inputs["repo_context"], repo_plan, unit_records,
@@ -2023,6 +2134,7 @@ def orchestrate_review(
     )
     findings = [f for r in results if not r["error"] for f in r["findings"]]
     findings = _enforce_scope(findings, ticket_active)
+    findings = _enforce_ticket_complete(findings, ticket_complete)
     findings = _enforce_rule(findings, rule_active)
     findings = _enforce_suggestion(findings, suggestions == "on", sweep_start=sweep_start)
 
@@ -2306,12 +2418,20 @@ def orchestrate_review(
             rewrites,
         )
     findings = consistent
-    findings = apply_removal_claim_check(findings, files)
+    findings = _check_removal_claims(
+        findings, files, reader,
+        repo_plan.listing_paths if repo_plan is not None else None,
+        run_inputs, tracer,
+        fallback_listing=lambda: _removal_claim_listing(
+            forge, ref, getattr(pr, "source_sha", "") or "", repo_dir,
+        ),
+    )
     findings = apply_hedge_gate(findings, spec_digest=injected)
     # AFTER the cheap prunes and BEFORE grouping, the cap and the gate (#126):
     # an error the head file contradicts must not consume ``max_errors`` or
     # fold a title group. Runs after severity consistency, so a downgraded
     # member can leave its title group mixed.
+    verify_units: list[dict[str, Any]] = []
     if verify_errors != "off":
         findings, input_tokens, output_tokens, cost_label = _verify_error_findings(
             llm, findings, reader, run_inputs,
@@ -2321,6 +2441,7 @@ def orchestrate_review(
             cost_units=[*results, *cost_units_extra],
             price_table=price_table, post_cost=post_cost,
             tokens=(input_tokens, output_tokens), cost_label=cost_label, tracer=tracer,
+            unit_sink=verify_units,
         )
     # Its own guard (#75), independent of grouping and the cap: any loaded
     # rules file that declares a section scope (any rule at all, for the
@@ -2345,6 +2466,25 @@ def orchestrate_review(
     if rule_sections or category_cleared:
         tracer.event("rulescope", "ok", cleared=cleared_labels + category_cleared, category=category_cleared)
         run_inputs["rule_scope_cleared"] = cleared_labels + category_cleared
+    # AFTER line align, the thread gates and the label checks, so it reads
+    # final anchors and cleared labels, and BEFORE the root-cause fold (#146):
+    # each finding answers for its own file, so a keeper lowered because its
+    # file is absent on the default branch cannot absorb a sibling whose file
+    # is there. A duplicate now costs a read (the cache and the path cap
+    # stand). BEFORE grouping, the caps and the gate: a lowered finding must
+    # not spend ``max_errors`` or count toward the error verdict and
+    # ``PRXREF_FAIL_ON``. 1:1 and order-preserving, so sweep_start still holds.
+    if default_branch_check == "on":
+        findings = _default_branch_check(
+            findings, files, forge, ref, pr, run_inputs, tracer,
+        )
+    # AFTER the default-branch check (#142, #144), BEFORE grouping and every
+    # cap, so a repeat of one root cause spends none of them. 1:1 and
+    # order-preserving, so sweep_start still marks the boundary.
+    findings = _fold_root_causes(
+        findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+        tracer=tracer,
+    )
     if group_findings:
         findings = _group_findings(
             findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
@@ -2404,10 +2544,32 @@ def orchestrate_review(
     # content, and running last means both the posted comment body and the
     # dropped-audit copy carry the same suffixed text.
     findings = apply_containment_note(findings)
+    # AFTER every pass that reads title/body or drops (#147): it only appends
+    # a line and clears a suggestion, so nothing downstream can be tripped by
+    # the added words, and it never touches drop_reason, severity or
+    # confidence. The record key exists only when it fired.
+    before_guard = findings
+    findings, guard_reasons = apply_guard_fix_check(findings, files)
+    guard_cleared = sum("suggestion_drops_guard" in r for r in guard_reasons)
+    guard_tagged = sum(
+        after.body != before.body for before, after in zip(before_guard, findings, strict=True)
+    )
+    if guard_tagged or guard_cleared:
+        logger.info(
+            "guard fix check: %d finding(s) marked unverified, %d suggestion(s) cleared",
+            guard_tagged, guard_cleared,
+        )
+        tracer.event("guardfix", "ok", tagged=guard_tagged, suggestions_cleared=guard_cleared)
+        run_inputs["guard_fix"] = {"tagged": guard_tagged, "suggestions_cleared": guard_cleared}
 
+    stability_note = (
+        stability.summary_line(stability_passes, stability_min_agree)
+        if stability_passes > 1 and chunks else ""
+    )
     findings_active = sorted(active(findings), key=finding_sort_key)
     findings_dropped = sorted(
-        (f for f in findings if f.drop_reason is not None), key=finding_sort_key
+        [*(f for f in findings if f.drop_reason is not None), *stability_dropped],
+        key=finding_sort_key,
     )
     if suggestions == "on":
         run_inputs["suggestions"] = _suggestion_record(findings_active, cleared_suggestions)
@@ -2419,18 +2581,31 @@ def orchestrate_review(
     # beats a coverage gap), and the total-failure "Error" verdict left at
     # the all-failed exit above can never be shadowed from here. An error
     # still open in an existing thread counts as active here (issue #117).
+    # Issue #138: a unit answered by a model outside PRXREF_LLM_REQUIRE_MODELS
+    # is a review that did not happen the way the operator required, so it
+    # reads as Incomplete under the same precedence as a failed unit, and
+    # the head is not marked reviewed for incremental review.
+    model_violations = _model_violations(
+        chunks, results, verify_units, llm_require_models,
+    )
+    if model_violations:
+        logger.error(
+            "%d review unit(s) answered by a model outside PRXREF_LLM_REQUIRE_MODELS: %s",
+            len(model_violations), _violation_text(model_violations),
+        )
     verdict = (
         "Request-Changes"
         if open_thread_errors
         or any(f.severity == "error" for f in findings_active)
         else "Incomplete"
-        if chunks_failed
+        if chunks_failed or model_violations
         else "Approved"
     )
 
     elapsed_ms = _elapsed_ms(t0)
     reviewed_head = _mark_reviewed_head(
-        run_inputs, scope, pr, post_mode=post_mode, complete=chunks_failed == 0,
+        run_inputs, scope, pr, post_mode=post_mode,
+        complete=chunks_failed == 0 and not model_violations,
     )
     incremental_note = _incremental_note(scope, len(files))
     evidence_note = _evidence_note(
@@ -2460,13 +2635,15 @@ def orchestrate_review(
             # Each failed chunk's reason AND file list reach the banner:
             # "findings may be incomplete" without which-files acts on nothing.
             failed_chunks=failed_chunks,
+            model_violations=model_violations,
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
             evidence_note=evidence_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
+            stability_note=stability_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -2525,13 +2702,15 @@ def orchestrate_review(
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
             failed_chunks=failed_chunks,
+            model_violations=model_violations,
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
             evidence_note=evidence_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
+            stability_note=stability_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
@@ -2550,20 +2729,22 @@ def orchestrate_review(
             logger.error("summary re-post with inline accounting failed: %s", e)
             post_failures.append(("summary", post_failure_cause(e)))
 
-    degraded = _degraded_record(post_failures, failed_chunk_rows)
+    degraded = _degraded_record(post_failures, failed_chunk_rows, model_violations)
     if degraded is not None and fallback_summary is None:
         fallback_summary = _render_summary(
             pr, files, verdict, findings_active, model,
             input_tokens, output_tokens, elapsed_ms,
             chunks_reviewed=chunks_reviewed, chunks_failed=chunks_failed,
             failed_chunks=failed_chunks,
+            model_violations=model_violations,
             include_verdict=post_verdict,
             spec_note=spec_note,
             ticket_note=ticket_note,
             evidence_note=evidence_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=sampling.get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
+            stability_note=stability_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -2672,6 +2853,39 @@ def _split_at_sweep(
     return chunk_part, sweep_part
 
 
+def _with_title_tickets(
+    ticket: Any, title: str, *, max_chars: int,
+    jira_base_url: str, jira_email: str, jira_api_token: str,
+) -> Any:
+    """Add the Jira tickets named in ``title`` to ``ticket`` (#145); never raises.
+
+    Each key is read through :func:`specs.fetch_jira_tickets`, the spec-source
+    Jira path. A key that cannot be read is logged and recorded on the result
+    as failed, so the summary names it and no finding is left ``out`` of it.
+    Any other failure here returns ``ticket`` unchanged.
+    """
+    try:
+        keys = specs.title_ticket_ids(title)
+        if keys:
+            sources = specs.fetch_jira_tickets(
+                keys, jira_base_url=jira_base_url,
+                jira_email=jira_email, jira_api_token=jira_api_token,
+            )
+            for src, key in zip(sources, keys, strict=True):
+                if src.error:
+                    logger.warning(
+                        "ticket %s from the PR title could not be read (best-effort): %s",
+                        key, redact_for_post(src.error),
+                    )
+            fetched = [(key, None if src.error else src.text) for key, src in zip(keys, sources, strict=True)]
+        else:
+            fetched = []
+        return with_title_tickets(ticket, fetched, max_chars=max_chars)
+    except Exception as e:  # noqa: BLE001 -- title tickets never fail a review
+        logger.error("title ticket loading failed (best-effort): %s", e)
+        return ticket
+
+
 def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
     """Hold every finding's ``scope`` to what the run asked the model for.
 
@@ -2690,6 +2904,22 @@ def _enforce_scope(findings: Sequence[Finding], active: bool) -> list[Finding]:
     return out
 
 
+def _enforce_ticket_complete(findings: Sequence[Finding], complete: bool) -> list[Finding]:
+    """Never leave a finding ``out`` of a ticket that was only partly read (#145).
+
+    The twin of :func:`_enforce_scope`, run right after it. A ticket that is
+    not ``complete`` (a listed ticket could not be read, or its text was cut
+    at the cap) cannot say what the unread part asks for, so a scope of
+    ``out`` becomes ``unknown``; ``in`` and ``unknown`` are untouched. A
+    complete ticket returns the findings as they are.
+    """
+    if complete:
+        return list(findings)
+    return [
+        replace(f, scope=SCOPE_UNKNOWN) if f.scope == SCOPE_OUT else f for f in findings
+    ]
+
+
 def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
     """Hold every finding's ``rule`` to what the run asked the model for.
 
@@ -2705,6 +2935,105 @@ def _enforce_rule(findings: Sequence[Finding], active: bool) -> list[Finding]:
         rule = normalize_rule(f.rule) if active else None
         out.append(f if rule == f.rule else replace(f, rule=rule))
     return out
+
+
+def _removal_claim_listing(
+    forge: Any, ref: Any, sha: str, repo_dir: RepoDir | None,
+) -> tuple[tuple[str, ...], str] | None:
+    """The head listing for symbol removal claims when repo_context gave none (#116), or None.
+
+    The ci_wiring stage's listing source: ``repo_reader.forge_reader`` at
+    the head sha, then ``repo_reader.repo_dir_reader`` over ``--repo-dir``
+    when the forge gives no listing. Returns ``(paths, source)`` with
+    ``source`` the reader's kind (``"forge"`` or ``"repo-dir"``). A lister
+    that raises or gives None leaves the next source, then None.
+    """
+    readers = [repo_reader.forge_reader(forge, ref, sha)]
+    if repo_dir is not None:
+        readers.append(repo_reader.repo_dir_reader(repo_dir))
+    for source in readers:
+        if source is None:
+            continue
+        try:
+            listing = source.listing()
+        except Exception as e:  # noqa: BLE001 -- a failed listing is "no listing"
+            logger.warning("removal claims: %s listing failed: %s", source.kind, e)
+            continue
+        if listing is not None:
+            return listing.paths, source.kind
+    return None
+
+
+def _check_removal_claims(
+    findings: list[Finding],
+    files: Sequence[Any],
+    reader: Callable[[str], str | None] | None,
+    listing: Collection[str] | None,
+    run_inputs: dict[str, Any],
+    tracer: Tracer,
+    *,
+    fallback_listing: Callable[[], tuple[Collection[str], str] | None] | None = None,
+) -> list[Finding]:
+    """Both removal-claim checks, counted: the diff's post-image, then the head tree (#116).
+
+    :func:`prxref.quality.apply_removal_claim_check` drops a claim that a
+    diff path was removed when the post-image keeps it;
+    :func:`prxref.quality.apply_head_removal_claim_check` then drops a claim
+    that a symbol or a file outside the diff was removed when the head tree
+    (``reader``, and a listing for symbols) still has it.
+
+    The listing is repo_context's ``listing``. Without one (repo_context off,
+    the default), ``fallback_listing`` is called LAZILY: only when
+    :func:`prxref.quality.head_removal_claims_name_symbol` says an active
+    finding claims a symbol was removed, so a review with no such claim
+    makes no listing call. Its None leaves file-path claims only.
+
+    Sets ``run_inputs["removal_claims"]`` to ``diff_refuted`` and
+    ``head_refuted``, the findings each pass dropped, ``reader`` and
+    ``listing``, whether the head pass had each, and ``listing_source``
+    (``"repo_context"``, ``"forge"``, ``"repo-dir"`` or None), and, when
+    either pass dropped a finding, emits one ``removal drop`` trace event
+    with the same fields.
+    """
+    diff_checked = apply_removal_claim_check(findings, files)
+    source: str | None = "repo_context" if listing is not None else None
+    if (
+        listing is None
+        and reader is not None
+        and fallback_listing is not None
+        and head_removal_claims_name_symbol(diff_checked, files)
+    ):
+        try:
+            fallback = fallback_listing()
+        except Exception as e:  # noqa: BLE001 -- a failed listing is "no listing"
+            logger.warning("removal claims: listing failed: %s", e)
+            fallback = None
+        if fallback is not None:
+            listing, source = fallback
+    head_checked = apply_head_removal_claim_check(diff_checked, files, reader, listing)
+    record = {
+        "diff_refuted": sum(
+            1 for before, after in zip(findings, diff_checked, strict=True)
+            if before.drop_reason is None and after.drop_reason is not None
+        ),
+        "head_refuted": sum(
+            1 for before, after in zip(diff_checked, head_checked, strict=True)
+            if before.drop_reason is None and after.drop_reason is not None
+        ),
+        "reader": reader is not None,
+        "listing": listing is not None,
+        "listing_source": source,
+    }
+    run_inputs["removal_claims"] = record
+    if record["diff_refuted"] or record["head_refuted"]:
+        tracer.event("removal", "drop", **record)
+    if record["head_refuted"]:
+        logger.info(
+            "removal claims: dropped %d finding(s) claiming removal of a symbol or file "
+            "the head tree still has",
+            record["head_refuted"],
+        )
+    return head_checked
 
 
 def _worker_template(prompts: PromptTemplates | None, review_depth: str) -> str:
@@ -2793,6 +3122,70 @@ def _rule_index(rules: Any, scoped_rules: Any) -> tuple[Any, ...]:
         for rules_file in getattr(scoped_rules, "files", ()) or ():
             sections += getattr(rules_file, "index", ()) or ()
     return sections
+
+
+def _fold_root_causes(
+    findings: Sequence[Finding],
+    *,
+    confidence_floor: float | None,
+    sweep_start: int,
+    tracer: Tracer,
+) -> list[Finding]:
+    """Run :func:`quality.apply_root_cause_fold` and report what it folded.
+
+    Each folded finding keeps its identity and carries its reason in
+    ``drop_reason``, so the run record is the audit. One INFO line and one
+    ``rootcause ok`` trace event appear only when something folded.
+    """
+    folded = apply_root_cause_fold(
+        findings, confidence_floor=confidence_floor, sweep_start=sweep_start,
+    )
+    count = sum(
+        1 for before, after in zip(findings, folded, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    if count:
+        logger.info("root cause fold: folded %d reworded finding(s)", count)
+        tracer.event("rootcause", "ok", folded=count)
+    return folded
+
+
+def _default_branch_check(
+    findings: Sequence[Finding],
+    files: Sequence[Any],
+    forge: Forge,
+    ref: PRRef,
+    pr: PRData,
+    run_inputs: dict[str, Any],
+    tracer: Tracer,
+) -> list[Finding]:
+    """Run :func:`default_branch.apply_default_branch_check` and record what it did.
+
+    Fails open: any exception leaves ``findings`` as they were. Writes the
+    run record's ``default_branch_check`` key and emits one
+    ``default_branch_check ok`` trace event.
+    """
+    try:
+        checked, outcome = default_branch.apply_default_branch_check(
+            findings, files=files, forge=forge, ref=ref,
+            target_branch=getattr(pr, "target_branch", "") or "",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("default branch check failed, findings unchanged: %s", e)
+        tracer.event("default_branch_check", "error", error=str(e))
+        return list(findings)
+    run_inputs["default_branch_check"] = outcome.record()
+    tracer.event(
+        "default_branch_check", "ok", branch=outcome.branch, stacked=outcome.stacked,
+        checked=outcome.checked, lowered=outcome.lowered, present=outcome.present,
+        unknown=outcome.unknown,
+    )
+    if outcome.lowered:
+        logger.info(
+            "default branch check: lowered %d versioning finding(s) against %s",
+            outcome.lowered, outcome.branch,
+        )
+    return checked
 
 
 def _group_findings(
@@ -2983,30 +3376,42 @@ def post_failure_cause(exc: BaseException) -> str:
 def _degraded_record(
     failures: Sequence[tuple[str, str]],
     failed_chunk_rows: Sequence[Mapping[str, object]] = (),
+    model_violations: Sequence[Mapping[str, object]] = (),
 ) -> dict | None:
-    """The run record's ``degraded`` value from failed posts and failed chunks.
+    """The run record's ``degraded`` value from failed posts, failed chunks and model violations.
 
     ``None`` when nothing failed. ``failed`` keeps each post kind once, in
     the order it first failed, after ``"chunk"`` when any review unit
-    failed (the chunk fails before any post is attempted). ``cause`` is
+    failed (the chunk fails before any post is attempted) and ``"model"``
+    when any unit was answered by a model outside
+    ``PRXREF_LLM_REQUIRE_MODELS`` (issue #138). ``cause`` is
     ``"permission"`` when any post failure was (a blocked write outranks
-    everything: it is the one the operator must act on), else ``"partial"``
+    everything: it is the one the operator must act on), else ``"model"``
+    when a model violation exists (the run broke the operator's model
+    policy, which a coverage gap does not explain away), else ``"partial"``
     when a chunk failed (issue #72: the review only partially happened),
     else ``"error"``. ``fallback`` and ``annotations`` start empty for the
     CLI to fill. ``chunks`` carries one ``{"index", "files", "error"}`` row
     per failed review unit, and appears only when at least one did, so the
-    #48 post-failure shape is unchanged.
+    #48 post-failure shape is unchanged. ``models`` carries the
+    :func:`_model_violations` rows (``{"unit", "index", "files", "model",
+    "requested_model"}``, plus ``line`` on a verify row) and appears only
+    when there is at least one.
     """
-    if not failures and not failed_chunk_rows:
+    if not failures and not failed_chunk_rows and not model_violations:
         return None
     failed: list[str] = []
     if failed_chunk_rows:
         failed.append("chunk")
+    if model_violations:
+        failed.append("model")
     for kind, _ in failures:
         if kind not in failed:
             failed.append(kind)
     if any(c == "permission" for _, c in failures):
         cause = "permission"
+    elif model_violations:
+        cause = "model"
     elif failed_chunk_rows:
         cause = "partial"
     else:
@@ -3016,6 +3421,8 @@ def _degraded_record(
     }
     if failed_chunk_rows:
         record["chunks"] = [dict(row) for row in failed_chunk_rows]
+    if model_violations:
+        record["models"] = [dict(row) for row in model_violations]
     return record
 
 
@@ -3161,6 +3568,7 @@ def _describe_step(
     labels_mode: str,
     max_tokens: int | None,
     tracer: Any,
+    require_models: Sequence[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Draft the PR description and labels (#37): ``(record, cost_unit)``.
 
@@ -3172,7 +3580,11 @@ def _describe_step(
     the forge's ``update_description`` with the body composed from the
     split original, shortened to the forge's ``max_description_chars``.
     Labels follow when ``labels_mode`` is not ``off``, the description was
-    written and the forge has ``add_labels``. ``cost_unit`` is the model
+    written and the forge has ``add_labels``. With ``require_models``
+    (``PRXREF_LLM_REQUIRE_MODELS``, issue #138) set, a reply answered by a
+    model it does not allow (:func:`_answer_allowed`) is neither written nor
+    labelled: ``record["reason"]`` names the model and one WARNING is
+    logged; the verdict is unaffected. ``cost_unit`` is the model
     call's run-cost unit, ``None`` when no call was made. Never raises: any
     failure is logged and lands in ``record["error"]``, and the review goes
     on unchanged.
@@ -3208,6 +3620,15 @@ def _describe_step(
         if not res.body:
             record["reason"] = "the model returned no usable description"
             record["error"] = res.error or "empty description"
+            return record, unit
+        allow = {m for m in require_models if m}
+        if allow and not _answer_allowed(allow, res.requested_model, res.model):
+            who = _answerer_text(res.requested_model, res.model)
+            record["reason"] = (
+                f"the description was answered by {who}, "
+                "which PRXREF_LLM_REQUIRE_MODELS does not allow"
+            )
+            logger.warning("describe: %s; not written", record["reason"])
             return record, unit
         body = _fit_description(
             res.body, parts.original, head_sha=head, at=_describe_now(),
@@ -3267,7 +3688,7 @@ def _apply_labels(
 
 
 def _attribution(
-    model: str, tokens: int, elapsed_ms: int, *, cost_label: str = "",
+    model: str, tokens: int, elapsed_ms: int, *, seed: object = None, cost_label: str = "",
 ) -> str:
     """The attribution line every posted comment carries.
 
@@ -3277,8 +3698,16 @@ def _attribution(
     fields keep their order, so a consumer that parses ``model=`` or the
     token count, and the prune pass that matches ``ATTRIBUTION_MARKER`` as a
     prefix, see the same line whether or not cost is posted.
+
+    ``seed`` is the sampling seed the client had in force (``sampling.seed``
+    in the run record). An integer, ``0`` included, is shown as `` · seed=N``
+    right after the elapsed field and before the cost label; ``None`` (no
+    seed, ``PRXREF_LLM_SEED=off``, claude-cli) or anything that is not an
+    integer leaves the line exactly as it was.
     """
     line = f"{ATTRIBUTION_MARKER} · model={model} · {tokens} tok · {elapsed_ms / 1000:.1f}s"
+    if isinstance(seed, int) and not isinstance(seed, bool):
+        line = f"{line} · seed={seed}"
     return f"{line} · {cost_label}" if cost_label else line
 
 
@@ -3453,7 +3882,8 @@ def _mark_reviewed_head(
     ``None`` whenever ``scope`` is ``None`` (``PRXREF_INCREMENTAL`` off, the
     record left untouched) or ``post_mode`` posts no summary. Otherwise the
     PR head, lowercased, when ``complete`` (every review unit of the run
-    succeeded) and the head is a hex SHA :data:`REVIEWED_HEAD_RE` can read
+    succeeded and, under ``PRXREF_LLM_REQUIRE_MODELS``, was answered by an
+    allowed model) and the head is a hex SHA :data:`REVIEWED_HEAD_RE` can read
     back; else the previous marker's SHA, so the files a failed unit covered
     are re-reviewed on the next push, or ``None`` when there was none.
     """
@@ -4137,6 +4567,7 @@ def _verify_error_findings(
     tokens: tuple[int, int],
     cost_label: str,
     tracer: Tracer,
+    unit_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Finding], int, int, str]:
     """Run the error-verification pass (#126): ``(findings, input_tokens, output_tokens, cost_label)``.
 
@@ -4148,6 +4579,8 @@ def _verify_error_findings(
     ``verify ok`` trace event with the totals. When tier 1 made calls, their
     units join ``cost_units`` and the run is priced again, exactly as the
     describe call is, so the tokens, cost and cost label cover them.
+    ``unit_sink``, when given, receives those units, so the allowed-model
+    guard (issue #138) can check which model answered each.
     """
     listing_paths = repo_plan.listing_paths if repo_plan is not None else None
     listing_complete = repo_plan.listing_complete if repo_plan is not None else False
@@ -4161,6 +4594,8 @@ def _verify_error_findings(
         listing_complete=listing_complete, exclude=exclude, max_workers=max_workers,
     )
     run_inputs["error_verification"] = record
+    if unit_sink is not None:
+        unit_sink.extend(units)
     if record is not None:
         tracer.event("verify", "ok", **{k: v for k, v in record.items() if k != "detail"})
         if record["name_refuted"] or record["refuted"]:
@@ -4326,6 +4761,7 @@ def _run_workers(
     followup_floor: float | None = None,
     followup_records: list[dict[str, Any] | None] | None = None,
     evidence_blocks: Sequence[str] | None = None,
+    pass_index: int = 0,
 ) -> list[dict]:
     # Never below 1: ThreadPoolExecutor rejects a zero-width pool, and a
     # library caller is not gated by config's range check.
@@ -4360,7 +4796,8 @@ def _run_workers(
             ex.submit(
                 _run_worker, i + 1, len(chunks), llm, chunk, pr,
                 max_tokens, context_lines, tracer, reader, all_files,
-                trace_label=f"chunk{i}", trace_dir=trace_dir,
+                trace_label=f"chunk{i}" if pass_index == 0 else f"chunk{i}.pass{pass_index}",
+                trace_dir=trace_dir,
                 prompt_context=prompt_context,
                 scoped_block=scoped_blocks[i] if scoped_blocks is not None else None,
                 repo_plan=repo_plan, unit_records=unit_records,
@@ -4389,6 +4826,104 @@ def _run_workers(
             return results
         finally:
             done.set()
+
+
+def _answer_allowed(allow: Collection[str], requested: object, model: object) -> bool:
+    """True when ``requested`` (the chain entry) or ``model`` (the reported id) is in ``allow``.
+
+    The one matching rule of :envvar:`PRXREF_LLM_REQUIRE_MODELS` (issue
+    #138), shared by the review guard and the PR-description call: exact
+    comparison, and a reply naming neither is not allowed.
+    """
+    return bool(requested) and requested in allow or bool(model) and model in allow
+
+
+def _answerer_text(requested: object, model: object) -> str:
+    """``entry, reported as id`` when both are known and differ, else whichever is known."""
+    who = requested or model or "an unidentified model"
+    if requested and model and model != requested:
+        who = f"{requested}, reported as {model}"
+    return str(who)
+
+
+def _model_violations(
+    chunks: Sequence[Sequence[Any]],
+    results: Sequence[Mapping[str, Any]],
+    verify_units: Sequence[Mapping[str, Any]],
+    allowed: Sequence[str],
+) -> list[dict[str, Any]]:
+    """One row per review unit answered by a model outside ``allowed`` (issue #138).
+
+    ``[]`` when ``allowed`` is empty (the guard is off). ``results`` are the
+    chunk results in chunk order followed by the systemic sweep, as
+    :func:`orchestrate_review` builds them; ``verify_units`` are the
+    error-verification calls that came back. A unit that failed is skipped:
+    it already makes the run ``Incomplete`` and no model answered it.
+
+    A reply is allowed when its ``requested_model`` (the
+    ``PRXREF_LLM_MODELS`` entry the backend sent the request to) or its
+    ``model`` (the id the provider reported) is in ``allowed``, exactly as
+    written. Matching the chain entry is what makes ``anthropic/claude-x``
+    work when the provider answers as ``claude-x-20250929``; matching the
+    reported id is what makes the guard usable on a backend that cannot name
+    the entry (litellm after an internal fallback). A reply naming neither
+    is not allowed: the guard fails closed. A unit merged from two replies
+    (the context follow-up) is checked once per reply, through its
+    ``answered_by`` pairs.
+
+    Each row is ``{"unit", "index", "files", "model", "requested_model"}``:
+    ``unit`` is ``"chunk"``, ``"sweep"`` or ``"verify"``; ``index`` is the
+    1-based chunk index (the sweep's is ``len(chunks) + 1``, as in the
+    ``degraded.chunks`` rows) or the verification call's 1-based position;
+    ``files`` the chunk's files, ``[]`` for the sweep, or the verified
+    finding's file, whose ``line`` a verify row adds.
+    """
+    allow = {m for m in allowed if m}
+    if not allow:
+        return []
+    rows: list[dict[str, Any]] = []
+
+    def check(kind: str, index: int, files: list[str], unit: Mapping[str, Any], extra: dict) -> None:
+        if unit.get("error"):
+            return
+        pairs = unit.get("answered_by") or [
+            [unit.get("requested_model") or "", unit.get("model") or ""],
+        ]
+        for requested, model in pairs:
+            if _answer_allowed(allow, requested, model):
+                continue
+            row = {
+                "unit": kind, "index": index, "files": files,
+                "model": str(model or ""), "requested_model": str(requested or ""),
+                **extra,
+            }
+            if row not in rows:
+                rows.append(row)
+
+    for i, (chunk, r) in enumerate(zip(chunks, results, strict=False), start=1):
+        check("chunk", i, [f.path for f in chunk], r, {})
+    if len(results) > len(chunks):
+        check("sweep", len(chunks) + 1, [], results[-1], {})
+    for k, unit in enumerate(verify_units, start=1):
+        file = str(unit.get("file") or "")
+        check("verify", k, [file] if file else [], unit, {"line": unit.get("line")})
+    return rows
+
+
+def _violation_text(rows: Sequence[Mapping[str, Any]]) -> str:
+    """``chunk 2 (model-b), sweep (model-b)``: each offending unit and the model that answered it."""
+    parts = []
+    for row in rows:
+        if row["unit"] == "chunk":
+            where = f"chunk {row['index']}"
+        elif row["unit"] == "verify":
+            files = row.get("files") or ["?"]
+            where = f"verification of {files[0]}:{row.get('line')}"
+        else:
+            where = "sweep"
+        who = _answerer_text(row.get("requested_model"), row.get("model"))
+        parts.append(f"{where} ({who})")
+    return ", ".join(parts)
 
 
 def _failed_chunks(chunks: Sequence[Sequence[Any]], results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -4446,6 +4981,20 @@ def _retry_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "parse_retries": meta["parse_retries"],
         "first_error": meta.get("first_error", ""),
+    }
+
+
+def _answer_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """The answering-model keys a unit result carries over (issue #138).
+
+    ``requested_model`` (the ``PRXREF_LLM_MODELS`` entry the used reply came
+    from) and ``answered_by`` (every ``[requested_model, model]`` pair whose
+    reply the unit used, set by a context follow-up that merged two replies),
+    each only when present, so a backend that reports no chain entry leaves
+    the result with exactly its earlier keys.
+    """
+    return {
+        key: meta[key] for key in ("requested_model", "answered_by") if meta.get(key)
     }
 
 
@@ -4530,6 +5079,7 @@ def _invoke_chunk(
             "cost_usd": meta.get("cost_usd"),
             "cost_source": meta.get("cost_source", ""),
             **_retry_meta(meta),
+            **_answer_meta(meta),
         }
 
     findings = []
@@ -4552,6 +5102,7 @@ def _invoke_chunk(
         "cost_usd": res.get("cost_usd"),
         "cost_source": res.get("cost_source", ""),
         **_retry_meta(res),
+        **_answer_meta(res),
     }
 
 
@@ -4741,6 +5292,7 @@ def _run_worker(
         "cost_usd": res["cost_usd"],
         "cost_source": res["cost_source"],
         **_retry_meta(res),
+        **_answer_meta(res),
     }
 
 
@@ -4857,6 +5409,7 @@ def _run_sweep(
         "cost_usd": meta.get("cost_usd"),
         "cost_source": meta.get("cost_source", ""),
         **_retry_meta(meta),
+        **_answer_meta(meta),
     }
 
 
@@ -4906,6 +5459,7 @@ def _render_summary(
     chunks_reviewed: int = 0,
     chunks_failed: int = 0,
     failed_chunks: Sequence[tuple[str, Sequence[str]]] = (),
+    model_violations: Sequence[Mapping[str, Any]] = (),
     include_verdict: bool = True,
     inline_accounting: str | None = None,
     thread_accounting: str = "",
@@ -4913,11 +5467,13 @@ def _render_summary(
     ticket_note: str = "",
     evidence_note: str = "",
     cost_label: str = "",
+    seed: object = None,
     size_advisory_line: str = "",
     summary_template: str = "",
     incremental_note: str = "",
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
     metadata_section: str = "",
+    stability_note: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -4938,7 +5494,8 @@ def _render_summary(
     ``No in-ticket findings.`` stands in for the first list. Without an
     active ticket every scope is ``"unknown"``, so the list stays flat.
     ``cost_label`` is the attribution's last field
-    (:func:`_attribution`). ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
+    (:func:`_attribution`), and ``seed`` (the client's integer sampling seed
+    or ``None``) is the field before it. ``size_advisory_line`` (``"> ⚠️ …\\n\\n"`` or
     ``""``) is prepended to the finished body, after the partial-review
     banner, so it is the first thing under the forge's summary marker.
     ``incremental_note`` (:func:`_incremental_note`, ``""`` on every run that
@@ -4946,7 +5503,9 @@ def _render_summary(
     ``metadata_section`` (:func:`_metadata_section`, ``""`` when the
     PR-metadata checks are off or found nothing) goes above the footer on
     every template, ahead of any other appended block, so an empty one
-    leaves the summary byte-identical.
+    leaves the summary byte-identical. ``stability_note``
+    (:func:`prxref.stability.summary_line`, issue #143, ``""`` with the mode
+    off) rides the same slot, right after it.
     ``summary_template`` is an operator override of ``summary.md``
     (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
     the packaged template through ``reviewer.load_prompt``, and only that
@@ -4984,7 +5543,10 @@ def _render_summary(
     attribution and a ``---`` rule directly over it) when the body has one
     (:func:`_insert_before_footer`); a template that dropped
     ``{attribution}`` gets them at the end of the body and the attribution
-    after them. The partial-review banner comes last.
+    after them. The partial-review banner comes last, followed, when
+    ``model_violations`` (:func:`_model_violations`, issue #138) is
+    non-empty, by a ``> ⚠️ Not the required model:`` blockquote naming each
+    unit and the model that answered it; empty leaves the body unchanged.
     """
     try:
         template = summary_template or reviewer.load_prompt("summary")
@@ -5046,7 +5608,7 @@ def _render_summary(
 
     head_sha = getattr(pr, "source_sha", "") or ""
     attribution = _attribution(
-        model, input_tokens + output_tokens, elapsed_ms, cost_label=cost_label,
+        model, input_tokens + output_tokens, elapsed_ms, seed=seed, cost_label=cost_label,
     )
     rendered = fill_template(template, {
         "verdict": verdict,
@@ -5073,6 +5635,8 @@ def _render_summary(
     uncovered = uncovered_summary_groups(found)
     stray = [f for f in findings_active if _summary_group_of(f) in uncovered]
     extras: list[str] = [metadata_section] if metadata_section else []
+    if stability_note:
+        extras.append(stability_note)
     if stray:
         logger.warning(
             "summary template has no {findings} and no slot for the %s finding group(s); "
@@ -5103,6 +5667,13 @@ def _render_summary(
         reason_lines = _failure_reason_lines(failed_chunks)
         if reason_lines:
             rendered += "\n>\n" + "\n".join(f"> {line}" for line in reason_lines)
+    if model_violations:
+        rendered = (
+            f"{rendered}\n\n> ⚠️ Not the required model: "
+            f"{len(model_violations)} review unit(s) were answered by a model "
+            f"outside PRXREF_LLM_REQUIRE_MODELS: {_violation_text(model_violations)}. "
+            "Those findings did not come from a model this review requires."
+        )
     return f"{size_advisory_line}{incremental_note}{rendered}"
 
 
@@ -5520,6 +6091,9 @@ def _summary_group_of(f: Finding) -> str:
 def _format_finding(f: Finding, model: str, suggestion_style: str | None = None) -> str:
     block = format_suggestion_block(f, suggestion_style)
     suggestion = f"{block}\n\n" if block else ""
+    seen = stability.seen_line(f)
+    if seen:
+        suggestion = f"{suggestion}{seen}\n\n"
     # The previously-raised note (issue #73) is a SUFFIX, after the footer:
     # the header, body, suggestion and attribution lines are pinned by frozen
     # tests that prefix-match or compare the leading body, and the note is
@@ -5666,7 +6240,7 @@ def _summary_only_run(
             chunks_reviewed=0, chunks_failed=0,
             include_verdict=post_verdict,
             ticket_note=ticket_note,
-            cost_label=cost_label,
+            cost_label=cost_label, seed=(sampling or {}).get("seed"),
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             summary_template=summary_template,
@@ -5740,7 +6314,7 @@ def _error_run(
     if wanted:
         attribution = _attribution(
             model, input_tokens + output_tokens, elapsed_ms,
-            cost_label=cost_label,
+            seed=(sampling or {}).get("seed"), cost_label=cost_label,
         )
         # The same redaction the partial banner uses: this notice interpolates
         # the reason into a public comment, and the caller has already logged

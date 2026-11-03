@@ -103,47 +103,53 @@ CONTEXTS = {
 # The four worker SYSTEM hashes (and orchestrator/1's, which is the chunk
 # system) were re-derived again for issue #67's "Matching rules" section in
 # worker.md: each is the earlier render with that one section inserted above
-# "## Style". Every sweep hash, every USER hash and orchestrator/0 are still
-# the 0.15 recording.
+# "## Style". Every USER hash is still the 0.15 recording.
+# Every SYSTEM hash, worker and sweep, orchestrator/0 and /1 included, was
+# re-derived for issue #116's one-line note in worker.md and systemic.md
+# (claims about deleted or renamed code are to be checked): each is the
+# earlier render with that one line added.
+# The four worker SYSTEM hashes (and orchestrator/1's) were re-derived once more
+# for issue #147's "## Suggested fixes" section in worker.md, inserted between
+# "## Matching rules" and "## Style"; every USER and sweep hash is unchanged.
 BASE_GOLDEN = {
     "worker/off": (
-        "5bdb1187017f275bf1afc5de65db61709155410ab94ff3d6d34c20533e11e335",
+        "f05be9ab37feec038d0fe7af04add3d645a4b9b1986f9a9273962a0f7b66787e",
         "4efbc87d908fc50b2ea9adb6dbc43b58e144a8c99734cef5790e425851b2f0f4",
     ),
     "sweep/off": (
-        "1ff5d002746e76e39f456d76db1e935aaacad22296b5319ccda23e392bbd65b6",
+        "ec7435bba98d67f8f8e5b000bbd0d58a313f0a4158d1226533fc3ba79abff253",
         "577820a0c654d7ac50edab15990cf9d527c83317ad90aa16a6ded0f4dc8aa80f",
     ),
     "worker/scope": (
-        "4e5eb1c3dc10f298546e68161dd960581ba6ea2b9e4fead4909f70a290bbb448",
+        "7bbe3263574ef605898bfe01be2ded4572786900291d366ab9215b9a5ccbf8b3",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/scope": (
-        "a1c032c184f4dd82fdb986f7087a95971fb1a596aa6b49887aaa33687a27eb50",
+        "04dbec28b4116ee5cc67c3c8fcf8e2594caa13b0db297f68bb5daf1dc514e6aa",
         "971380d4218e5aaebd8afd76787b1e57ba08697d910d30547dd7ac219fb70103",
     ),
     "worker/full": (
-        "a5715b5c90a5ca402c51eeaed9e56cdb68119fbdda0ded71058164766d2e9039",
+        "bee5fad4f5f93ed2d48bebeac3993e07a27521379d377195ffe0ac4f359fd544",
         "118d48be8eeac397b8246b5c6bfc3afb1478100f678c2a540648e41a37f4b715",
     ),
     "sweep/full": (
-        "82e4d0907a0f57da0f7f69ee8754b0bc3ba5ec9d22a77b78f172cea8b122c9a2",
+        "296fb3b798fdb1de8b1027e29ae1a5cfdcb8d9805ac13e746b0b8ba1c987f046",
         "3dcf3ce2490de05559933421db5beb8ab046a884f1d38d7470cf06921874732a",
     ),
     "worker/override": (
-        "5a7989b29cc4893651b9301fa899f6d400354d7c7f4d069dca4dde7ed5719295",
+        "69b8f4bd9988d50b52436e37fba5eaf9c829d44bc49a275f5b0b21f8350ee090",
         "5a6936e0eb45ca13d15ab7e70f7eb5879cc63ac3113f635b3294268f9c91e85f",
     ),
     "sweep/override": (
-        "2395bb9b0607756b574773f6c49b4dbd89bac79dcbef6942b5bc732cad93aa72",
+        "4ef7872636c671d53292a0009cf7dc88cfc7fbc4eb3a2988a62dc50a0f77aaf1",
         "971380d4218e5aaebd8afd76787b1e57ba08697d910d30547dd7ac219fb70103",
     ),
     "orchestrator/0": (
-        "1ff5d002746e76e39f456d76db1e935aaacad22296b5319ccda23e392bbd65b6",
+        "ec7435bba98d67f8f8e5b000bbd0d58a313f0a4158d1226533fc3ba79abff253",
         "69f464cf7517584bb8630547fde874febcff84f0498e95d7292a175952383c43",
     ),
     "orchestrator/1": (
-        "5bdb1187017f275bf1afc5de65db61709155410ab94ff3d6d34c20533e11e335",
+        "f05be9ab37feec038d0fe7af04add3d645a4b9b1986f9a9273962a0f7b66787e",
         "0113e78e0815af17dbbc6f2e642bfacc237f9464ead72197801a6c23799b2239",
     ),
 }

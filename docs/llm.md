@@ -59,6 +59,7 @@ The client iterates through `PRXREF_LLM_MODELS` in left-to-right priority order 
   - Malformed JSON response
 - On any failure, `OpenAICompatClient` logs the model error and tries the next model in the chain immediately.
 - If all configured models fail, `LLMError` is raised containing the per-model failure reasons.
+- A fallback that answers is a success: the review finishes as usual. When only some models may review the code (the one a rules pack was evaluated on, or the only one approved for it), list them in `PRXREF_LLM_REQUIRE_MODELS`. Any review unit answered by another model then makes the verdict `Incomplete`, and the run record's `degraded.models` names each unit and the model that answered it (`requested_model` is the `PRXREF_LLM_MODELS` entry, `model` the id the provider reported; either one listed is enough). See [env-vars.md](env-vars.md#llm--pipeline).
 - A 4xx body that names a model as permanently gone (deprovisioned, renamed, not supported, or never enabled for this integrator) is cached for the life of the client: every later call skips that model outright — no request, no per-call log — with a single WARNING logged the one time it is marked. `LiteLLMClient` mirrors the same cache, keyed on the exception litellm raises (a 4xx-shaped error naming a model) instead of an HTTP status; it filters the unavailable model out of both the primary `model` and its native `fallbacks` before calling litellm, and raises `LLMError` without calling litellm at all once every configured model has been marked. A 5xx, a timeout, or a connection error is never cached — only a 4xx carrying that phrasing is treated as permanent.
 
 ### Parse Retries
@@ -259,9 +260,25 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
   hardware, MoE routing shifts with batch composition, and many gateways accept
   an unknown top-level `seed` and ignore it. Two identical runs may still return
   different findings, and `prxref` cannot detect a gateway that dropped the seed.
+- **A single pass is a sample.** Identical input can give different findings
+  between runs even at temperature 0: an unset `PRXREF_LLM_SEED` differs per
+  run, and backends do not promise determinism. A review that says "no issues
+  found" is one sample, not a pass. `PRXREF_LLM_SEED=<n>` narrows run-to-run
+  differences on backends that honour it and guarantees nothing.
+- **Stability mode (#143).** `PRXREF_STABILITY_PASSES=N` (1-5, default 1 = off)
+  runs the chunk workers N times and merges the passes per chunk, so a finding
+  reports `Seen in X of N passes.`. `PRXREF_STABILITY_MIN_AGREE=K` lists only
+  findings at least K passes raised (a failed pass lowers K to the passes that
+  answered). Spend is about N times the chunk tokens; the whole-PR sweep runs
+  once. With an integer `PRXREF_LLM_SEED`, pass p sends seed+p, recorded in the
+  run record's `stability.seeds`; `off` sends none. Both keys are env-only.
 - The `sampling` field in the run record — `{"temperature", "seed", "models"}`,
   present on every exit including a failed run — tells you which knobs were
-  actually in force for the run you are looking at.
+  actually in force for the run you are looking at. The posted comment's footer
+  carries the same seed as `· seed=N` (after the elapsed time, before the cost),
+  so the footer and `sampling.seed` tell a flip between two runs apart from a
+  config change. No footer seed means the client had none: `PRXREF_LLM_SEED=off`
+  or a CLI backend.
 - What *is* deterministic is everything downstream of the model: findings are
   ordered by `(file, line, title)`, and the error and inline-comment caps break
   ties by finding content (confidence first, then file, line, and normalized

@@ -55,6 +55,8 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Sequence
+from typing import Any
 
 import requests
 
@@ -489,6 +491,7 @@ class OpenAICompatClient(LLMClient):
                     finish_reason=finish_reason,
                     cost_usd=cost_usd,
                     cost_source=cost_source,
+                    requested_model=model,
                 )
                 continue
             logger.info(
@@ -507,6 +510,7 @@ class OpenAICompatClient(LLMClient):
                 finish_reason=finish_reason,
                 cost_usd=cost_usd,
                 cost_source=cost_source,
+                requested_model=model,
             )
         # Exhausting the chain on truncation alone is a last resort, not a
         # failure: the best answer anyone managed is still handed back, with
@@ -514,6 +518,48 @@ class OpenAICompatClient(LLMClient):
         if last_truncated is not None:
             return last_truncated
         raise LLMError("all models failed: " + "; ".join(failures))
+
+
+def _litellm_fallback_count(hidden: Any) -> int | None:
+    """litellm's ``x-litellm-attempted-fallbacks`` count from hidden params, or ``None``.
+
+    ``hidden`` may be a dict or an attribute object; ``additional_headers``
+    may be missing, ``None`` or not a mapping, and the header absent (older
+    litellm). Only a real ``int`` counts: a ``bool`` or a string does not.
+    """
+    headers = (
+        hidden.get("additional_headers") if isinstance(hidden, dict)
+        else getattr(hidden, "additional_headers", None)
+    )
+    if not isinstance(headers, dict):
+        return None
+    count = headers.get("x-litellm-attempted-fallbacks")
+    return count if isinstance(count, int) and not isinstance(count, bool) else None
+
+
+def _litellm_requested_model(
+    reported: str, available: Sequence[str], hidden: Any = None,
+) -> str:
+    """The chain entry a litellm answer came from, or ``""`` when unknowable.
+
+    litellm walks ``fallbacks`` inside one call and reports only the
+    provider's model id (prefix stripped, so ``anthropic/claude-x`` comes
+    back as ``claude-x``). The entry is named in this order: the chain had
+    one entry; litellm's ``x-litellm-attempted-fallbacks`` count in the
+    response's hidden params, an ``int`` index into ``available`` because
+    the call is made with ``model=available[0]`` and
+    ``fallbacks=available[1:]``; the reported id is itself an entry.
+    Anything else, such as a litellm too old to report the count, is ``""``
+    and :envvar:`PRXREF_LLM_REQUIRE_MODELS` matches the reported id alone
+    (issue #138). ``litellm_model_name`` is never used: it keeps naming the
+    primary after a fallback answered.
+    """
+    if len(available) == 1:
+        return available[0]
+    count = _litellm_fallback_count(hidden)
+    if count is not None and 0 <= count < len(available):
+        return available[count]
+    return reported if reported in available else ""
 
 
 class LiteLLMClient(LLMClient):
@@ -624,17 +670,19 @@ class LiteLLMClient(LLMClient):
         hidden = getattr(response, "_hidden_params", None)
         raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else getattr(hidden, "response_cost", None)
         cost_usd = None if isinstance(raw_cost, str) else costs.valid_usd(raw_cost)
+        reported = getattr(response, "model", "") or available[0]
         return InvokeResult(
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
-            model=getattr(response, "model", "") or available[0],
+            model=reported,
             backend="litellm",
             elapsed_ms=elapsed_ms,
             # Absent on a provider that does not report one; never guessed.
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
             cost_usd=cost_usd,
             cost_source="litellm" if cost_usd is not None else "",
+            requested_model=_litellm_requested_model(reported, available, hidden),
         )
 
     def _maybe_mark_unavailable(

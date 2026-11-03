@@ -245,8 +245,29 @@ process by the same code `prxref review` runs, as a replay with
   standards discovery (`PRXREF_CONTEXT_STANDARDS_GLOBS`) are on by default
   for `prxref review`, and every case runs with them off, whatever the
   environment or the config file says, so a baseline stays comparable
-  across releases and machines. `run.json`'s `config` records the pinned
-  values.
+  across releases and machines. `PRXREF_TICKET_IDS_FROM_TITLE` is pinned
+  `off` as well: it is off by default, but a lane that turned it on would
+  otherwise reach a Jira host from an eval run, or exit `2` without Jira
+  settings. `run.json`'s `config` records the pinned values (except that
+  one), and each case's `record.json` carries all of them under
+  `eval_pins`.
+  These pins are `prxref.evals.EVAL_PINS`; `prxref review --eval-pins` (or
+  `PRXREF_EVAL_PINS=on`) applies the same mapping, at the same layer, to a
+  normal review, so a CI lane can run with the settings a rules pack was
+  measured under (#137). The pins sit above the environment, the config
+  file and every flag: a `--ci-wiring on` or `--context-standards-globs`
+  given with `--eval-pins` is overridden, with a WARNING naming the flag.
+  That review's `--format json` output records the mapping under
+  `eval_pins` (`null` without the pins).
+- **Stability mode** (`PRXREF_STABILITY_PASSES`, `PRXREF_STABILITY_MIN_AGREE`,
+  #143) is not an eval pin. An eval run honours the two environment keys like
+  any review, so a lane that sets them reviews every case that many times, and
+  the case's `record.json` then carries a `stability` object (passes, bar,
+  seeds, per-pass finding counts, dropped findings) and each chunk finding its
+  `agreement` and `passes_ok` (the sweep row has neither). Without the keys the record has none of these.
+  The keys are not in `prxref.evals.EVAL_PINS` or `RUN_CONFIG_KEYS`, so a
+  baseline run under them is not marked as such in `run.json`'s `config`:
+  compare like with like.
 - **A diff-file case** contacts no forge. It has no threads, and no file
   context unless it has a `repo_dir`, which serves its chunk context
   (dependency versions, definitions). A `git format-patch` file supplies the
@@ -364,7 +385,7 @@ prxref-eval/                        --out
 | `sampling` | the reviewer's `temperature`, `seed` and `models` |
 | `review_rules` | the record's stamp of the rules file, or `null` |
 | `scoped_rules` | the record's stamp of the path-scoped rules (`entries`, `files`, `max_chars`, `units`; never the rules text), or `null` |
-| `config` | the settings `llm_backend`, `llm_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `dedup_code_overlap`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads`, `routing_probe`, `ci_wiring`, `review_depth`, `verify_errors`, `verify_errors_max` |
+| `config` | the settings `llm_backend`, `llm_models`, `llm_require_models`, `llm_max_tokens`, `llm_parse_retries`, `max_chunks`, `chunk_token_budget`, `chunk_max_files`, `dedup_similarity`, `dedup_code_overlap`, `group_findings`, `max_warning_findings`, `max_outofscope_findings`, `max_findings_per_rule`, `scoped_rules_max_chars`, `suggestions`, `context_followup`, `repo_context`, `repo_context_max_chars`, `context_contract_globs`, `context_exclude_globs`, `context_standards_globs`, `context_standards_max_chars`, `repo_context_max_reads`, `repo_context_max_chunk_reads`, `routing_probe`, `ci_wiring`, `review_depth`, `verify_errors`, `verify_errors_max` |
 
 `prompts.sha256` always hashes the packaged templates, so an override shows
 only under `prompts.prompt_templates`, and a `PRXREF_REVIEW_DEPTH=thorough`
@@ -378,7 +399,7 @@ when their input is off.
 always read `off`, `off` and `[]`: every case is reviewed with those features
 pinned off, and `config` records the values that ran, not the environment's.
 
-**No credential is ever written.** `config` is an allowlist of the twenty-nine
+**No credential is ever written.** `config` is an allowlist of the thirty
 settings above, and a record carries no credential. The traces do hold the
 prompts, and the prompts hold the diff, so treat a run directory like the
 code it reviewed.

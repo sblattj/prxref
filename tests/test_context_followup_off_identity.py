@@ -35,6 +35,12 @@ for issue #67's "Matching rules" section in worker.md: stripping that one
 section from each worker system message reproduces the previous recording
 (``575f52b8...`` and ``92ed30e3...``) byte for byte. The sweep request sha is
 still the 0.17.0 recording.
+
+All three request shas (and the #29 pair) were re-recorded for issue #116's
+one-line note in worker.md and systemic.md (claims about deleted or renamed
+code are to be checked): stripping that line from each system message
+reproduces the previous recording (``058306f7...``, ``0df673d2...``,
+``9e29727a...`` and, for PRE_29_SHA, ``6f39ae9a...``) byte for byte.
 """
 from __future__ import annotations
 
@@ -70,21 +76,23 @@ SWEEP_CONTENT = json.dumps({"findings": []})
 # Recorded at 43ec560 with PRXREF_REPO_CONTEXT=repo, PRXREF_CONTEXT_FOLLOWUP
 # unset, over tests/fixtures/issue22/pr.patch against the route below.
 EXPECTED_REQUEST_COUNT = 3
-PRE_29_SHA = "07f1d507fa6b929b2483ab2fa610349355ef7c4e23e8f224f029301e5a3a2c3f"
-POST_29_SHA = "5e1f061ba04deedee51b7c02c31dd8f148560da7b85f9c682a9d1002ad48916e"
+PRE_29_SHA = "379eeea4ff08b4a70b372ea43b55af4f339ede56476c986bfa7b4de3e83f12d9"
+POST_29_SHA = "a962f0faa8e66d2e9cf2d440515c6f4cff109578453b2b4e69638e7f2eb49a73"
 ISSUE_29_LINE = "assistant/engine.py:12: class Step:\n"
 EXPECTED_MESSAGE_SHAS = [
-    # The sweep request: still the 0.17.0 recording.
-    "058306f7b8a3cf8f8e744a6393745bd31c124805790530e0e00314afdac7b1aa",
+    # Every sha was re-recorded at issue #116's one-line prompt note (see the
+    # module docstring); stripping that line gives the previous recording.
     # Both worker request shas were re-recorded at the issue #67 worker.md
     # "Matching rules" section (was 575f52b8... and, for the annotated one
     # below, 92ed30e3...): stripping that one section from each worker system
     # message reproduces the earlier recording byte for byte.
+    "1c51fb3483ec0d4ddc680de2084d7be92077912f1b14a4b80307df09dd55a73a",
     # Re-recorded at 0.20.0: issue #29 gives this diff-file plus repo-dir
     # replay chunk context, so this prompt gains exactly
     # ``assistant/engine.py:12: class Step:``; it was PRE_29_SHA at 0.17.0.
     POST_29_SHA,
-    "69642b0e902c5ab5ee620d31e13740e491d8a445fa553c6dbf4694056a70a0b3",
+    # The sweep request (the 0.17.0 recording until #116).
+    "d17c4dd7d33cbf4a5be10bf9d30ab0a528f846cfcb7f4351b06b602981576b83",
 ]
 
 

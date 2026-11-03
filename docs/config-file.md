@@ -146,6 +146,7 @@ its `PRXREF_` name.
 | Key | Type | Meaning |
 |---|---|---|
 | `llm_models` | array of strings | Model fallback chain, cheapest first ([more](env-vars.md#llm--pipeline)). |
+| `llm_require_models` | array of strings | Models allowed to answer a review unit; another one answering makes the verdict `Incomplete` ([more](env-vars.md#llm--pipeline)). |
 | `llm_reasoning_effort` | string | Reasoning effort sent to reasoning models ([more](env-vars.md#llm--pipeline)). |
 | `llm_max_tokens` | integer | Completion-token budget of each worker call ([more](env-vars.md#llm--pipeline)). |
 | `llm_timeout` | number | Per-model deadline in seconds ([more](env-vars.md#llm--pipeline)). |
@@ -164,6 +165,7 @@ its `PRXREF_` name.
 | `repo_context_max_reads` | integer | Uncached repository-context reads all chunks together may make in one run ([more](env-vars.md#llm--pipeline)). |
 | `repo_context_max_chunk_reads` | integer | Uncached repository-context reads one chunk may make ([more](env-vars.md#llm--pipeline)). |
 | `context_followup` | string | `on` re-sends a chunk once with a symbol it asked about ([more](env-vars.md#llm--pipeline)). |
+| `default_branch_check` | string | `on` lowers versioning findings on a stacked PR when the surface is not on the default branch ([more](env-vars.md#llm--pipeline)). |
 | `verify_errors` | string | Error verification before an error can block: `off`, `names` (the default) or `llm` ([more](env-vars.md#llm--pipeline)). |
 | `verify_errors_max` | integer | Model calls one run's error verification may make at `llm` ([more](env-vars.md#llm--pipeline)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
@@ -295,12 +297,15 @@ instead, even when the value is empty.
 | `azure_devops_webhook_secret` | credential | Azure DevOps service-hook secret. |
 | `llm_base_url` | endpoint | The host the diff and the prompts are sent to. |
 | `jira_base_url` | endpoint | The host Jira credentials are sent to. |
+| `ticket_ids_from_title` | endpoint | Fetches every Jira key in the PR title from that host (`PRXREF_TICKET_IDS_FROM_TITLE`). |
 | `llm_backend` | executable | Can select `claude-cli` or `kiro-cli`, which run a local binary, and picks where the diff goes. |
 | `llm_cli_path` | executable | The path of a binary prxref runs. |
 | `trace_file` | local write | Appends a JSONL trace at a chosen path. |
 | `trace_dir` | local write | Writes prompt and response files into a chosen directory. |
 | `fallback` | local write | `auto` writes `gl-code-quality-report.json` into the working directory and emits CI annotations. |
 | `price_table` | local read | Its value may be a path to any JSON file on the runner. |
+| `stability_passes` | spend | Runs every chunk review that many times; a file could multiply the lane's token spend. |
+| `stability_min_agree` | gate | Decides which findings are listed and so what `PRXREF_FAIL_ON` sees. |
 | `fail_on` | gate | The pipeline's exit-code policy. |
 | `dry_run` | gate | The switch that suppresses every forge write. |
 | `allow_unsigned` | gate | The webhook signature safety switch. |
@@ -318,6 +323,7 @@ instead, even when the value is empty.
 | `gate_watchdog_seconds` | gate | The gate's repair interval. |
 | `gate_reconcile_minutes` | gate | The gate's open-PR reconcile interval. |
 | `review_skip_globs` | gate | Removes files from review; a PR could otherwise exempt its own changes. |
+| `eval_pins` | override | Overrides other keys (`ci_wiring`, `routing_probe`, `context_standards_globs`, `ticket_ids_from_title`) above every layer, so a file that set it would override the file's own values. |
 
 ## Paths
 

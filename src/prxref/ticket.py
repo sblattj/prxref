@@ -1,7 +1,14 @@
 """Ticket context: the ticket a pull request is meant to implement.
 
 ``PRXREF_TICKET_CONTEXT_FILE`` (or ``--context-file PATH``, which wins) names
-a plain-text or Markdown file holding that ticket. When it has text, every
+a plain-text or Markdown file holding that ticket. With
+``PRXREF_TICKET_IDS_FROM_TITLE=on`` every Jira key in the PR title is also
+fetched (:func:`prxref.title_tickets.with_title_tickets`) and joined after the file's text under
+the same cap; the summary then lists the keys read and the keys that could
+not be read. A ticket that was only partly read (a listed key failed, or the
+text was cut at the cap) never lets a finding be marked ``out``: see
+:attr:`TicketContext.complete`; with the key off, a text cut at the cap
+still gets a one-sentence summary note saying so. When the context has text, every
 review unit sees it as fenced, untrusted data and is asked to mark each
 finding ``in``, ``out`` or ``unknown`` of the ticket's scope. An empty or
 whitespace-only file is the EMPTY state, "this PR has no ticket": nothing is
@@ -49,6 +56,8 @@ NOTE_NO_AC = (
     "> ℹ️ The ticket context has no acceptance criteria — scope was judged from "
     "its description alone.\n"
 )
+
+TICKET_FILE_LABEL = "the ticket file"
 
 _CONTEXT_HEADING = "### Ticket context"
 _SCOPE_HEADING = "## Ticket scope"
@@ -106,13 +115,19 @@ class TicketContext:
     capped for the prompt and fingerprinted by the raw file bytes; ``text``
     is the kept text, stripped, and empty for an EMPTY ticket;
     ``has_acceptance_criteria`` says whether that text carries acceptance
-    criteria.
+    criteria. ``from_title`` is true when ``PRXREF_TICKET_IDS_FROM_TITLE`` was
+    on for the run, ``ids_loaded`` and ``ids_failed`` are the title keys that
+    were and were not read, and ``path`` is empty for a context built from
+    title keys alone.
     """
 
     path: str
     capped: CappedText
     text: str
     has_acceptance_criteria: bool
+    ids_loaded: tuple[str, ...] = ()
+    ids_failed: tuple[str, ...] = ()
+    from_title: bool = False
 
     @property
     def active(self) -> bool:
@@ -120,17 +135,33 @@ class TicketContext:
         a finding's ``scope`` is accepted; False for an EMPTY ticket."""
         return bool(self.text)
 
+    @property
+    def complete(self) -> bool:
+        """True when nothing the ticket context was meant to hold is missing.
+
+        False when a listed title key could not be read or the text was cut at
+        the cap. The orchestrator never lets a finding stay ``out`` of a
+        ticket that is not complete: it cannot say what the unread part asks.
+        """
+        return not self.ids_failed and not self.capped.truncated
+
     def record(self) -> dict[str, object]:
         """Return the run-record view: ``path``, ``sha256``, ``chars``,
         ``max_chars``, ``truncated``, ``has_acceptance_criteria`` and
-        ``empty``, JSON-native values only and never the ticket text.
+        ``empty``, JSON-native values only and never the ticket text. A run
+        with ``PRXREF_TICKET_IDS_FROM_TITLE=on`` adds ``ids_loaded`` and
+        ``ids_failed``, lists of title keys.
         """
-        return {
+        out: dict[str, object] = {
             "path": self.path,
             **self.capped.record(),
             "has_acceptance_criteria": self.has_acceptance_criteria,
             "empty": not self.text,
         }
+        if self.from_title:
+            out["ids_loaded"] = list(self.ids_loaded)
+            out["ids_failed"] = list(self.ids_failed)
+        return out
 
     def prompt_block(self) -> str:
         """The USER-prompt ``### Ticket context`` block; ``""`` when inactive.
@@ -167,11 +198,49 @@ class TicketContext:
         in ``"\\n"``.
 
         :data:`NOTE_EMPTY` for an EMPTY ticket, :data:`NOTE_NO_AC` for text
-        without acceptance criteria, and ``""`` when it has them.
+        without acceptance criteria, and ``""`` when it has them. With
+        ``PRXREF_TICKET_IDS_FROM_TITLE=on`` a line listing what was read
+        follows, and a text cut at the cap gets a line saying so with the key
+        off too (:meth:`sources_line`).
         """
         if not self.active:
-            return NOTE_EMPTY
-        return "" if self.has_acceptance_criteria else NOTE_NO_AC
+            return NOTE_EMPTY + self.sources_line()
+        base = "" if self.has_acceptance_criteria else NOTE_NO_AC
+        return base + self.sources_line()
+
+    def sources_line(self) -> str:
+        """The summary line naming what was read, or why nothing is marked out.
+
+        With ``from_title`` it lists the ticket file (never its path) and the
+        title keys read, then the keys that could not be read, then a cut at
+        the cap, and says when findings are therefore not marked outside the
+        ticket. Without it, only a text cut at the cap gets a line, the one
+        sentence saying where it was cut and that findings are not marked
+        outside a ticket that was not fully read; it never lists sources.
+        Otherwise ``""``.
+        """
+        if not self.from_title:
+            if not self.capped.truncated:
+                return ""
+            return (
+                f"> ℹ️ The ticket was cut at {self.capped.max_chars} of "
+                f"{self.capped.chars} characters; findings are not marked outside "
+                "a ticket that was not fully read.\n"
+            )
+        if not self.active and not self.ids_failed:
+            return ""
+        read = ([TICKET_FILE_LABEL] if self.path else []) + list(self.ids_loaded)
+        parts = ["Tickets read: " + (", ".join(read) if read else "none")]
+        if self.ids_failed:
+            parts.append(", ".join(self.ids_failed) + " could not be read")
+        if self.capped.truncated:
+            parts.append(
+                f"cut at {self.capped.max_chars} of {self.capped.chars} characters"
+            )
+        line = "> ℹ️ " + "; ".join(parts) + "."
+        if not self.complete:
+            line += " Findings are not marked outside a ticket that was not fully read."
+        return line + "\n"
 
 
 def has_acceptance_criteria(text: str) -> bool:

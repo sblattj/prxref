@@ -359,7 +359,9 @@ class DescribeResult:
     reply was unusable, with ``error`` saying why); ``labels`` are already
     restricted to :data:`CONVENTIONAL_LABELS`. The usage fields mean what
     they mean on a reviewer unit; :meth:`unit` hands them to
-    :func:`prxref.costs.run_cost`.
+    :func:`prxref.costs.run_cost`. ``requested_model`` is the
+    ``PRXREF_LLM_MODELS`` entry that answered (``""`` when the backend
+    cannot name it); it is not part of :meth:`unit`.
     """
 
     body: str = ""
@@ -367,6 +369,7 @@ class DescribeResult:
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
+    requested_model: str = ""
     elapsed_ms: int = 0
     cost_usd: float | None = None
     cost_source: str = ""
@@ -447,6 +450,7 @@ def generate_description(
     res.input_tokens = getattr(result, "input_tokens", 0) or 0
     res.output_tokens = getattr(result, "output_tokens", 0) or 0
     res.model = getattr(result, "model", "") or ""
+    res.requested_model = getattr(result, "requested_model", "") or ""
     res.cost_usd, res.cost_source = _result_cost(result)
 
     stop_reason = _budget_stop_reason(result)

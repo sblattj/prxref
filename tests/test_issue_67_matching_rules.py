@@ -312,7 +312,7 @@ def _packaged_worker_without_matching_rules() -> str:
     text = load_prompt("worker.md")
     head, marker, rest = text.partition("## Matching rules")
     assert marker, "the packaged worker.md must carry the Matching rules section"
-    _section, style_marker, style_tail = rest.partition("## Style")
+    _section, style_marker, style_tail = rest.partition("## Suggested fixes")
     assert style_marker
     return head + style_marker + style_tail
 

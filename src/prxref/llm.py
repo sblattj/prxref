@@ -45,6 +45,15 @@ class InvokeResult:
     ``""`` whenever ``cost_usd`` is ``None``. A price-table estimate never
     appears here: backends only report, and :mod:`prxref.costs` estimates
     once, over the whole run.
+
+    ``model`` is the id the PROVIDER reported in its answer, which can differ
+    from the ``PRXREF_LLM_MODELS`` entry the request named (an endpoint may
+    echo ``claude-x-20250929`` for the entry ``anthropic/claude-x``).
+    ``requested_model`` is that chain entry: the one the backend sent the
+    request that answered to. ``PRXREF_LLM_REQUIRE_MODELS`` (issue #138)
+    matches against both. ``""`` means the backend cannot tell which entry
+    answered (litellm walks its fallbacks internally, so it sets this only
+    when the reported id is itself a chain entry or the chain has one entry).
     """
 
     text: str
@@ -56,6 +65,7 @@ class InvokeResult:
     finish_reason: str = ""
     cost_usd: float | None = None
     cost_source: str = ""
+    requested_model: str = ""
 
 
 class LLMClient(Protocol):

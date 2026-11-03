@@ -22,7 +22,9 @@ The pass is advisory and never raises: a failed read, a failed or timed-out
 call, an unparseable reply, ``confirmed``, ``unsure``, or a refutation whose
 quote was not served leaves the finding exactly as it was. Every call that
 came back is returned as a run-cost unit, so its tokens and cost join the
-run's.
+run's. A unit also names the finding it checked (``file``, ``line``) and,
+when the backend reported one, the ``requested_model`` chain entry that
+answered, which ``PRXREF_LLM_REQUIRE_MODELS`` checks (issue #138).
 """
 
 from __future__ import annotations
@@ -406,7 +408,12 @@ def verify_one(
             "cost_usd": cost,
             "cost_source": source,
             "error": "",
+            "file": f.file,
+            "line": f.line,
         }
+        requested = str(getattr(res, "requested_model", "") or "")
+        if requested:
+            unit["requested_model"] = requested
         parsed = parse_reply(getattr(res, "text", "") or "")
         if parsed is None:
             return _Outcome("error", f, unit=unit, error="unparseable reply")
