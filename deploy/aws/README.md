@@ -19,10 +19,11 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
 
 1. **AWS CLI and SAM CLI**, credentials for the target account, and a local Docker engine with
    buildx (OrbStack works) for `deploy.sh`.
-2. **Bedrock model access** for the model in `ModelId` (default
-   `bedrock/us.anthropic.claude-opus-4-6-v1`, a US cross-region inference profile) in the stack's
-   region. Check it before deploying:
-   `aws bedrock-runtime converse --model-id us.anthropic.claude-opus-4-6-v1 --messages '[{"role":"user","content":[{"text":"ping"}]}]'`.
+2. **Bedrock model access** for the models in `ModelId` (default
+   `bedrock/us.anthropic.claude-opus-5-5,bedrock/us.anthropic.claude-opus-4-6-v1`: US cross-region
+   inference profiles, tried in order, first that answers wins) in the stack's region. Check it
+   before deploying:
+   `aws bedrock-runtime converse --model-id us.anthropic.claude-opus-5-5 --messages '[{"role":"user","content":[{"text":"ping"}]}]'`.
    The worker role may call the `us.anthropic.*` inference profiles and the `anthropic.*`
    foundation models in every region the profile routes to; nothing else.
 3. **The GitHub App** registered and installed as in [docs/gate.md](../../docs/gate.md)

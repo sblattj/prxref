@@ -26,8 +26,10 @@ Parameters:
     Description: ARN of the Secrets Manager secret holding the webhook secret.
   ModelId:
     Type: String
-    Default: bedrock/us.anthropic.claude-opus-4-6-v1
-    Description: litellm model id for the review (PRXREF_LLM_MODELS).
+    Default: bedrock/us.anthropic.claude-opus-5-5,bedrock/us.anthropic.claude-opus-4-6-v1
+    Description: >-
+      litellm model chain for the review (PRXREF_LLM_MODELS), first that answers wins.
+      Opus 5.5, with Opus 4.6 behind it while 5.5 access is not yet confirmed in the account.
   ReasoningEffort:
     Type: String
     Default: medium
