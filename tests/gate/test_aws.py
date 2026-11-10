@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from types import SimpleNamespace
 
 import boto3
@@ -250,3 +251,37 @@ def test_the_worker_cold_start_reads_the_key_from_secrets_manager(cloud, monkeyp
     assert deps.settings.runs_dir == aws.RUNS_DIR
     assert worker._redact(pem) == "[redacted]"
     assert aws._worker_deps() is deps
+
+
+def test_the_llm_api_key_secret_lands_in_openrouter_api_key_and_is_redacted(cloud, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv(aws.LLM_KEY_VAR_ENV, raising=False)
+    arn = cloud.sm.create_secret(Name="gate-llm-key", SecretString="sk-or-test-123\n")["ARN"]
+    monkeypatch.setenv(aws.LLM_KEY_SECRET_ENV, arn)
+    aws._load_llm_key()
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-test-123"
+    assert worker._redact("key sk-or-test-123 here") == "key [redacted] here"
+
+
+def test_the_llm_api_key_variable_can_be_renamed(cloud, monkeypatch):
+    monkeypatch.delenv("OTHER_KEY", raising=False)
+    arn = cloud.sm.create_secret(Name="gate-llm-key", SecretString="k2")["ARN"]
+    monkeypatch.setenv(aws.LLM_KEY_SECRET_ENV, arn)
+    monkeypatch.setenv(aws.LLM_KEY_VAR_ENV, "OTHER_KEY")
+    aws._load_llm_key()
+    assert os.environ["OTHER_KEY"] == "k2"
+
+
+def test_no_llm_api_key_secret_is_a_no_op(cloud, monkeypatch):
+    monkeypatch.delenv(aws.LLM_KEY_SECRET_ENV, raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    aws._load_llm_key()
+    assert "OPENROUTER_API_KEY" not in os.environ
+
+
+def test_a_bad_llm_api_key_variable_name_is_refused(cloud, monkeypatch):
+    arn = cloud.sm.create_secret(Name="gate-llm-key", SecretString="k3")["ARN"]
+    monkeypatch.setenv(aws.LLM_KEY_SECRET_ENV, arn)
+    monkeypatch.setenv(aws.LLM_KEY_VAR_ENV, "PATH; rm")
+    with pytest.raises(RuntimeError, match="environment variable name"):
+        aws._load_llm_key()

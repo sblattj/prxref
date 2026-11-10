@@ -10,6 +10,17 @@ tracker.
 
 ## [Unreleased]
 
+### Added
+
+- AWS gate: optional `LlmApiKeySecretArn` and `LlmApiKeyEnv` template parameters. The
+  worker reads a provider API key from Secrets Manager at cold start, redacts it and
+  exports it (default `OPENROUTER_API_KEY`), so `ModelId` can name a model outside Bedrock
+  such as `openrouter/openai/gpt-6-luna`. The worker role reads the secret only when set.
+- AWS gate: `ReasoningEffort=off` leaves `PRXREF_LLM_REASONING_EFFORT` unset, for models
+  litellm refuses `reasoning_effort` on.
+- `deploy/aws/deploy.sh` lays `PRXREF_GATE_PARAM_OVERRIDES` (`Key=Value` pairs) over the
+  samconfig overrides; `deploy-gate.yml` passes it from the repository secret of that name.
+
 ### Changed
 
 - The litellm backend logs one WARNING per run when the chain's first model did not
