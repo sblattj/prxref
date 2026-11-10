@@ -612,6 +612,7 @@ class LiteLLMClient(LLMClient):
         # keyed on litellm's own exception shape instead of a status code.
         self._unavailable: set[str] = set()
         self._unavailable_lock = threading.Lock()
+        self._fallback_warned: set[tuple[str, str]] = set()
 
     def invoke(
         self,
@@ -671,6 +672,8 @@ class LiteLLMClient(LLMClient):
         raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else getattr(hidden, "response_cost", None)
         cost_usd = None if isinstance(raw_cost, str) else costs.valid_usd(raw_cost)
         reported = getattr(response, "model", "") or available[0]
+        requested_model = _litellm_requested_model(reported, available, hidden)
+        self._warn_on_fallback(available, requested_model, reported)
         return InvokeResult(
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -682,7 +685,41 @@ class LiteLLMClient(LLMClient):
             finish_reason=str(getattr(choice, "finish_reason", "") or ""),
             cost_usd=cost_usd,
             cost_source="litellm" if cost_usd is not None else "",
-            requested_model=_litellm_requested_model(reported, available, hidden),
+            requested_model=requested_model,
+        )
+
+    def _warn_on_fallback(self, available: list[str], requested_model: str, reported: str) -> None:
+        """Log one WARNING per run when the chain's first model did not answer.
+
+        litellm walks ``fallbacks`` inside the call and swallows the primary's
+        error, so without this line a primary that fails on every call (say a
+        Bedrock model whose Marketplace agreement was never accepted) is
+        invisible: the review completes on the next entry and nothing says so.
+        ``requested_model`` is the chain entry that answered, or ``""`` when
+        litellm did not report it; then ``reported`` is compared with the
+        primary, with and without its provider prefix.
+        """
+        primary = available[0]
+        if len(available) < 2:
+            return
+        if requested_model:
+            if requested_model == primary:
+                return
+            answered = requested_model
+        else:
+            if reported in (primary, primary.split("/", 1)[-1]):
+                return
+            answered = f"{reported} (reported id)"
+        key = (primary, answered)
+        with self._unavailable_lock:
+            if key in self._fallback_warned:
+                return
+            self._fallback_warned.add(key)
+        logger.warning(
+            "model chain fell back: %s did not answer, %s did; litellm hides the "
+            "primary's error, run it alone to see why (logged once per run)",
+            primary,
+            answered,
         )
 
     def _maybe_mark_unavailable(

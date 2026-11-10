@@ -10,6 +10,12 @@ tracker.
 
 ## [Unreleased]
 
+### Changed
+
+- The litellm backend logs one WARNING per run when the chain's first model did not
+  answer and a later entry did, naming both. litellm swallows the primary's error inside
+  its own fallback walk, so a primary that failed on every call left no trace before.
+
 ## [0.41.0] - 2026-11-01
 
 ### Added
