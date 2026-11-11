@@ -1,4 +1,4 @@
-"""Subscription CLI backends: ``claude-cli`` and ``kiro-cli``.
+"""Subscription CLI backends: ``claude-cli``, ``kiro-cli`` and ``codex-cli``.
 
 These backends run the user's own installed, logged-in CLI as a subprocess
 and walk ``PRXREF_LLM_MODELS`` as a caller-side chain, exactly like the
@@ -25,7 +25,7 @@ call's ``total_cost_usd`` is reported as ``InvokeResult.cost_usd`` with
 ``cost_source`` ``"claude-cli"``: it is the CLI's API-equivalent figure at
 list price, not what a subscription is invoiced.
 
-Neither CLI has a temperature, seed or per-call output-token option, so none
+No CLI has a temperature, seed or per-call output-token option, so none
 is applied: ``max_tokens`` is accepted and ignored, and each client's
 ``temperature`` and ``seed`` attributes are ``None``, which the run record's
 ``sampling`` reports truthfully.
@@ -39,6 +39,18 @@ passed through unchanged, and ``PRXREF_LLM_REASONING_EFFORT`` is not applied.
 Kiro reports no token counts and meters credits rather than dollars, so a
 kiro answer counts zero tokens and its ``cost_usd`` is ``None``; the credits
 and the Kiro session id go to the INFO ok line instead.
+
+``codex-cli`` runs ``codex exec --json`` on the user's ChatGPT login, with the
+user config, rules and git check skipped, no session saved, and a read-only
+sandbox rooted in the empty working directory. Codex has no system-prompt
+option, so the system prompt comes first on stdin, followed by
+:data:`CODEX_PROMPT_SEPARATOR` and the user message.
+``PRXREF_LLM_REASONING_EFFORT`` becomes ``-c model_reasoning_effort=<e>``. The
+child environment is the parent's minus :data:`CODEX_ENV_DENYLIST`, so an API
+key in the environment cannot take the call off the subscription login;
+``HOME`` and ``CODEX_HOME`` pass through, so the CLI finds that login. Tokens
+come from ``turn.completed`` and ``cost_usd`` is ``None``: a subscription
+reports no dollar figure.
 
 The module is stdlib-only and is imported lazily by
 :func:`prxref.llm_backends.create_llm_client`, so the HTTP backends never load
@@ -73,7 +85,7 @@ from .llm_backends import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BINARIES: Mapping[str, str] = {"claude-cli": "claude", "kiro-cli": "kiro-cli"}
+DEFAULT_BINARIES: Mapping[str, str] = {"claude-cli": "claude", "kiro-cli": "kiro-cli", "codex-cli": "codex"}
 JSON_ONLY_INSTRUCTION = (
     "\n\nRespond with exactly one JSON object and nothing else: no prose "
     "before or after it and no markdown code fences."
@@ -88,6 +100,15 @@ CLAUDE_ENV_DENYLIST: tuple[str, ...] = (
     "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_SIMPLE",
 )
+# The claude list plus the names that route codex to an API key or another
+# endpoint instead of the ChatGPT login in ~/.codex (or $CODEX_HOME).
+CODEX_ENV_DENYLIST: tuple[str, ...] = (
+    *CLAUDE_ENV_DENYLIST,
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "OPENAI_BASE_URL",
+)
+CODEX_PROMPT_SEPARATOR = "\n\n"
 # After a SIGKILL the pipes still have to be drained and the child reaped; a
 # process that survives even that is killed directly and abandoned.
 _REAP_TIMEOUT_S = 5.0
@@ -217,7 +238,8 @@ class _CLIClient(LLMClient):
     temporary root and returns the working directory, :meth:`_argv` builds
     the argv list, and :meth:`_parse` turns one finished process into an
     :class:`_Attempt`. It may override :meth:`_child_env`, which passes the
-    parent environment through unchanged by default. The chain, the
+    parent environment through unchanged by default, and :meth:`_stdin`,
+    which sends the user message alone by default. The chain, the
     unavailable-model memory, truncation, the deadline and process-group
     kill, the concurrency cap and the cost fold all live here, so every CLI
     behaves identically in the chain.
@@ -342,7 +364,7 @@ class _CLIClient(LLMClient):
                 argv = self._argv(root, model)
                 t0 = time.perf_counter()
                 rc, out, err, timed_out = _run_with_deadline(
-                    self._runner, argv, user, cwd, self._child_env(), deadline
+                    self._runner, argv, self._stdin(sys_text, user), cwd, self._child_env(), deadline
                 )
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
             except _ProcessFailed as exc:
@@ -372,6 +394,10 @@ class _CLIClient(LLMClient):
     def _child_env(self, environ: Mapping[str, str] | None = None) -> dict[str, str]:
         """The child process environment: ``environ`` (default ``os.environ``) unchanged."""
         return dict(os.environ if environ is None else environ)
+
+    def _stdin(self, sys_text: str, user: str) -> str:
+        """The text written to the process's stdin: the user message (the system prompt goes elsewhere)."""
+        return user
 
     def _warn_once(self, key: str, message: str, *args: object) -> None:
         """Log ``message`` at WARNING the first time this client sees ``key``."""
@@ -745,6 +771,134 @@ def _kiro_credits(metering: object) -> float | None:
     return total
 
 
+class CodexCLIClient(_CLIClient):
+    """``codex-cli``: the user's own logged-in OpenAI Codex CLI, one ``codex exec`` process per call.
+
+    The argv is ``codex exec --skip-git-repo-check --ephemeral
+    --ignore-user-config --ignore-rules -s read-only -C <cwd> -m <m> --json -``,
+    with ``-c model_reasoning_effort=<e>`` after the model when a reasoning
+    effort is set. The working directory is an empty temporary directory.
+    Codex has no system-prompt option, so stdin carries the system prompt,
+    :data:`CODEX_PROMPT_SEPARATOR` and the user message, in that order. The
+    child environment drops :data:`CODEX_ENV_DENYLIST` by name.
+
+    The answer is the text of the last ``agent_message`` item. Success needs
+    exit 0, no ``turn.failed`` event, a ``turn.completed`` event and a
+    non-empty answer; an ``item.completed`` of type ``error`` (codex's
+    missing-model-metadata warning) does not fail the run. A failure is
+    reported as ``turn failed: <message>`` when codex sent one, else as the
+    most specific kind with the last ``error`` event's message or the stderr
+    tail. A ``turn.failed`` or ``error`` message naming the model as
+    unsupported or unknown marks it unavailable for the run. Input tokens
+    are ``usage.input_tokens`` alone, because ``cached_input_tokens`` is the
+    cached part of that same count; output tokens are ``usage.output_tokens``.
+    Codex does not echo the model or a stop reason, so the result names the
+    requested model and ``finish_reason`` is empty. ``cost_usd`` is ``None``;
+    the cached-token count and the thread id go to the INFO ok line.
+    """
+
+    backend_name = "codex-cli"
+
+    def _prepare(self, root: str, model: str, sys_text: str) -> str:
+        cwd = os.path.join(root, "cwd")
+        os.mkdir(cwd)
+        return cwd
+
+    def _argv(self, root: str, model: str) -> list[str]:
+        argv = [
+            self.binary, "exec",
+            "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+            "-s", "read-only",
+            "-C", os.path.join(root, "cwd"),
+            "-m", model,
+        ]
+        if self.reasoning_effort:
+            argv += ["-c", f"model_reasoning_effort={self.reasoning_effort}"]
+        return argv + ["--json", "-"]
+
+    def _stdin(self, sys_text: str, user: str) -> str:
+        return sys_text + CODEX_PROMPT_SEPARATOR + user
+
+    def _child_env(self, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+        """The parent environment minus :data:`CODEX_ENV_DENYLIST`; a denylisted value is never read."""
+        source = os.environ if environ is None else environ
+        return {key: source[key] for key in source if key not in CODEX_ENV_DENYLIST}
+
+    def _parse(self, model: str, rc: int | None, out: str, err: str, elapsed_ms: int) -> _Attempt:
+        text: str | None = None
+        usage: dict | None = None
+        turn_failed: str | None = None
+        error: str | None = None
+        thread = ""
+        lines = [line for line in (raw.strip() for raw in out.splitlines()) if line]
+        skipped = 0
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            if not isinstance(event, dict):
+                skipped += 1
+                continue
+            kind = event.get("type")
+            if kind == "thread.started":
+                if not thread and isinstance(event.get("thread_id"), str):
+                    thread = event["thread_id"]
+            elif kind == "item.completed":
+                item = event.get("item")
+                if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                    text = item["text"]
+            elif kind == "turn.completed":
+                usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            elif kind == "turn.failed":
+                failed = event.get("error")
+                message = failed.get("message") if isinstance(failed, dict) else None
+                turn_failed = message if isinstance(message, str) else ""
+            elif kind == "error":
+                message = event.get("message")
+                if isinstance(message, str):
+                    error = message
+        if skipped:
+            logger.debug("codex-cli: skipped %d non-event stdout line(s) for model=%s", skipped, model)
+
+        if rc != 0 or turn_failed is not None or usage is None or not (text or "").strip():
+            unavailable = any(
+                isinstance(message, str) and _looks_permanently_unavailable(message)
+                for message in (turn_failed, error)
+            )
+            if turn_failed is not None:
+                detail = _one_line(turn_failed or error or "")[:_DETAIL_CHARS] or "(no message)"
+                return _Attempt(None, f"{model}: turn failed: {detail}", unavailable=unavailable)
+            if bool(lines) and skipped == len(lines):
+                kind = "unparseable output"
+            elif rc != 0:
+                kind = f"exit {rc}"
+            elif not (text or "").strip():
+                kind = "no agent message"
+            else:
+                kind = "no turn.completed event"
+            if error is not None and error.strip():
+                detail = _one_line(error)[:_DETAIL_CHARS]
+            elif err.strip():
+                detail = _one_line(err)[-_DETAIL_CHARS:]
+            else:
+                detail = "(no output)"
+            return _Attempt(None, f"{model}: {kind}: {detail}", unavailable=unavailable)
+
+        return _Attempt(
+            InvokeResult(
+                text=text,
+                input_tokens=_count(usage.get("input_tokens")),
+                output_tokens=_count(usage.get("output_tokens")),
+                model=model,
+                backend=self.backend_name,
+                elapsed_ms=elapsed_ms,
+                finish_reason="",
+            ),
+            log_extra=f" cached={_count(usage.get('cached_input_tokens'))} thread={thread or '-'}",
+        )
+
+
 def resolve_cli_binary(backend: str, cli_path: str, *, which=shutil.which) -> str:
     """Resolve the CLI binary for ``backend`` to an absolute executable path.
 
@@ -792,7 +946,7 @@ def build_cli_client(
 
     ``models`` is the chain walked in order; ``default_timeout`` is the
     per-model deadline in seconds; ``reasoning_effort`` feeds claude's
-    ``--effort`` and is ignored by kiro; ``cli_path`` is passed to
+    ``--effort`` and codex's ``model_reasoning_effort`` and is ignored by kiro; ``cli_path`` is passed to
     :func:`resolve_cli_binary`, which runs first, so a missing CLI is a
     :class:`~prxref.llm.ConfigError` before any client exists; ``concurrency``
     caps the CLI processes this client runs at once and must be an integer
@@ -800,8 +954,8 @@ def build_cli_client(
     ``which`` and ``runner`` are the binary lookup and the process launcher,
     injectable for tests. Building never starts a process.
 
-    ``claude-cli`` returns a :class:`ClaudeCLIClient` and ``kiro-cli`` a
-    :class:`KiroCLIClient`; a reasoning effort set for ``kiro-cli`` is
+    ``claude-cli`` returns a :class:`ClaudeCLIClient`, ``kiro-cli`` a
+    :class:`KiroCLIClient` and ``codex-cli`` a :class:`CodexCLIClient`; a reasoning effort set for ``kiro-cli`` is
     dropped with one INFO line saying so.
     """
     if backend not in CLI_BACKENDS:
@@ -817,6 +971,15 @@ def build_cli_client(
             models=models,
             default_timeout=default_timeout,
             concurrency=concurrency,
+            runner=runner,
+        )
+    if backend == "codex-cli":
+        return CodexCLIClient(
+            binary=binary,
+            models=models,
+            default_timeout=default_timeout,
+            concurrency=concurrency,
+            reasoning_effort=reasoning_effort,
             runner=runner,
         )
     return ClaudeCLIClient(

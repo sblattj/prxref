@@ -88,11 +88,11 @@ def recorded_cli_builds(monkeypatch):
 
 
 class TestBackendVocabulary:
-    def test_the_constants_name_the_six_backends(self):
+    def test_the_constants_name_the_seven_backends(self):
         assert OPENAI_COMPAT_BACKENDS == ("openai-compat", "ferry", "http")
-        assert CLI_BACKENDS == ("claude-cli", "kiro-cli")
+        assert CLI_BACKENDS == ("claude-cli", "kiro-cli", "codex-cli")
         assert BACKENDS == (*OPENAI_COMPAT_BACKENDS, "litellm", *CLI_BACKENDS)
-        assert len(set(BACKENDS)) == 6
+        assert len(set(BACKENDS)) == 7
         assert DEFAULT_CLI_CONCURRENCY == 2
 
     def test_unknown_backend_is_named_before_missing_models(self, monkeypatch):

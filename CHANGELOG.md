@@ -20,6 +20,16 @@ tracker.
   litellm refuses `reasoning_effort` on.
 - `deploy/aws/deploy.sh` lays `PRXREF_GATE_PARAM_OVERRIDES` (`Key=Value` pairs) over the
   samconfig overrides; `deploy-gate.yml` passes it from the repository secret of that name.
+- **`codex-cli` LLM backend.** `PRXREF_LLM_BACKEND=codex-cli` reviews with your own
+  logged-in OpenAI Codex CLI on its ChatGPT login: one `codex exec --json` process per
+  model attempt, in a read-only sandbox rooted in an empty directory, with the user config,
+  rules and session file off. The system prompt leads stdin, since Codex has no
+  system-prompt option. `PRXREF_LLM_REASONING_EFFORT` becomes
+  `-c model_reasoning_effort=<value>`, and `OPENAI_API_KEY`, `CODEX_API_KEY` and
+  `OPENAI_BASE_URL` are removed from the child environment along with the `claude-cli`
+  names. A model the login cannot use (`not supported when using Codex with a ChatGPT
+  account`) is skipped for the rest of the run. Tokens come from `turn.completed`;
+  `cost_usd` is not reported.
 
 ### Changed
 

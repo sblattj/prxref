@@ -213,7 +213,7 @@ prxref review --pr-url https://ado.corp.example/tfs/DefaultCollection/project/_g
 
 ## LLM Configuration
 
-prxref operates without direct cloud provider SDK keys (no Anthropic API keys). It ships with **no default endpoint and no default model chain**: point it at any OpenAI-compatible `/chat/completions` server (OpenRouter, Together, Groq, vLLM, Ollama, a self-hosted gateway), install the optional `litellm` extra, or run the `claude` or `kiro-cli` CLI you are already logged in to. `PRXREF_LLM_MODELS` is required on every backend and `PRXREF_LLM_BASE_URL` on `openai-compat`; leaving a required one unset exits `2` with an error naming the variable.
+prxref operates without direct cloud provider SDK keys (no Anthropic API keys). It ships with **no default endpoint and no default model chain**: point it at any OpenAI-compatible `/chat/completions` server (OpenRouter, Together, Groq, vLLM, Ollama, a self-hosted gateway), install the optional `litellm` extra, or run the `claude`, `kiro-cli` or `codex` CLI you are already logged in to. `PRXREF_LLM_MODELS` is required on every backend and `PRXREF_LLM_BASE_URL` on `openai-compat`; leaving a required one unset exits `2` with an error naming the variable.
 
 ```bash
 # Default backend: plain HTTP to any OpenAI-compatible endpoint
@@ -235,7 +235,7 @@ export PRXREF_LLM_MODELS="sonnet"
 export PRXREF_LLM_TIMEOUT=120                    # each call includes CLI start-up
 ```
 
-`claude-cli` and `kiro-cli` run the CLI already installed and logged in on your machine, on your subscription and for your own use only. Do not use them for a team, a shared webhook, or CI; use an API key through `openai-compat` or `litellm` there. See [Subscription CLI backends](docs/llm.md#subscription-cli-backends-claude-cli-and-kiro-cli).
+`claude-cli`, `kiro-cli` and `codex-cli` run the CLI already installed and logged in on your machine, on your subscription and for your own use only. Do not use them for a team, a shared webhook, or CI; use an API key through `openai-compat` or `litellm` there. See [Subscription CLI backends](docs/llm.md#subscription-cli-backends-claude-cli-kiro-cli-and-codex-cli).
 
 On a reasoning model the hidden reasoning trace draws from the **same** completion budget as the answer, so turning `PRXREF_LLM_REASONING_EFFORT` up makes truncation *more* likely. A reply that hits the budget before it is usable is retried once at double the budget (capped at 16384), which costs one extra call and happens only in that case. If the retry is cut off too, the chunk is counted as failed and the posted summary names the reason and the variable to raise; see [Reasoning models and the token budget](docs/env-vars.md#reasoning-models-and-the-token-budget).
 

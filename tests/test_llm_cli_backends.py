@@ -1,4 +1,4 @@
-"""Tests for prxref.llm_cli_backends: the shared CLI chain and the claude-cli and kiro-cli clients (#66).
+"""Tests for prxref.llm_cli_backends: the shared CLI chain and the claude-cli, kiro-cli and codex-cli clients.
 
 Every process here is a scripted fake handed to the client as ``runner``;
 nothing spawns a real CLI. ``os.killpg`` is replaced for the whole module, so
@@ -924,7 +924,7 @@ def _executable(tmp_path, name: str = "claude", mode: int = 0o755) -> str:
 class TestResolveCliBinary:
     def test_the_default_binaries_cover_every_cli_backend(self):
         assert set(DEFAULT_BINARIES) == set(CLI_BACKENDS)
-        assert DEFAULT_BINARIES == {"claude-cli": "claude", "kiro-cli": "kiro-cli"}
+        assert DEFAULT_BINARIES == {"claude-cli": "claude", "kiro-cli": "kiro-cli", "codex-cli": "codex"}
 
     @pytest.mark.parametrize("backend", CLI_BACKENDS)
     def test_the_default_name_is_looked_up_on_path(self, backend):
@@ -1107,7 +1107,9 @@ class TestThroughTheFactoryAndCli:
         assert client.default_timeout == 180.0
         assert real_orchestrator._sampling(client)["temperature"] is None
 
-    @pytest.mark.parametrize(("backend", "binary"), [("claude-cli", "claude"), ("kiro-cli", "kiro-cli")])
+    @pytest.mark.parametrize(
+        ("backend", "binary"), [("claude-cli", "claude"), ("kiro-cli", "kiro-cli"), ("codex-cli", "codex")]
+    )
     def test_review_exits_2_when_the_cli_is_not_on_path(self, monkeypatch, capsys, tmp_path, runtime, backend, binary):
         monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setenv("PRXREF_LLM_BACKEND", backend)
@@ -1469,3 +1471,302 @@ class TestProcessFailureLabel:
         with pytest.raises(LLMError) as exc:
             _kiro(runner, models=("a",)).invoke("sys", "usr")
         assert str(exc.value) == "all models failed: a: process failed (BrokenPipeError: [Errno 32] Broken pipe)"
+
+
+# The codex fixtures are the recorded stdout of two ``codex exec --json`` runs
+# (codex-cli 0.166.0), line for line: a clean answer from gpt-6.1-sol, and
+# gpt-6.2-sol refused on a ChatGPT login (exit 1, empty stderr). The second's
+# first ``item.completed`` of type ``error`` is a metadata warning, not the
+# failure; ``CODEX_WARNING_OK_STREAM`` puts that warning line into the clean run.
+CODEX_OK_LINES = (
+    '{"type":"thread.started","thread_id":"01a1cbab-55c2-7172-ad8f-841bb1d77898"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\\"verdict\\":\\"ok\\"}"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":24388,"cached_input_tokens":7168,'
+    '"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}}',
+)
+CODEX_OK_STREAM = "".join(line + "\n" for line in CODEX_OK_LINES)
+CODEX_UNSUPPORTED_LINES = (
+    '{"type":"thread.started","thread_id":"01a1cbab-8016-7de0-8580-4e453ee366ae"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-6.2-sol` '
+    'not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}',
+    '{"type":"turn.started"}',
+    '{"type":"error","message":"The \'gpt-6.2-sol\' model is not supported when using Codex with a ChatGPT account."}',
+    '{"type":"turn.failed","error":{"message":"The \'gpt-6.2-sol\' model is not supported when using Codex with a '
+    'ChatGPT account."}}',
+)
+CODEX_UNSUPPORTED_STREAM = "".join(line + "\n" for line in CODEX_UNSUPPORTED_LINES)
+CODEX_WARNING_OK_STREAM = "".join(
+    line + "\n" for line in (CODEX_OK_LINES[0], CODEX_UNSUPPORTED_LINES[1], *CODEX_OK_LINES[1:])
+)
+CODEX_ANSWER = '{"verdict":"ok"}'
+CODEX_UNSUPPORTED_REASON = (
+    "turn failed: The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account."
+)
+CODEX_OK = Script(stdout=CODEX_OK_STREAM)
+CODEX_UNSUPPORTED = Script(stdout=CODEX_UNSUPPORTED_STREAM, rc=1)
+CODEX_BINARY = "/opt/example/bin/codex"
+CODEX_MODEL = "gpt-6.1-sol"
+CODEX_GONE = "gpt-6.2-sol"
+
+
+def _codex(runner: FakeRunner, *, models=(CODEX_MODEL,), **kwargs):
+    kwargs.setdefault("default_timeout", 30.0)
+    return clib.CodexCLIClient(binary=CODEX_BINARY, models=list(models), runner=runner, **kwargs)
+
+
+def _codex_models(runner: FakeRunner) -> list[str]:
+    return [launch.argv[launch.argv.index("-m") + 1] for launch in runner.launches]
+
+
+def _codex_failure(script: Script, model: str = CODEX_MODEL) -> str:
+    """The reason the chain gives when ``model``'s one codex attempt plays ``script``."""
+    with pytest.raises(LLMError) as exc:
+        _codex(FakeRunner(script), models=(model,)).invoke("sys", "usr")
+    message = str(exc.value)
+    prefix = f"all models failed: {model}: "
+    assert message.startswith(prefix)
+    return message[len(prefix):]
+
+
+def _codex_stream(*events: dict) -> str:
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+class TestCodexProcess:
+    """How one codex process is launched: argv, stdin, cwd, environment."""
+
+    def test_codex_argv_has_the_isolation_flags_and_reads_stdin(self):
+        runner = FakeRunner(CODEX_OK)
+        _codex(runner).invoke("sys", "usr")
+        [launch] = runner.launches
+        cwd = launch.kwargs["cwd"]
+        assert launch.argv == [
+            CODEX_BINARY, "exec",
+            "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+            "-s", "read-only",
+            "-C", cwd,
+            "-m", CODEX_MODEL,
+            "--json",
+            "-",
+        ]
+        assert not launch.kwargs.get("shell")
+        assert launch.kwargs["start_new_session"] is (os.name == "posix")
+        for stream in ("stdin", "stdout", "stderr"):
+            assert launch.kwargs[stream] is subprocess.PIPE
+
+    @pytest.mark.parametrize("effort", ["low", "medium", "high"])
+    def test_a_reasoning_effort_becomes_a_config_override(self, effort):
+        runner = FakeRunner(CODEX_OK)
+        _codex(runner, reasoning_effort=effort).invoke("sys", "usr")
+        argv = runner.launches[0].argv
+        at = argv.index("-c")
+        assert argv[at + 1] == f"model_reasoning_effort={effort}"
+        assert argv[at - 2:at] == ["-m", CODEX_MODEL]
+        assert argv[-2:] == ["--json", "-"]
+
+    @pytest.mark.parametrize("effort", [None, ""])
+    def test_no_effort_omits_the_override(self, effort):
+        runner = FakeRunner(CODEX_OK)
+        _codex(runner, reasoning_effort=effort).invoke("sys", "usr")
+        argv = runner.launches[0].argv
+        assert "-c" not in argv
+        assert not any("model_reasoning_effort" in arg for arg in argv)
+
+    @pytest.mark.parametrize("json_mode", [True, False])
+    def test_the_system_text_comes_first_on_stdin(self, json_mode):
+        runner = FakeRunner(CODEX_OK)
+        user = "Review this diff: +secret_sauce = 1"
+        _codex(runner).invoke("You review diffs.", user, json_mode=json_mode)
+        [launch] = runner.launches
+        system = "You review diffs." + (JSON_ONLY_INSTRUCTION if json_mode else "")
+        assert launch.stdin == system + clib.CODEX_PROMPT_SEPARATOR + user
+        assert clib.CODEX_PROMPT_SEPARATOR == "\n\n"
+        assert not any("secret_sauce" in arg or "You review" in arg for arg in launch.argv)
+
+    def test_codex_cwd_is_empty_and_removed(self):
+        runner = FakeRunner(CODEX_OK)
+        client = _codex(runner)
+        client.invoke("sys", "usr")
+        client.invoke("sys", "usr")
+        first, second = runner.launches
+        assert first.cwd_listing == [] and second.cwd_listing == []
+        assert first.kwargs["cwd"] != second.kwargs["cwd"]
+        for launch in runner.launches:
+            assert os.path.isabs(launch.kwargs["cwd"])
+            assert not os.path.exists(launch.kwargs["cwd"])
+
+    def test_codex_env_drops_the_denylist_and_keeps_the_login_home(self, monkeypatch, tmp_path):
+        for name in clib.CODEX_ENV_DENYLIST:
+            monkeypatch.setenv(name, "set-by-test")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+        monkeypatch.setenv("PRXREF_TEST_KEEP", "kept")
+        before = dict(os.environ)
+        runner = FakeRunner(CODEX_OK)
+        _codex(runner).invoke("sys", "usr")
+        env = runner.launches[0].kwargs["env"]
+        assert set(CLAUDE_ENV_DENYLIST) <= set(clib.CODEX_ENV_DENYLIST)
+        assert {"OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"} <= set(clib.CODEX_ENV_DENYLIST)
+        assert not set(clib.CODEX_ENV_DENYLIST) & set(env)
+        assert env["HOME"] == str(tmp_path)
+        assert env["CODEX_HOME"] == str(tmp_path / ".codex")
+        assert env["PRXREF_TEST_KEEP"] == "kept"
+        assert dict(os.environ) == before
+
+    def test_codex_sampling_attributes_are_none(self):
+        client = _codex(FakeRunner(), models=(CODEX_MODEL, CODEX_GONE))
+        assert real_orchestrator._sampling(client) == {
+            "temperature": None, "seed": None, "models": [CODEX_MODEL, CODEX_GONE],
+        }
+
+
+class TestCodexParse:
+    """How one finished codex process becomes an answer or a failure."""
+
+    def test_codex_success_reads_the_agent_message_and_usage(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        result = _codex(FakeRunner(CODEX_OK)).invoke("sys", "usr")
+        assert result.text == CODEX_ANSWER
+        assert result.model == CODEX_MODEL
+        assert result.requested_model == CODEX_MODEL
+        assert result.backend == "codex-cli"
+        assert result.finish_reason == ""
+        # cached_input_tokens is a subset of input_tokens, so it is not added again.
+        assert (result.input_tokens, result.output_tokens) == (24388, 10)
+        assert (result.cost_usd, result.cost_source) == (None, "")
+        [ok] = _ok_lines(caplog)
+        assert ok.startswith(f"llm attempt 1/1 ok: backend=codex-cli model={CODEX_MODEL} ")
+        assert ok.endswith(" in=24388 out=10 finish=- cached=7168 thread=01a1cbab-55c2-7172-ad8f-841bb1d77898")
+        assert _warnings(caplog) == []
+
+    def test_the_last_agent_message_is_the_answer(self):
+        early = {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "thinking"}}
+        lines = list(CODEX_OK_LINES)
+        lines.insert(2, json.dumps(early))
+        stream = "".join(line + "\n" for line in lines)
+        assert _codex(FakeRunner(Script(stdout=stream))).invoke("sys", "usr").text == CODEX_ANSWER
+
+    def test_a_metadata_warning_item_alone_does_not_fail_the_run(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        runner = FakeRunner(Script(stdout=CODEX_WARNING_OK_STREAM))
+        client = _codex(runner, models=(CODEX_GONE, CODEX_MODEL))
+        result = client.invoke("sys", "usr")
+        assert result.text == CODEX_ANSWER
+        assert result.model == CODEX_GONE
+        assert _codex_models(runner) == [CODEX_GONE]
+        assert not any("failed" in m or "unavailable" in m for m in _warnings(caplog))
+
+    def test_an_unsupported_model_falls_through_and_is_skipped_for_the_run(self, caplog):
+        caplog.set_level(logging.INFO, logger=LOGGER)
+        runner = FakeRunner(CODEX_UNSUPPORTED, CODEX_OK)
+        client = _codex(runner, models=(CODEX_GONE, CODEX_MODEL))
+        result = client.invoke("sys", "usr")
+        assert result.text == CODEX_ANSWER
+        assert result.model == CODEX_MODEL
+        assert (result.input_tokens, result.output_tokens) == (24388, 10)
+        assert _codex_models(runner) == [CODEX_GONE, CODEX_MODEL]
+        warnings = _warnings(caplog)
+        assert f"llm attempt 1/2 failed: backend=codex-cli {CODEX_GONE}: {CODEX_UNSUPPORTED_REASON}" in warnings
+        assert any(m.startswith(f"model={CODEX_GONE} marked unavailable") for m in warnings)
+        client.invoke("sys", "usr")
+        assert _codex_models(runner) == [CODEX_GONE, CODEX_MODEL, CODEX_MODEL]
+
+    def test_an_unsupported_model_alone_exhausts_the_chain(self):
+        assert _codex_failure(CODEX_UNSUPPORTED, CODEX_GONE) == CODEX_UNSUPPORTED_REASON
+
+    def test_a_turn_failed_fails_even_on_exit_zero(self):
+        assert _codex_failure(Script(stdout=CODEX_UNSUPPORTED_STREAM)) == CODEX_UNSUPPORTED_REASON
+
+    def test_a_top_level_error_without_turn_failed_names_the_error(self):
+        stream = _codex_stream({"type": "thread.started"}, {"type": "error", "message": "stream  disconnected\n"})
+        assert _codex_failure(Script(stdout=stream, rc=1)) == "exit 1: stream disconnected"
+
+    @pytest.mark.parametrize(
+        ("script", "reason"),
+        [
+            (Script(stdout=CODEX_OK_STREAM, stderr="killed\n", rc=3), "exit 3: killed"),
+            (Script(stderr="Error: not logged in\n  run codex login\n", rc=1),
+             "exit 1: Error: not logged in run codex login"),
+            (Script(stdout="".join(line + "\n" for line in CODEX_OK_LINES if "agent_message" not in line)),
+             "no agent message: (no output)"),
+            (Script(stdout="".join(line + "\n" for line in CODEX_OK_LINES if "turn.completed" not in line)),
+             "no turn.completed event: (no output)"),
+            (Script(stdout="this is not json\n{broken\n[1, 2]\n", stderr="panic\n"), "unparseable output: panic"),
+            (Script(), "no agent message: (no output)"),
+        ],
+    )
+    def test_codex_failures_name_their_kind(self, script, reason):
+        assert _codex_failure(script) == reason
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            Script(stdout=_codex_stream({"type": "turn.failed", "error": {"message": "rate limit reached"}}), rc=1),
+            Script(stderr="boom", rc=1),
+            Script(stdout="not json\n"),
+        ],
+    )
+    def test_other_codex_failures_do_not_mark_the_model_unavailable(self, script):
+        runner = FakeRunner(script, CODEX_OK)
+        client = _codex(runner, models=("a", "b"))
+        client.invoke("sys", "usr")
+        client.invoke("sys", "usr")
+        assert _codex_models(runner) == ["a", "b", "a"]
+
+    def test_bad_usage_counts_as_zero(self):
+        stream = _codex_stream(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "x"}},
+            {"type": "turn.completed", "usage": {"input_tokens": True, "output_tokens": -4}},
+        )
+        result = _codex(FakeRunner(Script(stdout=stream))).invoke("sys", "usr")
+        assert (result.text, result.input_tokens, result.output_tokens) == ("x", 0, 0)
+
+
+class TestCodexBuild:
+    def _build(self, **overrides):
+        kwargs = {
+            "models": [CODEX_GONE, CODEX_MODEL],
+            "default_timeout": 120.0,
+            "reasoning_effort": "medium",
+            "cli_path": "",
+            "concurrency": 2,
+            "which": lambda name: f"/opt/example/{name}",
+            "runner": FakeRunner(CODEX_OK),
+        }
+        kwargs.update(overrides)
+        return build_cli_client("codex-cli", **kwargs)
+
+    def test_codex_builds_a_codex_client_without_starting_a_process(self):
+        runner = FakeRunner(CODEX_UNSUPPORTED, CODEX_OK)
+        client = self._build(runner=runner)
+        assert isinstance(client, clib.CodexCLIClient)
+        assert client.binary == "/opt/example/codex"
+        assert client.models == [CODEX_GONE, CODEX_MODEL]
+        assert (client.temperature, client.seed, client.reasoning_effort) == (None, None, "medium")
+        assert runner.launches == []
+        assert client.invoke("sys", "usr").model == CODEX_MODEL
+        assert runner.launches[0].argv[0] == "/opt/example/codex"
+        assert "model_reasoning_effort=medium" in runner.launches[0].argv
+
+    def test_a_missing_codex_binary_is_a_config_error(self):
+        with pytest.raises(ConfigError) as exc:
+            resolve_cli_binary("codex-cli", "", which=lambda name: None)
+        assert str(exc.value) == (
+            "PRXREF_LLM_BACKEND: codex-cli needs the 'codex' CLI, which was not found on PATH; "
+            "install it and log in, or set PRXREF_LLM_CLI_PATH to its absolute path"
+        )
+        with pytest.raises(ConfigError, match=r"^PRXREF_LLM_BACKEND: codex-cli needs the 'codex' CLI"):
+            self._build(which=lambda name: None)
+
+    def test_the_factory_builds_a_codex_client_from_env(self, monkeypatch, tmp_path):
+        path = _executable(tmp_path, "codex")
+        monkeypatch.setenv("PRXREF_LLM_BACKEND", "codex-cli")
+        monkeypatch.setenv("PRXREF_LLM_MODELS", f"{CODEX_GONE},{CODEX_MODEL}")
+        monkeypatch.setenv("PRXREF_LLM_CLI_PATH", path)
+        monkeypatch.setenv("PRXREF_LLM_REASONING_EFFORT", "high")
+        client = create_llm_client()
+        assert isinstance(client, clib.CodexCLIClient)
+        assert client.binary == path
+        assert client.models == [CODEX_GONE, CODEX_MODEL]
+        assert client.reasoning_effort == "high"
