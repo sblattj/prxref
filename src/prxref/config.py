@@ -4,12 +4,13 @@ Canonical environment-variable table (every name prefixed PRXREF_):
 
 LLM / pipeline:
   PRXREF_LLM_BACKEND            LLM backend: openai-compat | ferry | http
-                                (aliases) | litellm | claude-cli | kiro-cli,
+                                (aliases) | litellm | claude-cli | kiro-cli
+                                | codex-cli,
                                 read case-insensitively; any other value is
                                 a configuration error
   PRXREF_LLM_BASE_URL           Base URL of the OpenAI-compatible endpoint;
                                 required for openai-compat/ferry/http, not
-                                used by litellm, claude-cli or kiro-cli (a
+                                used by litellm or the CLI backends (a
                                 set value is ignored there with one INFO
                                 line)
   PRXREF_LLM_API_KEY            API key for the openai-compat endpoint
@@ -52,12 +53,12 @@ LLM / pipeline:
                                 seed); empty or unset falls back to the
                                 factory's once-per-process seed; "off"
                                 (lowercase) sends no seed at all
-  PRXREF_LLM_CLI_PATH           claude-cli / kiro-cli only: path to the CLI
-                                binary, ``~`` expanded; empty = "claude" or
-                                "kiro-cli" on PATH. Not found = configuration
-                                error
-  PRXREF_LLM_CLI_CONCURRENCY    claude-cli / kiro-cli only: max CLI
-                                processes one client runs at once; positive
+  PRXREF_LLM_CLI_PATH           claude-cli / kiro-cli / codex-cli only: path
+                                to the CLI binary, ``~`` expanded; empty =
+                                "claude", "kiro-cli" or "codex" on PATH. Not
+                                found = configuration error
+  PRXREF_LLM_CLI_CONCURRENCY    claude-cli / kiro-cli / codex-cli only: max
+                                CLI processes one client runs at once; positive
                                 int (default 2)
   PRXREF_LLM_PARSE_RETRIES      Times a reply that is empty, does not parse, or
                                 lacks a ``findings`` list is re-sent up to N

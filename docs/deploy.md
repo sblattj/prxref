@@ -187,10 +187,10 @@ Practical consequences for a pipeline:
 
 ## 6. CLI Model Backends in Docker and CI
 
-The `claude-cli` and `kiro-cli` backends run the Claude Code CLI or the Kiro CLI that a developer has installed and logged in to on their own machine, on that developer's own subscription. They are not for the Docker image, CI, or the webhook daemon:
+The `claude-cli`, `kiro-cli` and `codex-cli` backends run the Claude Code CLI, the Kiro CLI or the OpenAI Codex CLI that a developer has installed and logged in to on their own machine, on that developer's own subscription. They are not for the Docker image, CI, or the webhook daemon:
 
-- **The Docker image ships neither CLI.** It is `python:3.12-slim` plus the prxref wheel, so `claude` and `kiro-cli` are not on its `PATH`.
-- **Do not install or log in to one in CI or on the daemon.** A pipeline or a shared webhook server reviews for a whole team, and a personal subscription login is for your own use; Anthropic's terms do not allow a third-party product to offer claude.ai login or subscription rate limits without approval. Use an API key through `openai-compat` or `litellm` there, or Workload Identity Federation or Bedrock/Vertex/Foundry. The policy and everything else about these backends is in [Subscription CLI backends](llm.md#subscription-cli-backends-claude-cli-and-kiro-cli).
+- **The Docker image ships none of these CLIs.** It is `python:3.12-slim` plus the prxref wheel, so `claude`, `kiro-cli` and `codex` are not on its `PATH`.
+- **Do not install or log in to one in CI or on the daemon.** A pipeline or a shared webhook server reviews for a whole team, and a personal subscription login is for your own use; Anthropic's terms do not allow a third-party product to offer claude.ai login or subscription rate limits without approval. Use an API key through `openai-compat` or `litellm` there, or Workload Identity Federation or Bedrock/Vertex/Foundry. For `codex-cli` on a ChatGPT login, check OpenAI's terms for your plan; a self-hosted runner on a machine you own, logged in as you, is the CI shape it fits, since the login lives in that machine's `~/.codex`. The policy and everything else about these backends is in [Subscription CLI backends](llm.md#subscription-cli-backends-claude-cli-kiro-cli-and-codex-cli).
 
 A CLI backend whose binary cannot be found is a configuration error, so a lane that selects one by mistake fails loudly with exit `2` before any network call instead of posting nothing:
 

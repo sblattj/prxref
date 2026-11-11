@@ -153,7 +153,7 @@ its `PRXREF_` name.
 | `llm_timeout_per_1k` | number | Deadline-scaling coefficient, seconds per 1k estimated input tokens, `openai-compat` only and applied only while `llm_timeout` is at its default ([more](env-vars.md#llm--pipeline)). |
 | `llm_temperature` | number or string | Sampling temperature ([more](env-vars.md#llm--pipeline)). |
 | `llm_seed` | integer or "off" | Sampling seed, or `"off"` to send none ([more](env-vars.md#llm--pipeline)). |
-| `llm_cli_concurrency` | integer | CLI processes one `claude-cli` / `kiro-cli` client runs at once ([more](env-vars.md#llm--pipeline)). |
+| `llm_cli_concurrency` | integer | CLI processes one `claude-cli` / `kiro-cli` / `codex-cli` client runs at once ([more](env-vars.md#llm--pipeline)). |
 | `llm_parse_retries` | integer | Times an unparseable reply is re-sent ([more](env-vars.md#llm--pipeline)). |
 
 ### Context
@@ -298,7 +298,7 @@ instead, even when the value is empty.
 | `llm_base_url` | endpoint | The host the diff and the prompts are sent to. |
 | `jira_base_url` | endpoint | The host Jira credentials are sent to. |
 | `ticket_ids_from_title` | endpoint | Fetches every Jira key in the PR title from that host (`PRXREF_TICKET_IDS_FROM_TITLE`). |
-| `llm_backend` | executable | Can select `claude-cli` or `kiro-cli`, which run a local binary, and picks where the diff goes. |
+| `llm_backend` | executable | Can select `claude-cli`, `kiro-cli` or `codex-cli`, which run a local binary, and picks where the diff goes. |
 | `llm_cli_path` | executable | The path of a binary prxref runs. |
 | `trace_file` | local write | Appends a JSONL trace at a chosen path. |
 | `trace_dir` | local write | Writes prompt and response files into a chosen directory. |

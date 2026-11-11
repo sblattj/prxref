@@ -24,7 +24,7 @@ in-process SDK and delegates the chain to its native ``fallbacks=``
 mechanism (which advances on errors only — a truncated litellm answer
 still returns as success).
 
-The ``claude-cli`` and ``kiro-cli`` backends (``llm_cli_backends``) run the
+The ``claude-cli``, ``kiro-cli`` and ``codex-cli`` backends (``llm_cli_backends``) run the
 user's own installed, logged-in CLI as a subprocess, one process per call,
 with the same caller-side model chain. They take the model chain, the
 timeout, a process-count cap (``PRXREF_LLM_CLI_CONCURRENCY``) and an
@@ -43,7 +43,7 @@ Tenet: prxref never reads, stores, or forwards a provider credential, and
 its own settings are provider-neutral ``PRXREF_*`` names. A provider key
 lives behind the configured endpoint (openai-compat), in the provider SDK's
 own environment (litellm), or inside the user's own logged-in CLI
-(claude-cli, kiro-cli). The CLI backends remove a fixed list of
+(claude-cli, kiro-cli, codex-cli). The claude and codex CLI backends remove a fixed list of
 credential-routing variable NAMES from the child process environment so the
 CLI falls back to its subscription login; the values are never read.
 """
@@ -86,7 +86,7 @@ DEFAULT_TIMEOUT_PER_1K = 1.6
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_CLI_CONCURRENCY = 2
 OPENAI_COMPAT_BACKENDS = ("openai-compat", "ferry", "http")
-CLI_BACKENDS = ("claude-cli", "kiro-cli")
+CLI_BACKENDS = ("claude-cli", "kiro-cli", "codex-cli")
 BACKENDS = (*OPENAI_COMPAT_BACKENDS, "litellm", *CLI_BACKENDS)
 logger = logging.getLogger(__name__)
 # Connecting is not generating: a reachable endpoint answers the TCP/TLS
@@ -851,8 +851,8 @@ def create_llm_client(
     env; env
     never includes provider credentials. PRXREF_LLM_BACKEND is read
     case-insensitively and selects ``openai-compat`` (the default, with
-    ``ferry`` and ``http`` as aliases), ``litellm``, ``claude-cli`` or
-    ``kiro-cli``. Any other value raises :class:`~prxref.llm.ConfigError`
+    ``ferry`` and ``http`` as aliases), ``litellm``, ``claude-cli``,
+    ``kiro-cli`` or ``codex-cli``. Any other value raises :class:`~prxref.llm.ConfigError`
     naming PRXREF_LLM_BACKEND, before any other setting is looked at, so a
     typo is reported as itself (exit 2) rather than as a missing endpoint or
     a failed review.
@@ -869,8 +869,8 @@ def create_llm_client(
     openai-compat client for models that cannot disable reasoning
     (e.g. GLM-5.3-Flash's ``low``/``high``/``max``), to the litellm client
     as ``reasoning_effort=`` (litellm maps it per provider), and to
-    claude-cli as its effort setting; empty omits it, and kiro-cli ignores
-    it.
+    claude-cli and codex-cli as their effort setting; empty omits it, and
+    kiro-cli ignores it.
     PRXREF_LLM_TIMEOUT (seconds, default 120.0, must be > 0) becomes the
     client's ``default_timeout``. While it is left at that default the
     openai-compat client also scales each request's deadline from the
@@ -911,10 +911,10 @@ def create_llm_client(
     per-call budget threaded cfg -> orchestrator -> reviewer -> ``invoke``,
     so a client-level copy could never win and would be dead config.
 
-    The CLI backends (``claude-cli``, ``kiro-cli``) are built by
+    The CLI backends (``claude-cli``, ``kiro-cli``, ``codex-cli``) are built by
     :func:`prxref.llm_cli_backends.build_cli_client`, imported lazily.
-    PRXREF_LLM_CLI_PATH overrides the binary (empty = ``claude`` or
-    ``kiro-cli`` on ``PATH``; one that cannot be found is a ConfigError
+    PRXREF_LLM_CLI_PATH overrides the binary (empty = ``claude``,
+    ``kiro-cli`` or ``codex`` on ``PATH``; one that cannot be found is a ConfigError
     naming it). PRXREF_LLM_CLI_CONCURRENCY caps the CLI processes one client
     runs at once (integer >= 1, default ``DEFAULT_CLI_CONCURRENCY``), and is
     re-checked here for callers that bypass ``config.load_config``. Neither

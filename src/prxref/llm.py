@@ -1,10 +1,10 @@
 """LLM contract: protocol + fallback-chain factory.
 
 Backends live in llm_backends.py (openai-compat with its ferry / http aliases,
-and litellm) and llm_cli_backends.py (claude-cli, kiro-cli). This module
+and litellm) and llm_cli_backends.py (claude-cli, kiro-cli, codex-cli). This module
 freezes the interface the pipeline codes against. NO provider-specific keys
 are read here; backend selection is
-PRXREF_LLM_BACKEND=openai-compat|ferry|http|litellm|claude-cli|kiro-cli and
+PRXREF_LLM_BACKEND=openai-compat|ferry|http|litellm|claude-cli|kiro-cli|codex-cli and
 the model fallback chain is PRXREF_LLM_MODELS="model1,model2,..." (first that
 answers within timeout wins; failures fail over fast).
 """
