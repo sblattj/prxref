@@ -26,13 +26,31 @@ Parameters:
     Description: ARN of the Secrets Manager secret holding the webhook secret.
   ModelId:
     Type: String
-    Default: bedrock/us.anthropic.claude-opus-4-6-v1
-    Description: litellm model id for the review (PRXREF_LLM_MODELS).
+    Default: bedrock/us.anthropic.claude-opus-5-5,bedrock/us.anthropic.claude-opus-4-6-v1
+    Description: >-
+      litellm model chain for the review (PRXREF_LLM_MODELS), first that answers wins.
+      Opus 5.5, with Opus 4.6 behind it while 5.5 access is not yet confirmed in the account.
   ReasoningEffort:
     Type: String
     Default: medium
-    AllowedValues: [low, medium, high]
-    Description: PRXREF_LLM_REASONING_EFFORT for the review.
+    AllowedValues: ["off", low, medium, high]
+    Description: >-
+      PRXREF_LLM_REASONING_EFFORT for the review; off leaves it unset. A model litellm's
+      bundled map does not know (a new OpenRouter model, say) rejects the parameter with
+      UnsupportedParamsError, so such a chain needs off.
+  LlmApiKeySecretArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "(arn:aws[a-z-]*:secretsmanager:.+)?"
+    Description: >-
+      Optional Secrets Manager secret holding the API key for a model reached by key
+      rather than the execution role (an openrouter/ entry in ModelId). The worker sets it
+      into LlmApiKeyEnv at cold start. Empty for a Bedrock-only chain.
+  LlmApiKeyEnv:
+    Type: String
+    Default: OPENROUTER_API_KEY
+    AllowedPattern: "[A-Z][A-Z0-9_]*"
+    Description: The variable litellm reads the LlmApiKeySecretArn key from.
   ReviewDeadline:
     Type: Number
     Default: 900
@@ -60,6 +78,8 @@ Parameters:
 
 Conditions:
   HasBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+  HasLlmKey: !Not [!Equals [!Ref LlmApiKeySecretArn, ""]]
+  EffortOff: !Equals [!Ref ReasoningEffort, "off"]
 
 Globals:
   Function:
@@ -190,7 +210,9 @@ Resources:
           GATE_APP_KEY_SECRET_ARN: !Ref AppKeySecretArn
           PRXREF_LLM_BACKEND: litellm
           PRXREF_LLM_MODELS: !Ref ModelId
-          PRXREF_LLM_REASONING_EFFORT: !Ref ReasoningEffort
+          PRXREF_LLM_REASONING_EFFORT: !If [EffortOff, !Ref AWS::NoValue, !Ref ReasoningEffort]
+          GATE_LLM_API_KEY_SECRET_ARN: !If [HasLlmKey, !Ref LlmApiKeySecretArn, !Ref AWS::NoValue]
+          GATE_LLM_API_KEY_ENV: !Ref LlmApiKeyEnv
           PRXREF_GATE_REVIEW_DEADLINE: !Ref ReviewDeadline
           # Bedrock rejects litellm's sampling seed (UnsupportedParamsError), and Anthropic
           # extended thinking needs temperature 1.
@@ -231,7 +253,11 @@ Resources:
             - Sid: AppKey
               Effect: Allow
               Action: secretsmanager:GetSecretValue
-              Resource: !Ref AppKeySecretArn
+              # The model API key secret too, when one is set.
+              Resource: !If
+                - HasLlmKey
+                - [!Ref AppKeySecretArn, !Ref LlmApiKeySecretArn]
+                - !Ref AppKeySecretArn
       Events:
         Generations:
           Type: SQS

@@ -7,7 +7,8 @@
 # does after configure-aws-credentials assumes the deployer role over GitHub OIDC.
 #
 # Reads the saved samconfig.toml next to this script (image_repository and the parameter
-# overrides from the first `sam deploy --save-params`) and adds ImageUri. The image is built
+# overrides from the first `sam deploy --save-params`, then PRXREF_GATE_PARAM_OVERRIDES on top)
+# and adds ImageUri. The image is built
 # with buildx and Docker v2 media types: `sam build` under the containerd image store
 # (OrbStack, Docker Desktop) pushes a manifest with mixed layer types, and Lambda fails such an
 # image at init with Runtime.InvalidEntrypoint.
@@ -23,10 +24,18 @@ if [[ -n $profile ]]; then aws_args=(--profile "$profile"); fi
 
 read_config() {
   python3 - "$here/samconfig.toml" <<'PY'
-import sys, tomllib
+import os, shlex, sys, tomllib
 cfg = tomllib.load(open(sys.argv[1], "rb"))["default"]["deploy"]["parameters"]
 print(cfg["image_repository"])
-for key, value in cfg.get("parameter_overrides", {}).items():
+params = dict(cfg.get("parameter_overrides", {}))
+# PRXREF_GATE_PARAM_OVERRIDES: whitespace-separated Key=Value pairs that replace or add
+# to the saved ones, so a CI secret can change one parameter without rewriting samconfig.
+for pair in shlex.split(os.environ.get("PRXREF_GATE_PARAM_OVERRIDES", "")):
+    key, sep, value = pair.partition("=")
+    if not sep or not key:
+        sys.exit(f"PRXREF_GATE_PARAM_OVERRIDES: not Key=Value: {key or pair!r}")
+    params[key] = value
+for key, value in params.items():
     if key != "ImageUri":
         print(f"{key}={value}")
 PY

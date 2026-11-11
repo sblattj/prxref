@@ -11,11 +11,15 @@
 State lives in :class:`~prxref.gate.dynamo_store.DynamoStore`. The GitHub App
 key and the webhook secret come from Secrets Manager once per cold start and
 are registered for redaction. The model is reached through litellm with the
-function's execution role: no ``AWS_BEARER_TOKEN_BEDROCK`` here.
+function's execution role: no ``AWS_BEARER_TOKEN_BEDROCK`` here. A model
+behind an API key (OpenRouter, say) gets the key from a third secret, set into
+the variable litellm reads for that provider before the review is built.
 
 Lambda-only environment (plain names, not prxref config keys):
 ``GATE_TABLE_NAME``, ``GATE_QUEUE_URL``, ``GATE_APP_KEY_SECRET_ARN`` (worker,
-watchdog) and ``GATE_WEBHOOK_SECRET_ARN`` (receiver). The app id,
+watchdog), ``GATE_WEBHOOK_SECRET_ARN`` (receiver), and optionally
+``GATE_LLM_API_KEY_SECRET_ARN`` with ``GATE_LLM_API_KEY_ENV`` (worker; the
+variable defaults to ``OPENROUTER_API_KEY``). The app id,
 installation ids, repos and review settings are the usual ``PRXREF_GATE_*``
 keys.
 """
@@ -26,6 +30,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,6 +52,10 @@ TABLE_ENV = "GATE_TABLE_NAME"
 QUEUE_ENV = "GATE_QUEUE_URL"
 APP_KEY_SECRET_ENV = "GATE_APP_KEY_SECRET_ARN"
 WEBHOOK_SECRET_ARN_ENV = "GATE_WEBHOOK_SECRET_ARN"
+LLM_KEY_SECRET_ENV = "GATE_LLM_API_KEY_SECRET_ARN"
+LLM_KEY_VAR_ENV = "GATE_LLM_API_KEY_ENV"
+DEFAULT_LLM_KEY_VAR = "OPENROUTER_API_KEY"
+_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 RUNS_DIR = Path("/tmp/prxref-gate-runs")
 LEASE_TTL_S = 840.0
 DEADLINE_PAD_S = 120.0
@@ -209,6 +218,23 @@ def _github(settings: GateSettings) -> tuple[Any, Any, Any]:
     return auth, GitHubClient(auth, session), session
 
 
+def _load_llm_key() -> None:
+    """Put the model API key from ``GATE_LLM_API_KEY_SECRET_ARN`` where litellm reads it.
+
+    No-op when the ARN is unset (a Bedrock-only chain uses the execution role).
+    The variable is ``GATE_LLM_API_KEY_ENV``, default ``OPENROUTER_API_KEY``; the
+    value is registered for redaction by :func:`_secret`.
+    """
+    if not os.environ.get(LLM_KEY_SECRET_ENV, "").strip():
+        return
+    var = os.environ.get(LLM_KEY_VAR_ENV, "").strip() or DEFAULT_LLM_KEY_VAR
+    if not _ENV_NAME.fullmatch(var):
+        raise RuntimeError(f"{LLM_KEY_VAR_ENV} must be an environment variable name, got {var!r}")
+    key = _secret(LLM_KEY_SECRET_ENV).strip()
+    register_secret(key)  # the stripped form too, so a trailing newline in the secret cannot dodge it
+    os.environ[var] = key
+
+
 def _worker_deps() -> WorkerDeps:
     def build() -> WorkerDeps:
         from prxref.gate.binding import make_guard
@@ -216,6 +242,7 @@ def _worker_deps() -> WorkerDeps:
         from prxref.gate.serve import make_review
 
         settings, cfg = _config()
+        _load_llm_key()
         store = _store()
         auth, client, _session = _github(settings)
         publisher = Publisher(

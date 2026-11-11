@@ -56,4 +56,8 @@ jobs:
         run: printf '%s\n' "$SAMCONFIG" > deploy/aws/samconfig.toml
 
       - name: Deploy
+        env:
+          # Optional Key=Value pairs over samconfig's parameter overrides (ModelId,
+          # LlmApiKeySecretArn, ...); a secret because the ARNs carry the account id.
+          PRXREF_GATE_PARAM_OVERRIDES: ${{ secrets.PRXREF_GATE_PARAM_OVERRIDES }}
         run: bash deploy/aws/deploy.sh --no-profile

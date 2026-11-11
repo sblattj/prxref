@@ -19,10 +19,11 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
 
 1. **AWS CLI and SAM CLI**, credentials for the target account, and a local Docker engine with
    buildx (OrbStack works) for `deploy.sh`.
-2. **Bedrock model access** for the model in `ModelId` (default
-   `bedrock/us.anthropic.claude-opus-4-6-v1`, a US cross-region inference profile) in the stack's
-   region. Check it before deploying:
-   `aws bedrock-runtime converse --model-id us.anthropic.claude-opus-4-6-v1 --messages '[{"role":"user","content":[{"text":"ping"}]}]'`.
+2. **Bedrock model access** for the models in `ModelId` (default
+   `bedrock/us.anthropic.claude-opus-5-5,bedrock/us.anthropic.claude-opus-4-6-v1`: US cross-region
+   inference profiles, tried in order, first that answers wins) in the stack's region. Check it
+   before deploying:
+   `aws bedrock-runtime converse --model-id us.anthropic.claude-opus-5-5 --messages '[{"role":"user","content":[{"text":"ping"}]}]'`.
    The worker role may call the `us.anthropic.*` inference profiles and the `anthropic.*`
    foundation models in every region the profile routes to; nothing else.
 3. **The GitHub App** registered and installed as in [docs/gate.md](../../docs/gate.md)
@@ -39,6 +40,23 @@ the code. The cost is a receiver cold start of a second or two, well inside GitH
    The webhook secret file holds the secret alone, with no trailing newline
    (write it with `printf '%s'`, not `echo`). Note both ARNs. Delete the local
    copies you no longer need.
+5. **Optional: a model outside Bedrock.** litellm can route `ModelId` entries such as
+   `openrouter/openai/gpt-6-luna` to another provider. Its API key goes in a third secret,
+   again from a file or a process substitution so the value never reaches a command line:
+
+   ```bash
+   aws secretsmanager create-secret --name prxref-gate/llm-api-key \
+     --secret-string file://<(printf '%s' "$OPENROUTER_API_KEY")
+   ```
+
+   Pass its ARN as `LlmApiKeySecretArn`. The worker reads it at cold start, registers it for
+   redaction and exports it as `LlmApiKeyEnv` (default `OPENROUTER_API_KEY`, the variable
+   litellm reads for `openrouter/` models). The worker role may read this secret only when the
+   ARN is set, and only under `prxref-gate/`. Keep a Bedrock model last in the chain as the
+   fallback, for example
+   `ModelId=openrouter/openai/gpt-6-luna,bedrock/us.anthropic.claude-opus-4-6-v1`. Set
+   `ReasoningEffort=off` when a model in the chain rejects `reasoning_effort` (litellm raises
+   `UnsupportedParamsError` for models missing from its bundled map, `gpt-6-luna` among them).
 
 ## Deploy
 
@@ -158,6 +176,18 @@ Pass `GitHubOidcProviderArn=<arn>` as well when the account already has a
 repository secrets: `PRXREF_GATE_DEPLOY_ROLE_ARN` (the `DeployerRoleArn` output) and
 `PRXREF_GATE_SAMCONFIG` (the contents of your `samconfig.toml`). Neither is a credential: the
 role can only be assumed by the token GitHub mints for the trusted job.
+
+A third secret, `PRXREF_GATE_PARAM_OVERRIDES`, is optional. It holds space-separated
+`Key=Value` pairs (shell quoting allowed) that `deploy.sh` lays over the samconfig overrides,
+replacing a key that is already there and adding one that is not. Use it to change the model
+chain without rewriting the whole samconfig secret:
+
+```bash
+printf '%s' 'ModelId=openrouter/openai/gpt-6-luna,bedrock/us.anthropic.claude-opus-4-6-v1 LlmApiKeySecretArn=<arn> ReasoningEffort=off' \
+  | gh secret set PRXREF_GATE_PARAM_OVERRIDES -R OWNER/REPO
+```
+
+Locally, export the same variable before `deploy.sh`. A pair without `=` stops the deploy.
 
 Once a merge to main has deployed, the `prxref-deployer` user is no longer needed. Drop it by
 passing an empty name in the same update, which also removes it from the role's trust policy
