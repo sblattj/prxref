@@ -534,7 +534,7 @@ def _is_library(file: FileDiff, files: Sequence[FileDiff]) -> bool:
 
 # The signs that a script is an interactive operator helper (issue #177),
 # matched on added, non-comment lines: a terminal read (bash ``select``,
-# ``read -p``, ``/dev/tty``), an interactive login at the start of a command
+# ``read -p``, input redirected from ``/dev/tty``), an interactive login at the start of a command
 # (``aws sso login``, ``gcloud auth login``, ``az login``), or a redirect or
 # ``tee`` into the user's home directory (``>> "$HOME/.cloud/config"``).
 # A command's start: the line start or a ``;``/``&``/``|``/``(`` separator,
@@ -544,7 +544,7 @@ _HOME = r"""["']?(?:~|\$HOME|\$\{HOME\})/"""
 _INTERACTIVE_RES = (
     re.compile(r"^\s*select\s+\w+\s+in\b"),
     re.compile(rf"{_CMD_START}read\b[^;&|]*\s-[A-Za-z]*p\b"),
-    re.compile(r"/dev/tty\b"),
+    re.compile(r"""<\s*["']?/dev/tty\b"""),
     re.compile(rf"{_CMD_START}(?:[\w.-]+\s+(?:sso|auth)|az)\s+login\b"),
     re.compile(rf">>?\s*{_HOME}"),
     re.compile(rf"\btee\b(?:\s+-\w+)*\s+{_HOME}"),
