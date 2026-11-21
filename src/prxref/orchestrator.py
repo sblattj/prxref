@@ -123,7 +123,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    claim that a NAMED path was removed when the post-image still carries
    it) → ``apply_head_removal_claim_check`` (#116, a claim that a symbol
    or a file outside the diff was removed when the head tree still
-   defines or holds it) → ``apply_hedge_gate`` (a finding whose own text conditions the
+   defines or holds it) → ``apply_comment_only_change_check`` (#178, a
+   code-change claim anchored in a hunk that changed only comments) →
+   ``apply_hedge_gate`` (a finding whose own text conditions the
    defect on something the worker never established; a ``Spec:`` quote
    of the injected digest is not read as the finding's own text) →
    ``apply_rule_scope_check`` then ``apply_rule_category_check`` (#75,
@@ -334,6 +336,7 @@ from .quality import (
     _resolve_confidence_floor,
     active,
     apply_anchor_snap,
+    apply_comment_only_change_check,
     apply_containment_note,
     apply_evidence_drops,
     apply_example_echo_check,
@@ -2460,6 +2463,14 @@ def orchestrate_review(
             forge, ref, getattr(pr, "source_sha", "") or "", repo_dir,
         ),
     )
+    commented = apply_comment_only_change_check(findings, files, reader)
+    comment_only = sum(
+        1 for before, after in zip(findings, commented, strict=True)
+        if before.drop_reason is None and after.drop_reason is not None
+    )
+    if comment_only:
+        logger.info("comment-only hunks: dropped %d code-change claim(s)", comment_only)
+    findings = commented
     findings = apply_hedge_gate(findings, spec_digest=injected)
     # AFTER the cheap prunes and BEFORE grouping, the cap and the gate (#126):
     # an error the head file contradicts must not consume ``max_errors`` or

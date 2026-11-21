@@ -99,6 +99,12 @@ tracker.
   added line prompts the terminal (`select`, `read -p`, input from `/dev/tty`), runs an interactive
   login (`aws sso login`, `gcloud auth login`, `az login`) or writes into `$HOME`. A
   verify/smoke/check name or flag still counts, and a test-looking script is never skipped.
+- A hunk that changed only comments no longer yields a "logic changed" finding on the
+  unchanged code next to it (#178). `apply_comment_only_change_check` drops a
+  code-change claim (changed, switched, replaced, no longer, now uses, ...) whose hunk has
+  only blank or whole-line comment `+`/`-` lines, as `claims a code change, but only
+  comments changed: <file> @@ -<old> +<new>`. A finding about the comment itself, an
+  `outofscope` finding and prose files are left alone.
 
 ## [0.41.0] - 2026-11-01
 

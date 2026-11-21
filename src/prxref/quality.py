@@ -160,6 +160,9 @@ guard rules out the failure the finding claims.
     header produces when a worker reads a copy as a move (issue #03).
     Only a claim that NAMES a diff path is judged, so a finding about a
     removed guard or constant is untouched.
+    Right after it, ``apply_comment_only_change_check`` (#178) drops a
+    claim that code changed when every changed line of its hunk is a
+    comment or blank (``claims a code change, but only comments changed:``).
 14. ``apply_hedge_gate``: drop findings whose title or body conditions the
     defect on a precondition the worker never established from the diff
     ("If X still leases a client", "unless the backfill already ran"),
@@ -5240,3 +5243,248 @@ def apply_suggestion_validation(
         reasons.append(reason)
         out.append(f if reason is None else replace(f, suggestion=None, suggestion_end_line=0))
     return out, reasons
+
+
+COMMENT_ONLY_PREFIX: str = "claims a code change, but only comments changed: "
+
+_PROSE_SUFFIXES: frozenset[str] = frozenset({".md", ".markdown", ".mdx", ".rst", ".txt", ".adoc"})
+
+_SLASH_COMMENT_RE = re.compile(r"\s*//")
+_DASH_COMMENT_RE = re.compile(r"\s*--(?=\s|$)")
+_DASH_COMMENT_SUFFIXES: frozenset[str] = frozenset({
+    ".sql", ".psql", ".pgsql", ".lua", ".hs", ".lhs", ".elm", ".ada", ".adb", ".ads", ".vhd", ".vhdl",
+})
+_BLOCK_OPEN_RE = re.compile(r"\s*(/\*|<!--)")
+_BLOCK_CLOSE_RE = re.compile(r"\s*(?:\*/|-->)\s*$")
+_STAR_LINE_RE = re.compile(r"\s*\*(?=\s|$)\s*(.*)$")
+_STAR_PROSE_RE = re.compile(r"^(?:$|@\w|[A-Za-z]{2,}\s+[A-Za-z]{2,})")
+
+_HASH_COMMENT_SUFFIXES: frozenset[str] = frozenset({
+    ".py", ".pyi", ".sh", ".bash", ".zsh", ".fish", ".rb", ".pl", ".pm", ".r",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".tf", ".hcl", ".ps1",
+    ".mk", ".cmake", ".nix", ".jl", ".ex", ".exs", ".cr", ".nim", ".coffee",
+})
+_HASH_COMMENT_NAMES: frozenset[str] = frozenset({
+    "makefile", "dockerfile", "gemfile", "rakefile", "containerfile", ".gitignore",
+    ".dockerignore", ".env", "cmakelists.txt", "procfile",
+})
+_HASH_ANY_RE = re.compile(r"\s*#(?!!)")
+_BLOCK_CLOSERS: dict[str, str] = {"/*": "*/", "<!--": "-->"}
+
+_CODE_CHANGE_CLAIM_RE = re.compile(
+    r"\b(?:chang(?:e|ed|es|ing)|switch(?:ed|es|ing)?|swapp(?:ed|ing)|replac(?:ed|es|ing)"
+    r"|alter(?:ed|s|ing)?|flipp(?:ed|ing)|revert(?:ed|s|ing)?|regress(?:ed|es|ion|ions)?"
+    r"|no\s+longer|now\s+(?:uses?|returns?|calls?|rounds?|floors?|computes?|treats?"
+    r"|skips?|throws?|raises?))\b",
+    re.IGNORECASE,
+)
+
+_ABOUT_THE_TEXT_RE = re.compile(
+    r"\b(?:comments?|docstrings?|javadoc|jsdoc|notes?|typos?|misspell\w*|todo|fixme|wording"
+    r"|stale|outdated|misleading|inaccurate)\b",
+    re.IGNORECASE,
+)
+
+
+def _prose_file(path: str) -> bool:
+    """Whether ``path`` is prose (Markdown, reST, plain text), never judged; ``CMakeLists.txt`` is code."""
+    pure = PurePosixPath(path)
+    return pure.suffix.lower() in _PROSE_SUFFIXES and pure.name.lower() not in _HASH_COMMENT_NAMES
+
+
+def _hash_comment_file(path: str) -> bool:
+    """Whether ``#`` starts a comment anywhere it opens a line of ``path``."""
+    pure = PurePosixPath(path)
+    return pure.suffix.lower() in _HASH_COMMENT_SUFFIXES or pure.name.lower() in _HASH_COMMENT_NAMES
+
+
+_NOT_A_CHANGE_RE = re.compile(
+    r"\b(?:still|unchanged|pre-?existing|already|not|never|nothing|without)\b|n't\b", re.IGNORECASE,
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;!?])\s+|\n+")
+
+
+def _claims_code_change(finding: Finding) -> bool:
+    """Whether ``finding`` affirms that code or behavior changed.
+
+    Its title and body are read sentence by sentence: one sentence must
+    hold a change word (:data:`_CODE_CHANGE_CLAIM_RE`) while naming no
+    comment, note or docstring (:data:`_ABOUT_THE_TEXT_RE`) and saying
+    nothing is ``still``, ``already``, ``unchanged`` or ``pre-existing``,
+    and holding no negation (``not``, ``never``, ``nothing``, ``without``,
+    ``n't``; ``no longer`` is itself a change word).
+    "The comment changed, but the calculation is still wrong" is a claim
+    about unchanged code, not a code-change claim.
+    """
+    for sentence in _SENTENCE_SPLIT_RE.split(f"{finding.title or ''}\n{finding.body or ''}"):
+        if (
+            _CODE_CHANGE_CLAIM_RE.search(sentence)
+            and not _ABOUT_THE_TEXT_RE.search(sentence)
+            and not _NOT_A_CHANGE_RE.search(sentence)
+        ):
+            return True
+    return False
+
+
+def _dash_comment_file(path: str) -> bool:
+    """Whether ``--`` opens a comment in ``path`` (SQL, Lua, Haskell, ...)."""
+    return PurePosixPath(path).suffix.lower() in _DASH_COMMENT_SUFFIXES
+
+
+def _is_comment_or_blank(
+    text: str, *, hash_comments: bool = False, dash_comments: bool = False,
+) -> bool:
+    """Whether a changed line carries no code: blank, or a whole-line comment.
+
+    ``hash_comments`` (a Python, shell, YAML, ... file) makes any line
+    opening with ``#`` a comment, ``#note`` included, except a ``#!``
+    shebang; elsewhere a ``#`` line is code, so ``#include``,
+    ``# include`` and a JavaScript ``#private`` field stay code.
+    ``dash_comments`` (SQL, Lua, Haskell, ...) makes a ``-- `` line a
+    comment; elsewhere it is code (``-- i;`` in C).
+    A ``/*`` or ``<!--`` line is a comment only when nothing but blanks
+    follows its closer on the line (``/* note */ value = 2;`` is code). A
+    leading-``*`` line is a doc-comment line only outside hash-comment
+    files and only when what follows reads as prose or a ``@tag`` and ends
+    in no code punctuation, so a ``* 3`` continuation stays code.
+    """
+    if not text.strip() or _SLASH_COMMENT_RE.match(text) or _BLOCK_CLOSE_RE.match(text):
+        return True
+    if hash_comments and _HASH_ANY_RE.match(text):
+        return True
+    if dash_comments and _DASH_COMMENT_RE.match(text):
+        return True
+    opener = _BLOCK_OPEN_RE.match(text)
+    if opener:
+        closer = _BLOCK_CLOSERS[opener.group(1)]
+        end = text.find(closer, opener.end())
+        return end < 0 or not text[end + len(closer):].strip()
+    star = None if hash_comments else _STAR_LINE_RE.match(text)
+    if star:
+        rest = star.group(1).rstrip()
+        return _STAR_PROSE_RE.match(rest) is not None and not rest.endswith((";", "{", "}", ")", ","))
+    return False
+
+
+_STRING_FENCES: tuple[str, ...] = ('"""', "'''", "`")
+
+
+def _opens_multiline_string(text: str) -> bool:
+    """Whether ``text`` holds an odd count of a multi-line string fence (triple quote, backtick)."""
+    rest = text
+    for fence in _STRING_FENCES:
+        if rest.count(fence) % 2:
+            return True
+        rest = rest.replace(fence, "")
+    return False
+
+
+def _starts_inside_string(head: str | None, hunk: Hunk) -> bool:
+    """Whether the head file's lines above ``hunk`` leave a multi-line string open."""
+    if not head:
+        return False
+    return _opens_multiline_string("\n".join(head.splitlines()[: max(hunk.new_start - 1, 0)]))
+
+
+def _comment_only_hunk(hunk: Hunk, path: str) -> bool:
+    """Whether every changed line of ``hunk`` is blank or a comment in ``path``'s language.
+
+    A hunk where any line opens or closes a multi-line string (a Python
+    triple quote, a JavaScript template literal) is never comment-only: a
+    ``#`` or ``//`` line inside one is string data, so changing it changes
+    a value.
+    """
+    if any(_opens_multiline_string(ln.text) for ln in hunk.lines):
+        return False
+    changed = [ln for ln in hunk.lines if ln.kind in "+-"]
+    hashes, dashes = _hash_comment_file(path), _dash_comment_file(path)
+    return bool(changed) and all(
+        _is_comment_or_blank(ln.text, hash_comments=hashes, dash_comments=dashes) for ln in changed
+    )
+
+
+def apply_comment_only_change_check(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff],
+    read: Callable[[str], str | None] | None = None,
+) -> list[Finding]:
+    """Drop a code-change claim anchored in a hunk that changed only comments (#178).
+
+    A PR that rewords a comment above an unchanged calculation shows the
+    calculation as context; a worker that reads the comment's mention of
+    the old behavior can report "logic changed (floor vs round)" anchored
+    on that context line. A behavior change needs a changed code line, so
+    the finding is dropped as ``claims a code change, but only comments
+    changed: <file> @@ -<old> +<new>`` when all of these hold:
+
+    - a sentence of its title or body affirms a change (``changed``,
+      ``switched``, ``replaced``, ``regression``, ``no longer``, ``now
+      uses``, ...) without naming the comment or saying the code is
+      ``still`` or ``already`` so (:func:`_claims_code_change`);
+    - its title is not about the text itself (comment, docstring, note,
+      typo, wording, stale, misleading, TODO, ...);
+    - its severity is not ``outofscope``, the label for pre-existing code;
+    - every ``+``/``-`` line of the hunk holding its line, or of every hunk
+      of its file when it is file-level (line 0), is blank or a whole-line
+      comment (``//``, ``/*``, ``*``, ``<!--``, ``-->``; in a Python,
+      shell, YAML, ... file any ``#`` line but a ``#!`` shebang, ``#note``
+      included; in SQL, Lua, Haskell, ... a ``--`` line).
+
+    Conservative by construction: a line with code before a trailing
+    comment, ``#include``, ``#private``, ``*ptr`` and docstring body text
+    all count as code, a hunk with an unbalanced triple quote or backtick
+    (a multi-line string boundary) is never comment-only, a prose file
+    (Markdown, reST, plain text) is never
+    judged, and with ``read`` (the head-sha reader) a hunk that starts
+    inside a multi-line string opened above it (an odd fence count in the
+    head file's lines before the hunk) is never comment-only either; a
+    read that fails or returns nothing leaves the hunk judged alone. A
+    line outside every hunk, a deterministic check's finding
+    (:func:`prxref.heuristics.is_deterministic`) and one already dropped
+    are never judged. Pure apart from ``read`` (each path read at most
+    once), order-preserving, the same length in and out.
+    """
+    by_path = {fd.path: fd for fd in files}
+    reads: dict[str, str | None] = {}
+
+    def head_text(path: str) -> str | None:
+        if read is None:
+            return None
+        if path not in reads:
+            try:
+                text = read(path)
+            except Exception:  # noqa: BLE001 -- a failed read is "no head file"
+                text = None
+            reads[path] = text if isinstance(text, str) else None
+        return reads[path]
+
+    out: list[Finding] = []
+    for f in findings:
+        fd = by_path.get(f.file)
+        hunks: list[Hunk] = []
+        if (
+            fd is not None
+            and f.drop_reason is None
+            and f.severity != "outofscope"
+            and not heuristics.is_deterministic(f)
+            and not _prose_file(f.file)
+            and not _ABOUT_THE_TEXT_RE.search(f.title or "")
+            and _claims_code_change(f)
+        ):
+            if f.line > 0:
+                hunk = _hunk_containing(fd.hunks, f.line)
+                hunks = [hunk] if hunk is not None else []
+            else:
+                hunks = list(fd.hunks)
+        if (
+            hunks
+            and all(_comment_only_hunk(h, f.file) for h in hunks)
+            and not any(_starts_inside_string(head_text(f.file), h) for h in hunks)
+        ):
+            first = hunks[0]
+            out.append(replace(
+                f, drop_reason=f"{COMMENT_ONLY_PREFIX}{f.file} @@ -{first.old_start} +{first.new_start}",
+            ))
+        else:
+            out.append(f)
+    return out
