@@ -241,6 +241,26 @@ def _code_only(text: str) -> str:
     return re.split(r"(?://|#|/\*)", code, maxsplit=1)[0]
 
 
+def _maybe_null_in(value: str, fd: FileDiff) -> bool:
+    """Whether the writer's file shows ``value`` may be null.
+
+    A bare identifier counts as maybe-null when the file's post-image gives it
+    a null default or assignment (``text=None``, ``text = null``) or a
+    nullable type (``Optional[str]``, ``str | None``, ``String?``). Anything
+    else is not proven non-null either; the check only refuses what the diff
+    itself shows.
+    """
+    if not re.fullmatch(r"[A-Za-z_]\w*", value):
+        return False
+    v = re.escape(value)
+    nullable = re.compile(
+        rf"\b{v}\s*(?::[^=,)]*)?=\s*(?:None|null|nil|undefined)\b"
+        rf"|\b{v}\s*:\s*[^=,)]*(?:Optional\b|\|\s*None\b|\?)"
+        rf"|\b(?:Optional<[^>]*>|\w+\?)\s+{v}\b",
+    )
+    return any(nullable.search(_code_only(text)) for _, text, _ in _post_image(fd))
+
+
 def _norm(word: str) -> str:
     """``put_value`` / ``putValue`` / ``Value`` -> ``value``."""
     return word.replace("_", "").lower()
@@ -273,6 +293,8 @@ def _null_return_writer(f: Finding, claim: str, files: Sequence[FileDiff]) -> st
         return None
     named = {_norm(a.group(1)): a.group(2) for a in _NAMED_ARG_RE.finditer(args)}
     if field not in named or _NULL_LITERAL_RE.match(named[field]):
+        return None
+    if _maybe_null_in(named[field].strip(), next(fd for fd in files if fd.path == path)):
         return None
     arg = next(a.group(1) for a in _NAMED_ARG_RE.finditer(args) if _norm(a.group(1)) == field)
     return (

@@ -337,6 +337,20 @@ class TestCaseOneWriterRulesOutNull:
         writer = f"def publish(client, config_id, text):\n    {quoted}\n"
         assert _check(CASE_ONE, _writer_diff(writer))[1] is None
 
+    @pytest.mark.parametrize("signature", [
+        "def publish(client, config_id, text=None):",
+        "def publish(client, config_id, text: str | None):",
+        "def publish(client, config_id, text: Optional[str]):",
+    ], ids=["none-default", "union-none", "optional"])
+    def test_a_writer_value_the_file_shows_nullable_does_not_count(self, signature):
+        writer = WRITER.replace("def publish(client, config_id, text):", signature)
+        assert signature in writer
+        assert _check(CASE_ONE, _writer_diff(writer))[1] is None
+
+    def test_a_value_reassigned_to_null_does_not_count(self):
+        writer = WRITER.replace("    client.put_value", "    text = None if not text else text\n    client.put_value")
+        assert _check(CASE_ONE, _writer_diff(writer))[1] is None
+
     def test_a_quoted_write_call_does_not_hide_the_real_writer(self):
         writer = WRITER + '    log.info("put_value(Id=x, Binary=b) was not called")\n'
         assert _check(CASE_ONE, _writer_diff(writer))[1] == "null_return_ruled_out_by_writer"
