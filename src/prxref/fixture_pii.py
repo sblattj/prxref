@@ -45,6 +45,7 @@ _TEST_BASENAME_RE = re.compile(
 
 _PII_WORDS = r"e-?mails?|e-?mail\s+address(?:es)?|address(?:es)?|names?|phone(?:\s+numbers?)?"
 _PII_NOUN = f"(?:{_PII_WORDS})"
+_PERSON = r"(?:persons?|people|employees?|developers?|users?|colleagues?)"
 
 PII_RE = re.compile(
     r"\bpii\b|\bpersonally[\s-]+identifiable\b"
@@ -52,7 +53,8 @@ PII_RE = re.compile(
     r"|\b(?:employee|developer|author|staff|colleague|person|someone)(?:'s|s)?\s+"
     rf"(?:(?:own|real|work|personal)\s+)*{_PII_NOUN}\b"
     rf"|\b(?:own|work)\s+{_PII_NOUN}\b"
-    rf"|\breal\s+(?:persons?|people|employees?|developers?|users?|{_PII_WORDS})\b"
+    rf"|\breal\s+(?:{_PERSON}(?:'s|')?\s+)?{_PII_NOUN}\b"
+    rf"|\b{_PII_NOUN}\s+(?:of|from|belonging\s+to)\s+(?:a\s+)?real\s+{_PERSON}\b"
     rf"|\bpeople's\s+{_PII_NOUN}\b",
     re.IGNORECASE,
 )

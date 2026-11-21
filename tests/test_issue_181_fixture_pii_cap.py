@@ -177,6 +177,8 @@ class TestIsFixturePiiFinding:
         ("Test never asserts the email was sent", "Check the outbox."),
         ("Mock mailer swallows the email send failure", "Raise instead."),
         ("Phone number parser test misses the empty case", "Add a case."),
+        ("Real users cannot open settings", "The fixture hides the settings route."),
+        ("Real people will see this stack trace", "Catch the error in the test helper."),
         ("Fixture email has a real-looking session token", "The session token is live."),
     ])
     def test_does_not_match(self, title, body):
