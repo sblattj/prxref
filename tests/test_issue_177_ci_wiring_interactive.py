@@ -73,6 +73,9 @@ def test_the_issue_repro_end_to_end():
     "printf 'Choose: '; select role in admin readonly; do break; done",
     "tee -a \"$HOME/.netrc\" < creds",
     "printf x > \"$HOME\"/.config",
+    "select role; do break; done",
+    "bash -c \"aws sso login --profile dev\"",
+    "sh -c 'read -rp \"Name: \" n'",
     "cat creds | tee \"${HOME}\"/.netrc",
     "n=$#; [ $n -gt 0 ] || read -rp 'Name: ' name",
     "aws sso login --profile dev",
@@ -105,6 +108,8 @@ def test_each_interactive_sign_exempts_a_shebang_only_script(line):
     "printf '%s\\n' 'select role in admin readonly'",
     "echo ok # >> \"$HOME/.cfg\"",
     "make test  # then: aws sso login",
+    "echo 'bash -c \"aws sso login\"'",
+    "selection=1; echo $selection",
 ])
 def test_non_interactive_lines_keep_the_shebang_candidate(line):
     assert _paths(_added("scripts/bootstrap.sh", ["#!/usr/bin/env bash", line])) == [

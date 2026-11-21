@@ -544,7 +544,7 @@ def _is_library(file: FileDiff, files: Sequence[FileDiff]) -> bool:
 _CMD_START = r"(?:^|[;&|(])\s*(?:(?:if|then|else|elif|do|!)\s+)*"
 _HOME = r"""["']?(?:~|\$HOME|\$\{HOME\})["']?/"""
 _INTERACTIVE_RES = (
-    re.compile(rf"{_CMD_START}select\s+\w+\s+in\b"),
+    re.compile(rf"{_CMD_START}select\s+\w+\s*(?:in\b|;|$)"),
     re.compile(rf"{_CMD_START}read\b[^;&|]*\s-[A-Za-z]*p\b"),
     re.compile(r"""<\s*["']?/dev/tty\b"""),
     re.compile(rf"{_CMD_START}(?:[\w.-]+\s+(?:sso|auth)|az)\s+login\b"),
@@ -557,21 +557,30 @@ _QUOTED_RE = re.compile(r"'[^']*'|" + r'"(?:\\.|[^"\\])*"')
 # (``$#`` and ``${#x}`` are not comments).
 _COMMENT_RE = re.compile(r"(?:^|(?<=\s))#")
 _REDIRECT_TAIL_RE = re.compile(r"""(?:[<>]|\btee\b(?:\s+-\w+)*)\s*$""")
+# A shell run on a quoted command string: ``bash -c "..."``, ``sh -c '...'``.
+_SHELL_C_TAIL_RE = re.compile(r"(?<![\w.-])(?:ba|z|k|da)?sh\s+-c\s*$")
 
 
 def _mask_quotes(text: str) -> str:
-    """``text`` with every quoted string emptied, except a redirect or ``tee`` target.
+    """``text`` with every quoted string emptied, except a redirect target or a ``sh -c`` command.
 
     ``echo 'run gcloud auth login'`` and ``echo "x >> $HOME/f"`` keep no
     command text, while ``>> "$HOME/.cloud/config"`` and
-    ``tee "$HOME/.netrc"`` keep their quoted path.
+    ``tee "$HOME/.netrc"`` keep their quoted path, and the command string
+    of ``bash -c "aws sso login"`` is unquoted (masked in turn) behind a
+    ``;`` so it reads as a command start.
     """
     out: list[str] = []
     pos = 0
     for match in _QUOTED_RE.finditer(text):
         out.append(text[pos:match.start()])
-        keep = _REDIRECT_TAIL_RE.search(text[:match.start()]) is not None
-        out.append(match.group(0) if keep else '""')
+        before = text[:match.start()]
+        if _SHELL_C_TAIL_RE.search(before):
+            out.append(f"; {_mask_quotes(match.group(0)[1:-1])} ;")
+        elif _REDIRECT_TAIL_RE.search(before):
+            out.append(match.group(0))
+        else:
+            out.append('""')
         pos = match.end()
     out.append(text[pos:])
     return "".join(out)
