@@ -243,7 +243,9 @@ does not move.
 23. ``apply_guard_fix_check`` (#147): always on, no key. A fix that advises
     removing or relocating a guard gets the line ``Unverified fix: ...``
     appended to its body, and a code suggestion that replaces a guard line
-    without keeping its identifiers is cleared. Runs last, never drops a
+    without keeping its identifiers is cleared. A "do X instead" fix that
+    rests on framework behavior (an annotation, transaction propagation, a
+    proxy, middleware) gets its own ``Unverified fix: ...`` line. Runs last, never drops a
     finding and never changes severity or confidence.
 
 With ``PRXREF_SUGGESTIONS=on`` one more pass, ``apply_suggestion_validation``,
@@ -2199,7 +2201,13 @@ GUARD_FIX_LINE: str = (
     "Unverified fix: confirm the replacement enforces the same check, by reading "
     "its definition, before removing this guard."
 )
-GUARD_FIX_REASONS: tuple[str, ...] = ("suggestion_drops_guard", "advises_guard_removal")
+FRAMEWORK_FIX_LINE: str = (
+    "Unverified fix: it relies on framework behavior the diff does not show; confirm it "
+    "against the framework's code or documentation before applying it."
+)
+GUARD_FIX_REASONS: tuple[str, ...] = (
+    "suggestion_drops_guard", "advises_guard_removal", "framework_fix_unverified",
+)
 
 _GUARD_CLAUSE = r"[^.;!?\n]"
 _GUARD_NOUN = (
@@ -2270,6 +2278,77 @@ def _advises_guard_removal(text: str) -> bool:
     )
 
 
+_LANGUAGE_ANNOTATIONS = (
+    "Override|Deprecated|SuppressWarnings|FunctionalInterface|SafeVarargs|Nullable|NonNull"
+    "|Nonnull|NotNull|override|property|staticmethod|classmethod|abstractmethod|dataclass"
+    "|param|returns?|throws|see|link|since|author|type|inheritDoc|example|todo"
+)
+_FRAMEWORK_ANNOTATION_RE = re.compile(
+    rf"(?<![\w.@])@(?!(?:{_LANGUAGE_ANNOTATIONS})\b)[A-Za-z][\w.]*"
+)
+_FRAMEWORK_WORD = (
+    r"\b(?:propagation|non-?transactional|not\s+transactional|transactional|requires_new"
+    r"|not_supported|isolation\s+level|proxy|proxied|interceptors?|middlewares?"
+    r"|lifecycle\s+hooks?|framework'?s?|container-managed|autowir\w*|dependency\s+injection)\b"
+)
+_FRAMEWORK_CLAUSE = r"(?:[^.;!?\n]|\.(?=\S))"
+_FRAMEWORK_MECHANISM = rf"(?:{_FRAMEWORK_WORD}|{_FRAMEWORK_ANNOTATION_RE.pattern})"
+_FRAMEWORK_VERB = (
+    r"(?:mark|annotate|decorate|set|use|switch|change|configure|make|wrap|add|apply"
+    r"|declare|enable|register|put|call|route|replace)"
+)
+_FRAMEWORK_ADVICE_RE = re.compile(
+    _ADVICE_LEAD + rf"{_FRAMEWORK_VERB}\b{_FRAMEWORK_CLAUSE}{{0,80}}?{_FRAMEWORK_MECHANISM}",
+    re.IGNORECASE,
+)
+_FRAMEWORK_GERUND_RE = re.compile(
+    r"\b(?:consider|try|suggest|recommend|prefer)\s+"
+    r"(?:mark|annotat|decorat|sett|us|switch|chang|configur|mak|wrapp|add|apply|declar|enabl"
+    r"|register|putt|call|rout|replac)ing\b"
+    rf"{_FRAMEWORK_CLAUSE}{{0,80}}?{_FRAMEWORK_MECHANISM}",
+    re.IGNORECASE,
+)
+
+
+def _advises_framework_fix(text: str) -> bool:
+    """True when ``text`` advises a fix that rests on a framework mechanism.
+
+    The mechanism is an annotation or decorator (other than language-level
+    ones such as ``@Override`` or doc tags such as ``@param``), transaction
+    propagation, a proxy, an interceptor, middleware, a lifecycle hook,
+    dependency injection or the framework itself, reached in one clause from
+    an imperative or modal change verb (``mark``, ``annotate``, ``use``,
+    ``set``...) or a ``consider``-style gerund. A report (``is annotated``),
+    a negation (``do not use``) and a gerund consequence (``Marking it ...
+    would not help``) do not match.
+    """
+    return bool(_FRAMEWORK_ADVICE_RE.search(text) or _FRAMEWORK_GERUND_RE.search(text))
+
+
+def _framework_tokens(text: str) -> set[str]:
+    """Framework annotations in ``text`` with their argument list, casefolded, no whitespace."""
+    found: set[str] = set()
+    for m in _FRAMEWORK_ANNOTATION_RE.finditer(text):
+        args = re.match(r"\([^()\n]*\)", text[m.end():])
+        token = m.group(0) + (args.group(0) if args else "")
+        found.add(re.sub(r"\s+", "", token).casefold())
+    return found
+
+
+def _suggestion_adds_framework(finding: Finding, by_path: Mapping[str, FileDiff]) -> bool:
+    text = finding.suggestion
+    if not text or finding.line <= 0 or finding.locations:
+        return False
+    end = finding.suggestion_end_line or finding.line
+    if end < finding.line:
+        return False
+    current = _hunk_new_side(by_path.get(finding.file), finding.line, end)
+    if current is None:
+        return False
+    added = _framework_tokens(text) - _framework_tokens("\n".join(current))
+    return bool(added)
+
+
 def _guard_identifiers(lines: Sequence[str]) -> set[str]:
     """Guard-bearing identifiers on the head lines of ``lines``, casefolded."""
     found: set[str] = set()
@@ -2326,6 +2405,17 @@ def apply_guard_fix_check(
     (``this PR removes``, ``was dropped``, ``add a tenant check``) do not
     match. The body gets :data:`GUARD_FIX_LINE` after a blank line.
 
+    ``framework_fix_unverified``: the title or body ADVISES a "do X instead"
+    fix that rests on framework behavior the diff cannot show (see
+    :func:`_advises_framework_fix`: ``mark the inner method as not
+    transactional``, ``use REQUIRES_NEW``, ``annotate it with @Async``), or a
+    code suggestion introduces an annotation the head lines it replaces do
+    not carry. The suggestion is kept and the body gets
+    :data:`FRAMEWORK_FIX_LINE`; when a guard reason fired too, only
+    :data:`GUARD_FIX_LINE` is added. Quoting the diff's own annotation does
+    not count as proof, since the framework code that decides the fix is
+    never in the diff.
+
     A body that already holds ``Unverified fix:`` gets no second line, so the
     pass is idempotent and a model that followed the worker prompt is left
     alone. Dropped findings pass through untouched.
@@ -2343,10 +2433,14 @@ def apply_guard_fix_check(
         if _suggestion_drops_guard(f, by_path):
             fired.append("suggestion_drops_guard")
             updated = replace(updated, suggestion=None, suggestion_end_line=0)
-        if _advises_guard_removal(f"{f.title}. {f.body}"):
+        prose = f"{f.title}. {f.body}"
+        if _advises_guard_removal(prose):
             fired.append("advises_guard_removal")
+        if _advises_framework_fix(prose) or _suggestion_adds_framework(f, by_path):
+            fired.append("framework_fix_unverified")
         if fired and "Unverified fix:" not in (f.body or ""):
-            updated = replace(updated, body=f"{f.body}\n\n{GUARD_FIX_LINE}" if f.body else GUARD_FIX_LINE)
+            line = FRAMEWORK_FIX_LINE if fired == ["framework_fix_unverified"] else GUARD_FIX_LINE
+            updated = replace(updated, body=f"{f.body}\n\n{line}" if f.body else line)
         out.append(updated)
         reasons.append(tuple(fired))
     return out, reasons

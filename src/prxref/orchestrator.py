@@ -186,7 +186,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    it touches both the active and dropped copies of chunk and sweep
    findings alike) → ``apply_guard_fix_check`` (#147: a fix that advises
    removing a guard gets an ``Unverified fix:`` line, a suggestion that
-   replaces a guard without its identifiers is cleared; nothing is dropped).
+   replaces a guard without its identifiers is cleared, and a fix that rests
+   on framework behavior gets its own ``Unverified fix:`` line; nothing is
+   dropped).
    Dropped findings are retained in the result with
    ``drop_reason`` set, never silently discarded, and both lists come out
    sorted by ``finding_sort_key``. Every result — including an error or

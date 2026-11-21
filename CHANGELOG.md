@@ -10,6 +10,14 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- Quality pass 23 (#147): a "do X instead" fix that rests on framework behavior the diff
+  cannot show (mark a method not transactional, use `REQUIRES_NEW`, add `@Async`, wrap it in
+  middleware), or a code suggestion that adds an annotation the replaced lines lack, now gets
+  an `Unverified fix:` line telling the author to confirm it against the framework first.
+  Nothing is dropped; a guard-removal line still wins when both fire.
+
 ### Added
 
 - AWS gate: optional `LlmApiKeySecretArn` and `LlmApiKeyEnv` template parameters. The

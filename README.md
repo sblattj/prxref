@@ -100,8 +100,9 @@ with `PRXREF_GROUP_FINDINGS`), the per-rule cap (on by default when review
 rules are loaded; `PRXREF_MAX_FINDINGS_PER_RULE`), Also-at location
 verification, the quality gate, sweep
 dedup, the containment note, and the guard fix check (a fix that would
-remove or relocate an auth, tenant or validation guard is tagged
-`Unverified fix:`, never dropped). A filtered finding is never discarded
+remove or relocate an auth, tenant or validation guard, or that rests on
+framework behavior such as an annotation or transaction propagation, is
+tagged `Unverified fix:`, never dropped). A filtered finding is never discarded
 silently — it is kept with a `drop_reason` for the run log, and visible in a
 `--no-post` dry run or under `--format json`.
 

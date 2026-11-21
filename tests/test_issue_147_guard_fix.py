@@ -198,7 +198,7 @@ class TestStructuredSuggestion:
     def test_both_reasons_can_fire_and_add_one_line(self):
         f = _finding(body=CASE_ONE_PROSE, line=2, suggestion="", suggestion_end_line=3)
         (out,), (reason,) = _check(f)
-        assert reason == GUARD_FIX_REASONS
+        assert reason == GUARD_FIX_REASONS[:2]
         assert out.body.count("Unverified fix:") == 1
 
 
