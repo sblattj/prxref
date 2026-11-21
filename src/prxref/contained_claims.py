@@ -229,6 +229,18 @@ def _null_return_guard(f: Finding, claim: str, files: Sequence[FileDiff]) -> str
     return None
 
 
+def _code_only(text: str) -> str:
+    """``text`` with string literals emptied and any comment cut off.
+
+    A line that starts a comment (``//``, ``#``, ``/*``, ``*``) is no code at
+    all, so a write call quoted in a comment or a string is never a writer.
+    """
+    code = re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', '""', text)
+    if re.match(r"^\s*(?://|#|/\*|\*)", code):
+        return ""
+    return re.split(r"(?://|#|/\*)", code, maxsplit=1)[0]
+
+
 def _norm(word: str) -> str:
     """``put_value`` / ``putValue`` / ``Value`` -> ``value``."""
     return word.replace("_", "").lower()
@@ -250,7 +262,7 @@ def _null_return_writer(f: Finding, claim: str, files: Sequence[FileDiff]) -> st
     writers: list[tuple[str, int, str, bool]] = []
     for fd in files:
         for line, text, added in _post_image(fd):
-            code = re.split(r"\s(?://|#)", text, maxsplit=1)[0]
+            code = _code_only(text)
             for w in _WRITE_CALL_RE.finditer(code):
                 if _norm(w.group(1)) == noun:
                     writers.append((fd.path, line, w.group(2), added))

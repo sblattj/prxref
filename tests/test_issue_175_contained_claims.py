@@ -327,6 +327,20 @@ class TestCaseOneWriterRulesOutNull:
         same_field = "def seed(client, config_id):\n    client.put_value(Id=config_id, Text=DEFAULT)\n"
         assert _check(CASE_ONE, _writer_diff(WRITER, ("jobs/seed.py", same_field)))[1] is None
 
+    @pytest.mark.parametrize("quoted", [
+        "# client.put_value(Id=config_id, Text=text)",
+        "// client.putValue(Id=config_id, Text=text)",
+        " * client.putValue(Id=config_id, Text=text)",
+        'log.info("client.put_value(Id=config_id, Text=text)")',
+    ], ids=["hash-comment", "slash-comment", "javadoc", "string"])
+    def test_a_write_call_in_a_comment_or_string_is_no_writer(self, quoted):
+        writer = f"def publish(client, config_id, text):\n    {quoted}\n"
+        assert _check(CASE_ONE, _writer_diff(writer))[1] is None
+
+    def test_a_quoted_write_call_does_not_hide_the_real_writer(self):
+        writer = WRITER + '    log.info("put_value(Id=x, Binary=b) was not called")\n'
+        assert _check(CASE_ONE, _writer_diff(writer))[1] == "null_return_ruled_out_by_writer"
+
     def test_a_writer_on_an_unchanged_line_does_not_count(self):
         diff = _writer_diff("def unrelated():\n    pass\n").replace(
             "diff --git a/writer/store.py b/writer/store.py\nnew file mode 100644\n"
