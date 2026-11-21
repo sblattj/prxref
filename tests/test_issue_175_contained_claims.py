@@ -347,6 +347,19 @@ class TestCaseOneWriterRulesOutNull:
         assert signature in writer
         assert _check(CASE_ONE, _writer_diff(writer))[1] is None
 
+    @pytest.mark.parametrize("value", [
+        "text if missing else None", "data.get('text')", "data['text']", "self.text", "None",
+    ], ids=["ternary", "call", "subscript", "attribute", "null-literal"])
+    def test_a_writer_value_that_is_an_expression_does_not_count(self, value):
+        writer = WRITER.replace("Text=text)", f"Text={value})")
+        assert f"Text={value})" in writer
+        assert _check(CASE_ONE, _writer_diff(writer))[1] is None
+
+    def test_a_bare_name_value_counts(self):
+        writer = WRITER.replace("Text=text)", "Text=body)").replace(", text):", ", body):")
+        assert "Text=body)" in writer
+        assert _check(CASE_ONE, _writer_diff(writer))[1] == "null_return_ruled_out_by_writer"
+
     def test_a_value_reassigned_to_null_does_not_count(self):
         writer = WRITER.replace("    client.put_value", "    text = None if not text else text\n    client.put_value")
         assert _check(CASE_ONE, _writer_diff(writer))[1] is None

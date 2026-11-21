@@ -20,12 +20,14 @@ anchored line is an added read ``<getter>(...).<field>()`` whose getter is
 When every call in the diff's post-image (added and context lines, all files)
 that writes that noun (``put``/``set``/``write``/``store``/``save`` plus the
 same noun, any case or underscores) is exactly one added call, and it passes
-the field the read uses as a named argument (``Text=text``) whose value is not
-a null literal, the only writer the PR shows always stores that field, so the
-null case the finding claims does not come from this PR's writes. The finding
-drops to ``outofscope`` with the writer named. A positional writer, a second
-writer, or one that leaves the field out ties nothing. Writers outside the
-diff are not visible, and the note says so.
+the field the read uses as a named argument (``Text=text``) whose value is a
+bare name (not a null literal, not one the writer's file shows nullable), the
+only writer the PR shows always stores that field, so the null case the
+finding claims does not come from this PR's writes. The finding drops to
+``outofscope`` with the writer named. A positional writer, a second writer,
+one that leaves the field out, or a value that is any other expression (a
+ternary, call, subscript, attribute or literal) ties nothing. Writers outside
+the diff are not visible, and the note says so.
 
 ``precondition_rules_out_preexisting``: an ``error`` or ``warning`` finding
 says a delete, remove or overwrite can hit something the call never created
@@ -103,7 +105,7 @@ _READ_FIELD_RE = re.compile(
 )
 _WRITE_CALL_RE = re.compile(r"\b(?:put|set|write|store|save)_?([A-Za-z]\w*)\s*\(([^()]*)\)")
 _NAMED_ARG_RE = re.compile(r"\b([A-Za-z_]\w*)\s*[=:](?!=)\s*([^,]+)")
-_NULL_LITERAL_RE = re.compile(r"^\s*(?:null|None|nil|undefined)\s*$")
+_PLAIN_VALUE_RE = re.compile(r"(?!(?:null|None|nil|undefined)\b)[A-Za-z_]\w*")
 
 _DESTRUCTIVE_RE = re.compile(
     r"\b(?:delet|remov|overwrit|destroy|drop|clobber|wip)\w*", re.IGNORECASE,
@@ -292,7 +294,7 @@ def _null_return_writer(f: Finding, claim: str, files: Sequence[FileDiff]) -> st
     if not added:
         return None
     named = {_norm(a.group(1)): a.group(2) for a in _NAMED_ARG_RE.finditer(args)}
-    if field not in named or _NULL_LITERAL_RE.match(named[field]):
+    if field not in named or not _PLAIN_VALUE_RE.fullmatch(named[field].strip()):
         return None
     if _maybe_null_in(named[field].strip(), next(fd for fd in files if fd.path == path)):
         return None
