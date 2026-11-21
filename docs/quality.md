@@ -195,8 +195,9 @@ creation date (the release tags, when the repo tags its releases):
 
 Each git call has a 10 second timeout. A shallow clone without the default branch ref,
 a directory that is not a checkout, a missing `git`, or a failed grep on the branch
-falls through to the forge path, and git is not tried again that run; a tag whose grep
-fails is left out of the refs. `--repo-dir` must be the top of the checkout: a plain
+falls through to the forge path, and git is not tried again that run; a failed tag grep
+or tag listing leaves a finding with no hit unchanged (counted `unknown`), since the
+search did not cover every release. `--repo-dir` must be the top of the checkout: a plain
 directory nested inside another repository never searches that repository, and
 `GIT_DIR`/`GIT_WORK_TREE` from the environment are ignored. The command is fixed (`git
 grep -F -e <string> <ref> --`), which is why `default_branch_check` stays a

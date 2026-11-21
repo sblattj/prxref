@@ -204,3 +204,25 @@ class TestNestedDirectory:
         plain.mkdir()
         monkeypatch.setenv("GIT_DIR", str(other / ".git"))
         assert default_branch.git_search(str(plain), "main", ["/v1/widgets"]) is None
+
+
+@pytest.mark.usefixtures("contract_stubs")
+class TestIncompleteTagSearch:
+    def test_a_failed_tag_grep_keeps_the_finding_unchanged(self, tmp_path, monkeypatch):
+        root = make_repo(
+            tmp_path, [{API: "import web\n" + ROUTE_LINE}, {API: "import web\n"}],
+            tag_after=0,
+        )
+        real = default_branch._grep
+
+        def flaky(r, ref, tokens, timeout):
+            return None if ref.startswith("refs/tags/") else real(r, ref, tokens, timeout)
+
+        monkeypatch.setattr(default_branch, "_grep", flaky)
+        forge = BranchForge(diff=route_diff(API), files={API: (True, "import web\n")})
+        res = run(forge, repo_dir=RepoDir(root))
+        f = only(res)
+        assert f.severity == "error"
+        assert "Checked against" not in f.body
+        assert res["default_branch_check"]["unknown"] == 1
+        assert forge.reads == []

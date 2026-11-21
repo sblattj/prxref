@@ -119,6 +119,7 @@ class GitSearch:
     refs: list[str]
     present_in: list[str]
     matched: list[str] = field(default_factory=list)
+    incomplete: bool = False
 
 
 _GIT_ENV_DROP = frozenset({
@@ -195,7 +196,10 @@ def git_search(
     not the top of a checkout (a plain directory nested in another repository
     never searches that repository), the branch ref is not there
     (a shallow CI clone), ``branch`` looks like an option, or the branch grep
-    fails; a tag whose grep fails is skipped. Never raises.
+    fails. A tag whose grep fails, or a failed tag listing, is left out of
+    ``refs`` and sets ``incomplete``: the caller then leaves a finding it
+    found no hit for unchanged rather than lower it on a partial search.
+    Never raises.
     """
     if not branch or branch.startswith("-") or not tokens:
         return None
@@ -212,22 +216,26 @@ def git_search(
         return None
     matched = list(hits)
     refs, present = [branch], [branch] if hits else []
+    incomplete = False
     if max_tags > 0:
         proc = _git(
             root, "for-each-ref", "--sort=-creatordate", f"--count={max_tags}",
             "--format=%(refname)", "refs/tags", timeout=timeout,
         )
-        names = proc.stdout.split() if proc is not None and proc.returncode == 0 else []
+        listed = proc is not None and proc.returncode == 0
+        incomplete = not listed
+        names = proc.stdout.split() if listed and proc is not None else []
         for tag_ref in names:
             tag_hits = _grep_each(root, tag_ref, tokens, timeout)
             if tag_hits is None:
+                incomplete = True
                 continue
             short = tag_ref.removeprefix("refs/tags/")
             refs.append(short)
             if tag_hits:
                 present.append(short)
                 matched.extend(t for t in tag_hits if t not in matched)
-    return GitSearch(refs=refs, present_in=present, matched=matched)
+    return GitSearch(refs=refs, present_in=present, matched=matched, incomplete=incomplete)
 
 
 def is_compat_finding(finding: Finding) -> bool:
@@ -428,6 +436,9 @@ def apply_default_branch_check(
                     out.append(replace(f, body=_append(
                         f.body, f"Checked against {_join(gs.present_in)}: {names} still present there.",
                     )))
+                elif gs.incomplete:
+                    outcome.unknown += 1
+                    out.append(f)
                 else:
                     out.append(lower(f, REASON_TREE_ABSENT, _tree_note(gs.refs)))
                 continue
