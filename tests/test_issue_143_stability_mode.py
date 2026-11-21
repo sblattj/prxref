@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from prxref import cli, config, evals, stability
+from prxref import cli, config, evals, orchestrator, stability
 from prxref.cli import _build_json_result, _fail_on_exit
 from prxref.config import load_config
 from prxref.llm import ConfigError, InvokeResult
@@ -358,7 +358,8 @@ class TestAccounting:
 class TestOff:
     SCRIPT = {B1: [[_limit(10, "warning")]], B2: [[_timeout(B2)]]}
 
-    def test_one_pass_is_the_run_without_the_keys(self):
+    def test_one_pass_is_the_run_without_the_keys(self, monkeypatch):
+        monkeypatch.setattr(orchestrator, "_elapsed_ms", lambda t0: 0)
         base_forge = FakeForge(diff=multi_chunk_diff(2))
         base = orchestrate_review(base_forge, REF, ScriptLLM(self.SCRIPT), post=True, max_workers=1)
         res, forge = _review(ScriptLLM(self.SCRIPT), 1, 1)
