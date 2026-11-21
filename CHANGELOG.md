@@ -45,6 +45,15 @@ tracker.
   answer and a later entry did, naming both. litellm swallows the primary's error inside
   its own fallback walk, so a primary that failed on every call left no trace before.
 
+### Fixed
+
+- Personal data in a test fixture is no longer a blocking error (#181). An `error`
+  about a real person's email address, name or phone number on a test path (a `tests/` or
+  `fixtures/` directory, `test_x.py`, `x.spec.ts`, ...) is lowered to `warning`, so a
+  developer's own address in a unit test no longer makes the verdict Request-Changes.
+  A finding that names a secret, a credential, or customer or production data keeps
+  `error`. See `docs/quality.md`.
+
 ## [0.41.0] - 2026-11-01
 
 ### Added

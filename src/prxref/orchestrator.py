@@ -137,6 +137,9 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    and the run record's ``rule_scope_cleared`` count the cleared labels of
    both halves — ``None`` when the scope half did not run and the
    category half cleared nothing) →
+   ``fixture_pii.apply_fixture_pii_cap`` (#181, always on: an ``error`` about
+   personal data on a test path, such as a developer's email in a fixture,
+   is lowered to ``warning`` unless it reads as a secret or customer data) →
    ``apply_root_cause_fold`` (#142, #144: chunk findings restating one root
    cause, a few lines apart in one file or across files, fold into the most
    specific one, which lists the rest under ``Also at:``; the rest are dropped
@@ -265,6 +268,7 @@ from . import (
     costs,
     default_branch,
     describe,
+    fixture_pii,
     followup,
     heuristics,
     repo_contracts,
@@ -2480,6 +2484,19 @@ def orchestrate_review(
         findings = _default_branch_check(
             findings, files, forge, ref, pr, run_inputs, tracer,
         )
+    # AFTER severity consistency and the default-branch check (#181), BEFORE
+    # the root-cause fold, grouping and the gate: a fixture's personal data
+    # answers for its own file, must not lift a sibling it folds into, and
+    # must not spend ``max_errors`` or decide the verdict. 1:1 and
+    # order-preserving, so sweep_start still holds.
+    capped = fixture_pii.apply_fixture_pii_cap(findings)
+    lowered = sum(a.severity != b.severity for a, b in zip(findings, capped, strict=True))
+    if lowered:
+        logger.info(
+            "fixture pii: lowered %d personal-data error(s) on test paths to warning",
+            lowered,
+        )
+    findings = capped
     # AFTER the default-branch check (#142, #144), BEFORE grouping and every
     # cap, so a repeat of one root cause spends none of them. 1:1 and
     # order-preserving, so sweep_start still marks the boundary.

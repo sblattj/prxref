@@ -22,6 +22,11 @@ numbered pass: ``prxref.default_branch`` runs from the orchestrator right after
 pass 15 and only lowers a versioning finding on a stacked PR, so the count above
 does not move.
 
+The always-on personal-data fixture cap (#181) is not a numbered pass either:
+``prxref.fixture_pii`` runs from the orchestrator right after the default-branch
+check and only lowers an ``error`` about personal data on a test path to
+``warning``.
+
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the
    map gives it (``error``), compared after whitespace collapsing and

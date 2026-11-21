@@ -141,7 +141,7 @@ is documented, not fixed.
 
 Opt-in (`PRXREF_DEFAULT_BRANCH_CHECK=on`, also a `.prxref.toml` key). It is a step
 beside the numbered passes, not one of them, so the pass count above does not move.
-It runs right before pass 15, the root-cause fold (so each finding answers for its own
+It runs before pass 15, the root-cause fold (only the #181 fixture cap below sits between them; so each finding answers for its own
 file: a keeper lowered because its file is absent cannot absorb a sibling whose file is
 there, and a duplicate costs a read), and before grouping, the caps and the gate (so a lowered finding spends no
 `max_errors`, does not make the verdict `Request-Changes` and does not trip
@@ -179,6 +179,37 @@ forge APIs and no release-tag check, because reading release tags has no
 provider-neutral cheap path, so "no released client" means "nothing on the default
 branch". A route that moved files can look absent, which is why the outcome lowers a
 finding instead of dropping it.
+
+## Personal data in test fixtures (#181)
+
+Always on, no key. Like the default-branch check it is a step beside the numbered
+passes, so the pass count above does not move. It runs after severity consistency and
+the default-branch check and right before pass 15, the root-cause fold, so a lowered
+finding answers for its own file, cannot lift a sibling it folds into, spends no
+`max_errors`, does not make the verdict `Request-Changes` and does not trip
+`PRXREF_FAIL_ON=error`.
+
+An active model `error` is lowered to `warning` when all three hold:
+
+- Its file is a test path: a `test`, `tests`, `__tests__`, `testdata` or `fixtures`
+  directory, or a name such as `test_x.py`, `x_test.go`, `x.test.ts`, `x.spec.js`,
+  `user_spec.rb`, `XTest.java` or `conftest.py`. A `spec/` directory alone is not
+  one, since it may hold API specs.
+- Its title or body talks about a real person's data: a real, own or work email or
+  address, an employee's or developer's email or name, personal data, PII. A bare
+  "email" is not enough: "the test never asserts the email was sent" keeps `error`.
+- Its title names no secret, token, credential, customer, client, production or prod,
+  and its body names no credential (password, API key, private key, access or session
+  token), customer records, card number, SSN or patient data. The body list is
+  narrower because a model's explanation often says the fixture "could mail someone
+  against a production relay", and that finding is still lowered.
+
+So "Replace real employee email addresses in test fixtures" on
+`tests/test_reminders.py` posts as a warning, the same finding on `src/reminders.py`
+stays an error, and "Hard-coded API token in test fixture" stays an error. Nothing is
+dropped and only `severity` changes; a deterministic check's finding is never touched.
+Detection is by text, so a finding that names personal data in other words is not
+lowered.
 
 Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
