@@ -31,6 +31,12 @@ The always-on personal-data fixture cap (#181) is not a numbered pass either:
 check and only lowers an ``error`` about personal data on a test path to
 ``warning``.
 
+The contained-claim check (#175, :mod:`prxref.contained_claims`, always on) is
+not a numbered pass either: the orchestrator runs it after
+``apply_location_verification`` and right before ``apply_quality_gate``, and it
+only lowers an ``error`` or ``warning`` to ``outofscope`` when the diff's own
+guard rules out the failure the finding claims.
+
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the
    map gives it (``error``), compared after whitespace collapsing and

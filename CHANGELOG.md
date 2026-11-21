@@ -87,6 +87,13 @@ tracker.
   forge path also reads the diff files that removed the route, so the build-file duplicate of
   a controller finding is lowered with it instead of staying an `error`. The run record's
   `default_branch_check` gains `refs` (#146).
+- A WARNING that a function can return null and a caller then fails, or that a
+  compensating delete can remove something the call never created, is lowered to minor
+  (`outofscope`) when the same PR's diff already contains the failure: a caller in
+  another file rejects null or blank with a named exception, or an existence check
+  above the delete in the same function exits first. The finding keeps its text and
+  gains a `Contained:` line naming the guard; the run record counts it under
+  `contained_claims` (#175).
 
 ## [0.41.0] - 2026-11-01
 

@@ -267,6 +267,7 @@ from urllib.parse import urlparse
 
 from . import (
     chunk_context,
+    contained_claims,
     costs,
     default_branch,
     describe,
@@ -2572,6 +2573,15 @@ def orchestrate_review(
     # content order, so _split_at_sweep re-derives the boundary from finding
     # identity and the gate's stable sort rather than carrying it across the
     # gate as an index.
+    # Before the gate (#175), so a lowered finding counts toward the
+    # outofscope cap rather than the warning cap, and after every fold, so a
+    # representative is judged once. The record key exists only when it fired.
+    findings, contained_reasons = contained_claims.apply_contained_claim_check(findings, files)
+    contained_counts = Counter(r for r in contained_reasons if r)
+    if contained_counts:
+        logger.info("contained claim check: %d finding(s) lowered to outofscope", sum(contained_counts.values()))
+        tracer.event("contained", "ok", **contained_counts)
+        run_inputs["contained_claims"] = dict(sorted(contained_counts.items()))
     gated = apply_quality_gate(
         findings, confidence_floor=confidence_floor, max_errors=max_errors,
         max_warning_findings=max_warning_findings,

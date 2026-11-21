@@ -262,6 +262,31 @@ dropped and only `severity` changes; a deterministic check's finding is never to
 Detection is by text, so a finding that names personal data in other words is not
 lowered.
 
+## Contained-claim check (#175)
+
+Always on, no key. A step beside the numbered passes, like the default-branch check,
+so the pass count does not move. It runs after `apply_location_verification` (pass 18
+in the table above) and right before the gate, `apply_quality_gate` (pass 19), so a lowered finding counts toward the outofscope cap instead of the
+warning cap, and before `apply_containment_note`, so a lowered finding, whose note
+names where the failure is handled, gets no `[containment boundary not stated]`
+suffix. It reads only the parsed diff, never a model, and only active `error` and
+`warning` findings. It never drops a finding and never moves its confidence.
+
+| Finding claims | The diff also holds | Result |
+|---|---|---|
+| a function can return null (`None`, `nil`, `undefined`) and a caller then fails | in another file, a null or blank check on a variable tied to the call, whose own block (at most 3 lines; the check line itself for a one-liner) throws or raises a named exception (not `NullPointerException`, `TypeError`, `AttributeError` or a bare `Exception`/`RuntimeException`/`Error`). Tied means the variable was assigned from a call to the function within 3 lines above, or, in a file whose name holds a word the finding uses and the finding's own file name does not (`the parser` for `ConfigParser.java`, not the shared `config`), the variable is a parameter of the function the check sits in | severity `outofscope`, `Contained: the null case is handled by the caller this PR adds: <file>:<line> rejects a null or blank value with <Exception>, ...` appended |
+| a delete, remove or overwrite can hit something the call never created (`pre-existing`, `never created`, `didn't create`) | above the anchor, in the same hunk and function (at most 40 lines up, stopping at a function header): an `if` that calls `find`, `exists`, `isPresent`, `contains`, `has`, `get` or `lookup` and passes when the value exists (no `!`, `not`, `unless`, `isEmpty`, `== null` or `== false`, which pass on absence and let an existing value through) on an identifier the anchored line or its neighbours also use, whose own block (at most 3 lines, ending at its closing brace or dedent) throws, raises or returns | severity `outofscope`, `Contained: the existence check at <file>:<line> exits before this path ... What is left is a race between that check and the create.` appended |
+| anything else, or the guard is missing | | unchanged, the same object |
+
+The run record and `--format json` carry `contained_claims` (count per reason,
+`null_return_guarded_by_caller`, `precondition_rules_out_preexisting`) only when the
+check lowered something. With `PRXREF_MAX_OUTOFSCOPE_FINDINGS=0` the gate drops a
+lowered finding as `outofscope cap exceeded`.
+
+Known limits: the caller check reads added lines only, so a guard in unchanged code is
+not seen; the writer side (whether anything stores the null case at all) is not
+checked, since the caller's guard already contains the failure.
+
 Threads are fetched once per review, **before** the workers run and **after**
 the stale-inline-comment prune — reading threads first would let a run suppress
 its own findings against prxref's own stale comments and then delete them.
