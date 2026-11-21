@@ -247,7 +247,8 @@ def _maybe_null_in(value: str, fd: FileDiff) -> bool:
     """Whether the writer's file shows ``value`` may be null.
 
     A bare identifier counts as maybe-null when the file's post-image gives it
-    a null default or assignment (``text=None``, ``text = null``) or a
+    a null default or an assignment whose right side names null anywhere
+    (``text=None``, ``text = x if ok else None``) or a
     nullable type (``Optional[str]``, ``str | None``, ``String?``). Anything
     else is not proven non-null either; the check only refuses what the diff
     itself shows.
@@ -256,7 +257,8 @@ def _maybe_null_in(value: str, fd: FileDiff) -> bool:
         return False
     v = re.escape(value)
     nullable = re.compile(
-        rf"\b{v}\s*(?::[^=,)]*)?=\s*(?:None|null|nil|undefined)\b"
+        rf"\b{v}\s*(?::[^=,)]*)?=(?!=)[^,)]*\b(?:None|null|nil|undefined)\b"
+        rf"|^\s*{v}\s*(?::[^=]*)?=(?!=).*\b(?:None|null|nil|undefined)\b"
         rf"|\b{v}\s*:\s*[^=,)]*(?:Optional\b|\|\s*None\b|\?)"
         rf"|\b(?:Optional<[^>]*>|\w+\?)\s+{v}\b",
     )

@@ -360,8 +360,14 @@ class TestCaseOneWriterRulesOutNull:
         assert "Text=body)" in writer
         assert _check(CASE_ONE, _writer_diff(writer))[1] == "null_return_ruled_out_by_writer"
 
-    def test_a_value_reassigned_to_null_does_not_count(self):
-        writer = WRITER.replace("    client.put_value", "    text = None if not text else text\n    client.put_value")
+    @pytest.mark.parametrize("assignment", [
+        "text = None if not text else text",
+        "text = fetch(config_id) if ready else None",
+        "text = cache.get(config_id) or None",
+    ], ids=["null-first", "null-last", "or-null"])
+    def test_a_value_assigned_null_on_some_path_does_not_count(self, assignment):
+        writer = WRITER.replace("    client.put_value", f"    {assignment}\n    client.put_value")
+        assert assignment in writer
         assert _check(CASE_ONE, _writer_diff(writer))[1] is None
 
     def test_a_quoted_write_call_does_not_hide_the_real_writer(self):
