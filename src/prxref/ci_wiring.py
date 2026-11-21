@@ -533,16 +533,18 @@ def _is_library(file: FileDiff, files: Sequence[FileDiff]) -> bool:
 
 
 # The signs that a script is an interactive operator helper (issue #177),
-# matched on added, non-comment lines: a terminal read (bash ``select``,
-# ``read -p``, input redirected from ``/dev/tty``), an interactive login at the start of a command
-# (``aws sso login``, ``gcloud auth login``, ``az login``), or a redirect or
-# ``tee`` into the user's home directory (``>> "$HOME/.cloud/config"``).
-# A command's start: the line start or a ``;``/``&``/``|``/``(`` separator,
-# then any run of ``if``/``then``/``else``/``elif``/``do``/``!`` words.
+# matched on added, non-comment lines with quoted text masked
+# (:func:`_mask_quotes`): a terminal read (bash ``select``, ``read -p``,
+# input redirected from ``/dev/tty``), an interactive login (``aws sso
+# login``, ``gcloud auth login``, ``az login``) at the start of a command,
+# or a redirect or ``tee`` into the user's home directory
+# (``>> "$HOME/.cloud/config"``). A command starts at the line start or a
+# ``;``/``&``/``|``/``(`` separator, after any ``if``/``then``/``else``/
+# ``elif``/``do``/``!`` words.
 _CMD_START = r"(?:^|[;&|(])\s*(?:(?:if|then|else|elif|do|!)\s+)*"
 _HOME = r"""["']?(?:~|\$HOME|\$\{HOME\})/"""
 _INTERACTIVE_RES = (
-    re.compile(r"^\s*select\s+\w+\s+in\b"),
+    re.compile(rf"{_CMD_START}select\s+\w+\s+in\b"),
     re.compile(rf"{_CMD_START}read\b[^;&|]*\s-[A-Za-z]*p\b"),
     re.compile(r"""<\s*["']?/dev/tty\b"""),
     re.compile(rf"{_CMD_START}(?:[\w.-]+\s+(?:sso|auth)|az)\s+login\b"),
@@ -550,21 +552,43 @@ _INTERACTIVE_RES = (
     re.compile(rf"\btee\b(?:\s+-\w+)*\s+{_HOME}"),
 )
 
+_QUOTED_RE = re.compile(r"'[^']*'|" + r'"(?:\\.|[^"\\])*"')
+_REDIRECT_TAIL_RE = re.compile(r"""(?:[<>]|\btee\b(?:\s+-\w+)*)\s*$""")
+
+
+def _mask_quotes(text: str) -> str:
+    """``text`` with every quoted string emptied, except a redirect or ``tee`` target.
+
+    ``echo 'run gcloud auth login'`` and ``echo "x >> $HOME/f"`` keep no
+    command text, while ``>> "$HOME/.cloud/config"`` and
+    ``tee "$HOME/.netrc"`` keep their quoted path.
+    """
+    out: list[str] = []
+    pos = 0
+    for match in _QUOTED_RE.finditer(text):
+        out.append(text[pos:match.start()])
+        keep = _REDIRECT_TAIL_RE.search(text[:match.start()]) is not None
+        out.append(match.group(0) if keep else '""')
+        pos = match.end()
+    out.append(text[pos:])
+    return "".join(out)
+
 
 def _is_interactive_helper(file: FileDiff) -> bool:
     """True when ``file`` reads like an interactive operator helper, not a check.
 
-    Any added, non-comment line carrying one of :data:`_INTERACTIVE_RES`.
-    A test-looking path (:func:`_looks_like_test`, :func:`default_include`)
-    is never one: a test suite may fake ``$HOME`` and still be a check.
+    Any added, non-comment line whose :func:`_mask_quotes` text carries one
+    of :data:`_INTERACTIVE_RES`. A test-looking path
+    (:func:`_looks_like_test`, :func:`default_include`) is never one: a
+    test suite may fake ``$HOME`` and still be a check.
     """
     if _looks_like_test(file.path) or default_include(file.path):
         return False
     for _, text in _added_lines(file):
-        stripped = text.strip()
-        if stripped.startswith("#"):
+        if text.strip().startswith("#"):
             continue
-        if any(pattern.search(text) for pattern in _INTERACTIVE_RES):
+        masked = _mask_quotes(text)
+        if any(pattern.search(masked) for pattern in _INTERACTIVE_RES):
             return True
     return False
 
