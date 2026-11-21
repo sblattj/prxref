@@ -5366,6 +5366,176 @@ def _is_comment_or_blank(
     return False
 
 
+_LEX_CODE, _LEX_BLOCK, _LEX_TEMPLATE, _LEX_RAW, _LEX_UNKNOWN = "code", "block", "template", "raw", "unknown"
+_LEX_C_FAMILY: frozenset[str] = frozenset({
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".java", ".cs", ".go", ".scss", ".less",
+})
+_LEX_JS_FAMILY: frozenset[str] = frozenset({".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"})
+_LEX_NO_SLASH_COMMENT: frozenset[str] = frozenset({".css"})
+_LEX_BAIL_MARKERS: dict[str, tuple[str, ...]] = {
+    ".java": ('"""',), ".cs": ('@"', '$"', '"""'),
+    ".cpp": ('R"',), ".cc": ('R"',), ".cxx": ('R"',), ".hpp": ('R"',), ".hh": ('R"',), ".h": ('R"',),
+}
+
+
+def _lexable_suffix(path: str) -> str | None:
+    """``path``'s suffix when its ``/* */`` comments, strings and line comments are modeled, else ``None``.
+
+    Only languages whose block comments do not nest and whose string forms
+    are all modeled or bailed on are lexed: C, C++, Java, C#, Go, CSS, SCSS,
+    Less, JavaScript and TypeScript. Rust, Swift, Kotlin, Scala, Dart and
+    SQL dialects (nesting block comments, raw or interpolated strings),
+    PHP (heredocs), JSX and TSX (JSX text, where ``/*`` is literal text)
+    and every other language keep the line-shape rules.
+    """
+    suffix = PurePosixPath(path).suffix.lower()
+    known = _LEX_C_FAMILY | _LEX_JS_FAMILY | _LEX_NO_SLASH_COMMENT
+    return suffix if suffix in known else None
+
+
+def _lex_line(text: str, state: str, suffix: str) -> tuple[bool, str]:
+    """Lex one line from ``state``; return (carries code or is unsure, end state).
+
+    A line "carries code" when any non-blank character sits outside a
+    comment, string text included. Anything the lexer cannot model returns
+    :data:`_LEX_UNKNOWN`: a raw, verbatim or text-block string, a template
+    ``${``, an unterminated quote or a backslash continuation, and in
+    JavaScript a ``/`` that may open a regex literal with a delimiter or
+    quote after it on the line.
+    """
+    if state == _LEX_UNKNOWN:
+        return True, _LEX_UNKNOWN
+    if any(marker in text for marker in _LEX_BAIL_MARKERS.get(suffix, ())):
+        return True, _LEX_UNKNOWN
+    js = suffix in _LEX_JS_FAMILY
+    slash_comments = suffix not in _LEX_NO_SLASH_COMMENT
+    code = state in (_LEX_TEMPLATE, _LEX_RAW)
+    i, n = 0, len(text)
+    while i < n:
+        ch, pair = text[i], text[i:i + 2]
+        if state == _LEX_BLOCK:
+            end = text.find("*/", i)
+            if end < 0:
+                return code, _LEX_BLOCK
+            state, i = _LEX_CODE, end + 2
+            continue
+        if state == _LEX_TEMPLATE:
+            if pair == "${":
+                return True, _LEX_UNKNOWN
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "`":
+                state = _LEX_CODE
+            i += 1
+            continue
+        if state == _LEX_RAW:
+            end = text.find("`", i)
+            if end < 0:
+                return True, _LEX_RAW
+            state, i = _LEX_CODE, end + 1
+            continue
+        if ch.isspace():
+            i += 1
+            continue
+        if pair == "/*":
+            state, i = _LEX_BLOCK, i + 2
+            continue
+        if slash_comments and pair == "//":
+            return code or text.rstrip().endswith("\\"), (
+                _LEX_UNKNOWN if text.rstrip().endswith("\\") else _LEX_CODE
+            )
+        code = True
+        if ch in "\"'":
+            j = i + 1
+            while j < n and text[j] != ch:
+                j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                return True, _LEX_UNKNOWN
+            i = j + 1
+            continue
+        if ch == "`" and (js or suffix == ".go"):
+            state, i = (_LEX_TEMPLATE if js else _LEX_RAW), i + 1
+            continue
+        if ch == "/" and js and any(tok in text[i + 1:] for tok in ("/*", "*/", "//", '"', "'", "`")):
+            return True, _LEX_UNKNOWN
+        if ch == "\\" and i == n - 1:
+            return True, _LEX_UNKNOWN
+        i += 1
+    return code, state
+
+
+def _lex_states(lines: Sequence[str], start: str, suffix: str) -> tuple[list[bool], list[str], str]:
+    """Lex ``lines`` from ``start``: per line (carries code, state at its start), and the end state."""
+    codes: list[bool] = []
+    starts: list[str] = []
+    state = start
+    for text in lines:
+        starts.append(state)
+        has_code, state = _lex_line(text, state, suffix)
+        codes.append(has_code or state == _LEX_UNKNOWN)
+    return codes, starts, state
+
+
+def _lexed_hunk_verdict(hunk: Hunk, start: str, suffix: str) -> bool | None:
+    """Whether ``hunk`` changed only comments, lexed from ``start`` on both sides; ``None`` when unsure.
+
+    The old side (context and ``-`` lines) and the new side (context and
+    ``+`` lines) are lexed separately from the same start state. The hunk
+    is comment-only when every changed line carries no code, every context
+    line is classified the same on both sides (so a ``+/*`` ... ``+*/``
+    pair that comments out an unchanged call is a code change) and both
+    sides end in the same state. Any :data:`_LEX_UNKNOWN` yields ``None``.
+    """
+    body = [ln for ln in hunk.lines if ln.kind in "+- "]
+    old = [ln for ln in body if ln.kind in "- "]
+    new = [ln for ln in body if ln.kind in "+ "]
+    old_codes, _, old_end = _lex_states([ln.text for ln in old], start, suffix)
+    new_codes, _, new_end = _lex_states([ln.text for ln in new], start, suffix)
+    if _LEX_UNKNOWN in (start, old_end, new_end):
+        return None
+    if old_end != new_end:
+        return False
+    old_ctx = [c for ln, c in zip(old, old_codes, strict=True) if ln.kind == " "]
+    new_ctx = [c for ln, c in zip(new, new_codes, strict=True) if ln.kind == " "]
+    if old_ctx != new_ctx:
+        return False
+    changed = [c for ln, c in zip(old, old_codes, strict=True) if ln.kind == "-"]
+    changed += [c for ln, c in zip(new, new_codes, strict=True) if ln.kind == "+"]
+    return bool(changed) and not any(changed)
+
+
+def _hunk_start_states(head: str | None, hunks: Sequence[Hunk], suffix: str) -> dict[int, str]:
+    """The proven lexer state at each hunk's first line, keyed by ``id(hunk)``.
+
+    A state is proven from the head file only while every hunk so far has
+    new-side lines equal to the head's lines at their numbers and lexes to
+    the same end state on its old and new side, so the base file's text
+    above the next hunk lexes the same as the head's. A hunk past the first
+    break gets no entry.
+    """
+    if not head:
+        return {}
+    head_lines = head.splitlines()
+    _, states, eof = _lex_states(head_lines, _LEX_CODE, suffix)
+    states.append(eof)
+    proven: dict[int, str] = {}
+    for hunk in sorted(hunks, key=lambda h: h.new_start):
+        new = [ln.text for ln in hunk.lines if ln.kind in "+ "]
+        first = hunk.new_start - 1 if hunk.new_count else hunk.new_start
+        if first < 0 or first >= len(states) or head_lines[first:first + len(new)] != new:
+            break
+        start = states[first]
+        if start == _LEX_UNKNOWN:
+            break
+        proven[id(hunk)] = start
+        old_text = [ln.text for ln in hunk.lines if ln.kind in "- "]
+        _, _, old_end = _lex_states(old_text, start, suffix)
+        _, _, new_end = _lex_states(new, start, suffix)
+        if old_end != new_end or _LEX_UNKNOWN in (old_end, new_end):
+            break
+    return proven
+
 _STRING_FENCES: tuple[str, ...] = ('"""', "'''", "`")
 
 
@@ -5386,17 +5556,51 @@ def _starts_inside_string(head: str | None, hunk: Hunk) -> bool:
     return _opens_multiline_string("\n".join(head.splitlines()[: max(hunk.new_start - 1, 0)]))
 
 
-def _comment_only_hunk(hunk: Hunk, path: str) -> bool:
+def _delimiter_signature(lines: Sequence[str]) -> list[str]:
+    """The order of bare block-comment openers and closers among ``lines``.
+
+    A line counts when it opens ``/*`` or ``<!--`` without closing it, or
+    starts with ``*/`` or ``-->``. Two sides with different signatures moved
+    a comment boundary, which can comment code in or out.
+    """
+    marks: list[str] = []
+    for text in lines:
+        opener = _BLOCK_OPEN_RE.match(text)
+        if opener and text.find(_BLOCK_CLOSERS[opener.group(1)], opener.end()) < 0:
+            marks.append("open")
+        elif re.match(r"\s*(?:\*/|-->)", text):
+            marks.append("close")
+    return marks
+
+
+def _comment_only_hunk(hunk: Hunk, path: str, start: str | None = None) -> bool:
     """Whether every changed line of ``hunk`` is blank or a comment in ``path``'s language.
 
     A hunk where any line opens or closes a multi-line string (a Python
     triple quote, a JavaScript template literal) is never comment-only: a
     ``#`` or ``//`` line inside one is string data, so changing it changes
-    a value.
+    a value. In a lexed language (:func:`_lexable_suffix`) the hunk is
+    lexed (:func:`_lexed_hunk_verdict`) from ``start``, the state proven
+    from the head file, whose verdict is final; with no proven state it is
+    lexed from code state and only a comment-only verdict is taken, so a
+    JSDoc ``*`` line of any length or a bare block-comment body line is a
+    comment once an opener above it is seen. When lexing is unsure or
+    unproven, and in every other language, each changed line is judged by its shape
+    (:func:`_is_comment_or_blank`) and the ``-`` and ``+`` sides must hold
+    the same bare comment openers and closers in the same order.
     """
     if any(_opens_multiline_string(ln.text) for ln in hunk.lines):
         return False
+    suffix = _lexable_suffix(path)
+    if suffix is not None:
+        verdict = _lexed_hunk_verdict(hunk, start or _LEX_CODE, suffix)
+        if verdict is not None and (start is not None or verdict):
+            return verdict
     changed = [ln for ln in hunk.lines if ln.kind in "+-"]
+    removed = [ln.text for ln in changed if ln.kind == "-"]
+    added = [ln.text for ln in changed if ln.kind == "+"]
+    if _delimiter_signature(removed) != _delimiter_signature(added):
+        return False
     hashes, dashes = _hash_comment_file(path), _dash_comment_file(path)
     return bool(changed) and all(
         _is_comment_or_blank(ln.text, hash_comments=hashes, dash_comments=dashes) for ln in changed
@@ -5438,7 +5642,12 @@ def apply_comment_only_change_check(
     judged, and with ``read`` (the head-sha reader) a hunk that starts
     inside a multi-line string opened above it (an odd fence count in the
     head file's lines before the hunk) is never comment-only either; a
-    read that fails or returns nothing leaves the hunk judged alone. A
+    read that fails or returns nothing leaves the hunk judged alone. In a
+    lexed language (:func:`_lexable_suffix`) ``read`` also proves the
+    ``/* */`` state at each hunk (:func:`_hunk_start_states`), so a bare
+    block-comment body line under an opener above the hunk is a comment,
+    and a hunk that moves a comment boundary is a code change in every
+    language (:func:`_comment_only_hunk`). A
     line outside every hunk, a deterministic check's finding
     (:func:`prxref.heuristics.is_deterministic`) and one already dropped
     are never judged. Pure apart from ``read`` (each path read at most
@@ -5476,9 +5685,11 @@ def apply_comment_only_change_check(
                 hunks = [hunk] if hunk is not None else []
             else:
                 hunks = list(fd.hunks)
+        suffix = _lexable_suffix(f.file) if hunks and fd is not None else None
+        starts = _hunk_start_states(head_text(f.file), fd.hunks, suffix) if suffix and fd else {}
         if (
             hunks
-            and all(_comment_only_hunk(h, f.file) for h in hunks)
+            and all(_comment_only_hunk(h, f.file, starts.get(id(h))) for h in hunks)
             and not any(_starts_inside_string(head_text(f.file), h) for h in hunks)
         ):
             first = hunks[0]

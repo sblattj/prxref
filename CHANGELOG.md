@@ -107,7 +107,13 @@ tracker.
   code-change claim (changed, switched, replaced, no longer, now uses, ...) whose hunk has
   only blank or whole-line comment `+`/`-` lines, as `claims a code change, but only
   comments changed: <file> @@ -<old> +<new>`. A finding about the comment itself, an
-  `outofscope` finding and prose files are left alone.
+  `outofscope` finding and prose files are left alone. In C, C++, Java, C#, Go, CSS,
+  SCSS, Less, JavaScript and TypeScript the hunk is lexed for `/* */` state, read from
+  the head file when the opener sits above the hunk, so a one-word JSDoc `*` line and
+  a bare block-comment body line count as comments; a hunk that moves a comment
+  boundary (`+/*` ... `+*/` around an unchanged call) is a code change in every
+  language. Rust, Swift, Kotlin, Scala, Dart, SQL, PHP, JSX and TSX keep the line-shape
+  rules.
 
 ## [0.41.0] - 2026-11-01
 

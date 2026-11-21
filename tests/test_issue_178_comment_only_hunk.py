@@ -13,6 +13,7 @@ diff with a scripted LLM; no test touches the network.
 
 from __future__ import annotations
 
+import difflib
 import json
 
 import pytest
@@ -195,9 +196,9 @@ class TestTheCheck:
             ("src/a.java", " * old javadoc", " * new javadoc"),
             ("src/a.html", "<!-- old -->", "<!-- new -->"),
             ("src/a.ts", "/* old */", ""),
-            ("src/a.ts", "/* old note", "/* new note */"),
+            ("src/a.ts", "/* old note", "/* new note"),
             ("src/a.ts", " * @param ms elapsed", " * @param ms elapsed time"),
-            ("src/a.ts", " */", " *"),
+            ("src/a.ts", " */", "  */"),
             ("src/a.py", "#old note", "#new note"),
             ("deploy/app.yaml", "#old", "#new"),
             ("Makefile", "#old", "#new"),
@@ -205,6 +206,16 @@ class TestTheCheck:
         ):
             [out] = apply_comment_only_change_check([_f(file=path, line=1)], _files(_hunk_patch(path, minus, plus)))
             assert out.drop_reason == f"{COMMENT_ONLY_PREFIX}{path} @@ -1 +1", (path, minus)
+
+    def test_moving_a_comment_boundary_is_a_code_change(self):
+        for path, minus, plus in (
+            ("src/a.ts", "/* old note", "/* new note */"),
+            ("src/a.ts", " */", " *"),
+            ("src/a.rs", "/* old note", "/* new note */"),
+            ("src/a.html", "<!-- old", "<!-- new -->"),
+        ):
+            [out] = apply_comment_only_change_check([_f(file=path, line=1)], _files(_hunk_patch(path, minus, plus)))
+            assert out.drop_reason is None, (path, minus)
 
     def test_a_comment_shaped_line_inside_a_multiline_string_is_data(self):
         for path, context in (
@@ -256,3 +267,165 @@ class TestTheCheck:
         out = apply_comment_only_change_check(items, _files())
         assert [f.title for f in out] == [f.title for f in items]
         assert [f.drop_reason is not None for f in out] == [False, True, False]
+
+
+
+def _diff(path: str, old: str, new: str) -> str:
+    """A real unified diff of ``old`` to ``new`` (three lines of context)."""
+    body = "".join(difflib.unified_diff(
+        old.splitlines(keepends=True), new.splitlines(keepends=True), f"a/{path}", f"b/{path}",
+    ))
+    return f"diff --git a/{path} b/{path}\n{body}"
+
+
+def _judge(path: str, old: str, new: str, line: int, *, head: bool = True) -> Finding:
+    [out] = apply_comment_only_change_check(
+        [_f(file=path, line=line)], _files(_diff(path, old, new)), (lambda p: new) if head else None,
+    )
+    return out
+
+
+JSDOC_PATH = "src/time/ago.ts"
+JSDOC_OLD = (
+    "/**\n"
+    " * Relative time for a duration in ms.\n"
+    " * ABC-7\n"
+    " */\n"
+    "export function ago(ms: number): string {\n"
+    "  const minutes = Math.max(Math.floor(ms / 60_000), 0);\n"
+    "  return `${minutes}m ago`;\n"
+    "}\n"
+)
+JSDOC_NEW = JSDOC_OLD.replace(" * ABC-7\n", " * Deprecated\n")
+
+BLOCK_PATH = "src/time/round.c"
+BLOCK_NEW = (
+    "/*\n"
+    "   Rounding notes for the minutes helper.\n"
+    "   Every tier floors.\n"
+    "   The seconds tier floors.\n"
+    "   The hours tier floors.\n"
+    "   Floor at every tier; round showed 30s as one minute.\n"
+    "   The days tier floors.\n"
+    "   The weeks tier floors.\n"
+    "   The months tier floors.\n"
+    "   End of notes.\n"
+    "*/\n"
+    "int minutes(long ms) { return (int)(ms / 60000); }\n"
+)
+BLOCK_OLD = BLOCK_NEW.replace("   Floor at every", "   ABC-9: floor at every")
+
+
+def _drop(path: str, start: int) -> str:
+    return f"{COMMENT_ONLY_PREFIX}{path} @@ -{start} +{start}"
+
+
+class _HeadForge(FakeForge):
+    """A fake forge that also serves the head revision of one file."""
+
+    def __init__(self, diff: str, path: str, head: str):
+        super().__init__(diff=diff)
+        self._head = {path: head}
+
+    def get_file_content(self, ref, path, sha=None):
+        return self._head.get(path)
+
+
+class _ScriptLLMAt(_ScriptLLM):
+    """:class:`_ScriptLLM` answering for another file and line."""
+
+    def __init__(self, path: str, line: int):
+        super().__init__(line=line)
+        self.path = path
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        res = super().invoke(system, user, max_tokens=max_tokens, json_mode=json_mode, timeout_s=timeout_s)
+        return InvokeResult(
+            text=res.text.replace(PATH, self.path), input_tokens=10, output_tokens=5,
+            model="fake-model", backend="fake", elapsed_ms=1,
+        )
+
+
+def _review_head(path: str, old: str, new: str, line: int, *, head: bool = True):
+    patch = _diff(path, old, new)
+    forge = _HeadForge(patch, path, new) if head else FakeForge(diff=patch)
+    return orchestrator.orchestrate_review(
+        forge, REF, _ScriptLLMAt(path, line), post=False, max_workers=1, ci_wiring="off",
+    )
+
+
+class TestBlockComments:
+    """Follow-up to #178: JSDoc ``*`` lines and bare block-comment body lines are comments."""
+
+    def test_a_one_word_jsdoc_edit_next_to_an_unchanged_calc_is_dropped(self):
+        for head in (True, False):
+            out = _judge(JSDOC_PATH, JSDOC_OLD, JSDOC_NEW, 3, head=head)
+            assert out.drop_reason == _drop(JSDOC_PATH, 1), head
+
+    def test_the_jsdoc_edit_through_the_orchestrator(self):
+        res = _review_head(JSDOC_PATH, JSDOC_OLD, JSDOC_NEW, 6, head=False)
+        assert _ours(res["findings_active"]) == []
+        assert [f.drop_reason for f in _ours(res["findings_dropped"])] == [_drop(JSDOC_PATH, 1)]
+
+    def test_a_block_body_edit_with_the_opener_above_the_hunk_is_dropped(self):
+        assert _judge(BLOCK_PATH, BLOCK_OLD, BLOCK_NEW, 6).drop_reason == _drop(BLOCK_PATH, 3)
+
+    def test_the_block_body_edit_through_the_orchestrator_reader(self):
+        res = _review_head(BLOCK_PATH, BLOCK_OLD, BLOCK_NEW, 6)
+        assert _ours(res["findings_active"]) == []
+        assert [f.drop_reason for f in _ours(res["findings_dropped"])] == [_drop(BLOCK_PATH, 3)]
+
+    def test_without_the_head_file_a_bare_body_line_stays_conservative(self):
+        assert _judge(BLOCK_PATH, BLOCK_OLD, BLOCK_NEW, 6, head=False).drop_reason is None
+        res = _review_head(BLOCK_PATH, BLOCK_OLD, BLOCK_NEW, 6, head=False)
+        assert [f.title for f in _ours(res["findings_active"])] == [TITLE]
+
+    def test_a_real_code_change_keeps_the_finding(self):
+        calc = "Math.floor(ms / 60_000)"
+        jsdoc_old = JSDOC_OLD.replace(calc, "Math.round(ms / 60_000)")
+        for head in (True, False):
+            assert _judge(JSDOC_PATH, jsdoc_old, JSDOC_NEW, 3, head=head).drop_reason is None, head
+        block_new = BLOCK_NEW.replace("   The hours tier floors.\n", "*/\nint hours = 1;\n/*\n")
+        block_old = BLOCK_OLD.replace("   The hours tier floors.\n", "*/\nint hours = 0;\n/*\n")
+        assert _judge(BLOCK_PATH, block_old, block_new, 8).drop_reason is None
+
+    def test_commenting_an_unchanged_call_in_or_out_is_a_code_change(self):
+        code = "function f() {\n  setup();\n  tick();\n  teardown();\n}\n"
+        commented = code.replace("  tick();\n", "  /*\n  tick();\n  */\n")
+        for path in ("src/a.ts", "src/a.rs"):
+            for old, new in ((code, commented), (commented, code)):
+                for head in (True, False):
+                    assert _judge(path, old, new, 3, head=head).drop_reason is None, (path, head)
+
+    def test_a_block_closed_above_the_hunk_leaves_body_shaped_lines_as_code(self):
+        new = "/* header */\n" + "".join(f"int v{i} = {i};\n" for i in range(5)) + "total = v1;\n"
+        old = new.replace("total = v1;", "total = v0;")
+        assert _judge("src/a.c", old, new, 7).drop_reason is None
+
+    def test_a_comment_opener_inside_a_string_or_regex_is_not_a_comment(self):
+        body = "".join(BLOCK_NEW.splitlines(keepends=True)[1:])
+        for path, opener in (
+            ("src/a.ts", 'const glob = "src/**/*.ts";\n'),
+            ("src/a.ts", "const re = /[/*]/;\n"),
+            ("src/a.ts", "// see src/*\n"),
+            ("src/a.c", "char star = '*'; char slash = '/'; /* ok */\n"),
+            ("src/a.ts", "const doc = `\n"),
+            ("src/a.go", "var doc = `\n"),
+            ("src/a.java", 'String doc = """\n'),
+        ):
+            new = opener + body
+            old = new.replace("   Floor at every", "   ABC-9: floor at every")
+            assert _judge(path, old, new, 6).drop_reason is None, (path, opener)
+
+    def test_nested_comment_languages_stay_conservative(self):
+        for path in ("src/a.rs", "src/a.swift", "src/a.kt", "src/a.sql"):
+            assert _judge(path, BLOCK_OLD, BLOCK_NEW, 6).drop_reason is None, path
+
+    def test_jsx_text_holding_a_comment_opener_stays_conservative(self):
+        new = (
+            "export const Help = () => (\n  <p>\n    Type /* to start a note.\n"
+            "    Then press enter.\n    Count: {n}\n  </p>\n);\n"
+        )
+        old = new.replace("Count: {n}", "Count: {n + 1}")
+        for path in ("src/Help.jsx", "src/Help.tsx"):
+            assert _judge(path, old, new, 5).drop_reason is None, path
