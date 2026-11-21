@@ -103,8 +103,8 @@ _UNTYPED_EXCEPTIONS = frozenset({
 _READ_FIELD_RE = re.compile(
     r"\b(?:get|read|fetch|load)_?([A-Za-z]\w*)\s*\([^()]*\)\s*\.\s*([A-Za-z_]\w*)\s*\(\s*\)",
 )
-_WRITE_CALL_RE = re.compile(r"\b(?:put|set|write|store|save)_?([A-Za-z]\w*)\s*\(([^()]*)\)")
-_NAMED_ARG_RE = re.compile(r"\b([A-Za-z_]\w*)\s*[=:](?!=)\s*([^,]+)")
+_WRITE_CALL_RE = re.compile(r"\b(?:put|set|write|store|save)_?([A-Za-z]\w*)\s*\(")
+_NAMED_ARG_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*[=:](?!=)\s*(.+?)\s*$", re.S)
 _PLAIN_VALUE_RE = re.compile(r"(?!(?:null|None|nil|undefined)\b)[A-Za-z_]\w*")
 
 _DESTRUCTIVE_RE = re.compile(
@@ -265,6 +265,39 @@ def _maybe_null_in(value: str, fd: FileDiff) -> bool:
     return any(nullable.search(_code_only(text)) for _, text, _ in _post_image(fd))
 
 
+def _call_args(code: str, start: int) -> str:
+    """The argument text from ``start`` (just past ``(``) to its matching ``)``.
+
+    A paren-depth scan, so nested calls (``Id=f(x)``) stay inside. A call
+    left open on the line (its arguments continue below) returns the rest of
+    the line; it still counts as a writer, it just shows no complete field.
+    """
+    depth = 1
+    for i in range(start, len(code)):
+        if code[i] in "([{":
+            depth += 1
+        elif code[i] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return code[start:i]
+    return code[start:]
+
+
+def _top_level_args(args: str) -> list[str]:
+    """``args`` split at commas outside any bracket."""
+    out, depth, begin = [], 0, 0
+    for i, ch in enumerate(args):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            out.append(args[begin:i])
+            begin = i + 1
+    out.append(args[begin:])
+    return [a for a in out if a.strip()]
+
+
 def _norm(word: str) -> str:
     """``put_value`` / ``putValue`` / ``Value`` -> ``value``."""
     return word.replace("_", "").lower()
@@ -289,18 +322,19 @@ def _null_return_writer(f: Finding, claim: str, files: Sequence[FileDiff]) -> st
             code = _code_only(text)
             for w in _WRITE_CALL_RE.finditer(code):
                 if _norm(w.group(1)) == noun:
-                    writers.append((fd.path, line, w.group(2), added))
+                    writers.append((fd.path, line, _call_args(code, w.end()), added))
     if len(writers) != 1:
         return None
     path, line, args, added = writers[0]
     if not added:
         return None
-    named = {_norm(a.group(1)): a.group(2) for a in _NAMED_ARG_RE.finditer(args)}
+    pairs = [m_ for m_ in map(_NAMED_ARG_RE.match, _top_level_args(args)) if m_]
+    named = {_norm(a.group(1)): a.group(2) for a in pairs}
     if field not in named or not _PLAIN_VALUE_RE.fullmatch(named[field].strip()):
         return None
     if _maybe_null_in(named[field].strip(), next(fd for fd in files if fd.path == path)):
         return None
-    arg = next(a.group(1) for a in _NAMED_ARG_RE.finditer(args) if _norm(a.group(1)) == field)
+    arg = next(a.group(1) for a in pairs if _norm(a.group(1)) == field)
     value = named[field].strip()
     writer_fd = next(fd for fd in files if fd.path == path)
     rows = [(n, t) for n, t, _ in _post_image(writer_fd)]

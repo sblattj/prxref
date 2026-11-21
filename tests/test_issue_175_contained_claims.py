@@ -389,6 +389,22 @@ class TestCaseOneWriterRulesOutNull:
         writer = WRITER + '    log.info("put_value(Id=x, Binary=b) was not called")\n'
         assert _check(CASE_ONE, _writer_diff(writer))[1] == "null_return_ruled_out_by_writer"
 
+    @pytest.mark.parametrize("second", [
+        "client.put_value(Id=f(x), Binary=b)",
+        "client.putValue(Id=ids.next(prefix(x)), Binary=b)",
+        "client.put_value(\n        Id=f(x),",
+    ], ids=["nested", "deeply-nested", "spans-lines"])
+    def test_a_second_writer_with_nested_arguments_still_counts(self, second):
+        body = f"def migrate(client, x, b):\n    {second}\n"
+        assert _check(CASE_ONE, _writer_diff(WRITER, ("jobs/migrate.py", body)))[1] is None
+
+    def test_a_writer_with_nested_arguments_reads_its_named_field(self):
+        writer = WRITER.replace("Id=config_id", "Id=key(config_id, 'v1')")
+        assert "Id=key(config_id, 'v1'), Text=text" in writer
+        assert _check(CASE_ONE, _writer_diff(writer))[1] == "null_return_ruled_out_by_writer"
+        nested_value = WRITER.replace("Text=text", "Text=wrap(text, x)")
+        assert _check(CASE_ONE, _writer_diff(nested_value))[1] is None
+
     def test_a_writer_on_an_unchanged_line_does_not_count(self):
         diff = _writer_diff("def unrelated():\n    pass\n").replace(
             "diff --git a/writer/store.py b/writer/store.py\nnew file mode 100644\n"
