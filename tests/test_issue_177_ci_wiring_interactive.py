@@ -74,6 +74,8 @@ def test_the_issue_repro_end_to_end():
     "tee -a \"$HOME/.netrc\" < creds",
     "printf x > \"$HOME\"/.config",
     "select role; do break; done",
+    "tee --append \"$HOME/.netrc\" < creds",
+    "tee --append $HOME/.netrc < creds",
     "bash -c \"aws sso login --profile dev\"",
     "sh -c 'read -rp \"Name: \" n'",
     "cat creds | tee \"${HOME}\"/.netrc",

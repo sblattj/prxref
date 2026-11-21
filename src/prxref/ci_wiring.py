@@ -549,14 +549,14 @@ _INTERACTIVE_RES = (
     re.compile(r"""<\s*["']?/dev/tty\b"""),
     re.compile(rf"{_CMD_START}(?:[\w.-]+\s+(?:sso|auth)|az)\s+login\b"),
     re.compile(rf">>?\s*{_HOME}"),
-    re.compile(rf"\btee\b(?:\s+-\w+)*\s+{_HOME}"),
+    re.compile(rf"\btee\b(?:\s+-[\w-]+)*\s+{_HOME}"),
 )
 
 _QUOTED_RE = re.compile(r"'[^']*'|" + r'"(?:\\.|[^"\\])*"')
 # A shell comment start: ``#`` at the line start or after whitespace
 # (``$#`` and ``${#x}`` are not comments).
 _COMMENT_RE = re.compile(r"(?:^|(?<=\s))#")
-_REDIRECT_TAIL_RE = re.compile(r"""(?:[<>]|\btee\b(?:\s+-\w+)*)\s*$""")
+_REDIRECT_TAIL_RE = re.compile(r"""(?:[<>]|\btee\b(?:\s+-[\w-]+)*)\s*$""")
 # A shell run on a quoted command string: ``bash -c "..."``, ``sh -c '...'``.
 _SHELL_C_TAIL_RE = re.compile(r"(?<![\w.-])(?:ba|z|k|da)?sh\s+-c\s*$")
 
