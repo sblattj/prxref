@@ -35,7 +35,7 @@ The contained-claim check (#175, :mod:`prxref.contained_claims`, always on) is
 not a numbered pass either: the orchestrator runs it after
 ``apply_location_verification`` and right before ``apply_quality_gate``, and it
 only lowers an ``error`` or ``warning`` to ``outofscope`` when the diff's own
-guard rules out the failure the finding claims.
+guard or only writer rules out the failure the finding claims.
 
 1. ``apply_severity_map``: when the team review rules declare a severity
    map, rewrite a team severity word (``blocker``) to the prxref tier the

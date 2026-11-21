@@ -14,6 +14,19 @@ named exception, the caller already turns the null into a clear error. The
 claimed failure cannot happen, so the finding drops to ``outofscope`` (shown
 as minor) with the guard named.
 
+``null_return_ruled_out_by_writer``: the same null-return claim, where the
+anchored line is an added read ``<getter>(...).<field>()`` whose getter is
+``get``/``read``/``fetch``/``load`` plus a noun (``getValue(id).text()``).
+When every call in the diff's post-image (added and context lines, all files)
+that writes that noun (``put``/``set``/``write``/``store``/``save`` plus the
+same noun, any case or underscores) is exactly one added call, and it passes
+the field the read uses as a named argument (``Text=text``) whose value is not
+a null literal, the only writer the PR shows always stores that field, so the
+null case the finding claims does not come from this PR's writes. The finding
+drops to ``outofscope`` with the writer named. A positional writer, a second
+writer, or one that leaves the field out ties nothing. Writers outside the
+diff are not visible, and the note says so.
+
 ``precondition_rules_out_preexisting``: an ``error`` or ``warning`` finding
 says a delete, remove or overwrite can hit something the call never created
 (``pre-existing``, ``never created``, ``didn't create``). When the same
@@ -44,6 +57,7 @@ from .triage import FileDiff, Finding
 CONTAINED_REASONS: tuple[str, ...] = (
     "null_return_guarded_by_caller",
     "precondition_rules_out_preexisting",
+    "null_return_ruled_out_by_writer",
 )
 
 GUARD_WINDOW: int = 3
@@ -83,6 +97,13 @@ _UNTYPED_EXCEPTIONS = frozenset({
     "NullPointerException", "TypeError", "AttributeError", "Exception",
     "RuntimeException", "Error",
 })
+
+_READ_FIELD_RE = re.compile(
+    r"\b(?:get|read|fetch|load)_?([A-Za-z]\w*)\s*\([^()]*\)\s*\.\s*([A-Za-z_]\w*)\s*\(\s*\)",
+)
+_WRITE_CALL_RE = re.compile(r"\b(?:put|set|write|store|save)_?([A-Za-z]\w*)\s*\(([^()]*)\)")
+_NAMED_ARG_RE = re.compile(r"\b([A-Za-z_]\w*)\s*[=:](?!=)\s*([^,]+)")
+_NULL_LITERAL_RE = re.compile(r"^\s*(?:null|None|nil|undefined)\s*$")
 
 _DESTRUCTIVE_RE = re.compile(
     r"\b(?:delet|remov|overwrit|destroy|drop|clobber|wip)\w*", re.IGNORECASE,
@@ -142,6 +163,9 @@ def apply_contained_claim_check(
         if note is None:
             note = _precondition_guard(f, claim, by_path.get(f.file))
             reason = "precondition_rules_out_preexisting" if note else None
+        if note is None:
+            note = _null_return_writer(f, claim, files)
+            reason = "null_return_ruled_out_by_writer" if note else None
         if note is None:
             out.append(f)
             reasons.append(None)
@@ -203,6 +227,48 @@ def _null_return_guard(f: Finding, claim: str, files: Sequence[FileDiff]) -> str
                 "clear that error is."
             )
     return None
+
+
+def _norm(word: str) -> str:
+    """``put_value`` / ``putValue`` / ``Value`` -> ``value``."""
+    return word.replace("_", "").lower()
+
+
+def _null_return_writer(f: Finding, claim: str, files: Sequence[FileDiff]) -> str | None:
+    """The ``Contained:`` note when the PR's only writer always sets the field read."""
+    if not _NULL_RETURN_RE.search(claim):
+        return None
+    anchor = next(
+        (text for fd in files if fd.path == f.file
+         for line, text, added in _post_image(fd) if added and line == f.line),
+        None,
+    )
+    m = _READ_FIELD_RE.search(anchor or "")
+    if m is None:
+        return None
+    noun, field = _norm(m.group(1)), _norm(m.group(2))
+    writers: list[tuple[str, int, str, bool]] = []
+    for fd in files:
+        for line, text, added in _post_image(fd):
+            code = re.split(r"\s(?://|#)", text, maxsplit=1)[0]
+            for w in _WRITE_CALL_RE.finditer(code):
+                if _norm(w.group(1)) == noun:
+                    writers.append((fd.path, line, w.group(2), added))
+    if len(writers) != 1:
+        return None
+    path, line, args, added = writers[0]
+    if not added:
+        return None
+    named = {_norm(a.group(1)): a.group(2) for a in _NAMED_ARG_RE.finditer(args)}
+    if field not in named or _NULL_LITERAL_RE.match(named[field]):
+        return None
+    arg = next(a.group(1) for a in _NAMED_ARG_RE.finditer(args) if _norm(a.group(1)) == field)
+    return (
+        f"{_MARK} the only writer this PR adds, `{path}:{line}`, always stores "
+        f"`{arg}`, the field `{m.group(2)}()` reads, so the null case is handled by "
+        "that writer and does not come from this PR's writes. Writers outside this "
+        "PR are not visible to this check."
+    )
 
 
 def _call_results(rows: list[tuple[int, str, bool]], names: set[str]) -> dict[int, str]:

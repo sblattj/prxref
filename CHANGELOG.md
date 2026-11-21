@@ -93,7 +93,10 @@ tracker.
   another file rejects null or blank with a named exception, or an existence check
   above the delete in the same function exits first. The finding keeps its text and
   gains a `Contained:` line naming the guard; the run record counts it under
-  `contained_claims` (#175).
+  `contained_claims` (#175). A null-return WARNING is also lowered when the PR's only
+  writer of the value (`put_value(Id=..., Text=text)`) always stores the field the
+  read returns (`getValue(id).text()`), with a `Contained:` line naming that writer
+  (`null_return_ruled_out_by_writer`, #175).
 - The CI wiring check no longer flags an interactive setup helper as an unwired check
   (#177). A new script that counts only because it gains a shebang is skipped when an
   added line prompts the terminal (`select`, `read -p`, input from `/dev/tty`), runs an interactive

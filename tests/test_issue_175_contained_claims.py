@@ -76,6 +76,10 @@ CASE_ONE_UNGUARDED_DIFF = (
     + _new_file("parser/src/main/java/config/parser/ConfigParser.java", PARSER_UNGUARDED)
     + _new_file("writer/store.py", WRITER)
 )
+CASE_ONE_NO_GUARD_NO_WRITER_DIFF = (
+    _new_file("store/src/main/java/config/store/ConfigStore.java", STORE)
+    + _new_file("parser/src/main/java/config/parser/ConfigParser.java", PARSER_UNGUARDED)
+)
 CASE_ONE = {
     "file": "store/src/main/java/config/store/ConfigStore.java", "line": 6,
     "severity": "warning", "confidence": 0.85,
@@ -152,7 +156,9 @@ class TestCaseOneNullReturnGuardedByCaller:
 
     def test_a_caller_with_no_guard_keeps_the_warning(self):
         original = Finding(**CASE_ONE)
-        out, reasons = apply_contained_claim_check([original], parse_unified_diff(CASE_ONE_UNGUARDED_DIFF))
+        out, reasons = apply_contained_claim_check(
+            [original], parse_unified_diff(CASE_ONE_NO_GUARD_NO_WRITER_DIFF),
+        )
         assert out[0] is original and reasons == [None]
 
     def test_a_guard_only_in_the_finding_own_file_does_not_count(self):
@@ -275,6 +281,72 @@ class TestCaseOneNullReturnGuardedByCaller:
             "null_return_guarded_by_caller"
         )
         assert _check(CASE_ONE, store + parser_diff("public Config parse(String id) {"))[1] is None
+
+
+STORE_PATH = "store/src/main/java/config/store/ConfigStore.java"
+PARSER_PATH = "parser/src/main/java/config/parser/ConfigParser.java"
+
+
+def _writer_diff(writer: str, *extra: tuple[str, str]) -> str:
+    out = _new_file(STORE_PATH, STORE) + _new_file(PARSER_PATH, PARSER_UNGUARDED)
+    out += _new_file("writer/store.py", writer)
+    for path, body in extra:
+        out += _new_file(path, body)
+    return out
+
+
+class TestCaseOneWriterRulesOutNull:
+    """The issue's writer: the PR's only writer always stores text, the caller has no guard."""
+
+    def test_the_only_writer_storing_the_field_read_contains_the_claim(self):
+        f, reason = _check(CASE_ONE, CASE_ONE_UNGUARDED_DIFF)
+        assert reason == "null_return_ruled_out_by_writer"
+        assert f.severity == "outofscope" and f.title == CASE_ONE["title"]
+        assert "`writer/store.py:2`" in f.body and "`Text`" in f.body and "`text()`" in f.body
+        assert "Writers outside this PR are not visible" in f.body
+
+    def test_the_writer_note_names_a_boundary(self):
+        f, _ = _check(CASE_ONE, CASE_ONE_UNGUARDED_DIFF)
+        assert not apply_containment_note([f])[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)
+
+    def test_the_caller_guard_still_wins_when_both_are_present(self):
+        assert _check(CASE_ONE, CASE_ONE_DIFF)[1] == "null_return_guarded_by_caller"
+
+    @pytest.mark.parametrize("writer", [
+        "def publish(client, config_id, data):\n    client.put_value(Id=config_id, Binary=data)\n",
+        "def publish(client, config_id, text):\n    client.put_value(Id=config_id, Text=None)\n",
+        "def publish(client, config_id, text):\n    client.put_value(config_id, text)\n",
+        "def publish(client, config_id, text):\n    client.put_secret(Id=config_id, Text=text)\n",
+    ], ids=["other-field", "null-literal", "positional", "other-noun"])
+    def test_a_writer_that_does_not_always_store_the_field_does_not_count(self, writer):
+        assert _check(CASE_ONE, _writer_diff(writer))[1] is None
+
+    def test_a_second_writer_anywhere_in_the_diff_does_not_count(self):
+        second = "def migrate(client, config_id, blob):\n    client.putValue(Id=config_id, Binary=blob)\n"
+        assert _check(CASE_ONE, _writer_diff(WRITER, ("jobs/migrate.py", second)))[1] is None
+        same_field = "def seed(client, config_id):\n    client.put_value(Id=config_id, Text=DEFAULT)\n"
+        assert _check(CASE_ONE, _writer_diff(WRITER, ("jobs/seed.py", same_field)))[1] is None
+
+    def test_a_writer_on_an_unchanged_line_does_not_count(self):
+        diff = _writer_diff("def unrelated():\n    pass\n").replace(
+            "diff --git a/writer/store.py b/writer/store.py\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/writer/store.py\n@@ -0,0 +1,2 @@\n"
+            "+def unrelated():\n+    pass\n",
+            "diff --git a/writer/store.py b/writer/store.py\n"
+            "--- a/writer/store.py\n+++ b/writer/store.py\n@@ -1,2 +1,3 @@\n"
+            " def publish(client, config_id, text):\n"
+            "     client.put_value(Id=config_id, Text=text)\n"
+            "+# touched\n",
+        )
+        assert "     client.put_value" in diff
+        assert _check(CASE_ONE, diff)[1] is None
+
+    def test_an_anchor_that_is_not_a_getter_field_read_does_not_count(self):
+        assert _check({**CASE_ONE, "line": 5}, CASE_ONE_UNGUARDED_DIFF)[1] is None
+
+    def test_a_claim_without_a_null_return_does_not_count(self):
+        finding = {**CASE_ONE, "title": "read is slow", "body": "`read` makes a network call per entry."}
+        assert _check(finding, CASE_ONE_UNGUARDED_DIFF)[1] is None
 
 
 class TestCaseTwoPreconditionRulesOutPreexisting:
@@ -402,7 +474,11 @@ class TestPassThrough:
         assert reasons == [None] and twice[0].body.count("Contained:") == 1
 
     def test_reasons_are_the_published_names(self):
-        assert CONTAINED_REASONS == ("null_return_guarded_by_caller", "precondition_rules_out_preexisting")
+        assert CONTAINED_REASONS == (
+            "null_return_guarded_by_caller",
+            "precondition_rules_out_preexisting",
+            "null_return_ruled_out_by_writer",
+        )
 
 
 @pytest.mark.usefixtures("contract_stubs")
@@ -416,6 +492,15 @@ class TestThroughTheOrchestrator:
         assert f.severity == "outofscope" and "ConfigParser.java:5" in f.body
         assert not f.body.endswith(CONTAINMENT_NOTE_SUFFIX)
         assert res["contained_claims"] == {"null_return_guarded_by_caller": 1}
+
+    def test_case_one_writer_only_posts_as_minor(self):
+        llm = FakeLLM({CASE_ONE["file"]: [CASE_ONE]})
+        res = orchestrator.orchestrate_review(
+            FakeForge(diff=CASE_ONE_UNGUARDED_DIFF), REF, llm, post=False, max_workers=1,
+        )
+        (f,) = res["findings_active"]
+        assert f.severity == "outofscope" and "writer/store.py:2" in f.body
+        assert res["contained_claims"] == {"null_return_ruled_out_by_writer": 1}
 
     def test_case_two_posts_as_minor(self):
         llm = FakeLLM({ACCOUNTS_PATH: [CASE_TWO]})
