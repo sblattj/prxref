@@ -41,6 +41,12 @@ one-line note in worker.md and systemic.md (claims about deleted or renamed
 code are to be checked): stripping that line from each system message
 reproduces the previous recording (``058306f7...``, ``0df673d2...``,
 ``9e29727a...`` and, for PRE_29_SHA, ``6f39ae9a...``) byte for byte.
+
+The #29 worker request sha was re-recorded once more for issue #182: the
+chunk edits ``README.md``, so its prompt gains the same-file restatement
+block, one row (``README.md:3: ...``). Its sha moved from POST_29_SHA to
+POST_182_SHA; ``test_the_182_delta_is_exactly_the_restatement_block`` pins
+that delta: with the block removed the prompt hashes to POST_29_SHA again.
 """
 from __future__ import annotations
 
@@ -51,6 +57,7 @@ from pathlib import Path
 import pytest
 
 from prxref import cli
+from prxref.chunk_context import render_context_blocks
 from tests.test_integration import MockOpenAIServer, _completion
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "issue22"
@@ -79,6 +86,11 @@ EXPECTED_REQUEST_COUNT = 3
 PRE_29_SHA = "3d21fa206486178aba0be83c050879bd7980caee6b4391dc5e6b261b8682476b"
 POST_29_SHA = "97e9f32aa7b5d1e0913c0fb5915f0363d93deb8b75f0a34f72b5efa1c5b069c0"
 ISSUE_29_LINE = "assistant/engine.py:12: class Step:\n"
+POST_182_SHA = "f73d6aeca12098f6f905f62ec455716f1cb25e5e964b15b22b79fc1137fc7c5e"
+ISSUE_182_BLOCK = "\n\n" + render_context_blocks((), (), restatement_lines=(
+    "README.md:3: A tiny chat assistant engine: a user message runs a loop of steps "
+    "(model calls and tool calls).",
+))
 EXPECTED_MESSAGE_SHAS = [
     # Every sha was re-recorded at issue #116's one-line prompt note (see the
     # module docstring); stripping that line gives the previous recording.
@@ -90,9 +102,12 @@ EXPECTED_MESSAGE_SHAS = [
     # Re-recorded at 0.20.0: issue #29 gives this diff-file plus repo-dir
     # replay chunk context, so this prompt gains exactly
     # ``assistant/engine.py:12: class Step:``; it was PRE_29_SHA at 0.17.0.
-    POST_29_SHA,
     # The sweep request (the 0.17.0 recording until #116).
     "d17c4dd7d33cbf4a5be10bf9d30ab0a528f846cfcb7f4351b06b602981576b83",
+    # Re-recorded at issue #182: the same prompt gains the one-row same-file
+    # restatement block (ISSUE_182_BLOCK); it was POST_29_SHA before, and it
+    # now sorts last.
+    POST_182_SHA,
 ]
 
 
@@ -158,6 +173,11 @@ def _normalize(payload: dict) -> dict:
     return payload
 
 
+def _without_182_block(messages: list[dict]) -> list[dict]:
+    """``messages`` with the issue #182 restatement block removed from every content."""
+    return [{**m, "content": m["content"].replace(ISSUE_182_BLOCK, "")} for m in messages]
+
+
 class TestOffIdentity:
     """Unset and ``=off`` must both match the shape recorded at 43ec560.
 
@@ -190,8 +210,8 @@ class TestOffIdentity:
     def test_the_29_delta_is_exactly_one_definition_line(self, review):
         """Issue #29 adds one same-file definition line; without it the prompt is the 0.17.0 recording."""
         _, requests = review({"PRXREF_CONTEXT_FOLLOWUP": None})
-        (changed,) = [r for r in requests if _messages_sha(r) == POST_29_SHA]
-        messages = changed["payload"]["messages"]
+        (changed,) = [r for r in requests if _messages_sha(r) == POST_182_SHA]
+        messages = _without_182_block(changed["payload"]["messages"])
         holding = [i for i, m in enumerate(messages) if ISSUE_29_LINE in m["content"]]
         assert len(holding) == 1
         assert messages[holding[0]]["content"].count(ISSUE_29_LINE) == 1
@@ -199,6 +219,17 @@ class TestOffIdentity:
         stripped[holding[0]]["content"] = stripped[holding[0]]["content"].replace(ISSUE_29_LINE, "")
         blob = json.dumps(stripped, sort_keys=True).encode("utf-8")
         assert hashlib.sha256(blob).hexdigest() == PRE_29_SHA
+
+    def test_the_182_delta_is_exactly_the_restatement_block(self, review):
+        """Issue #182 adds the README restatement block; without it the prompt is the #29 recording."""
+        _, requests = review({"PRXREF_CONTEXT_FOLLOWUP": None})
+        (changed,) = [r for r in requests if _messages_sha(r) == POST_182_SHA]
+        messages = changed["payload"]["messages"]
+        holding = [i for i, m in enumerate(messages) if ISSUE_182_BLOCK in m["content"]]
+        assert len(holding) == 1
+        assert messages[holding[0]]["content"].count(ISSUE_182_BLOCK) == 1
+        blob = json.dumps(_without_182_block(messages), sort_keys=True).encode("utf-8")
+        assert hashlib.sha256(blob).hexdigest() == POST_29_SHA
 
     def test_the_key_is_absent_or_none(self, review):
         """At 43ec560 the run.json config has no such key at all; once it lands it is None when off."""

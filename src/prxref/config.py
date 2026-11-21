@@ -455,7 +455,9 @@ LLM / pipeline:
                                 context entry, read, trace event or log line;
                                 the same-file definitions and dependency
                                 versions, Java and Kotlin ones included since
-                                0.17.0, do not depend on it. "diff" adds
+                                0.17.0, and the same-file restatements of a
+                                document or spec change (#182) do not
+                                depend on it. "diff" adds
                                 cross-chunk definitions from other files
                                 already in the diff, plus diff-file entries,
                                 all read from the diff itself; no repository

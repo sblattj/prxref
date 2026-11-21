@@ -51,6 +51,13 @@ tracker.
 
 ### Changed
 
+- A chunk that edits a document or API spec (Markdown, reStructuredText, plain text,
+  AsciiDoc, or an OpenAPI/Swagger/AsyncAPI YAML or JSON file) now also shows the worker
+  the unchanged lines of that file that share wording with the change, under
+  `### Unchanged text in the same document that shares wording with the change`, and asks
+  it to flag a rewritten rule still stated the old way there. A PR that added an exception
+  to a rule in one paragraph of an OpenAPI description, while a paragraph further down kept
+  the old rule, used to pass with no finding. Fixes #182.
 - The litellm backend logs one WARNING per run when the chain's first model did not
   answer and a later entry did, naming both. litellm swallows the primary's error inside
   its own fallback walk, so a primary that failed on every call left no trace before.

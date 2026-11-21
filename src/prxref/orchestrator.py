@@ -4210,6 +4210,13 @@ def _context_blocks(
     block (:func:`_route_lines`); ``all_files`` is the PR's parsed file list,
     whose paths are never re-read for it. False, the default, renders
     exactly as before.
+
+    With a ``reader`` and ``include_definitions`` (so never on the timeout
+    retry), a chunk that edits a document or API spec also gets the
+    same-file restatement block
+    (:func:`prxref.chunk_context.same_file_restatements`, #182): unchanged
+    lines of that file sharing wording with the change, so a rewritten rule
+    still stated the old way elsewhere in the file is in view.
     """
     extra = unit.definition_lines if unit is not None else ()
     contracts = unit.contract_lines if unit is not None else ()
@@ -4220,6 +4227,7 @@ def _context_blocks(
         return ""
     deps: list[str] = []
     defs: list[str] = []
+    restated: list[str] = []
     if reader is not None:
         try:
             files = chunk_context.chunk_files(chunk)
@@ -4233,10 +4241,18 @@ def _context_blocks(
             if not (extra or contracts or readers or standards or routes):
                 return ""
             deps, defs = [], []
+            files = []
+        if include_definitions and files:
+            try:
+                restated = chunk_context.same_file_restatements(files, reader)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("same-file restatements unavailable: %s", e)
+                restated = []
     try:
         return chunk_context.render_context_blocks(
             deps, defs, extra_def_lines=extra, contract_lines=contracts,
             reader_lines=readers, standards_lines=standards, route_lines=routes,
+            restatement_lines=restated,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("chunk context unavailable: %s", e)

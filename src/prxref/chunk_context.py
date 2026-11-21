@@ -7,7 +7,10 @@ identifier actually IS when its definition sits outside the rendered hunk. A
 third answers the question chunking itself creates — what the REST of the PR
 changes — so a worker holding one file cannot assert that something is absent
 or unsupported when a sibling file in the same diff carries the refuting
-evidence.
+evidence. A fourth, for a chunk that edits a document or API spec, lists the
+unchanged lines of the same file that share wording with the change, so a rule
+the PR rewrites in one paragraph is checked against another paragraph that
+still states it the old way (#182).
 
 The module is pure. It performs no I/O of its own: every caller passes a
 ``read(path) -> str | None`` callable that resolves a repository-relative path
@@ -53,6 +56,18 @@ STANDARDS_GUIDANCE = (
     "a side."
 )
 
+RESTATEMENT_HEADER = "### Unchanged text in the same document that shares wording with the change"
+RESTATEMENT_GUIDANCE = (
+    "Unchanged lines elsewhere in a document or spec this chunk edits, one "
+    "`path:line:` row each, picked because they share wording with the "
+    "changed lines. When the change rewrites a documented rule (adds an "
+    "exception, flips a default, renames a value) and one of these lines "
+    "still states the rule the old way, report the contradiction: anchor "
+    "the finding on the changed line and cite the stale line as "
+    "`<path>:<line>` in the body, saying it needs the same update. Ignore "
+    "rows that do not state the same rule."
+)
+
 ROUTES_HEADER = "### Route tables outside this diff"
 ROUTE_TABLE_CANDIDATES = (
     "src/routes.tsx",
@@ -73,6 +88,29 @@ ROUTE_TABLE_CANDIDATES = (
 MAX_ROUTE_FILES = 3
 MAX_ROUTE_LINES_PER_FILE = 40
 MAX_ROUTE_CHARS = 3000
+
+# Same contract for the same-file restatement probe (#182).
+MAX_RESTATEMENTS_PER_FILE = 12
+MAX_RESTATEMENT_CHARS = 3000
+MAX_RESTATEMENT_LINE_CHARS = 300
+MIN_SHARED_STEMS = 3
+_PROSE_SUFFIXES = (".md", ".mdx", ".markdown", ".rst", ".txt", ".adoc")
+_SPEC_SUFFIXES = (".yaml", ".yml", ".json")
+_SPEC_MARK_RE = re.compile(r"""^\s*["']?(?:openapi|swagger|asyncapi)["']?\s*:""", re.MULTILINE)
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z']+")
+_STOPWORDS = frozenset({
+    "about", "above", "after", "again", "also", "always", "been", "before",
+    "being", "below", "between", "both", "can't", "cannot", "case", "cases",
+    "could", "does", "doesn't", "done", "down", "each", "either", "else",
+    "even", "every", "from", "have", "having", "here", "into", "it's",
+    "just", "like", "made", "make", "many", "more", "most", "much", "must",
+    "need", "only", "other", "over", "same", "should", "some", "such",
+    "than", "that", "their", "them", "then", "there", "these", "they",
+    "this", "those", "through", "under", "until", "upon", "used", "very",
+    "want", "were", "what", "when", "where", "whether", "which", "while",
+    "will", "with", "within", "without", "would", "your", "true", "false",
+    "null", "type", "string", "description",
+})
 
 _SERVER_CONFIG_NAMES = frozenset({
     "nginx.conf", ".htaccess", "_redirects", "caddyfile", "vercel.json",
@@ -153,12 +191,16 @@ class ChunkFile:
 
     ``added`` holds the TEXT of the chunk's ``+`` lines; ``hunk_lines`` holds
     every new-file line number the chunk's hunks cover, so a definition inside
-    a rendered hunk is never repeated as out-of-hunk context.
+    a rendered hunk is never repeated as out-of-hunk context. ``removed``
+    holds the TEXT of the ``-`` lines and ``added_lines`` the new-file line
+    numbers of the ``+`` lines (:func:`same_file_restatements`).
     """
 
     path: str
     added: tuple[str, ...] = ()
     hunk_lines: frozenset[int] = frozenset()
+    removed: tuple[str, ...] = ()
+    added_lines: frozenset[int] = frozenset()
 
 
 def chunk_files(chunk: Iterable[object]) -> list[ChunkFile]:
@@ -174,7 +216,9 @@ def chunk_files(chunk: Iterable[object]) -> list[ChunkFile]:
         if not path:
             continue
         added: list[str] = []
+        removed: list[str] = []
         covered: set[int] = set()
+        added_numbers: set[int] = set()
         for hunk in getattr(f, "hunks", None) or []:
             for line in getattr(hunk, "lines", None) or []:
                 kind = getattr(line, "kind", " ")
@@ -183,7 +227,14 @@ def chunk_files(chunk: Iterable[object]) -> list[ChunkFile]:
                     covered.add(new_line)
                 if kind == "+":
                     added.append(getattr(line, "text", ""))
-        out.append(ChunkFile(path=path, added=tuple(added), hunk_lines=frozenset(covered)))
+                    if new_line is not None:
+                        added_numbers.add(new_line)
+                elif kind == "-":
+                    removed.append(getattr(line, "text", ""))
+        out.append(ChunkFile(
+            path=path, added=tuple(added), hunk_lines=frozenset(covered),
+            removed=tuple(removed), added_lines=frozenset(added_numbers),
+        ))
     return out
 
 
@@ -530,6 +581,108 @@ def referenced_definitions(
     return out
 
 
+def is_document_path(path: str, content: str | None = None) -> bool:
+    """True when ``path`` is prose documentation or an API spec (#182).
+
+    Prose is ``*.md``, ``*.mdx``, ``*.markdown``, ``*.rst``, ``*.txt`` and
+    ``*.adoc``. A spec is a ``*.yaml``, ``*.yml`` or ``*.json`` file whose
+    ``content`` (its head text) has an ``openapi``, ``swagger`` or
+    ``asyncapi`` key, or that the rule scopes call a spec
+    (:func:`prxref.rules.scope_token_covers` with ``openapi``).
+    """
+    lowered = path.casefold()
+    if lowered.endswith(_PROSE_SUFFIXES):
+        return True
+    if not lowered.endswith(_SPEC_SUFFIXES):
+        return False
+    from .rules import scope_token_covers
+
+    if scope_token_covers("openapi", path):
+        return True
+    return bool(content) and _SPEC_MARK_RE.search(content) is not None
+
+
+def _stems(text: str) -> set[str]:
+    """Lowercased content words of ``text`` (4+ letters, no stopwords), with a plural ``s`` dropped."""
+    out: set[str] = set()
+    for word in _WORD_RE.findall(text):
+        word = word.casefold().strip("'")
+        if word.endswith("'s"):
+            word = word[:-2]
+        if len(word) < 4 or word in _STOPWORDS:
+            continue
+        if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        out.add(word)
+    return out
+
+
+def same_file_restatements(
+    chunk_files: Sequence[ChunkFile],
+    read: Callable[[str], str | None],
+    *,
+    max_per_file: int = MAX_RESTATEMENTS_PER_FILE,
+    max_chars: int = MAX_RESTATEMENT_CHARS,
+    min_shared: int = MIN_SHARED_STEMS,
+) -> list[str]:
+    """``<path>:<line>: <text>`` rows of unchanged document lines that share wording with the change (#182).
+
+    For each chunk file that :func:`is_document_path` accepts and that has
+    added lines, the head file is read and every line that is not itself an
+    added line is scored by how many content stems (:func:`_stems`) it
+    shares with the chunk's added and removed lines in that file. A line
+    sharing at least ``min_shared`` stems is a row; the ``max_per_file``
+    best-scoring rows per file are kept, then listed by path and line, each
+    trimmed to :data:`MAX_RESTATEMENT_LINE_CHARS` characters. Context lines
+    inside a hunk are eligible, because the rendered diff may trim them
+    (``PRXREF_CHUNK_CONTEXT_LINES``). When ``max_chars`` trims the list, a
+    final ``… N more lines omitted`` row says so. Files over 512 KiB are
+    skipped; a failed read is no rows.
+    """
+    collected: list[tuple[str, int, str]] = []
+    for entry in chunk_files:
+        if not entry.added:
+            continue
+        if not entry.path.casefold().endswith(_PROSE_SUFFIXES + _SPEC_SUFFIXES):
+            continue
+        content = read(entry.path)
+        if not content or len(content.encode("utf-8", "ignore")) > MAX_FILE_BYTES:
+            continue
+        if not is_document_path(entry.path, content):
+            continue
+        changed: set[str] = set()
+        for text in (*entry.added, *entry.removed):
+            changed |= _stems(text)
+        if not changed:
+            continue
+        scored: list[tuple[int, int, str]] = []
+        for idx, text in enumerate(content.splitlines()):
+            number = idx + 1
+            if number in entry.added_lines:
+                continue
+            stems = _stems(text)
+            if len(stems) < min_shared:
+                continue
+            shared = len(stems & changed)
+            if shared >= min_shared:
+                scored.append((shared, number, text.strip()))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        for _shared, number, text in sorted(scored[:max_per_file], key=lambda item: item[1]):
+            if len(text) > MAX_RESTATEMENT_LINE_CHARS:
+                text = text[: MAX_RESTATEMENT_LINE_CHARS - 1] + "…"
+            collected.append((entry.path, number, text))
+    out: list[str] = []
+    used = 0
+    for path, number, text in collected:
+        rendered = f"{path}:{number}: {text}"
+        if used + len(rendered) > max_chars and out:
+            out.append(f"… {len(collected) - len(out)} more lines omitted")
+            break
+        out.append(rendered)
+        used += len(rendered) + 1
+    return out
+
+
 def render_context_blocks(
     dep_lines: Sequence[str],
     def_lines: Sequence[str],
@@ -538,6 +691,7 @@ def render_context_blocks(
     reader_lines: Sequence[str] = (),
     standards_lines: Sequence[str] = (),
     route_lines: Sequence[str] = (),
+    restatement_lines: Sequence[str] = (),
 ) -> str:
     """Render the prompt blocks, omitting each when it has no lines.
 
@@ -552,8 +706,10 @@ def render_context_blocks(
     :data:`STANDARDS_HEADER` behind one :data:`STANDARDS_GUIDANCE` line,
     because that block carries its own how-to-cite rule. ``route_lines``
     (:func:`route_table_lines`, the matching-rules probe's route tables)
-    render after everything else under :data:`ROUTES_HEADER`. With the five
-    optional arguments empty, the output is exactly the two-block rendering
+    render after those under :data:`ROUTES_HEADER`, and ``restatement_lines``
+    (:func:`same_file_restatements`, #182) last, under
+    :data:`RESTATEMENT_HEADER` behind one :data:`RESTATEMENT_GUIDANCE` line.
+    With the six optional arguments empty, the output is exactly the two-block rendering
     repository context predates, with ``reader_lines`` empty it is exactly
     the rendering without a readers block, and so on. Returns the empty
     string when every list is empty, so the prompt slot leaves no stray
@@ -573,6 +729,10 @@ def render_context_blocks(
         blocks.append(STANDARDS_HEADER + "\n\n" + STANDARDS_GUIDANCE + "\n\n" + "\n".join(standards_lines))
     if route_lines:
         blocks.append(ROUTES_HEADER + "\n\n" + "\n".join(route_lines))
+    if restatement_lines:
+        blocks.append(
+            RESTATEMENT_HEADER + "\n\n" + RESTATEMENT_GUIDANCE + "\n\n" + "\n".join(restatement_lines)
+        )
     return "\n\n".join(blocks)
 
 
