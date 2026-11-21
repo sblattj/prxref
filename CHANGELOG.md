@@ -61,6 +61,13 @@ tracker.
 - The litellm backend logs one WARNING per run when the chain's first model did not
   answer and a later entry did, naming both. litellm swallows the primary's error inside
   its own fallback walk, so a primary that failed on every call left no trace before.
+- Thread dedup: a resolved thread whose last human reply dismissed the claim with a
+  reason ("invalid: start() is meant to fail, refresh() catches and logs") now keeps
+  suppressing the same claim on a re-review while the thread is current, instead of
+  re-posting it with a "Previously raised ... still present" footer. A fix
+  acknowledgement ("fixed", "good catch") is not a dismissal, and an outdated thread
+  re-posts as before. The summary's suppressed bullet quotes the dismissal. Read on
+  GitHub, GitLab, Azure DevOps, Bitbucket Server and Bitbucket Cloud. Fixes #176.
 
 ### Fixed
 

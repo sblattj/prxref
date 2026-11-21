@@ -664,3 +664,20 @@ comment whose own text says "By design." is never mistaken for one. GitHub, GitL
 Azure DevOps read every reply of the thread, so a "won't fix" reply covers the root
 comment the finding is matched against; Bitbucket Cloud, Bitbucket Server and
 Gitea/Forgejo read it from the comment the finding is matched against.
+
+### Dismissed threads
+
+A resolved thread whose last human reply rebuts the claim with a reason also keeps
+suppressing the finding while the thread is current (#176). The dismissal is the last
+reply without the prxref attribution, from someone other than the thread's author, that
+does not open as a fix acknowledgement (`fixed`, `done`, `addressed`, `good catch`,
+`thanks`, `agreed`, `will fix` and the like), so "invalid: start() is meant to fail,
+refresh() catches and logs" counts and needs no keyword. Once the thread is outdated
+(the code under it moved) the dismissal no longer applies and a matching finding is
+posted with the "Previously raised" note again. The suppressed bullet in the summary's
+`Thread dedup:` block quotes the dismissal. GitHub groups replies by their root comment,
+GitLab by discussion, Azure DevOps by thread, Bitbucket Server by a comment's nested
+replies and Bitbucket Cloud by the `parent` chain. Gitea/Forgejo's review-comment feed
+carries no reply links, so it reads no dismissals. Only GitHub reports a thread outdated; on the
+other forges prxref cannot tell that the code moved, so there a dismissed, resolved
+thread keeps suppressing until it is reopened.

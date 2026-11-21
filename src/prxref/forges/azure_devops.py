@@ -41,6 +41,7 @@ from prxref.forges.base import (
     PRRef,
     Thread,
     branch_file_result,
+    dismissal_reply,
     says_wont_fix,
     with_summary_marker,
 )
@@ -897,6 +898,23 @@ class ForgeImpl:
             for c in thread.get("comments") or []
         )
 
+    @staticmethod
+    def _dismissal(thread: dict) -> str | None:
+        """The reply that dismissed the thread's claim (issue #176), from its live human comments."""
+        comments = [
+            c for c in thread.get("comments") or []
+            if isinstance(c, dict) and not c.get("isDeleted") and c.get("commentType") != "system"
+        ]
+        return dismissal_reply([
+            (
+                (c.get("author") or {}).get("uniqueName")
+                or (c.get("author") or {}).get("displayName")
+                or "",
+                c.get("content") or "",
+            )
+            for c in comments
+        ])
+
     def list_threads(self, ref: PRRef) -> list[Thread]:
         """List existing discussion threads on the PR.
 
@@ -904,8 +922,10 @@ class ForgeImpl:
         counts as resolved when its status is fixed, won't-fix, closed or
         by-design, and as ``wont_fix`` when its status is won't-fix or
         by-design or a human comment in it says "won't fix"
-        (:func:`~prxref.forges.base.says_wont_fix`, issue #73). A feed that cannot be read is logged and yields what was
-        read, because these threads only feed best-effort dedup.
+        (:func:`~prxref.forges.base.says_wont_fix`, issue #73), with the
+        ``dismissal`` its human replies carry
+        (:func:`~prxref.forges.base.dismissal_reply`, issue #176). A feed that cannot be read is
+        logged and yields what was read, because these threads only feed best-effort dedup.
         """
         threads: list[Thread] = []
         try:
@@ -924,6 +944,7 @@ class ForgeImpl:
                             str(thread.get("status") or "").lower() in _WONT_FIX_STATUSES
                             or self._says_wont_fix(thread)
                         ),
+                        dismissal=self._dismissal(thread),
                         author=who.get("displayName") or who.get("uniqueName") or "",
                         body_snippet=(root.get("content") or "")[:200],
                     )

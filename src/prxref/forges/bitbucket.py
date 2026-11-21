@@ -27,6 +27,7 @@ from prxref.forges.base import (
     TitleRename,
     _require_aware,
     branch_file_result,
+    dismissal_reply,
     says_wont_fix,
     with_summary_marker,
 )
@@ -112,6 +113,51 @@ def _make_retry_session() -> requests.Session:
 
 _DEFAULT_SESSION = _make_retry_session()
 
+
+
+def _thread_dismissals(items: Sequence[dict]) -> list[str | None]:
+    """Each comment's thread ``dismissal`` (issue #176), 1:1 with ``items``.
+
+    A comment's thread is its root along the ``parent`` chain (a parent
+    missing from the feed ends the chain); the thread's comments in id order,
+    as ``(author, raw body)``, feed :func:`dismissal_reply`.
+    """
+    def ident(item: dict) -> int | None:
+        value = item.get("id")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    by_id = {i: item for item in items if (i := ident(item)) is not None}
+
+    def parent_of(item: dict) -> int | None:
+        parent = item.get("parent")
+        return ident(parent) if isinstance(parent, dict) else None
+
+    def root_of(item: dict) -> int | None:
+        node, seen = item, set()
+        while (parent := parent_of(node)) is not None and parent in by_id and parent not in seen:
+            seen.add(parent)
+            node = by_id[parent]
+        return ident(node)
+
+    def who(item: dict) -> str:
+        user = item.get("user") or item.get("author") or {}
+        if not isinstance(user, dict):
+            return ""
+        return user.get("uuid") or user.get("nickname") or user.get("display_name") or ""
+
+    roots = [root_of(item) for item in items]
+    members: dict[int, list[dict]] = {}
+    for item, root in zip(items, roots, strict=True):
+        if root is not None:
+            members.setdefault(root, []).append(item)
+    dismissals = {
+        root: dismissal_reply([
+            (who(c), (c.get("content") or {}).get("raw") or "")
+            for c in sorted(group, key=lambda c: ident(c) or 0)
+        ])
+        for root, group in members.items()
+    }
+    return [dismissals.get(root) if root is not None else None for root in roots]
 
 class ForgeImpl:
     """Bitbucket Cloud Forge adapter."""
@@ -487,8 +533,14 @@ class ForgeImpl:
         that were read successfully. The shortfall is logged rather than
         swallowed — an under-read here shows up as findings re-posted on a
         re-review, with nothing in the output to explain why.
+
+        Comments are joined into threads by their ``parent`` chain; each
+        thread's comments in id order give every one of them the
+        ``dismissal`` (:func:`~prxref.forges.base.dismissal_reply`, issue
+        #176).
         """
         threads: list[Thread] = []
+        items: list[dict] = []
         try:
             for page in self._iter_comment_pages(ref):
                 for item in page:
@@ -507,6 +559,7 @@ class ForgeImpl:
                     content = item.get("content") or {}
                     raw_body = content.get("raw") or ""
                     body_snippet = raw_body[:200]
+                    items.append(item)
 
                     threads.append(
                         Thread(
@@ -525,6 +578,8 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, len(threads), e,
             )
 
+        for t, dismissal in zip(threads, _thread_dismissals(items), strict=True):
+            t.dismissal = dismissal
         return threads
 
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:

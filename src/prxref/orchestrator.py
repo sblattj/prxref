@@ -2366,7 +2366,8 @@ def orchestrate_review(
     # Issue #117: a thread gate stops an open thread's finding from being
     # posted twice, but the defect it names is still in the code. An
     # error-severity drop that clears the confidence floor, matched against
-    # an open thread that is not a won't-fix decision, keeps the verdict at
+    # an open thread that is not a decision (won't-fix, or a resolved thread
+    # dismissed with a reason, issue #176), keeps the verdict at
     # Request-Changes even though nothing new is posted inline.
     open_thread_floor: float | None = None
     open_thread_errors = 0
@@ -2380,7 +2381,7 @@ def orchestrate_review(
         if after.confidence < open_thread_floor:
             continue
         matched = open_thread_for_drop(before, threads)
-        if matched is not None and not matched.wont_fix:
+        if matched is not None and not matched.decided:
             open_thread_errors += 1
     before_noted = findings
     findings, thread_matched_resolved = _note_previously_raised(findings, threads)
@@ -3976,7 +3977,9 @@ def _thread_detail(
 ) -> dict[str, object]:
     """One finding's thread-gate record: where it sat, what it was, and the
     thread it matched (:func:`_thread_reference`), plus the gate's
-    ``drop_reason`` for a suppressed finding (issue #73)."""
+    ``drop_reason`` for a suppressed finding (issue #73), and the reply
+    that dismissed the matched thread when a suppressed finding's thread is
+    a dismissed decision (``dismissal``, issue #176)."""
     detail: dict[str, object] = {
         "file": finding.file,
         "line": finding.line,
@@ -3985,6 +3988,9 @@ def _thread_detail(
     }
     if drop_reason is not None:
         detail["drop_reason"] = drop_reason
+        if thread is not None and thread.dismissal and thread.decided and not thread.wont_fix:
+            reason = " ".join(thread.dismissal.split())
+            detail["dismissal"] = reason if len(reason) <= 160 else reason[:159] + "\u2026"
     return detail
 
 
@@ -3993,6 +3999,9 @@ def _thread_detail_line(detail: dict[str, object]) -> str:
     where = f"{detail['file']}:{line if isinstance(line, int) and line > 0 else '—'}"
     ref = detail["thread"]
     suffix = f" — {ref}" if ref else ""
+    dismissal = detail.get("dismissal")
+    if dismissal:
+        suffix += f"; dismissed: \u201c{dismissal}\u201d"
     return f"- `{where}` — {detail['title']}{suffix}"
 
 
@@ -4017,7 +4026,9 @@ def _thread_dedup_accounting(
     so a run without thread history keeps a byte-identical summary.
     "Resolved" here covers outdated threads too — anything the gates skip.
     A suppression can come from a resolved or outdated thread only when it
-    is a won't-fix decision (``Thread.wont_fix``), hence "open or won't-fix".
+    is a decision (``Thread.decided``: won't-fix, or dismissed with a reason
+    while current, issue #176), hence "open or won't-fix"; a dismissed
+    thread's bullet quotes the dismissal reply.
     """
     if not suppressed and not matched_resolved:
         return ""

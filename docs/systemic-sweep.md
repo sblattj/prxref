@@ -84,5 +84,6 @@ grouped chunk member is still dropped as `duplicate of chunk finding`.
 already demoted a file-level finding to line 0 by the time it runs, so a
 distance test could never fire. Only an **open, current** thread settles its
 subject (#73): a resolved or outdated thread never suppresses — unless it was
-closed as an explicit "won't fix" — and a finding
+closed as an explicit "won't fix", or dismissed with a reason while the
+code under it is unchanged (#176) — and a finding
 that matches one is posted with a "Previously raised" note instead.

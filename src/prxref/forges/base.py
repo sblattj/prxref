@@ -84,6 +84,46 @@ def says_wont_fix(text: object) -> bool:
     return _WONT_FIX_RE.search(text) is not None
 
 
+
+_FIX_ACK_RE = re.compile(
+    r"^[\W_]*(?:"
+    r"fix(?:ed|ing)?|done|addressed|updated|changed|resolved|ack(?:nowledged)?|"
+    r"good\s+(?:catch|call|point|find)|nice\s+(?:catch|find)|great\s+catch|"
+    r"thanks|thank\s+you|thx|agreed|agree|will\s+(?:do|fix)|on\s+it|"
+    r"makes\s+sense|you(?:'|\u2019)?re\s+right"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def dismissal_reply(comments: Sequence[tuple[str, str]]) -> str | None:
+    """The reply that dismissed a thread's claim with a reason, else ``None`` (issue #176).
+
+    ``comments`` is one thread's comments in order, each ``(author, full
+    body)``, the root first. A comment carrying :data:`ATTRIBUTION_MARKER`
+    is prxref's own and is skipped. The last remaining reply is the
+    dismissal when its author is not the root's author (the claimant having
+    the last word is not a rebuttal) and it does not open as a fix
+    acknowledgement ("fixed", "done", "good catch", "thanks", "agreed",
+    "will fix" and the like). The stripped reply text is returned, so the
+    summary can quote the reason. Bodies must be whole, as for
+    :func:`says_wont_fix`.
+    """
+    if len(comments) < 2:
+        return None
+    root_author = comments[0][0]
+    human = [
+        (author, body.strip()) for author, body in comments[1:]
+        if isinstance(body, str) and ATTRIBUTION_MARKER not in body
+    ]
+    if not human:
+        return None
+    author, body = human[-1]
+    if not body or author == root_author or _FIX_ACK_RE.search(body):
+        return None
+    return body
+
+
 @dataclass
 class Thread:
     """An existing discussion thread on a PR (for dedup against re-review).
@@ -107,7 +147,13 @@ class Thread:
     prxref comment's trailing attribution is cut off and its own prose could
     pass for a human decision. Construction never infers it. It keeps
     suppressing a duplicate even though it is resolved or outdated.
-    :attr:`lapsed` is the one predicate the gates share.
+    ``dismissal`` is the reply that rebutted the thread's claim
+    (:func:`dismissal_reply`, issue #176), set like ``wont_fix`` on every
+    comment of the thread and never inferred. A resolved thread with one is
+    a decision while it is current, so it keeps suppressing; once it is
+    outdated the code under it moved and the dismissal no longer applies.
+    :attr:`decided` says which threads are decisions, and :attr:`lapsed`
+    is the one predicate the gates share.
     """
 
     path: str | None
@@ -120,11 +166,19 @@ class Thread:
     url: str | None = None
     root_id: int | None = None
     wont_fix: bool = False
+    dismissal: str | None = None
+
+    @property
+    def decided(self) -> bool:
+        """True for a won't-fix thread, or a resolved, current one dismissed with a reason."""
+        if self.wont_fix:
+            return True
+        return bool(self.dismissal) and self.resolved and not self.outdated
 
     @property
     def lapsed(self) -> bool:
-        """True for a resolved or outdated thread that is not a won't-fix decision."""
-        return (self.resolved or self.outdated) and not self.wont_fix
+        """True for a resolved or outdated thread that is not a decision (:attr:`decided`)."""
+        return (self.resolved or self.outdated) and not self.decided
 
 
 @dataclass

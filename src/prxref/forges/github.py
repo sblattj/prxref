@@ -30,6 +30,7 @@ from .base import (
     Thread,
     TitleRename,
     branch_file_result,
+    dismissal_reply,
     says_wont_fix,
     with_summary_marker,
 )
@@ -738,13 +739,16 @@ class ForgeImpl:
         matched on lives in the root's snippet, so an explicit human "won't
         fix" in any comment (:func:`~prxref.forges.base.says_wont_fix`, read
         from the full body) marks every comment sharing that root
-        ``wont_fix`` (issue #73).
+        ``wont_fix`` (issue #73). The same root grouping, in feed order,
+        gives every comment of a thread its ``dismissal``
+        (:func:`~prxref.forges.base.dismissal_reply`, issue #176).
         """
         url = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
         headers = self._headers(ref.host)
 
         threads: list[Thread] = []
         wont_fix_roots: set[int] = set()
+        by_root: dict[int, list[tuple[str, str]]] = {}
         try:
             for data in self._iter_pages(ref, url, headers, what="comment feed"):
                 for item in data:
@@ -770,6 +774,8 @@ class ForgeImpl:
                     root_id = _root_comment_id(item)
                     if root_id is not None and says_wont_fix(body):
                         wont_fix_roots.add(root_id)
+                    if root_id is not None:
+                        by_root.setdefault(root_id, []).append((author, body))
                     threads.append(
                         Thread(
                             path=path,
@@ -789,9 +795,12 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, len(threads), e,
             )
 
+        dismissals = {root: dismissal_reply(comments) for root, comments in by_root.items()}
         for t in threads:
             if t.root_id in wont_fix_roots:
                 t.wont_fix = True
+            if t.root_id is not None:
+                t.dismissal = dismissals.get(t.root_id)
         self._patch_thread_states(ref, threads)
         return threads
 

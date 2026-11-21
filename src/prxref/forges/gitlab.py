@@ -23,6 +23,7 @@ from prxref.forges.base import (
     PRRef,
     Thread,
     branch_file_result,
+    dismissal_reply,
     says_wont_fix,
     with_summary_marker,
 )
@@ -117,6 +118,14 @@ def _make_retry_session() -> requests.Session:
 
 _DEFAULT_SESSION = _make_retry_session()
 
+
+
+def _note_author(note: dict) -> str:
+    """A GitLab note's author: username, else display name, else ``""``."""
+    info = note.get("author") or {}
+    if not isinstance(info, dict):
+        return ""
+    return info.get("username") or info.get("name") or ""
 
 class ForgeImpl:
     """GitLab Forge adapter."""
@@ -617,7 +626,9 @@ class ForgeImpl:
 
         An explicit human "won't fix" in any note of a discussion
         (:func:`~prxref.forges.base.says_wont_fix`, read from the full body)
-        marks every note of that discussion ``wont_fix`` (issue #73).
+        marks every note of that discussion ``wont_fix`` (issue #73). The
+        discussion's non-system notes, in order, give every note its
+        ``dismissal`` (:func:`~prxref.forges.base.dismissal_reply`, issue #176).
         """
         headers = self._get_auth_headers()
         base = self._api_base(ref)
@@ -643,6 +654,11 @@ class ForgeImpl:
                         isinstance(note, dict) and says_wont_fix(note.get("body"))
                         for note in notes
                     )
+                    disc_dismissal = dismissal_reply([
+                        (_note_author(note), note.get("body") or "")
+                        for note in notes
+                        if isinstance(note, dict) and not note.get("system")
+                    ])
 
                     for note in notes:
                         pos = note.get("position")
@@ -655,8 +671,7 @@ class ForgeImpl:
                             disc_resolved = bool(note["resolved"])
 
                     for note in notes:
-                        author_info = note.get("author") or {}
-                        author = author_info.get("username") or author_info.get("name") or ""
+                        author = _note_author(note)
                         body = note.get("body") or ""
                         note_resolved = note.get("resolved", disc_resolved)
 
@@ -668,6 +683,7 @@ class ForgeImpl:
                                 author=author,
                                 body_snippet=body[:200],
                                 wont_fix=disc_wont_fix,
+                                dismissal=disc_dismissal,
                             )
                         )
         except FeedReadError as e:

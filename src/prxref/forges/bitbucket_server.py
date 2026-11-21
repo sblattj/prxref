@@ -22,6 +22,7 @@ from prxref.forges.base import (
     PRRef,
     Thread,
     branch_file_result,
+    dismissal_reply,
     says_wont_fix,
     with_summary_marker,
 )
@@ -600,6 +601,10 @@ class ForgeImpl:
         that were read successfully. The shortfall is logged rather than
         swallowed — an under-read here shows up as findings re-posted on a
         re-review, with nothing in the output to explain why.
+
+        A comment's nested replies, flattened in id order, give its thread
+        the ``dismissal`` (:func:`~prxref.forges.base.dismissal_reply`,
+        issue #176).
         """
         threads: list[Thread] = []
         try:
@@ -622,6 +627,7 @@ class ForgeImpl:
                             author=author.get("name") or author.get("slug") or "",
                             body_snippet=(comment.get("text") or "")[:200],
                             wont_fix=says_wont_fix(comment.get("text")),
+                            dismissal=dismissal_reply(_comment_chain(comment)),
                         )
                     )
         except FeedReadError as e:
@@ -960,6 +966,26 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, removed, e,
             )
         return removed
+
+
+def _comment_chain(comment: dict) -> list[tuple[str, str]]:
+    """A Data Center comment and its nested replies as ``(author, text)``, root first, replies by id."""
+    def who(c: dict) -> str:
+        author = c.get("author") or {}
+        if not isinstance(author, dict):
+            return ""
+        return author.get("name") or author.get("slug") or ""
+
+    replies: list[dict] = []
+    stack = [r for r in comment.get("comments") or [] if isinstance(r, dict)]
+    while stack:
+        reply = stack.pop()
+        replies.append(reply)
+        stack.extend(r for r in reply.get("comments") or [] if isinstance(r, dict))
+    replies.sort(key=lambda r: r.get("id") if isinstance(r.get("id"), int) else 0)
+    return [(who(comment), comment.get("text") or "")] + [
+        (who(r), r.get("text") or "") for r in replies
+    ]
 
 
 def _is_resolved(comment: dict) -> bool:
