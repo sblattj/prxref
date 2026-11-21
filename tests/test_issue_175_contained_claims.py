@@ -305,6 +305,21 @@ class TestCaseOneWriterRulesOutNull:
         assert "`writer/store.py:2`" in f.body and "`Text`" in f.body and "`text()`" in f.body
         assert "Writers outside this PR are not visible" in f.body
 
+    def test_an_untyped_parameter_value_names_the_assumption(self):
+        f, _ = _check(CASE_ONE, CASE_ONE_UNGUARDED_DIFF)
+        assert (
+            "Its `text` argument comes from callers outside this PR, so that value is "
+            "assumed non-null, not shown to be."
+        ) in f.body
+
+    def test_a_local_value_states_no_parameter_assumption(self):
+        writer = WRITER.replace("    client.put_value", "    body = render(config_id)\n    client.put_value").replace(
+            "Text=text)", "Text=body)",
+        )
+        f, reason = _check(CASE_ONE, _writer_diff(writer))
+        assert reason == "null_return_ruled_out_by_writer"
+        assert "comes from callers outside this PR" not in f.body
+
     def test_the_writer_note_names_a_boundary(self):
         f, _ = _check(CASE_ONE, CASE_ONE_UNGUARDED_DIFF)
         assert not apply_containment_note([f])[0].body.endswith(CONTAINMENT_NOTE_SUFFIX)

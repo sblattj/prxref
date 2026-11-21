@@ -301,11 +301,21 @@ def _null_return_writer(f: Finding, claim: str, files: Sequence[FileDiff]) -> st
     if _maybe_null_in(named[field].strip(), next(fd for fd in files if fd.path == path)):
         return None
     arg = next(a.group(1) for a in _NAMED_ARG_RE.finditer(args) if _norm(a.group(1)) == field)
+    value = named[field].strip()
+    writer_fd = next(fd for fd in files if fd.path == path)
+    rows = [(n, t) for n, t, _ in _post_image(writer_fd)]
+    at = next(i for i, (n, _) in enumerate(rows) if n == line)
+    assumption = ""
+    if value in _enclosing_params(rows, at):
+        assumption = (
+            f" Its `{value}` argument comes from callers outside this PR, so that "
+            "value is assumed non-null, not shown to be."
+        )
     return (
         f"{_MARK} the only writer this PR adds, `{path}:{line}`, always stores "
         f"`{arg}`, the field `{m.group(2)}()` reads, so the null case is handled by "
-        "that writer and does not come from this PR's writes. Writers outside this "
-        "PR are not visible to this check."
+        f"that writer and does not come from this PR's writes.{assumption} Writers "
+        "outside this PR are not visible to this check."
     )
 
 
