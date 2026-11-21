@@ -553,6 +553,9 @@ _INTERACTIVE_RES = (
 )
 
 _QUOTED_RE = re.compile(r"'[^']*'|" + r'"(?:\\.|[^"\\])*"')
+# A shell comment start: ``#`` at the line start or after whitespace
+# (``$#`` and ``${#x}`` are not comments).
+_COMMENT_RE = re.compile(r"(?:^|(?<=\s))#")
 _REDIRECT_TAIL_RE = re.compile(r"""(?:[<>]|\btee\b(?:\s+-\w+)*)\s*$""")
 
 
@@ -577,7 +580,8 @@ def _mask_quotes(text: str) -> str:
 def _is_interactive_helper(file: FileDiff) -> bool:
     """True when ``file`` reads like an interactive operator helper, not a check.
 
-    Any added, non-comment line whose :func:`_mask_quotes` text carries one
+    Any added, non-comment line whose :func:`_mask_quotes` text, cut at
+    an inline ``#`` comment, carries one
     of :data:`_INTERACTIVE_RES`. A test-looking path
     (:func:`_looks_like_test`, :func:`default_include`) is never one: a
     test suite may fake ``$HOME`` and still be a check.
@@ -587,7 +591,7 @@ def _is_interactive_helper(file: FileDiff) -> bool:
     for _, text in _added_lines(file):
         if text.strip().startswith("#"):
             continue
-        masked = _mask_quotes(text)
+        masked = _COMMENT_RE.split(_mask_quotes(text), maxsplit=1)[0]
         if any(pattern.search(masked) for pattern in _INTERACTIVE_RES):
             return True
     return False

@@ -72,6 +72,7 @@ def test_the_issue_repro_end_to_end():
     "exec 3</dev/tty",
     "printf 'Choose: '; select role in admin readonly; do break; done",
     "tee -a \"$HOME/.netrc\" < creds",
+    "n=$#; [ $n -gt 0 ] || read -rp 'Name: ' name",
     "aws sso login --profile dev",
     "gcloud auth login",
     "az login",
@@ -100,6 +101,8 @@ def test_each_interactive_sign_exempts_a_shebang_only_script(line):
     "echo 'example: echo x >> \"$HOME/.cloud/config\"'",
     "echo \"then run: aws sso login\"",
     "printf '%s\\n' 'select role in admin readonly'",
+    "echo ok # >> \"$HOME/.cfg\"",
+    "make test  # then: aws sso login",
 ])
 def test_non_interactive_lines_keep_the_shebang_candidate(line):
     assert _paths(_added("scripts/bootstrap.sh", ["#!/usr/bin/env bash", line])) == [
