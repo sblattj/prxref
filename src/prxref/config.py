@@ -502,9 +502,14 @@ LLM / pipeline:
                                 branch), a versioning finding whose own file,
                                 or the surface it names, is absent from the
                                 default branch is lowered to the minor tier
-                                (outofscope) with a note, never dropped; at
-                                most 20 files are read per run and there is
-                                no release-tag check. Any other value is a
+                                (outofscope) with a note, never dropped.
+                                With --repo-dir a git checkout holding the
+                                default branch ref, the surface is searched
+                                over the whole default branch and the 3
+                                newest tags (git grep); otherwise the forge
+                                reads at most 20 files per run (the
+                                finding's own file and the diff files that
+                                removed the surface). Any other value is a
                                 configuration error
   PRXREF_VERIFY_ERRORS          Error verification (#126): checks every
                                 active model error at or above the

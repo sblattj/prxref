@@ -2510,6 +2510,7 @@ def orchestrate_review(
     if default_branch_check == "on":
         findings = _default_branch_check(
             findings, files, forge, ref, pr, run_inputs, tracer,
+            repo_root=getattr(repo_dir, "root", None),
         )
     # AFTER severity consistency and the default-branch check (#181), BEFORE
     # the root-cause fold, grouping and the gate: a fixture's personal data
@@ -3204,8 +3205,13 @@ def _default_branch_check(
     pr: PRData,
     run_inputs: dict[str, Any],
     tracer: Tracer,
+    *,
+    repo_root: str | None = None,
 ) -> list[Finding]:
     """Run :func:`default_branch.apply_default_branch_check` and record what it did.
+
+    ``repo_root`` is the ``--repo-dir`` root, where the whole-tree git search
+    runs when that directory is a git checkout holding the default branch.
 
     Fails open: any exception leaves ``findings`` as they were. Writes the
     run record's ``default_branch_check`` key and emits one
@@ -3215,6 +3221,7 @@ def _default_branch_check(
         checked, outcome = default_branch.apply_default_branch_check(
             findings, files=files, forge=forge, ref=ref,
             target_branch=getattr(pr, "target_branch", "") or "",
+            repo_root=repo_root,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("default branch check failed, findings unchanged: %s", e)

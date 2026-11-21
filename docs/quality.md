@@ -173,33 +173,62 @@ branch), nothing tags a versioning finding, so it is found by text: an active `e
 or `warning` whose title or body matches a compatibility pattern (breaking change,
 backwards compatibility, a new or bumped API version, a versioned route, a removed,
 renamed or moved route, endpoint or public API, "keep or version"). A finding about a
-removed null check or a SQL bug does not match. For each such finding the check reads
-its own file at the default branch's tip (`get_file_at_branch`; a renamed file is read at
-its old path; one read per distinct path read, at most 20 paths per run; later ones count as unknown):
+removed null check or a SQL bug does not match.
+
+A surface string is a backticked string or a URL-path-like string (`/v1/widgets`) in
+the finding's text that also occurs in the removed lines of the PR diff for the
+finding's own file; when none does, the removed lines of the whole diff are used, so
+the duplicate a model posts on the build file is tied to the route the controller
+lost. Each such finding is then checked one of two ways.
+
+**Whole tree (git).** When `--repo-dir` is a git checkout that holds the default
+branch (`refs/remotes/origin/<branch>`, else `refs/heads/<branch>`), the surface
+strings are searched with `git grep -F` (only the URL-path-like ones when the finding
+names any, so a generic name elsewhere in the tree cannot keep a route that never
+shipped) over that ref and the 3 newest tags by
+creation date (the release tags, when the repo tags its releases):
+
+| Search finds | Result |
+|---|---|
+| a string on the default branch or a tag | severity kept, ``Checked against <refs that hold it>: `<strings found>` still present there.`` appended |
+| no string on any ref searched | severity `outofscope`, `Checked against <every ref searched> (whole tree): what this finding names is not there, ...` appended |
+
+Each git call has a 10 second timeout. A shallow clone without the default branch ref,
+a directory that is not a checkout, a missing `git`, or a failed grep on the branch
+falls through to the forge path, and git is not tried again that run; a tag whose grep
+fails is left out of the refs. `--repo-dir` must be the top of the checkout: a plain
+directory nested inside another repository never searches that repository, and
+`GIT_DIR`/`GIT_WORK_TREE` from the environment are ignored. The command is fixed (`git
+grep -F -e <string> <ref> --`), which is why `default_branch_check` stays a
+`.prxref.toml` key.
+
+**Forge.** Otherwise the check reads its own file at the default branch's tip
+(`get_file_at_branch`; a renamed file is read at its old path) and each other diff file
+whose removed lines hold a surface string; one read per distinct path read, at most 20
+paths per run; later ones count as unknown:
 
 | Default branch has | Result |
 |---|---|
-| the file is not there (404) | severity `outofscope` (the minor tier), line A appended |
-| the file, none of the finding's surface strings | severity `outofscope`, line B appended |
-| the file, one of them | severity kept, `Checked against <branch>: still present there.` appended |
+| its own file is not there (404) | severity `outofscope` (the minor tier), line A appended |
+| the files, none of the surface strings | severity `outofscope`, line B (strings from its own file) or D (from other files) appended |
+| one of the strings in any file read | severity kept, `Checked against <branch>: still present there.` appended |
 | no surface strings, an unknown read, an exception | unchanged, no note |
 
-A surface string is a backticked string or a URL-path-like string (`/v1/widgets`) in
-the finding's text that also occurs in the removed lines of the PR diff for the same
-file. Line A: `Checked against <branch>: this file is not there, so no released client
+Line A: `Checked against <branch>: this file is not there, so no released client
 should depend on it. If it moved earlier in this stack, this check cannot tell. Docs
 that mention it may still need updating.` Line B replaces `this file is not there` with
-`what this finding names is not in this file there`. A finding is lowered, never
+`what this finding names is not in this file there`, line D with `what this finding
+names is not in the files this PR removed it from`. A finding is lowered, never
 dropped by this check; with `PRXREF_MAX_OUTOFSCOPE_FINDINGS=0` the cap that runs later
 drops a lowered finding as `outofscope cap exceeded`. The run record and `--format json` carry `default_branch_check`: `branch`,
-`stacked`, `checked`, `lowered`, `present`, `unknown` and `lowered_findings` (file and
-reason per lowered finding); the key is absent when the check is off.
+`stacked`, `checked`, `lowered`, `present`, `unknown`, `lowered_findings` (file and
+reason per lowered finding) and `refs` (the refs the git search covered, empty when
+it did not run); the key is absent when the check is off.
 
-Known limits: only the finding's own file is checked. There is no repo-wide search over
-forge APIs and no release-tag check, because reading release tags has no
-provider-neutral cheap path, so "no released client" means "nothing on the default
-branch". A route that moved files can look absent, which is why the outcome lowers a
-finding instead of dropping it.
+Known limits: the forge path has no repo-wide search, so a route that moved to a file
+the PR does not touch can look absent, which is why the outcome lowers a finding
+instead of dropping it. Pass `--repo-dir` over a checkout with the default branch
+fetched (and tags, for the release check) to get the whole-tree search.
 
 ## Personal data in test fixtures (#181)
 

@@ -80,6 +80,13 @@ tracker.
   developer's own address in a unit test no longer makes the verdict Request-Changes.
   A finding that names a secret, a credential, or customer or production data keeps
   `error`. See `docs/quality.md`.
+- `PRXREF_DEFAULT_BRANCH_CHECK=on` no longer lowers a versioning finding whose route moved to
+  another file on the default branch or still ships in a release tag: with `--repo-dir` a git
+  checkout holding the default branch, the route is searched with `git grep -F` over the whole
+  default branch and the 3 newest tags, and the note names every ref checked. Without it, the
+  forge path also reads the diff files that removed the route, so the build-file duplicate of
+  a controller finding is lowered with it instead of staying an `error`. The run record's
+  `default_branch_check` gains `refs` (#146).
 
 ## [0.41.0] - 2026-11-01
 

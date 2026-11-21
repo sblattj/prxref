@@ -4,15 +4,27 @@ A PR stacked on another PR targets a branch that is not the repository's
 default branch. A finding such as "moved URIs need a new API version" assumes
 a released client depends on the old surface; when that surface never existed
 on the default branch, no released client can. With
-``PRXREF_DEFAULT_BRANCH_CHECK=on`` the orchestrator reads the finding's own file
-at the default branch's tip and lowers the finding to the minor tier
-(``outofscope``, the tier the severity caps call minor) when the file or the
-named surface is not there. It never drops a finding.
+``PRXREF_DEFAULT_BRANCH_CHECK=on`` the orchestrator checks the surface the
+finding names and lowers the finding to the minor tier (``outofscope``, the
+tier the severity caps call minor) when it is not there. It never drops a
+finding.
 
-Detection is by text, since nothing tags a versioning finding. Only the
-finding's own file is read: there is no repo-wide search over forge APIs and no
-release-tag check. A route that moved files can look absent, which is why the
-outcome lowers a finding rather than dropping it.
+Detection is by text, since nothing tags a versioning finding. The surface is
+the finding's backticked and URL-path-like strings that the PR removed: from
+the finding's own file first, else from any file of the diff (so the build
+file duplicate of a controller finding is tied to the controller's route).
+
+Two ways to check, the first that can answer wins:
+
+1. Whole tree, when ``--repo-dir`` is a git checkout that holds the default
+   branch ref (``refs/remotes/origin/<branch>`` or ``refs/heads/<branch>``):
+   ``git grep -F`` over that ref and the newest :data:`MAX_TAGS` tags. A hit
+   in any of them keeps the finding; none lowers it. A shallow clone without
+   the ref, or no git at all, falls through to 2.
+2. The forge: the finding's own file at the default branch's tip (a renamed
+   file at its old path), plus each other diff file whose removed lines hold
+   the surface. A route that moved to a file the PR does not touch can look
+   absent here, which is why the outcome lowers rather than drops.
 
 Everything fails open: an unknown default branch, a forge without the optional
 lookup methods, a failed read or an exception leaves the finding as it was.
@@ -20,7 +32,10 @@ lookup methods, a failed read or an exception leaves the finding as it was.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -41,8 +56,15 @@ LOWERED_SEVERITY = "outofscope"
 LOWERABLE_SEVERITIES = frozenset({"error", "warning"})
 """Only these severities are candidates; ``spec`` and ``outofscope`` are left alone."""
 
+MAX_TAGS = 3
+"""Newest tags (by creation date) the git search also checks, as release tags."""
+
+GIT_TIMEOUT = 10.0
+"""Seconds each git call of the whole-tree search may take."""
+
 REASON_FILE_ABSENT = "file absent on default branch"
 REASON_SURFACE_ABSENT = "named surface absent from file on default branch"
+REASON_TREE_ABSENT = "named surface absent from default branch and release tags"
 
 _COMPAT_PATTERNS = (
     r"\bbreaking[\s-]+changes?\b",
@@ -74,6 +96,7 @@ class CheckOutcome:
     present: int = 0
     unknown: int = 0
     lowered_findings: list[dict[str, str]] = field(default_factory=list)
+    refs: list[str] = field(default_factory=list)
 
     def record(self) -> dict[str, Any]:
         """The run record's ``default_branch_check`` value."""
@@ -85,7 +108,126 @@ class CheckOutcome:
             "present": self.present,
             "unknown": self.unknown,
             "lowered_findings": [dict(row) for row in self.lowered_findings],
+            "refs": list(self.refs),
         }
+
+
+@dataclass
+class GitSearch:
+    """One whole-tree search: the refs searched and the ones holding a token."""
+
+    refs: list[str]
+    present_in: list[str]
+    matched: list[str] = field(default_factory=list)
+
+
+_GIT_ENV_DROP = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+})
+
+
+def _git_env(root: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+    env.update({
+        "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.realpath(root)),
+    })
+    return env
+
+
+def _git(root: str, *args: str, timeout: float) -> subprocess.CompletedProcess[str] | None:
+    exe = shutil.which("git")
+    if exe is None:
+        return None
+    try:
+        return subprocess.run(
+            [exe, "-C", root, "-c", "core.fsmonitor=false", *args],
+            capture_output=True, text=True, timeout=timeout, check=False,
+            env=_git_env(root),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("default branch git search failed: %s", e)
+        return None
+
+
+def _resolve_branch(root: str, branch: str, timeout: float) -> str | None:
+    for full in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
+        proc = _git(root, "rev-parse", "--verify", "--quiet", f"{full}^{{commit}}", timeout=timeout)
+        if proc is None:
+            return None
+        if proc.returncode == 0:
+            return full
+    return None
+
+
+def _grep(root: str, full_ref: str, tokens: Sequence[str], timeout: float) -> bool | None:
+    args = ["grep", "-q", "-I", "-F"]
+    for t in tokens:
+        args += ["-e", t]
+    proc = _git(root, *args, full_ref, "--", timeout=timeout)
+    if proc is None or proc.returncode not in (0, 1):
+        return None
+    return proc.returncode == 0
+
+
+def _grep_each(root: str, full_ref: str, tokens: Sequence[str], timeout: float) -> list[str] | None:
+    found: list[str] = []
+    for t in tokens:
+        hit = _grep(root, full_ref, [t], timeout)
+        if hit is None:
+            return None
+        if hit:
+            found.append(t)
+    return found
+
+
+def git_search(
+    root: str, branch: str, tokens: Sequence[str], *,
+    max_tags: int = MAX_TAGS, timeout: float = GIT_TIMEOUT,
+) -> GitSearch | None:
+    """Search ``tokens`` (fixed strings) over the default branch and the newest tags.
+
+    ``root`` is a local git checkout. The branch resolves to
+    ``refs/remotes/origin/<branch>``, else ``refs/heads/<branch>``; the newest
+    ``max_tags`` tags by creation date are searched too. ``matched`` lists the
+    tokens found on any ref. None (unknown) when git is missing, ``root`` is
+    not the top of a checkout (a plain directory nested in another repository
+    never searches that repository), the branch ref is not there
+    (a shallow CI clone), ``branch`` looks like an option, or the branch grep
+    fails; a tag whose grep fails is skipped. Never raises.
+    """
+    if not branch or branch.startswith("-") or not tokens:
+        return None
+    top = _git(root, "rev-parse", "--show-toplevel", timeout=timeout)
+    if top is None or top.returncode != 0:
+        return None
+    if os.path.realpath(top.stdout.strip()) != os.path.realpath(root):
+        return None
+    full = _resolve_branch(root, branch, timeout)
+    if full is None:
+        return None
+    hits = _grep_each(root, full, tokens, timeout)
+    if hits is None:
+        return None
+    matched = list(hits)
+    refs, present = [branch], [branch] if hits else []
+    if max_tags > 0:
+        proc = _git(
+            root, "for-each-ref", "--sort=-creatordate", f"--count={max_tags}",
+            "--format=%(refname)", "refs/tags", timeout=timeout,
+        )
+        names = proc.stdout.split() if proc is not None and proc.returncode == 0 else []
+        for tag_ref in names:
+            tag_hits = _grep_each(root, tag_ref, tokens, timeout)
+            if tag_hits is None:
+                continue
+            short = tag_ref.removeprefix("refs/tags/")
+            refs.append(short)
+            if tag_hits:
+                present.append(short)
+                matched.extend(t for t in tag_hits if t not in matched)
+    return GitSearch(refs=refs, present_in=present, matched=matched)
 
 
 def is_compat_finding(finding: Finding) -> bool:
@@ -133,10 +275,24 @@ def surface_tokens(finding: Finding, removed: str) -> list[str]:
     return found
 
 
-def _note(branch: str, variant: str) -> str:
-    what = "this file is not there" if variant == "A" else (
-        "what this finding names is not in this file there"
+def _join(names: Sequence[str]) -> str:
+    names = list(names)
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _tree_note(refs: Sequence[str]) -> str:
+    return (
+        f"Checked against {_join(refs)} (whole tree): what this finding names is not there, "
+        "so no released client should depend on it. Docs that mention it may still need updating."
     )
+
+
+def _note(branch: str, variant: str) -> str:
+    what = {
+        "A": "this file is not there",
+        "B": "what this finding names is not in this file there",
+        "D": "what this finding names is not in the files this PR removed it from",
+    }[variant]
     return (
         f"Checked against {branch}: {what}, so no released client should depend on it. "
         "If it moved earlier in this stack, this check cannot tell. "
@@ -148,6 +304,17 @@ def _append(body: str, note: str) -> str:
     return f"{body}\n\n{note}" if body else note
 
 
+def _removed_by_path(files: Sequence[FileDiff]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for fd in files:
+        key = fd.path or fd.new_path or fd.old_path
+        if key:
+            text = removed_text(files, key)
+            if text:
+                out[key] = text
+    return out
+
+
 def apply_default_branch_check(
     findings: Sequence[Finding],
     *,
@@ -156,19 +323,29 @@ def apply_default_branch_check(
     ref: Any,
     target_branch: str,
     max_paths: int = MAX_PATHS,
+    repo_root: str | None = None,
 ) -> tuple[list[Finding], CheckOutcome]:
     """Lower or annotate versioning findings of a stacked PR; 1:1 and order-preserving.
 
     Does nothing (and reads nothing) when the forge cannot name its default
     branch, or the PR already targets it. Otherwise, for each active
-    ``error``/``warning`` finding that reads as a compatibility concern, reads
-    its file at the default branch (a renamed file at its old path; one read per distinct path, at most
-    ``max_paths`` paths per run): a 404 lowers it (note variant A); a file
-    that holds none of the finding's surface tokens lowers it (variant B); a
-    file that holds one keeps the severity and adds a "still present" line;
-    anything else (no surface tokens, an unknown read, an exception) leaves it
-    unchanged with no note. Lowering sets ``outofscope`` and appends one line;
-    it never sets ``drop_reason``.
+    ``error``/``warning`` finding that reads as a compatibility concern, the
+    surface tokens are taken from its own file's removed lines, else from the
+    removed lines of the whole diff. With tokens and a ``repo_root`` where
+    :func:`git_search` can answer (only the URL-path-like tokens when there
+    are any, so a generic name elsewhere in the tree does not count; the
+    first unknown answer turns git off for the rest of the run), a hit on the
+    default branch or a release tag keeps the severity and adds a "still
+    present" line naming the tokens and where; no
+    hit lowers it (the whole-tree note names every ref searched). Otherwise
+    the forge path: its own file at the default branch (a renamed file at its
+    old path) and each other diff file whose removed lines hold a token, one
+    read per distinct path, at most ``max_paths`` per run. Its own file 404
+    lowers it (note variant A); the tokens in none of the files read lower it
+    (variant B, or D when the tokens came from other files); a token found
+    keeps the severity with a "still present" line; anything else (no tokens,
+    an unknown read, an exception) leaves it unchanged with no note. Lowering
+    sets ``outofscope`` and appends one line; it never sets ``drop_reason``.
     """
     outcome = CheckOutcome()
     get_default = getattr(forge, "get_default_branch", None)
@@ -187,17 +364,13 @@ def apply_default_branch_check(
         return list(findings), outcome
     outcome.stacked = True
 
+    removed = _removed_by_path(files)
+    all_removed = "\n".join(removed.values())
     cache: dict[str, tuple[bool, str | None] | None] = {}
-    out: list[Finding] = []
-    for f in findings:
-        if (
-            f.drop_reason is not None
-            or (f.severity or "").strip().lower() not in LOWERABLE_SEVERITIES
-            or not is_compat_finding(f)
-        ):
-            out.append(f)
-            continue
-        path = read_path(files, f.file)
+    git_cache: dict[tuple[str, ...], GitSearch | None] = {}
+    git_usable = True
+
+    def read(path: str) -> tuple[bool, str | None] | None:
         if path not in cache:
             if len(cache) >= max_paths:
                 cache[path] = None
@@ -207,35 +380,93 @@ def apply_default_branch_check(
                 except Exception as e:  # noqa: BLE001
                     logger.warning("default branch read of %s failed: %s", path, e)
                     cache[path] = (True, None)
-        result = cache[path]
-        if result is None or (result[0] is True and result[1] is None):
+        return cache[path]
+
+    def unknown(result: tuple[bool, str | None] | None) -> bool:
+        return result is None or (result[0] is True and result[1] is None)
+
+    def lower(f: Finding, reason: str, note: str) -> Finding:
+        outcome.checked += 1
+        outcome.lowered += 1
+        outcome.lowered_findings.append({"file": f.file, "reason": reason})
+        return replace(f, severity=LOWERED_SEVERITY, body=_append(f.body, note))
+
+    def keep(f: Finding, where: Sequence[str]) -> Finding:
+        outcome.checked += 1
+        outcome.present += 1
+        return replace(f, body=_append(f.body, f"Checked against {_join(where)}: still present there."))
+
+    out: list[Finding] = []
+    for f in findings:
+        if (
+            f.drop_reason is not None
+            or (f.severity or "").strip().lower() not in LOWERABLE_SEVERITIES
+            or not is_compat_finding(f)
+        ):
+            out.append(f)
+            continue
+        tokens = surface_tokens(f, removed_text(files, f.file))
+        own_tokens = bool(tokens)
+        if not tokens:
+            tokens = surface_tokens(f, all_removed)
+
+        if tokens and repo_root and git_usable:
+            paths = [t for t in tokens if _URL_PATH_RE.fullmatch(t)]
+            key = tuple(paths or tokens)
+            if key not in git_cache:
+                git_cache[key] = git_search(repo_root, branch, list(key))
+            gs = git_cache[key]
+            if gs is None:
+                git_usable = False
+            else:
+                if not outcome.refs:
+                    outcome.refs = list(gs.refs)
+                if gs.present_in:
+                    outcome.checked += 1
+                    outcome.present += 1
+                    names = ", ".join(f"`{t}`" for t in gs.matched)
+                    out.append(replace(f, body=_append(
+                        f.body, f"Checked against {_join(gs.present_in)}: {names} still present there.",
+                    )))
+                else:
+                    out.append(lower(f, REASON_TREE_ABSENT, _tree_note(gs.refs)))
+                continue
+
+        own = read(read_path(files, f.file))
+        if unknown(own):
             outcome.unknown += 1
             out.append(f)
             continue
-        found, text = result
+        assert own is not None
+        found, text = own
         if not found:
-            outcome.checked += 1
-            outcome.lowered += 1
-            outcome.lowered_findings.append({"file": f.file, "reason": REASON_FILE_ABSENT})
-            out.append(replace(
-                f, severity=LOWERED_SEVERITY, body=_append(f.body, _note(branch, "A")),
-            ))
+            out.append(lower(f, REASON_FILE_ABSENT, _note(branch, "A")))
             continue
-        tokens = surface_tokens(f, removed_text(files, f.file))
         if not tokens:
             outcome.unknown += 1
             out.append(f)
             continue
-        outcome.checked += 1
-        if any(t in (text or "") for t in tokens):
-            outcome.present += 1
-            out.append(replace(
-                f, body=_append(f.body, f"Checked against {branch}: still present there."),
-            ))
+        others = [
+            read_path(files, p) for p, rem in removed.items()
+            if p != f.file and any(t in rem for t in tokens)
+        ]
+        texts = [text or ""]
+        some_unknown = False
+        for path in dict.fromkeys(others):
+            if path == read_path(files, f.file):
+                continue
+            res = read(path)
+            if unknown(res):
+                some_unknown = True
+            elif res is not None and res[0]:
+                texts.append(res[1] or "")
+        if any(t in body for t in tokens for body in texts):
+            out.append(keep(f, [branch]))
+        elif some_unknown:
+            outcome.unknown += 1
+            out.append(f)
+        elif own_tokens:
+            out.append(lower(f, REASON_SURFACE_ABSENT, _note(branch, "B")))
         else:
-            outcome.lowered += 1
-            outcome.lowered_findings.append({"file": f.file, "reason": REASON_SURFACE_ABSENT})
-            out.append(replace(
-                f, severity=LOWERED_SEVERITY, body=_append(f.body, _note(branch, "B")),
-            ))
+            out.append(lower(f, REASON_SURFACE_ABSENT, _note(branch, "D")))
     return out, outcome
