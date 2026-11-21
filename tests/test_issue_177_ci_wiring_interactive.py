@@ -72,6 +72,8 @@ def test_the_issue_repro_end_to_end():
     "exec 3</dev/tty",
     "printf 'Choose: '; select role in admin readonly; do break; done",
     "tee -a \"$HOME/.netrc\" < creds",
+    "printf x > \"$HOME\"/.config",
+    "cat creds | tee \"${HOME}\"/.netrc",
     "n=$#; [ $n -gt 0 ] || read -rp 'Name: ' name",
     "aws sso login --profile dev",
     "gcloud auth login",

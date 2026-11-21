@@ -542,7 +542,7 @@ def _is_library(file: FileDiff, files: Sequence[FileDiff]) -> bool:
 # ``;``/``&``/``|``/``(`` separator, after any ``if``/``then``/``else``/
 # ``elif``/``do``/``!`` words.
 _CMD_START = r"(?:^|[;&|(])\s*(?:(?:if|then|else|elif|do|!)\s+)*"
-_HOME = r"""["']?(?:~|\$HOME|\$\{HOME\})/"""
+_HOME = r"""["']?(?:~|\$HOME|\$\{HOME\})["']?/"""
 _INTERACTIVE_RES = (
     re.compile(rf"{_CMD_START}select\s+\w+\s+in\b"),
     re.compile(rf"{_CMD_START}read\b[^;&|]*\s-[A-Za-z]*p\b"),
