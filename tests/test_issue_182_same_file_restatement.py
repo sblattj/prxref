@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -25,7 +26,8 @@ from prxref.chunk_context import (
     same_file_restatements,
 )
 from prxref.llm import InvokeResult
-from prxref.triage import parse_unified_diff
+from prxref.quality import apply_restatement_anchor
+from prxref.triage import Finding, parse_unified_diff
 from tests.test_orchestrator import REF, FakeForge
 
 PATH = "api/library.yaml"
@@ -211,3 +213,72 @@ def test_control_without_a_reader_the_stale_line_is_not_shown():
     assert RESTATEMENT_HEADER not in worker[0]
     assert STALE.strip() not in worker[0]
     assert res["findings_active"] == []
+
+
+class _StaleAnchorLLM(_LLM):
+    """Answers like the live run did: the finding anchored on the STALE line, outside the diff."""
+
+    def invoke(self, system, user, *, max_tokens=4096, json_mode=False, timeout_s=60.0):
+        with self._lock:
+            self.calls.append(user)
+        findings = []
+        if f"diff --git a/{PATH} " in user and f"{PATH}:{STALE_LINE}:" in user:
+            findings = [{
+                "file": PATH, "line": STALE_LINE, "severity": "warning", "confidence": 0.85,
+                "title": "Accounts section still says late returns never close the account",
+                "body": (
+                    "The changed line now says a closed-branch book blocks the account. "
+                    "This paragraph still says \"Late returns only add a fee; the account "
+                    "stays open.\" and needs the same update."
+                ),
+            }]
+        return InvokeResult(
+            text=json.dumps({"findings": findings}), input_tokens=10, output_tokens=5,
+            model="fake-model", backend="fake", elapsed_ms=1,
+        )
+
+
+def test_a_finding_anchored_on_the_stale_line_posts_inline_on_the_changed_line():
+    """Follow-up to #182: GitHub only takes inline comments on diff lines, so line 35 was rejected."""
+    forge = _ReadingForge(DIFF, {PATH: HEAD_TEXT})
+    res = orchestrator.orchestrate_review(forge, REF, _StaleAnchorLLM(), post=True, ci_wiring="off")
+    (finding,) = res["findings_active"]
+    assert (finding.file, finding.line) == (PATH, RULE_LINE)
+    assert f"{PATH}:{STALE_LINE}" in finding.body
+    (batch,) = forge.inline_batches
+    assert [(c.path, c.line) for c in batch] == [(PATH, RULE_LINE)]
+    assert f"{PATH}:{STALE_LINE}" in batch[0].body
+
+
+def _finding(path: str, line: int, body: str = "stale rule") -> Finding:
+    return Finding(
+        file=path, line=line, severity="warning", confidence=0.8, title="t", body=body,
+    )
+
+
+def _reanchor(findings, files_text=None):
+    files = parse_unified_diff(DIFF)
+    text = {PATH: HEAD_TEXT} if files_text is None else files_text
+    return apply_restatement_anchor(findings, files, read=text.get)
+
+
+def test_reanchor_adds_the_citation_once():
+    (moved,) = _reanchor([_finding(PATH, STALE_LINE)])
+    assert moved.line == RULE_LINE
+    assert moved.body == f"stale rule (Unchanged text: `{PATH}:{STALE_LINE}`.)"
+    cited = f"see `{PATH}:{STALE_LINE}`"
+    (kept,) = _reanchor([_finding(PATH, STALE_LINE, cited)])
+    assert (kept.line, kept.body) == (RULE_LINE, cited)
+
+
+def test_reanchor_leaves_everything_else_alone():
+    inside = _finding(PATH, RULE_LINE - 1)
+    file_level = _finding(PATH, 0)
+    unrelated = _finding(PATH, STALE_LINE + 2)
+    dropped = replace(_finding(PATH, STALE_LINE), drop_reason="x")
+    findings = [inside, file_level, unrelated, dropped]
+    assert _reanchor(findings) == findings
+    assert _reanchor([_finding(PATH, STALE_LINE)], {}) == [_finding(PATH, STALE_LINE)]
+    code = _finding(PATH, STALE_LINE)
+    assert _reanchor([code], {PATH: "replicas: 3\n" * 40}) == [code]
+    assert apply_restatement_anchor([code], parse_unified_diff(DIFF), read=None) == [code]

@@ -602,7 +602,7 @@ def is_document_path(path: str, content: str | None = None) -> bool:
     return bool(content) and _SPEC_MARK_RE.search(content) is not None
 
 
-def _stems(text: str) -> set[str]:
+def content_stems(text: str) -> set[str]:
     """Lowercased content words of ``text`` (4+ letters, no stopwords), with a plural ``s`` dropped."""
     out: set[str] = set()
     for word in _WORD_RE.findall(text):
@@ -629,7 +629,7 @@ def same_file_restatements(
 
     For each chunk file that :func:`is_document_path` accepts and that has
     added lines, the head file is read and every line that is not itself an
-    added line is scored by how many content stems (:func:`_stems`) it
+    added line is scored by how many content stems (:func:`content_stems`) it
     shares with the chunk's added and removed lines in that file. A line
     sharing at least ``min_shared`` stems is a row; the ``max_per_file``
     best-scoring rows per file are kept, then listed by path and line, each
@@ -652,7 +652,7 @@ def same_file_restatements(
             continue
         changed: set[str] = set()
         for text in (*entry.added, *entry.removed):
-            changed |= _stems(text)
+            changed |= content_stems(text)
         if not changed:
             continue
         scored: list[tuple[int, int, str]] = []
@@ -660,7 +660,7 @@ def same_file_restatements(
             number = idx + 1
             if number in entry.added_lines:
                 continue
-            stems = _stems(text)
+            stems = content_stems(text)
             if len(stems) < min_shared:
                 continue
             shared = len(stems & changed)

@@ -99,7 +99,12 @@ check and only lowers an ``error`` about personal data on a test path to
    break, or that sits file-level with no snippet at all is marked
    ``anchor_unverified`` with its confidence
    unchanged; an unreadable file, a dropped finding and a
-   deterministic check's finding are untouched.
+   deterministic check's finding are untouched. Right after it,
+   ``apply_restatement_anchor`` (#182) moves a document or spec finding
+   that sits on unchanged text outside every hunk (where a forge rejects
+   an inline comment) onto the added line of that file sharing the most
+   content words with that text, at least two, and cites the old line as
+   ``<path>:<line>`` in the body.
 8. ``apply_thread_dedup``: drop findings that duplicate an already-open
    and current thread on the PR (path + line-window + shared distinctive
    tokens), with ``drop_reason`` ``duplicate of existing thread``; a
@@ -1487,6 +1492,87 @@ def _duplicate_matches_thread(
         required = distant_required
 
     return len(finding_tokens & body_tokens) >= required
+
+
+RESTATEMENT_ANCHOR_MIN_SHARED = 2
+
+
+def apply_restatement_anchor(
+    findings: Sequence[Finding],
+    files: Sequence[FileDiff] | None = None,
+    read: Callable[[str], str | None] | None = None,
+) -> list[Finding]:
+    """Move a document finding anchored on unchanged text onto the changed line it contradicts (#182).
+
+    A finding the same-file restatement block prompted
+    (:func:`prxref.chunk_context.same_file_restatements`) is often anchored
+    on the STALE line, which sits outside every hunk, and a forge such as
+    GitHub rejects an inline comment there. For a finding on a positive
+    line of a document or spec (:func:`prxref.chunk_context.is_document_path`
+    over the head file read through ``read``) that no hunk of that file
+    covers, the head file's text at that line is compared with each added
+    line of the file by shared content stems
+    (:func:`prxref.chunk_context.content_stems`). The added line sharing
+    the most, at least :data:`RESTATEMENT_ANCHOR_MIN_SHARED`, ties to the
+    earliest, becomes the anchor, and the body gains a closing
+    ``(Unchanged text: `<path>:<line>`.)`` citation of the old line unless
+    it already cites it as ``<path>:<line>``. Everything else passes
+    through untouched: a dropped or deterministic finding, a file-level
+    one, one inside a hunk, a code file, an unreadable file, and one whose
+    stale text shares too little with every added line. Length and order
+    are preserved.
+    """
+    from .chunk_context import content_stems, is_document_path
+
+    if read is None or not files:
+        return list(findings)
+    by_path = {f.path: f for f in files}
+    result: list[Finding] = []
+    for f in findings:
+        diff = by_path.get(f.file)
+        if (
+            f.drop_reason is not None
+            or diff is None
+            or f.line <= 0
+            or heuristics.is_deterministic(f)
+        ):
+            result.append(f)
+            continue
+        covered: set[int] = set()
+        added: list[tuple[int, str]] = []
+        for hunk in diff.hunks:
+            for line in hunk.lines:
+                if line.new_line is None:
+                    continue
+                covered.add(line.new_line)
+                if line.kind == "+":
+                    added.append((line.new_line, line.text))
+        if f.line in covered or not added:
+            result.append(f)
+            continue
+        content = read(f.file)
+        if not isinstance(content, str) or not is_document_path(f.file, content):
+            result.append(f)
+            continue
+        head = content.splitlines()
+        if f.line > len(head):
+            result.append(f)
+            continue
+        stale = content_stems(head[f.line - 1])
+        best_line, best_shared = 0, 0
+        for number, text in added:
+            shared = len(stale & content_stems(text))
+            if shared > best_shared:
+                best_line, best_shared = number, shared
+        if best_shared < RESTATEMENT_ANCHOR_MIN_SHARED:
+            result.append(f)
+            continue
+        citation = f"{f.file}:{f.line}"
+        body = f.body or ""
+        if not re.search(re.escape(citation) + r"(?!\d)", body):
+            body = (body.rstrip() + f" (Unchanged text: `{citation}`.)").lstrip()
+        result.append(replace(f, line=best_line, body=body))
+    return result
 
 
 def apply_thread_dedup(

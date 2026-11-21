@@ -346,6 +346,7 @@ from .quality import (
     apply_manifest_claim_check,
     apply_quality_gate,
     apply_removal_claim_check,
+    apply_restatement_anchor,
     apply_root_cause_fold,
     apply_rule_cap,
     apply_rule_category_check,
@@ -2349,7 +2350,20 @@ def orchestrate_review(
             "marked %d unverified",
             anchor_moves, anchor_unverified,
         )
-    findings = snapped
+    # AFTER the snap, deliberately: the snap can carry a document finding to
+    # its quoted stale text outside every hunk (#182), where no inline
+    # comment can land; this moves it to the changed line it contradicts.
+    reanchored = apply_restatement_anchor(snapped, files, read=reader)
+    restatement_moves = sum(
+        1 for before, after in zip(snapped, reanchored, strict=True)
+        if after.line != before.line
+    )
+    if restatement_moves:
+        logger.info(
+            "restatement anchor: moved %d document finding(s) from unchanged "
+            "text onto the changed line", restatement_moves,
+        )
+    findings = reanchored
     before_threads = findings
     findings = apply_thread_dedup(findings, threads)
     findings = apply_settled_thread_suppression(findings, threads)
