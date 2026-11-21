@@ -65,6 +65,8 @@ Stage order (v1 — no Jira, no graph, no learnings, no investigator):
    its file and line — a chunk worker's own restatement of the same toggle
    included — and only the higher-ranked one of the two (severity, then
    confidence, then content) survives, same as any other same-side pair.
+   The cross-slot Redis findings (#183,
+   ``redis_cluster.crossslot_findings``) join the same splice.
    The opt-in PR-metadata checks (#70, ``metadata_rules``) are NOT part
    of that splice: their violations are summary notes, never findings, so
    none of the passes below sees them:
@@ -364,6 +366,7 @@ from .quality import (
     prompt_example_titles,
     rule_cap_counts,
 )
+from .redis_cluster import crossslot_findings, multi_key_calls
 from .repo_context import exclude_predicate
 from .reviewer import NO_PROMPT_CONTEXT, PromptContext, fill_template
 from .stable_ids import REUSED_FROM_THREAD, REUSED_FROM_VERDICT, apply_stable_ids, stable_id_collisions
@@ -1690,6 +1693,12 @@ def orchestrate_review(
                     "ci_wiring", "fail", reason=f"{e.__class__.__name__}: {e}"
                 )
 
+    # Cross-slot multi-key Redis commands (#183): pure over the diff until
+    # a candidate call exists, then a bounded read of the head tree for
+    # cluster-mode evidence, through its own reader like CI wiring's. A
+    # crash here drops the check, never the review.
+    redis_findings = _redis_crossslot_findings(files, forge, ref, pr, repo_dir)
+
     try:
         with tracer.span("build_chunks") as sp:
             plan = plan_chunks(
@@ -1728,7 +1737,8 @@ def orchestrate_review(
             evidence if evidence_active else None, files, tracer=tracer,
         )
         deterministic_findings = (
-            release_shape + toggle_findings + ci_findings + evidence_findings
+            release_shape + toggle_findings + ci_findings + redis_findings
+            + evidence_findings
         )
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
@@ -1741,6 +1751,7 @@ def orchestrate_review(
             sampling=sampling, release_shape_findings=release_shape,
             toggle_findings=toggle_findings,
             ci_findings=ci_findings,
+            redis_findings=redis_findings,
             evidence_findings=evidence_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
@@ -2212,7 +2223,8 @@ def orchestrate_review(
             evidence, files, tracer=tracer, restated=len(evidence_restated),
         )
     deterministic_findings = (
-        release_shape + toggle_findings + ci_findings + evidence_findings
+        release_shape + toggle_findings + ci_findings + redis_findings
+        + evidence_findings
     )
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
@@ -6166,6 +6178,31 @@ def _trace_post_end(
         tracer.event("post", "ok" if posted else "fail", **meta)
 
 
+def _redis_crossslot_findings(files, forge, ref, pr, repo_dir) -> list[Finding]:
+    """The cross-slot Redis findings (#183, :func:`prxref.redis_cluster.crossslot_findings`).
+
+    Reads nothing unless the diff holds a candidate multi-key call; then
+    reads the head tree through the forge's head-sha reader, or
+    ``--repo-dir`` when the forge has none. Any exception yields ``[]``
+    and one warning: the check is advisory and never fails a review.
+    """
+    try:
+        if not multi_key_calls(files):
+            return []
+        reader = repo_reader.forge_reader(forge, ref, getattr(pr, "source_sha", "") or "")
+        if reader is None and repo_dir is not None:
+            reader = repo_reader.repo_dir_reader(repo_dir)
+        if reader is None:
+            return crossslot_findings(files)
+        listing = reader.listing()
+        return crossslot_findings(
+            files, read=reader.read, listing=listing.paths if listing is not None else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("redis cross-slot check failed (continuing without it): %s", e)
+        return []
+
+
 def _summary_only_run(
     forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
@@ -6173,6 +6210,7 @@ def _summary_only_run(
     release_shape_findings: list[Finding] | None = None,
     toggle_findings: list[Finding] | None = None,
     ci_findings: list[Finding] | None = None,
+    redis_findings: list[Finding] | None = None,
     evidence_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
@@ -6192,7 +6230,8 @@ def _summary_only_run(
     and quality passes a chunk-sourced finding gets
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
     they reach ``findings_active`` / ``verdict`` / the summary. The
-    CI-wiring findings (#66, ``ci_findings``) and the findings failing
+    CI-wiring findings (#66, ``ci_findings``), the cross-slot Redis
+    findings (#183, ``redis_findings``) and the findings failing
     execution evidence raises (#69, ``evidence_findings``,
     :func:`prxref.evidence.failure_findings`) join them the same way.
     Location validation runs only when the diff holds files; every
@@ -6228,7 +6267,8 @@ def _summary_only_run(
 
     findings = (
         list(release_shape_findings or []) + list(toggle_findings or [])
-        + list(ci_findings or []) + list(evidence_findings or [])
+        + list(ci_findings or []) + list(redis_findings or [])
+        + list(evidence_findings or [])
     )
     if findings:
         if files:

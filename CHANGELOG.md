@@ -39,6 +39,16 @@ tracker.
   account`) is skipped for the rest of the run. Tokens come from `turn.completed`;
   `cost_usd` is not reported.
 
+- **Cross-slot check for multi-key Redis commands (#183).** An added line that sends one
+  multi-key `DEL`/`UNLINK`/`EXISTS`/`MGET`/`MSET` over a collection of keys (Spring's
+  `delete(Collection)`, `multiGet`, a `*keys` or `...keys` spread, two or more keys) now
+  gets a deterministic `warning` when the diff or the repository says the cache runs in
+  cluster mode (`cluster-enabled yes`, "cluster mode" next to Redis/Valkey/ElastiCache, a
+  serverless ElastiCache cache, MemoryDB). Such a command fails with `CROSSSLOT` there
+  while a standalone test server accepts it. The finding cites the evidence line and
+  suggests per-key `DEL`/`UNLINK`, pipelined, or a shared hash tag; a file whose keys carry
+  a hash tag is skipped. At most 40 head files are read, and only when such a call exists.
+
 ### Changed
 
 - The litellm backend logs one WARNING per run when the chain's first model did not

@@ -125,6 +125,11 @@ directive of a present header is kept), and raises a
 warning (at most 10 per run) at each `path:line` a failing evidence item
 reports in a changed file, citing the command and its exit code.
 
+A cross-slot check (#183, always on) flags an added multi-key Redis command
+over many keys (`DEL`, `UNLINK`, `MGET`, `MSET`, Spring's
+`delete(Collection)`) when the diff or the repository says the cache runs in
+cluster mode, where such a command fails with `CROSSSLOT`.
+
 The passes, the checks, every `drop_reason` string, and which of them have a
 knob: [docs/quality.md](docs/quality.md).
 

@@ -88,6 +88,27 @@ keeps one copy, the more severe, then the more confident: on a severity tie
 the check's 1.0 outranks a model's lower confidence, and the model's copy is
 dropped as `duplicate of chunk finding (reworded, similarity <s>)`.
 
+**Multi-key Redis commands on a cluster-mode cache (#183).** When an added
+line hands a Redis client a multi-key command over many keys (`DEL`, `UNLINK`,
+`EXISTS`, `MGET`, `MSET`, Spring's `delete(Collection)`, `multiGet`,
+`multiSet`, a `*keys` or `...keys` spread, two or more key arguments) and the
+repository says its cache runs in cluster mode, that line gets a `warning` at
+confidence 0.9: such a command fails with `CROSSSLOT Keys in request don't
+hash to the same slot` unless every key shares one hash slot, and a
+standalone test server accepts it anyway. Cluster evidence is a line in the
+diff or in a head file saying `cluster-enabled yes`, "cluster mode" in a file
+that names Redis, Valkey, ElastiCache or MemoryDB, a serverless ElastiCache
+or Valkey cache, or MemoryDB. Cluster-aware client classes are not evidence,
+since Spring Data's and redis-py's cluster clients split a cross-slot `DEL`
+themselves. A file whose added lines carry a hash tag (`"{items}:*"`) is
+skipped. The head tree is read only when the diff holds such a call and no
+evidence of its own, at most 40 files (paths naming a cache first, then
+config, infrastructure and docs files), through the forge's head-sha reads or
+`--repo-dir`. The finding cites the evidence line and suggests one
+single-key `DEL`/`UNLINK` per key, pipelined, grouping keys by slot, or a
+shared hash tag. It joins the other deterministic findings at the chunk/sweep
+boundary, keeps its own severity like them, and has no knob.
+
 **Both checks keep their own severity.** A finding whose body ends with
 `(deterministic check, no model)` takes no part in severity consistency
 (pass 10): it joins no group, so no model finding raises it or is raised by
@@ -731,7 +752,7 @@ run record and `--format json` carry `review_depth`, the configured value.
   fixed; `PRXREF_RULE_SCOPING=off` turns both halves off), the anchor-snap and Also-at
   verification passes (#74 — they read the head file, and their window and
   confidence decrement are fixed constants), and the
-  pinned-off toggle check have **no knob**. They are correctness checks against the diff itself, not noise
+  pinned-off toggle and cross-slot Redis checks have **no knob**. They are correctness checks against the diff itself, not noise
   levers. The example-echo check has none either: a finding that repeats the
   prompt's own example was never found in the diff. To change what it drops,
   change the example in an overridden template. A hedged finding is unverified by its own admission; the escape hatch
