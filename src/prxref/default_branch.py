@@ -348,8 +348,9 @@ def apply_default_branch_check(
     hit lowers it (the whole-tree note names every ref searched). Otherwise
     the forge path: its own file at the default branch (a renamed file at its
     old path) and each other diff file whose removed lines hold a token, one
-    read per distinct path, at most ``max_paths`` per run. Its own file 404
-    lowers it (note variant A); the tokens in none of the files read lower it
+    read per distinct path, at most ``max_paths`` per run. A token found in
+    any file read keeps the severity, even when its own file is a 404; else
+    its own file 404 lowers it (note variant A); the tokens in none of the files read lower it
     (variant B, or D when the tokens came from other files); a token found
     keeps the severity with a "still present" line; anything else (no tokens,
     an unknown read, an exception) leaves it unchanged with no note. Lowering
@@ -450,19 +451,12 @@ def apply_default_branch_check(
             continue
         assert own is not None
         found, text = own
-        if not found:
-            out.append(lower(f, REASON_FILE_ABSENT, _note(branch, "A")))
-            continue
-        if not tokens:
-            outcome.unknown += 1
-            out.append(f)
-            continue
+        texts = [text or ""] if found else []
+        some_unknown = False
         others = [
             read_path(files, p) for p, rem in removed.items()
             if p != f.file and any(t in rem for t in tokens)
         ]
-        texts = [text or ""]
-        some_unknown = False
         for path in dict.fromkeys(others):
             if path == read_path(files, f.file):
                 continue
@@ -471,11 +465,13 @@ def apply_default_branch_check(
                 some_unknown = True
             elif res is not None and res[0]:
                 texts.append(res[1] or "")
-        if any(t in body for t in tokens for body in texts):
+        if tokens and any(t in body for t in tokens for body in texts):
             out.append(keep(f, [branch]))
-        elif some_unknown:
+        elif some_unknown or (found and not tokens):
             outcome.unknown += 1
             out.append(f)
+        elif not found:
+            out.append(lower(f, REASON_FILE_ABSENT, _note(branch, "A")))
         elif own_tokens:
             out.append(lower(f, REASON_SURFACE_ABSENT, _note(branch, "B")))
         else:

@@ -464,9 +464,15 @@ class TestEachFindingAnswersForItsOwnFile:
         )
         return res, forge
 
-    def test_a_lowered_keeper_does_not_hide_its_sibling(self):
+    def test_a_route_that_ships_in_the_sibling_file_keeps_the_spec_finding(self):
+        # The spec file is absent on main, but the controller still serves
+        # `/v1/things` there, so a released client can break: the spec error
+        # stays (the controller removed the same route and is read too), and
+        # the controller duplicate folds into it as one root cause.
         res, forge = self._run()
         assert (SPEC_PATH, "main") in forge.reads and (CTRL, "main") in forge.reads
-        active = [(f.file, f.severity) for f in res["findings_active"]]
-        assert (CTRL, "warning") in active
-        assert all(f.severity != "error" for f in res["findings_active"])
+        (f,) = res["findings_active"]
+        assert (f.file, f.severity) == (SPEC_PATH, "error")
+        assert "Checked against main: still present there." in f.body
+        assert f"Also at: `{CTRL}:2`" in f.body
+        assert res["default_branch_check"]["lowered"] == 0

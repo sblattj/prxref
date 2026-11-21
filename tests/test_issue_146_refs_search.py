@@ -226,3 +226,27 @@ class TestIncompleteTagSearch:
         assert "Checked against" not in f.body
         assert res["default_branch_check"]["unknown"] == 1
         assert forge.reads == []
+
+
+@pytest.mark.usefixtures("contract_stubs")
+class TestOwnFileAbsentOtherFileShips:
+    def test_a_404_on_its_own_file_still_checks_the_controller(self):
+        forge = BranchForge(
+            diff=two_file_diff(),
+            files={API: (True, "import web\n" + ROUTE_LINE), BUILD: (False, None)},
+        )
+        res = run_two(forge, {BUILD: [build_raw()]})
+        (f,) = [x for x in res["findings_active"] if x.file == BUILD]
+        assert f.severity == "error"
+        assert "Checked against main: still present there." in f.body
+        assert (API, "main") in forge.reads
+
+    def test_control_a_404_with_the_route_nowhere_is_still_variant_a(self):
+        forge = BranchForge(
+            diff=two_file_diff(),
+            files={API: (True, "import web\n"), BUILD: (False, None)},
+        )
+        res = run_two(forge, {BUILD: [build_raw()]})
+        (f,) = [x for x in res["findings_active"] if x.file == BUILD]
+        assert f.severity == "outofscope"
+        assert "this file is not there" in f.body

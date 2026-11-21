@@ -210,9 +210,9 @@ paths per run; later ones count as unknown:
 
 | Default branch has | Result |
 |---|---|
-| its own file is not there (404) | severity `outofscope` (the minor tier), line A appended |
+| one of the strings in any file read (checked first, even when its own file is a 404) | severity kept, `Checked against <branch>: still present there.` appended |
+| its own file is not there (404), no string in the other files | severity `outofscope` (the minor tier), line A appended |
 | the files, none of the surface strings | severity `outofscope`, line B (strings from its own file) or D (from other files) appended |
-| one of the strings in any file read | severity kept, `Checked against <branch>: still present there.` appended |
 | no surface strings, an unknown read, an exception | unchanged, no note |
 
 Line A: `Checked against <branch>: this file is not there, so no released client
