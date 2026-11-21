@@ -52,7 +52,10 @@ indentation scanner mis-slices, and a runner chain the one-file hop does
 not follow — a recipe calling ``$(MAKE) smoke``, ``make -C sub`` /
 ``make -f other.mk``, a workspace ``npm --prefix web run verify``, a
 script body calling another script, or a ``justfile``/``Taskfile``/
-``tox.ini`` runner.
+``tox.ini`` runner. A known false negative of the interactive-helper skip
+(#177): a shebang-only check that also prompts the terminal, logs in
+interactively or writes into ``$HOME`` is skipped; a check-shaped name or
+flag, or a test-looking path, still counts.
 """
 from __future__ import annotations
 
@@ -529,6 +532,43 @@ def _is_library(file: FileDiff, files: Sequence[FileDiff]) -> bool:
     )
 
 
+# The signs that a script is an interactive operator helper (issue #177),
+# matched on added, non-comment lines: a terminal read (bash ``select``,
+# ``read -p``, ``/dev/tty``), an interactive login at the start of a command
+# (``aws sso login``, ``gcloud auth login``, ``az login``), or a redirect or
+# ``tee`` into the user's home directory (``>> "$HOME/.cloud/config"``).
+# A command's start: the line start or a ``;``/``&``/``|``/``(`` separator,
+# then any run of ``if``/``then``/``else``/``elif``/``do``/``!`` words.
+_CMD_START = r"(?:^|[;&|(])\s*(?:(?:if|then|else|elif|do|!)\s+)*"
+_HOME = r"""["']?(?:~|\$HOME|\$\{HOME\})/"""
+_INTERACTIVE_RES = (
+    re.compile(r"^\s*select\s+\w+\s+in\b"),
+    re.compile(rf"{_CMD_START}read\b[^;&|]*\s-[A-Za-z]*p\b"),
+    re.compile(r"/dev/tty\b"),
+    re.compile(rf"{_CMD_START}(?:[\w.-]+\s+(?:sso|auth)|az)\s+login\b"),
+    re.compile(rf">>?\s*{_HOME}"),
+    re.compile(rf"\btee\b(?:\s+-\w+)*\s+{_HOME}"),
+)
+
+
+def _is_interactive_helper(file: FileDiff) -> bool:
+    """True when ``file`` reads like an interactive operator helper, not a check.
+
+    Any added, non-comment line carrying one of :data:`_INTERACTIVE_RES`.
+    A test-looking path (:func:`_looks_like_test`, :func:`default_include`)
+    is never one: a test suite may fake ``$HOME`` and still be a check.
+    """
+    if _looks_like_test(file.path) or default_include(file.path):
+        return False
+    for _, text in _added_lines(file):
+        stripped = text.strip()
+        if stripped.startswith("#"):
+            continue
+        if any(pattern.search(text) for pattern in _INTERACTIVE_RES):
+            return True
+    return False
+
+
 def _defines_flag(text: str, flag: str) -> bool:
     """True when ``text`` defines ``--flag`` rather than mentions it.
 
@@ -565,7 +605,10 @@ def candidate_checks(
 
     A file that is not ``removed`` counts when it is new (any status but
     ``modified``) and its basename contains a :data:`CI_SUFFIX_HINT` word
-    or it gains a shebang as its first line, or when any ``--flag`` it
+    or it gains a shebang as its first line (unless its added lines read
+    like an interactive operator helper, :func:`_is_interactive_helper`:
+    a terminal prompt, an interactive login or a write into ``$HOME``,
+    issue #177), or when any ``--flag`` it
     gains (on an added line, absent from the removed lines) contains such
     a word — so a modified script counts only for a new flag, and a
     body-only edit never does. A NEW file whose name says test or spec but
@@ -608,7 +651,7 @@ def candidate_checks(
             continue
         if fresh and any(
             new_line == 1 and text.startswith("#!") for new_line, text in _added_lines(file)
-        ):
+        ) and not _is_interactive_helper(file):
             candidates[path] = ("it gains a shebang line", True)
             continue
         if file.status == "added" and _looks_like_test(path) and not default_include(path):

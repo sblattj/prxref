@@ -94,6 +94,11 @@ tracker.
   above the delete in the same function exits first. The finding keeps its text and
   gains a `Contained:` line naming the guard; the run record counts it under
   `contained_claims` (#175).
+- The CI wiring check no longer flags an interactive setup helper as an unwired check
+  (#177). A new script that counts only because it gains a shebang is skipped when an
+  added line prompts the terminal (`select`, `read -p`, `/dev/tty`), runs an interactive
+  login (`aws sso login`, `gcloud auth login`, `az login`) or writes into `$HOME`. A
+  verify/smoke/check name or flag still counts, and a test-looking script is never skipped.
 
 ## [0.41.0] - 2026-11-01
 
