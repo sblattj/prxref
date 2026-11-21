@@ -10,13 +10,7 @@ tracker.
 
 ## [Unreleased]
 
-### Fixed
-
-- Quality pass 23 (#147): a "do X instead" fix that rests on framework behavior the diff
-  cannot show (mark a method not transactional, use `REQUIRES_NEW`, add `@Async`, wrap it in
-  middleware), or a code suggestion that adds an annotation the replaced lines lack, now gets
-  an `Unverified fix:` line telling the author to confirm it against the framework first.
-  Nothing is dropped; a guard-removal line still wins when both fire.
+## [0.42.0] - 2026-11-20
 
 ### Added
 
@@ -74,6 +68,11 @@ tracker.
 
 ### Fixed
 
+- Quality pass 23 (#147): a "do X instead" fix that rests on framework behavior the diff
+  cannot show (mark a method not transactional, use `REQUIRES_NEW`, add `@Async`, wrap it in
+  middleware), or a code suggestion that adds an annotation the replaced lines lack, now gets
+  an `Unverified fix:` line telling the author to confirm it against the framework first.
+  Nothing is dropped; a guard-removal line still wins when both fire.
 - Personal data in a test fixture is no longer a blocking error (#181). An `error`
   about a real person's email address, name or phone number on a test path (a `tests/` or
   `fixtures/` directory, `test_x.py`, `x.spec.ts`, ...) is lowered to `warning`, so a
