@@ -10,6 +10,18 @@ tracker.
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-11-22
+
+### Changed
+
+- The default-branch check is now on by default: on a stacked PR, a versioning or
+  compatibility finding whose file or named route is not on the default branch (or a recent
+  tag, with a git `--repo-dir`) is lowered to the minor tier with a note, so it no longer
+  counts toward `PRXREF_FAIL_ON=error`. Each review asks the forge for the default branch
+  once; a run whose forge cannot name it (a diff file, a replay, a failed lookup) changes
+  nothing and records `branch: null`. Set `PRXREF_DEFAULT_BRANCH_CHECK=off` (or
+  `default_branch_check = "off"` in `.prxref.toml`) to opt out (#146).
+
 ## [0.42.0] - 2026-11-20
 
 ### Added
