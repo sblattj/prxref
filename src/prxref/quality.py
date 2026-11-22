@@ -21,7 +21,7 @@ The cross-slot Redis check (#183, ``prxref.redis_cluster.crossslot_findings``)
 adds its findings the same way, from the orchestrator, and is not counted
 above either.
 
-The opt-in default-branch check (#146, ``PRXREF_DEFAULT_BRANCH_CHECK``) is not a
+The default-branch check (#146, ``PRXREF_DEFAULT_BRANCH_CHECK``) is not a
 numbered pass: ``prxref.default_branch`` runs from the orchestrator right after
 pass 15 and only lowers a versioning finding on a stacked PR, so the count above
 does not move.

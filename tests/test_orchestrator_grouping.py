@@ -893,6 +893,7 @@ SCENARIOS = {
 def capture(name: str, **knobs) -> tuple[str, dict]:
     diff, extra = SCENARIOS[name]
     knobs.setdefault("ci_wiring", "off")
+    knobs.setdefault("default_branch_check", "off")
     forge = FakeForge(diff=diff)
     llm = _Recorder(json.dumps({"findings": MODEL_FINDINGS}))
     handler = _ListHandler()

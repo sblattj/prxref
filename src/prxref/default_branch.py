@@ -4,7 +4,7 @@ A PR stacked on another PR targets a branch that is not the repository's
 default branch. A finding such as "moved URIs need a new API version" assumes
 a released client depends on the old surface; when that surface never existed
 on the default branch, no released client can. With
-``PRXREF_DEFAULT_BRANCH_CHECK=on`` the orchestrator checks the surface the
+``PRXREF_DEFAULT_BRANCH_CHECK=on`` (the default; ``off`` opts out) the orchestrator checks the surface the
 finding names and lowers the finding to the minor tier (``outofscope``, the
 tier the severity caps call minor) when it is not there. It never drops a
 finding.

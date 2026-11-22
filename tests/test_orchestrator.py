@@ -282,7 +282,7 @@ class TestHappyPath:
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-            "review_depth", "learnings", "describe",
+            "review_depth", "learnings", "describe", "default_branch_check",
         }
         assert res["verdict"] == "Request-Changes"
         assert len(res["findings_active"]) == 2
@@ -760,7 +760,7 @@ class TestMaxTokensThreading:
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-            "review_depth", "learnings", "describe",
+            "review_depth", "learnings", "describe", "default_branch_check",
         }
 
 
@@ -1079,7 +1079,7 @@ class TestQualityGateKnobsAreThreaded:
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-            "review_depth", "learnings", "describe",
+            "review_depth", "learnings", "describe", "default_branch_check",
         }
 
 
@@ -1093,7 +1093,7 @@ RESULT_KEYS = {
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "removal_claims",
     "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-    "review_depth", "learnings", "describe",
+    "review_depth", "learnings", "describe", "default_branch_check",
 }
 
 

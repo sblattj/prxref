@@ -143,6 +143,7 @@ def _review(forge, llm: _RecordingLLM | None = None, *, ref=REF, **kwargs):
     llm = llm if llm is not None else _RecordingLLM()
     kwargs.setdefault("max_files_per_chunk", 1)
     kwargs.setdefault("ci_wiring", "off")
+    kwargs.setdefault("default_branch_check", "off")
     res = orchestrator.orchestrate_review(forge, ref, llm, post=False, **kwargs)
     return res, llm
 

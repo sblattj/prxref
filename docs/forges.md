@@ -582,9 +582,10 @@ comments it publishes itself.
 ## Default branch and branch file reads
 
 Two optional forge capabilities (issue #146) let a later pass read a file from the
-repository's default branch. Nothing calls them in a default review: constructing a forge
-and `get_pr` make no request for them. Only `PRXREF_DEFAULT_BRANCH_CHECK=on` does, and only
-on a PR whose target branch is not the default branch ([the check](quality.md#default-branch-check-on-stacked-prs-146)). `get_default_branch(ref)` returns the bare branch
+repository's default branch. Constructing a forge and `get_pr` make no request for them.
+The default-branch check (`PRXREF_DEFAULT_BRANCH_CHECK`, on by default, `off` opts out)
+calls `get_default_branch` once per review, and `get_file_at_branch` only on a PR whose
+target branch is not the default branch ([the check](quality.md#default-branch-check-on-stacked-prs-146)). `get_default_branch(ref)` returns the bare branch
 name or `None` (any failure, with a logged warning). `get_file_at_branch(ref, path,
 branch)` returns `(found, text)`: `(False, None)` only on HTTP 404, `(True, text)` for a
 file, and `(True, None)` when the answer is unknown (transport failure, any other status,

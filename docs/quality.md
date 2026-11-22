@@ -160,7 +160,7 @@ is documented, not fixed.
 
 ## Default-branch check on stacked PRs (#146)
 
-Opt-in (`PRXREF_DEFAULT_BRANCH_CHECK=on`, also a `.prxref.toml` key). It is a step
+On by default since 0.43.0 (`PRXREF_DEFAULT_BRANCH_CHECK=off` opts out, also a `.prxref.toml` key). A run whose forge cannot name the default branch (a diff file, a replay, a failed lookup) changes nothing. It is a step
 beside the numbered passes, not one of them, so the pass count above does not move.
 It runs before pass 15, the root-cause fold (only the #181 fixture cap below sits between them; so each finding answers for its own
 file: a keeper lowered because its file is absent cannot absorb a sibling whose file is

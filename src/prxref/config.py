@@ -495,9 +495,9 @@ LLM / pipeline:
                                 repository reader, the run logs one WARNING
                                 and the follow-up stays off for that run. Any
                                 other value is a configuration error
-  PRXREF_DEFAULT_BRANCH_CHECK   Default-branch check (#146): "off" (the
-                                default) makes no extra call and leaves the
-                                run exactly as it was. "on": on a stacked PR
+  PRXREF_DEFAULT_BRANCH_CHECK   Default-branch check (#146): "on" (the
+                                default) or "off" (opts out: no extra call,
+                                the run exactly as it was). "on": on a stacked PR
                                 (target branch is not the repository's default
                                 branch), a versioning finding whose own file,
                                 or the surface it names, is absent from the
@@ -1043,7 +1043,7 @@ _DEFAULTS: dict[str, object] = {
     "repo_context_max_reads": 200,
     "repo_context_max_chunk_reads": 16,
     "context_followup": "off",
-    "default_branch_check": "off",
+    "default_branch_check": "on",
     # Error verification (#126): vocabulary restated from
     # prxref.verify.VERIFY_MODES (config stays a leaf module).
     "verify_errors": "names",

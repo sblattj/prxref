@@ -229,11 +229,11 @@ class TestOff:
         assert "default_branch_check" not in res
         assert "default_branch_check" not in _build_json_result(res)
 
-    def test_off_output_is_identical_to_the_argument_left_out(self):
+    def test_on_output_is_identical_to_the_argument_left_out(self):
         findings = [raw()]
         a = orchestrate_review(
             BranchForge(diff=route_diff(API), files={}), REF, FakeLLM({API: findings}),
-            post=True, max_workers=1, default_branch_check="off",
+            post=True, max_workers=1, default_branch_check="on",
         )
         b = orchestrate_review(
             BranchForge(diff=route_diff(API), files={}), REF, FakeLLM({API: findings}),
@@ -330,8 +330,9 @@ class TestCompatPattern:
 
 
 class TestConfig:
-    def test_default_is_off(self):
-        assert load_config()["default_branch_check"] == "off"
+    def test_default_is_on(self, monkeypatch):
+        monkeypatch.delenv(ENV, raising=False)
+        assert load_config()["default_branch_check"] == "on"
 
     @pytest.mark.parametrize("value", ["off", "on"])
     def test_env_value_loads(self, monkeypatch, value):

@@ -55,7 +55,7 @@ RECORD_KEYS = {
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "removal_claims",
     "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-    "review_depth", "learnings", "describe",
+    "review_depth", "learnings", "describe", "default_branch_check",
 }
 NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",

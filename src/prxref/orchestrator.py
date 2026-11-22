@@ -668,7 +668,7 @@ def orchestrate_review(
     repo_context_max_chunk_reads: int = repo_reader.MAX_CHUNK_READS,
     llm_parse_retries: int = 0,
     context_followup: str = "off",
-    default_branch_check: str = "off",
+    default_branch_check: str = "on",
     verify_errors: str = verify.DEFAULT_MODE,
     verify_errors_max: int = verify.DEFAULT_MAX_CALLS,
     suggestions: str = "off",
@@ -1254,7 +1254,7 @@ def orchestrate_review(
     the timeout retry is skipped. The sweep never gets a follow-up.
 
     ``default_branch_check`` (``PRXREF_DEFAULT_BRANCH_CHECK``, issue #146) is
-    ``"off"`` (the default) or ``"on"``; any other value raises ``ValueError``.
+    ``"on"`` (the default) or ``"off"``; any other value raises ``ValueError``.
     Off makes no forge call and adds no record key. On, a PR whose target
     branch is not the repository's default branch has its versioning findings
     checked against the default branch (see :mod:`prxref.default_branch`) right

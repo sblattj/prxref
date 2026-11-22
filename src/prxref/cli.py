@@ -1327,7 +1327,8 @@ def _build_json_result(result: Any) -> dict:
     min_agree, seeds, findings_per_pass, dropped}``, and each row of
     ``findings`` then also carries ``agreement`` and ``passes_ok`` (see
     :func:`_finding_json`). ``default_branch_check`` (#146) is forwarded the
-    same way, and only on runs with ``PRXREF_DEFAULT_BRANCH_CHECK=on``.
+    same way, and only on runs with ``PRXREF_DEFAULT_BRANCH_CHECK=on`` (the
+    default).
     """
     if not isinstance(result, dict):
         result = {}

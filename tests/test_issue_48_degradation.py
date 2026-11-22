@@ -470,6 +470,11 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("rule_scope_cleared") is None  # 0.29 (#75): null when no scope declared
         # #66: on by default (OD2); this forge has no reader, so the check records why.
         assert payload.pop("ci_wiring") == {"triggered": False, "reason": "no reader"}
+        # #146: on by default; this forge cannot name a default branch, so nothing is checked.
+        assert payload.pop("default_branch_check") == {
+            "branch": None, "stacked": False, "checked": 0, "lowered": 0, "present": 0,
+            "unknown": 0, "lowered_findings": [], "refs": [],
+        }
         assert payload.pop("evidence") is None  # #69: null when no evidence file is configured
         assert payload.pop("stable_ids") is not None  # #71: ids are on by default
         assert payload.pop("error_verification")["mode"] == "names"  # #126: on by default
