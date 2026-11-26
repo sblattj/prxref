@@ -103,15 +103,22 @@ def _finding_counts(record: Mapping[str, Any]) -> dict[str, int]:
     return counts
 
 
-def _models(record: Mapping[str, Any]) -> list[str]:
-    """The models that answered (``cost_by_model`` keys), else the configured chain."""
-    by_model = record.get("cost_by_model")
-    names: list[object] = list(by_model) if isinstance(by_model, Mapping) and by_model else []
-    if not names:
+def _clean_models(names: Iterable[object]) -> list[str]:
+    return [m for m in (_text(n) for n in names) if m][:_MODELS_MAX]
+
+
+def _models(*records: Mapping[str, Any]) -> list[str]:
+    """The models that answered (``cost_by_model`` keys of any record), else the configured chain."""
+    for record in records:
+        by_model = record.get("cost_by_model")
+        if isinstance(by_model, Mapping) and by_model:
+            return _clean_models(by_model)
+    for record in records:
         sampling = record.get("sampling")
         chain = sampling.get("models") if isinstance(sampling, Mapping) else None
-        names = list(chain) if isinstance(chain, list) else []
-    return [m for m in (_text(n) for n in names) if m][:_MODELS_MAX]
+        if isinstance(chain, list) and chain:
+            return _clean_models(chain)
+    return []
 
 
 def summarize(
@@ -136,7 +143,7 @@ def summarize(
     """
     data: Mapping[str, Any] = record if isinstance(record, Mapping) else {}
     more: Mapping[str, Any] = extra if isinstance(extra, Mapping) else {}
-    models = _models(data) or _models(more)
+    models = _models(data, more)
     return {
         "finished_at": _number(finished_at),
         "repo": _text(repo),

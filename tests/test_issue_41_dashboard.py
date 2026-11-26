@@ -374,6 +374,18 @@ def test_script_in_a_gate_run_record_renders_inert(tmp_path, served):
     store.close()
 
 
+def test_gate_models_are_the_ones_that_answered_not_the_chain(tmp_path):
+    chain = {"temperature": 0, "seed": None, "models": ["acme/a", "acme/b", "acme/c"]}
+    result = _result(cost_by_model={"acme/b": 0.01}, sampling=chain)
+    d = tmp_path / "runs" / "1"
+    d.mkdir(parents=True)
+    (d / "result.json").write_text(json.dumps(cli._build_json_result(result)), encoding="utf-8")
+    (d / "run_record.json").write_text(json.dumps(result, default=str), encoding="utf-8")
+    assert dashboard.RunsDirSource(tmp_path / "runs").rows()[0]["models"] == ["acme/b"]
+    (d / "run_record.json").unlink()
+    assert dashboard.RunsDirSource(tmp_path / "runs").rows()[0]["models"] == ["acme/a", "acme/b", "acme/c"]
+
+
 def test_a_missing_runs_dir_is_an_empty_list(tmp_path):
     assert dashboard.RunsDirSource(tmp_path / "absent").rows() == []
 
