@@ -33,8 +33,12 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/ac
 | `systemic.md` | the prompt of the whole-PR sweep |
 | `summary.md` | the summary comment prxref posts on the PR |
 
-Only these three file names are read. Any other file in the directory is
-ignored with a warning; dotfiles such as `.gitkeep` are skipped silently.
+Only these three file names are read by a review. The directory may also hold
+`reply.md`, the [thread-reply](thread-replies.md#context) template, which
+only `prxref reply` and the daemon's reply sweep read; `prxref prompts
+export` does not write it, so copy it from `src/prxref/prompts/reply.md`.
+Any other file in the directory is ignored with a warning; dotfiles such as
+`.gitkeep` are skipped silently.
 Two texts cannot be overridden: the judge prompt of `prxref eval`, so runs
 with different templates are always graded by the same judge (see
 [docs/evals.md](evals.md#the-judge-prompt)), and the notice
@@ -335,7 +339,7 @@ These only warn, and the run goes on:
   prompt;
 - a `summary.md` without `{findings}` that gives some finding group no slot,
   whose findings then land under `Other findings`;
-- a file other than the three templates;
+- a file other than the three templates and `reply.md`;
 - a directory that holds none of the three, which reviews with the packaged
   templates.
 

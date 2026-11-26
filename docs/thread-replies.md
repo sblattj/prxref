@@ -104,6 +104,10 @@ and posts nothing.
 - The webhook daemon also drops a comment event whose body carries the marker
   before queueing anything.
 - Edited and deleted comment events are ignored; only `created` wakes a sweep.
+- Known limit: in `always` mode, another bot's reply under a prxref finding
+  counts as a person's, since only prxref's marker identifies a bot. Two
+  bots that answer every reply would trade answers up to `PRXREF_REPLY_MAX`
+  per sweep; use `mention` where other bots comment.
 - A re-review's prune pass deletes prxref's old inline comments, answers
   included, so a thread whose finding was pruned disappears with its answers.
 
@@ -149,6 +153,7 @@ jobs:
       && !contains(github.event.comment.body, 'Reviewed by prxref')
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
       issues: write
     steps:
