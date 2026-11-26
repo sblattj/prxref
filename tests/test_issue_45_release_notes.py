@@ -419,16 +419,23 @@ class TestDraftHook:
         assert fake.writes == []
 
     def test_a_human_edited_draft_keeps_its_text(self, draft, monkeypatch):
-        draft.write_text(
-            "# Unreleased\n\nIntro a human wrote.\n\n## Fixes\n\n- edited by hand ([#5](x))\n", encoding="utf-8",
-        )
+        edited = f"# Unreleased\n\nIntro a human wrote.\n\n## Fixes\n\n- edited by hand ([#5]({BASE}5))\n"
+        draft.write_text(edited, encoding="utf-8")
         monkeypatch.setattr(cli, "make_forge", lambda ref: FakeForge({}))
         cli._webhook_release_note_handler(f"{BASE}6", "fix: six")
         cli._webhook_release_note_handler(f"{BASE}5", "fix: five")
-        assert draft.read_text(encoding="utf-8") == (
-            "# Unreleased\n\nIntro a human wrote.\n\n## Fixes\n\n- edited by hand ([#5](x))\n"
-            "- six ([#6](https://github.com/acme/widgets/pull/6))\n"
-        )
+        assert draft.read_text(encoding="utf-8") == edited + f"- six ([#6]({BASE}6))\n"
+
+    def test_the_same_number_in_another_repository_is_recorded(self, draft, monkeypatch):
+        monkeypatch.setattr(cli, "make_forge", lambda ref: FakeForge({}))
+        other = "https://github.com/acme/gadgets/pull/"
+        cli._webhook_release_note_handler(f"{BASE}9", "fix: widgets nine")
+        cli._webhook_release_note_handler(f"{other}9", "fix: gadgets nine")
+        cli._webhook_release_note_handler(f"{other}9", "fix: gadgets nine again")
+        text = draft.read_text(encoding="utf-8")
+        assert f"- widgets nine ([#9]({BASE}9))" in text
+        assert f"- gadgets nine ([#9]({other}9))" in text
+        assert "again" not in text
 
     def test_a_summary_read_failure_still_records_the_title(self, draft, monkeypatch):
         monkeypatch.setattr(cli, "make_forge", lambda ref: FakeForge({}, fail={7}))

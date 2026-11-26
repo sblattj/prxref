@@ -175,8 +175,10 @@ because it writes a file; a `.prxref.toml` cannot set it.
   appends its bullet, built from the webhook's pull request title, under the
   category heading. A missing heading is inserted in the fixed order above.
   A summary that cannot be read leaves the title alone.
-- A pull request whose `[#N](` link is already in the file is skipped, so a
-  redelivered webhook writes nothing twice.
+- A pull request whose `[#N](URL)` link is already in the file is skipped,
+  so a redelivered webhook writes nothing twice. The match is on the whole
+  link, so several repositories can share one draft without the same number
+  colliding.
 - A write that fails (a directory in the way, no permission) is logged at
   ERROR and the daemon keeps running.
 - It never posts to the forge.

@@ -445,13 +445,13 @@ def append_to_draft(path: str | Path, entry: Entry) -> bool:
 
     The file is created with a ``# Unreleased`` title when missing. A
     missing category heading is inserted in :data:`CATEGORIES` order. An
-    entry whose ``[#N](`` link is already in the file is skipped. Returns
+    entry whose ``[#N](url)`` link is already in the file is skipped. Returns
     True when the file was written and False when the entry was already
     there. ``OSError`` propagates; the daemon caller logs it.
     """
     target = Path(path)
     text = target.read_text(encoding="utf-8") if target.exists() else f"{DRAFT_TITLE}\n"
-    if f"[#{entry.number}](" in text:
+    if f"[#{entry.number}]({entry.url})" in text:
         return False
     lines = text.rstrip("\n").split("\n")
     heading = f"## {_HEADINGS[entry.category]}"
