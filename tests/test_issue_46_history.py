@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import prxref
-from prxref import cli, history
+from prxref import cli, history, orchestrator
 from prxref.orchestrator import orchestrate_review
 from prxref.triage import Finding
 from tests.test_issue_143_stability_mode import B1, ScriptLLM, _limit
@@ -403,10 +403,35 @@ class TestConfigErrors:
         err = capsys.readouterr().err
         assert "PRXREF_FAIL_ON_REGRESSION" in err and "PRXREF_HISTORY_FILE" in err
 
-    def test_a_config_file_cannot_set_them(self, stub, hfile, capsys):
-        Path(".prxref.toml").write_text('fail_on_regression = "on"\n', encoding="utf-8")
+    @pytest.mark.parametrize(("key", "reason"), [
+        ("history_file", "local write"),
+        ("fail_on_regression", "gate"),
+        ("regression_tolerance", "gate"),
+    ])
+    def test_a_config_file_cannot_set_them(self, stub, hfile, capsys, key, reason):
+        Path(".prxref.toml").write_text(f'{key} = "x"\n', encoding="utf-8")
         assert _review() == 2
-        assert "fail_on_regression" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert f"'{key}' cannot be set in a repository config file ({reason})" in err
+        assert f"set PRXREF_{key.upper()} in the pipeline instead" in err
+
+
+class TestTheRealIncrementalRecord:
+    """The skip rule reads the orchestrator's own ``incremental`` record."""
+
+    def _record(self, mode):
+        scope = orchestrator._IncrementalScope(mode, reason=None if mode == "incremental" else "r")
+        return orchestrator._incremental_record(scope, 3, None)
+
+    def test_a_scoped_run_is_skipped(self):
+        res = _result(incremental=self._record("incremental"))
+        assert cli._history_skip_reason(res) == "incremental review of part of the PR"
+
+    def test_a_full_run_under_incremental_is_recorded(self):
+        assert cli._history_skip_reason(_result(incremental=self._record("full"))) is None
+        assert cli._history_skip_reason(_result(incremental=orchestrator._incremental_record(
+            None, 0, None,
+        ))) is None
 
 
 class TestOtherCallers:
@@ -414,4 +439,12 @@ class TestOtherCallers:
         res = cli._run_review(None, post=False, diff_file=str(DIFF))
         assert res["history"] is None
         assert stub.calls[0]["history_baseline"] is None
+        assert not hfile.exists()
+
+    def test_eval_run_never_writes_the_file(self, stub, hfile, tmp_path):
+        fixture = DIFF.parent
+        argv = ["eval", "run", "--cases", str(fixture / "cases.json"), "--label", "L",
+                "--out", str(tmp_path / "out")]
+        assert cli.main(argv) == 0
+        assert stub.calls and all(c["history_baseline"] is None for c in stub.calls)
         assert not hfile.exists()

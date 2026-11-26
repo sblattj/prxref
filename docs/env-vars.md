@@ -190,7 +190,9 @@ configuration error: --max-chunks: must be a finite number greater than 0, got 0
 
 The second form exists because naming the environment variable unconditionally sent operators hunting for a `PRXREF_MAX_CHUNKS` they had never set.
 
-One knob can move the exit code beyond that: `PRXREF_FAIL_ON`. Its default `never` is everything above, unchanged. Setting it to `error` exits **1** when the completed review carries an active error-severity finding; `any` exits **1** on any active finding; and under either value a review that does not complete also exits **1** — it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed). A gate that silently passes on a broken run is worse than none. An empty PR diff is not a failure (verdict `Approved`, exit **0**). An unrecognized PR URL still exits **0** under every value: nothing was reviewed, so there is no outcome to gate on. The webhook daemon has no exit code and is unaffected.
+Two opt-in knobs can move the exit code beyond that: `PRXREF_FAIL_ON`, and `PRXREF_FAIL_ON_REGRESSION` (below). The default `PRXREF_FAIL_ON=never` is everything above, unchanged. Setting it to `error` exits **1** when the completed review carries an active error-severity finding; `any` exits **1** on any active finding; and under either value a review that does not complete also exits **1**: it crashes, or it ends with verdict `Error` (the forge could not be read, the diff could not be parsed or chunked, or every chunk review failed). A gate that silently passes on a broken run is worse than none. An empty PR diff is not a failure (verdict `Approved`, exit **0**). An unrecognized PR URL still exits **0** under every value: nothing was reviewed, so there is no outcome to gate on. The webhook daemon has no exit code and is unaffected.
+
+`PRXREF_FAIL_ON_REGRESSION=on` (#46, default `off`) exits **1** when a completed review's active findings exceed the rolling mean of the last 20 runs in `PRXREF_HISTORY_FILE` times `1 + PRXREF_REGRESSION_TOLERANCE`, once at least 3 prior runs exist. It does not change `PRXREF_FAIL_ON`: the exit code is the higher of the two. See [history.md](history.md).
 
 Think hard before reaching for it. Failing a build on a finding turns a probabilistic reviewer into a merge gate, and the first false positive teaches the team to bypass the gate. Read the verdict from the posted summary instead — and do not build a security control on the exit code.
 
@@ -234,7 +236,7 @@ The trade-off is the whole difference: the advisory profile gives you the three 
 
 One filter has no knob and always runs: the **hedge gate**, immediately before the confidence floor. A finding whose own title or body conditions the defect on a precondition the model never established from the diff ("If X still leases a client", "Unless the backfill already ran", "if they are members of the root workspaces") is dropped regardless of its confidence, with `drop_reason` `hedged: "<matched phrase>"` in the run record, and never consumes an error-cap slot.
 
-Neither knob affects the exit code — `PRXREF_FAIL_ON` is the only one that can. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build).
+Neither knob affects the exit code: only `PRXREF_FAIL_ON` and `PRXREF_FAIL_ON_REGRESSION` can. See [Bad Configuration Is the Only Thing That Fails a Build](#bad-configuration-is-the-only-thing-that-fails-a-build).
 
 ## Quality Passes and Drop Reasons
 

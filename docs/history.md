@@ -120,29 +120,51 @@ against a mean of 0 passes and 1 finding fails.
 ## Committing the file back
 
 prxref never runs git. Commit the file from your own CI step after the
-review, so the next run reads it. A GitHub Actions example:
+review, so the next run reads it. A GitHub Actions example for PRs from
+branches of the same repository:
 
 ```yaml
-- name: Review
-  env:
-    PRXREF_HISTORY_FILE: .prxref-history.jsonl
-    PRXREF_FAIL_ON_REGRESSION: "on"
-  run: prxref review --pr-url "${{ github.event.pull_request.html_url }}"
+permissions:
+  contents: write
 
-- name: Commit the review history
-  if: always()
-  run: |
-    git config user.name "prxref-history"
-    git config user.email "prxref-history@users.noreply.github.com"
-    git add .prxref-history.jsonl
-    git diff --cached --quiet || git commit -m "chore: record prxref review"
-    git push origin "HEAD:${{ github.head_ref }}"
+steps:
+  - uses: actions/checkout@v4
+    with:
+      ref: ${{ github.head_ref }}
+
+  - name: Review
+    env:
+      PRXREF_HISTORY_FILE: .prxref-history.jsonl
+      PRXREF_FAIL_ON_REGRESSION: "on"
+    run: prxref review --pr-url "${{ github.event.pull_request.html_url }}"
+
+  - name: Commit the review history
+    if: always()
+    run: |
+      git config user.name "prxref-history"
+      git config user.email "prxref-history@users.noreply.github.com"
+      git add .prxref-history.jsonl
+      git diff --cached --quiet || git commit -m "chore: record prxref review"
+      git push origin "HEAD:${{ github.head_ref }}"
 ```
 
-`if: always()` keeps the line even when the gate fails the review step.
+- `ref: ${{ github.head_ref }}` checks out the PR branch itself. Without it,
+  `actions/checkout` checks out the PR's merge commit, and the push would put
+  that merge commit on the PR branch.
+- `if: always()` keeps the line even when the gate fails the review step.
+- A PR from a fork cannot push with the default token. Run the commit step
+  only for same-repository PRs, or use the dedicated-branch variant below.
+
+Two open PRs that both append to the file conflict when the second merges.
+Git's built-in union merge keeps both lines. Add this to `.gitattributes`:
+
+```
+.prxref-history.jsonl merge=union
+```
+
 Pushing to the PR branch adds a commit per run. To keep PR branches clean,
-push to a dedicated branch instead and fetch the file from it before the
-review.
+push the file to a dedicated branch instead and fetch it from that branch
+before the review.
 
 ## The JSON key
 
