@@ -112,6 +112,18 @@ def test_prxref_rooted_thread_maps_to_one_inline_conversation_and_reply_targets_
     }
 
 
+def test_a_root_with_a_resolution_reports_resolved():
+    resolved_root = {
+        **ROOT,
+        "resolution": {"type": "comment_resolution", "created_on": "2026-11-02T09:00:00+00:00"},
+    }
+    forge, _ = _forge(_page([resolved_root, REPLY]))
+
+    [conversation] = forge.list_conversations(_ref())
+
+    assert conversation.resolved is True
+
+
 def test_a_thread_whose_root_is_human_is_left_out():
     forge, _ = _forge(_page([ROOT, HUMAN_ROOT, HUMAN_ROOT_PRXREF_REPLY]))
 

@@ -636,8 +636,9 @@ class ForgeImpl:
         root its ``parent`` chain ends at. A root with ``inline`` whose body
         carries :data:`ATTRIBUTION_MARKER` is an inline thread: its comments
         in id order, ``reply_to`` the root id, ``path``/``line`` the root's
-        ``inline.path``/``inline.to``, ``resolved`` as :meth:`list_threads`
-        derives it (a tombstoned root), ``url`` the root's ``links.html``.
+        ``inline.path``/``inline.to``, ``resolved`` true for a tombstoned root
+        (as :meth:`list_threads` derives it) or one carrying a
+        ``resolution``, ``url`` the root's ``links.html``.
         The comments under every root without ``inline`` form the one
         ``"pr"`` conversation, sorted by ``created_on`` then id, present only
         when it has a comment. Deleted comments are left out. A feed that
@@ -669,7 +670,7 @@ class ForgeImpl:
                 comments=tuple(_conversation_comment(c) for c in group),
                 path=inline.get("path"),
                 line=inline.get("to"),
-                resolved=_is_deleted(root),
+                resolved=_is_deleted(root) or bool(root.get("resolution")),
                 url=href if isinstance(href, str) else None,
             ))
         if top_level:
