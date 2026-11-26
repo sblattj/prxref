@@ -99,6 +99,8 @@ SUMMARY_OPTIONAL_PLACEHOLDERS: frozenset[str] = SUMMARY_GROUP_SLOTS | frozenset(
 #: but loaded on its own by :func:`load_reply_template`, so it is not one of
 #: :data:`TEMPLATE_NAMES` and a review run never reads it.
 REPLY_TEMPLATE = "reply"
+#: What ``prxref prompts export`` writes: the review templates, then ``reply.md``.
+EXPORT_NAMES: tuple[str, ...] = (*TEMPLATE_NAMES, REPLY_TEMPLATE)
 #: The heading that splits ``reply.md`` into system (above) and user (from it on).
 REPLY_SPLIT_MARKER = "## Conversation"
 MAX_TEMPLATE_BYTES = 256 * 1024
@@ -540,16 +542,16 @@ def _is_within(path: str, root: str) -> bool:
 
 
 def export_prompt_templates(dest: str | os.PathLike[str], *, force: bool = False) -> list[str]:
-    """Write the packaged ``worker.md``, ``systemic.md`` and ``summary.md`` into directory ``dest``.
+    """Write the packaged ``worker.md``, ``systemic.md``, ``summary.md`` and ``reply.md`` into directory ``dest``.
 
     The starting point for an override directory: each template is written
     byte for byte as packaged, so the exported directory loads through
-    :func:`load_prompt_templates` without a warning. Only the
-    :data:`TEMPLATE_NAMES` are written, each by name; the package directory
+    :func:`load_prompt_templates` and :func:`load_reply_template` without a
+    warning. Only the :data:`EXPORT_NAMES` are written, each by name; the package directory
     is never listed, so the judge prompt, which is not overridable, is never
     exported. ``dest`` is created, with any missing parents, when it does
     not exist. Returns the written paths, ``dest`` joined with each file
-    name, in :data:`TEMPLATE_NAMES` order.
+    name, in :data:`EXPORT_NAMES` order.
 
     Without ``force``, any target that already exists (a dangling symlink
     included) is refused before anything is written or created, with a
@@ -562,7 +564,7 @@ def export_prompt_templates(dest: str | os.PathLike[str], *, force: bool = False
     raw = os.fspath(dest)
     if not raw.strip():
         raise ConfigError("prompts export: DIR must name a directory, got an empty path")
-    targets = [os.path.join(raw, f"{name}.md") for name in TEMPLATE_NAMES]
+    targets = [os.path.join(raw, f"{name}.md") for name in EXPORT_NAMES]
     if not force:
         existing = [target for target in targets if os.path.lexists(target)]
         if existing:
@@ -573,7 +575,7 @@ def export_prompt_templates(dest: str | os.PathLike[str], *, force: bool = False
     written: list[str] = []
     try:
         os.makedirs(raw, exist_ok=True)
-        for name, target in zip(TEMPLATE_NAMES, targets, strict=True):
+        for name, target in zip(EXPORT_NAMES, targets, strict=True):
             if os.path.islink(target):
                 os.unlink(target)
             with open(target, "wb") as fh:

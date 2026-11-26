@@ -19,8 +19,8 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/ac
   (`prompts_dir = ".prxref/prompts"`), relative to that file and kept inside
   the repository; see [docs/config-file.md](config-file.md). The CI safety
   section below applies to it as well.
-- `prxref prompts export DIR [--force]` writes the packaged templates into
-  `DIR` byte for byte. An unedited export loads without a warning and reviews
+- `prxref prompts export DIR [--force]` writes the packaged templates, and
+  `reply.md`, into `DIR` byte for byte. An unedited export loads without a warning and reviews
   exactly as the packaged templates do.
 - A template missing from the directory keeps the packaged one. Delete the
   templates you leave unchanged, so they follow prxref's upgrades.
@@ -36,7 +36,7 @@ prxref review --pr-url https://github.com/acme/widget/pull/42 --prompts-dir ~/ac
 Only these three file names are read by a review. The directory may also hold
 `reply.md`, the [thread-reply](thread-replies.md#context) template, which
 only `prxref reply` and the daemon's reply sweep read; `prxref prompts
-export` does not write it, so copy it from `src/prxref/prompts/reply.md`.
+export` writes it beside the three.
 Any other file in the directory is ignored with a warning; dotfiles such as
 `.gitkeep` are skipped silently.
 Two texts cannot be overridden: the judge prompt of `prxref eval`, so runs

@@ -14,9 +14,16 @@ import pytest
 from prxref import reviewer
 from prxref.cli import _build_parser, main
 from prxref.llm import ConfigError
-from prxref.prompt_templates import TEMPLATE_NAMES, export_prompt_templates, load_prompt_templates
+from prxref.prompt_templates import (
+    EXPORT_NAMES,
+    TEMPLATE_NAMES,
+    export_prompt_templates,
+    load_prompt_templates,
+    load_reply_template,
+    packaged_reply_text,
+)
 
-FILES = tuple(f"{name}.md" for name in TEMPLATE_NAMES)
+FILES = tuple(f"{name}.md" for name in EXPORT_NAMES)
 MINE = b"our team's own template\n"
 
 
@@ -54,12 +61,12 @@ class TestExportedFiles:
     def test_reviewer_load_prompt_text_encodes_back_to_the_raw_packaged_bytes(self, name):
         assert _packaged(name) == _resource(f"{name}.md")
 
-    @pytest.mark.parametrize("name", TEMPLATE_NAMES)
+    @pytest.mark.parametrize("name", EXPORT_NAMES)
     def test_each_exported_file_is_byte_equal_to_the_packaged_template(self, work, name):
         export_prompt_templates("prompts")
         assert (work / "prompts" / f"{name}.md").read_bytes() == _packaged(name)
 
-    def test_exactly_the_three_overridable_templates_are_written_and_never_judge(self, work):
+    def test_exactly_the_overridable_templates_and_reply_are_written_and_never_judge(self, work):
         packaged = {p.name for p in resources.files("prxref").joinpath("prompts").iterdir() if p.name.endswith(".md")}
         assert "judge.md" in packaged
         assert packaged > set(FILES)
@@ -131,15 +138,15 @@ class TestRefusal:
         d = work / "prompts"
         _seed(d, FILES)
         export_prompt_templates("prompts", force=True)
-        for name in TEMPLATE_NAMES:
-            assert (d / f"{name}.md").read_bytes() == _packaged(name)
+        for name in EXPORT_NAMES:
+            assert (d / f"{name}.md").read_bytes() == _resource(f"{name}.md")
 
     def test_force_fills_a_partly_seeded_directory(self, work):
         d = work / "prompts"
         _seed(d, ("summary.md",))
         assert export_prompt_templates("prompts", force=True) == [os.path.join("prompts", f) for f in FILES]
-        for name in TEMPLATE_NAMES:
-            assert (d / f"{name}.md").read_bytes() == _packaged(name)
+        for name in EXPORT_NAMES:
+            assert (d / f"{name}.md").read_bytes() == _resource(f"{name}.md")
 
     def test_force_replaces_a_symlink_rather_than_writing_through_it(self, work):
         shared = work / "shared.md"
@@ -186,6 +193,11 @@ class TestRoundTrip:
             recorded = loaded.record()["templates"][name]
             assert recorded["sha256"] == hashlib.sha256(_resource(f"{name}.md")).hexdigest()
 
+    def test_the_exported_reply_template_loads_as_the_packaged_one(self, work):
+        export_prompt_templates("prompts")
+        assert (work / "prompts" / "reply.md").is_file()
+        assert load_reply_template("prompts", source="--prompts-dir") == packaged_reply_text()
+
 
 class TestCli:
     def test_export_exits_0_and_prints_one_line_per_written_file(self, work, capsys):
@@ -193,8 +205,8 @@ class TestCli:
         out, err = capsys.readouterr()
         assert out.splitlines() == [os.path.join("prompts", f) for f in FILES]
         assert err == ""
-        for name in TEMPLATE_NAMES:
-            assert (work / "prompts" / f"{name}.md").read_bytes() == _packaged(name)
+        for name in EXPORT_NAMES:
+            assert (work / "prompts" / f"{name}.md").read_bytes() == _resource(f"{name}.md")
 
     @pytest.mark.parametrize("seeded", [FILES, ("systemic.md",)], ids=["all", "one"])
     def test_an_existing_template_exits_2_naming_force_and_modifies_nothing(self, work, capsys, seeded):
@@ -214,9 +226,9 @@ class TestCli:
         d = work / "prompts"
         _seed(d, FILES)
         assert main(["prompts", "export", "prompts", "--force"]) == 0
-        assert len(capsys.readouterr().out.splitlines()) == 3
-        for name in TEMPLATE_NAMES:
-            assert (d / f"{name}.md").read_bytes() == _packaged(name)
+        assert len(capsys.readouterr().out.splitlines()) == len(FILES)
+        for name in EXPORT_NAMES:
+            assert (d / f"{name}.md").read_bytes() == _resource(f"{name}.md")
 
     def test_an_unwritable_destination_exits_2(self, work, capsys):
         (work / "blocker").write_bytes(MINE)
