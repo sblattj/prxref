@@ -167,6 +167,7 @@ from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, ch
 from prxref.forges.repo_dir import RepoDir
 from prxref.llm import ConfigError
 from prxref.metadata_rules import MetadataRules
+from prxref.notify import notify as _notify
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
 from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir
 from prxref.rules import load_review_rules, load_scoped_rules
@@ -2106,6 +2107,7 @@ def _run_review(
     if isinstance(result, dict):
         result["config_file"] = config_stamp
         result["eval_pins"] = pins
+    _notify(result, cfg, ref=ref, post=post)
     return result
 
 

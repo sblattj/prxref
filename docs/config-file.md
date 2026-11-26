@@ -308,6 +308,7 @@ instead, even when the value is empty.
 | `stability_min_agree` | gate | Decides which findings are listed and so what `PRXREF_FAIL_ON` sees. |
 | `fail_on` | gate | The pipeline's exit-code policy. |
 | `dry_run` | gate | The switch that suppresses every forge write. |
+| `notify_url` | credential | A webhook URL (a Slack webhook URL is a secret); `config check` prints it as `<set>`. |
 | `allow_unsigned` | gate | The webhook signature safety switch. |
 | `rules_source` | gate | Chooses whether repository rules come from the PR's base or its head. |
 | `gate_app_id` | credential | The gate app's identity. |

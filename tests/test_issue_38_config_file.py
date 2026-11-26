@@ -29,6 +29,7 @@ EXPECTED_ENV_ONLY = {
     "stability_passes": "spend",
     "stability_min_agree": "gate",
     "dry_run": "gate",
+    "notify_url": "credential",
     "allow_unsigned": "gate",
     "rules_source": "gate",
     "gate_app_id": "credential",

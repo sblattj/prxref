@@ -164,6 +164,8 @@ LLM / pipeline:
                                 PRXREF_FAIL_ON. Environment-only: it overrides
                                 other keys, so a config file setting it would
                                 override its own values.
+  PRXREF_NOTIFY_URL             env-only webhook (e.g. Slack) that gets one JSON
+                                summary of each finished review; empty = off
   PRXREF_DRY_RUN                literal "1" reviews without writing anything
                                 to the forge — no summary, no inline comments
                                 (default off). Applies to the webhook daemon
@@ -1000,6 +1002,7 @@ _DEFAULTS: dict[str, object] = {
     "max_inline_comments": 15,
     "fail_on": "never",
     "dry_run": False,
+    "notify_url": "",
     "trace_file": "",
     "trace_dir": "",
     "post_mode": "summary+inline",
@@ -1408,6 +1411,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "llm_cli_path": "executable",
     "fail_on": "gate",
     "dry_run": "gate",
+    "notify_url": "credential",
     "allow_unsigned": "gate",
     "rules_source": "gate",
     "review_skip_globs": "gate",

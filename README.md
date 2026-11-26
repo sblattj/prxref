@@ -480,6 +480,27 @@ prxref can draft a pull request's description from its diff and label it (#37). 
 
 Per-forge details, including Azure DevOps's 4000-character limit: [docs/forges.md](docs/forges.md#pr-descriptions-and-labels). Settings: [docs/env-vars.md](docs/env-vars.md).
 
+## Notifications
+
+Set `PRXREF_NOTIFY_URL` (env-only, empty by default) and every finished review
+POSTs one small JSON document to it. A Slack incoming webhook takes it as is,
+because the document carries a top-level `text` line:
+
+```bash
+export PRXREF_NOTIFY_URL=https://hooks.slack.com/services/T000/B000/XXXX
+prxref review --pr-url https://github.com/owner/repo/pull/12
+# Slack shows: prxref: Request-Changes on owner/repo#12 (2 errors, 1 warning)
+```
+
+The document also has `pr_url`, `forge`, `repo`, `number`, `verdict`,
+`findings` (counts by severity), `models`, `prxref_version` and an ISO
+`timestamp`. One attempt, a 10 second timeout, no retry. A failed notification
+(timeout, connection error, non-2xx) never changes the verdict, the posted
+comments or the exit code; the outcome is `result["notify"]` with `status`
+`sent`, `failed` or `off`. A dry run (`PRXREF_DRY_RUN=1` or `--no-post`) never
+notifies. The URL is a credential: only its host is logged, and `config check`
+prints it as `<set>`.
+
 ## CLI Flags
 
 `prxref review` takes:
