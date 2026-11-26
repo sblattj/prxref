@@ -293,7 +293,7 @@ With `PRXREF_METRICS_PORT` set, `serve` and `gate serve` also expose Prometheus 
 
 With `PRXREF_DASHBOARD_PORT` set, they also serve a read-only page of recent runs (verdict, finding counts, cost, tokens, models) on `127.0.0.1` only: see [docs/dashboard.md](docs/dashboard.md).
 
-With `PRXREF_RELEASE_NOTES_FILE` set (off by default), `serve` also appends each merged GitHub pull request to that release-notes draft file, under its conventional-commit category, and never posts: see [docs/release-notes.md](docs/release-notes.md).
+With `PRXREF_RELEASE_NOTES_FILE` set (off by default), `serve` also appends each merged pull request, from any forge's merge webhook, to that release-notes draft file, under its conventional-commit category, and never posts: see [docs/release-notes.md](docs/release-notes.md).
 
 ## Thread Replies
 

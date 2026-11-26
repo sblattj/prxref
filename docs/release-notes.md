@@ -167,10 +167,27 @@ Off by default. Set `PRXREF_RELEASE_NOTES_FILE` to a path, and `prxref
 serve` keeps a draft there as pull requests merge. It is environment-only
 because it writes a file; a `.prxref.toml` cannot set it.
 
-- A GitHub `pull_request` delivery with action `closed` and
-  `pull_request.merged` true is queued on the same worker as reviews. A
-  close without a merge is ignored, as is every closed delivery while the
-  variable is unset (the response reason stays the one it was before).
+- A merge delivery is queued on the same worker as reviews. Each forge's
+  merge event:
+
+  | Forge | Merge event | Ignored |
+  |---|---|---|
+  | GitHub | `pull_request`, action `closed`, `pull_request.merged` true | a close with `merged` false |
+  | Gitea/Forgejo | `pull_request`, action `closed`, `pull_request.merged` true | a close with `merged` false |
+  | GitLab | Merge Request Hook, `object_attributes.action` `merge` | action `close` |
+  | Bitbucket Cloud | `pullrequest:fulfilled` | `pullrequest:rejected` (declined) |
+  | Bitbucket Server/DC | `pr:merged` | `pr:declined` |
+  | Azure DevOps | `git.pullrequest.updated` with `resource.status` `completed` | status `abandoned`, and `git.pullrequest.merged` |
+
+  Azure DevOps sends `git.pullrequest.merged` for a merge *attempt*, which
+  can fail on conflicts or policy, so only a completed pull request counts.
+  The webhook must be subscribed to the merge event: Bitbucket needs its
+  merged event added, and Azure DevOps a third subscription on
+  `git.pullrequest.updated` filtered to **Status changed** (the review
+  subscription is filtered to source-branch pushes, so it never carries a
+  completion). See [deploy.md](deploy.md).
+  The URL and title come from the payload. While the variable is unset,
+  every merge delivery is ignored with the response reason it had before.
 - The worker reads prxref's summary comment on that pull request and
   appends its bullet, built from the webhook's pull request title, under the
   category heading. A missing heading is inserted in the fixed order above.
@@ -198,6 +215,3 @@ Edit it as you go. Text you add (an intro paragraph, reworded bullets) is
 kept, because prxref only inserts lines. At release time, rename the title to
 the version, move the section into your changelog, commit it, and empty the
 file for the next release.
-
-Only GitHub deliveries feed the draft today. For the other forges, run the
-command at release time instead.

@@ -908,7 +908,7 @@ Webhooks:
                                   webhooks (default off; insecure)
   PRXREF_RELEASE_NOTES_FILE       release notes (#45): a path. When set,
                                   ``prxref serve`` appends each merged
-                                  GitHub PR (pull_request closed, merged)
+                                  PR (any forge's merge webhook)
                                   to this "Unreleased" markdown draft,
                                   under its conventional-commit category,
                                   skipping a PR already in it. Never

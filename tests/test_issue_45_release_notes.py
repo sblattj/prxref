@@ -372,6 +372,137 @@ class TestIntake:
         assert seen == [("note", f"{BASE}21", "t")]
 
 
+def _jbody(payload: dict) -> bytes:
+    return json.dumps(payload).encode()
+
+
+_GL_URL = "https://gitlab.com/acme/widgets/-/merge_requests/31"
+_BBC_URL = "https://bitbucket.org/acme/widgets/pull-requests/44"
+_BBS_URL = "https://bitbucket.example.com/projects/ACME/repos/widgets/pull-requests/8"
+_GITEA_URL = "https://gitea.example.com/acme/widgets/pulls/9"
+_ADO_URL = "https://dev.azure.com/acme/proj/_git/widgets/pullrequest/55"
+
+
+def _gitlab(action: str) -> bytes:
+    return _jbody({"object_kind": "merge_request", "object_attributes": {
+        "action": action, "url": _GL_URL, "title": "fix: gitlab merge"}})
+
+
+def _bitbucket_cloud(state: str) -> bytes:
+    return _jbody({"pullrequest": {"title": "feat: cloud merge", "state": state,
+                                   "links": {"html": {"href": _BBC_URL}}}})
+
+
+def _bitbucket_server(state: str) -> bytes:
+    return _jbody({"pullRequest": {"title": "perf: server merge", "state": state,
+                                   "links": {"self": [{"href": _BBS_URL}]}}})
+
+
+def _gitea(merged: bool) -> bytes:
+    return _jbody({"action": "closed", "pull_request": {
+        "html_url": _GITEA_URL, "merged": merged, "title": "docs: gitea merge"}})
+
+
+def _azure(status: str, event: str = "git.pullrequest.updated") -> bytes:
+    return _jbody({"publisherId": "tfs", "eventType": event, "resource": {
+        "status": status, "pullRequestId": 55, "title": "refactor: ado merge",
+        "repository": {"webUrl": "https://dev.azure.com/acme/proj/_git/widgets"}}})
+
+
+# (forge, merged headers, merged body, url, title, reason with the variable unset,
+#  unmerged headers, unmerged body, unmerged reason with the variable set)
+FORGE_CASES = [
+    ("gitlab", {"X-Gitlab-Event": "Merge Request Hook"}, _gitlab("merge"), _GL_URL, "fix: gitlab merge",
+     "ignored: gitlab merge request action 'merge' is not reviewable",
+     {"X-Gitlab-Event": "Merge Request Hook"}, _gitlab("close"),
+     "ignored: gitlab merge request action 'close' is not reviewable"),
+    ("bitbucket-cloud", {"X-Event-Key": "pullrequest:fulfilled"}, _bitbucket_cloud("MERGED"), _BBC_URL,
+     "feat: cloud merge", "ignored: bitbucket event 'pullrequest:fulfilled' is not reviewable",
+     {"X-Event-Key": "pullrequest:rejected"}, _bitbucket_cloud("DECLINED"),
+     "ignored: bitbucket event 'pullrequest:rejected' is not reviewable"),
+    ("bitbucket-server", {"X-Event-Key": "pr:merged"}, _bitbucket_server("MERGED"), _BBS_URL,
+     "perf: server merge", "ignored: bitbucket event 'pr:merged' is not reviewable",
+     {"X-Event-Key": "pr:declined"}, _bitbucket_server("DECLINED"),
+     "ignored: bitbucket event 'pr:declined' is not reviewable"),
+    ("gitea", {"X-Gitea-Event": "pull_request"}, _gitea(True), _GITEA_URL, "docs: gitea merge",
+     "ignored: gitea pull_request action 'closed' is not reviewable",
+     {"X-Gitea-Event": "pull_request"}, _gitea(False), "ignored: gitea pull_request closed without merging"),
+    ("azure-devops", {}, _azure("completed"), _ADO_URL, "refactor: ado merge",
+     "ignored: azure devops pull request status 'completed' is not reviewable",
+     {}, _azure("abandoned"), "ignored: azure devops pull request status 'abandoned' is not reviewable"),
+]
+FORGE_IDS = [case[0] for case in FORGE_CASES]
+
+
+@pytest.fixture
+def unsigned_all(monkeypatch):
+    monkeypatch.setenv("PRXREF_ALLOW_UNSIGNED", "1")
+    for name in ("GITHUB", "BITBUCKET", "GITLAB", "GITEA", "AZURE_DEVOPS"):
+        monkeypatch.delenv(f"PRXREF_{name}_WEBHOOK_SECRET", raising=False)
+
+
+def _deliver(body: bytes, headers: dict):
+    review_queue: queue.Queue = queue.Queue()
+    handler_cls = webhooks.make_webhook_handler(review_queue)
+    handler = handler_cls.__new__(handler_cls)
+    handler.headers = {**headers, "Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    sent = []
+    handler._respond = lambda status, payload, extra=None: sent.append((status, payload))
+    handler._handle_webhook()
+    return sent, (review_queue.get_nowait() if not review_queue.empty() else None)
+
+
+class TestIntakeEveryForge:
+    @pytest.mark.parametrize("case", FORGE_CASES, ids=FORGE_IDS)
+    def test_a_merge_queues_a_release_note_job(self, case, unsigned_all, monkeypatch, tmp_path):
+        _forge, headers, body, url, title, *_ = case
+        monkeypatch.setenv("PRXREF_RELEASE_NOTES_FILE", str(tmp_path / "draft.md"))
+        sent, job = _deliver(body, headers)
+        assert [status for status, _ in sent] == [202]
+        assert job == webhooks.ReleaseNoteJob(url, title)
+
+    @pytest.mark.parametrize("case", FORGE_CASES, ids=FORGE_IDS)
+    def test_off_by_default_a_merge_is_ignored_as_before(self, case, unsigned_all, monkeypatch):
+        _forge, headers, body, _url, _title, off_reason, *_ = case
+        monkeypatch.delenv("PRXREF_RELEASE_NOTES_FILE", raising=False)
+        assert webhooks.verify_signature(body, headers) == (False, off_reason)
+        sent, job = _deliver(body, headers)
+        assert job is None and sent == [(202, {"queued": False, "reason": off_reason})]
+
+    @pytest.mark.parametrize("case", FORGE_CASES, ids=FORGE_IDS)
+    def test_an_unmerged_or_declined_close_is_ignored(self, case, unsigned_all, monkeypatch, tmp_path):
+        *_, headers, body, reason = case
+        monkeypatch.setenv("PRXREF_RELEASE_NOTES_FILE", str(tmp_path / "draft.md"))
+        assert webhooks.verify_signature(body, headers) == (False, reason)
+        assert _deliver(body, headers)[1] is None
+
+    def test_an_azure_merge_attempt_is_not_a_merge(self, unsigned_all, monkeypatch, tmp_path):
+        monkeypatch.setenv("PRXREF_RELEASE_NOTES_FILE", str(tmp_path / "draft.md"))
+        body = _azure("active", event="git.pullrequest.merged")
+        assert webhooks.verify_signature(body, {}) == (
+            False, "ignored: azure devops event 'git.pullrequest.merged' is not reviewable",
+        )
+
+    def test_reviews_still_queue_with_release_notes_on(self, unsigned_all, monkeypatch, tmp_path):
+        monkeypatch.setenv("PRXREF_RELEASE_NOTES_FILE", str(tmp_path / "draft.md"))
+        assert _deliver(_gitlab("open"), {"X-Gitlab-Event": "Merge Request Hook"})[1] == _GL_URL
+        assert _deliver(_azure("active"), {})[1] == _ADO_URL
+
+    @pytest.mark.parametrize("case", FORGE_CASES, ids=FORGE_IDS)
+    def test_the_draft_dedups_each_forge_link(self, case, monkeypatch, tmp_path):
+        _forge, _headers, _body, url, title, *_ = case
+        draft = tmp_path / "draft.md"
+        monkeypatch.setenv("PRXREF_RELEASE_NOTES_FILE", str(draft))
+        monkeypatch.setattr(cli, "make_forge", lambda ref: FakeForge({}))
+        cli._webhook_release_note_handler(url, title)
+        cli._webhook_release_note_handler(url, title + " again")
+        text = draft.read_text(encoding="utf-8")
+        number = url.rsplit("/", 1)[1]
+        assert text.count(f"[#{number}]({url})") == 1
+        assert "again" not in text
+
+
 class TestServeWiring:
     def _capture(self, monkeypatch):
         captured = {}

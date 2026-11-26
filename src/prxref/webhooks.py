@@ -12,11 +12,15 @@ deliveries with action ``created`` queue a :class:`ReplyJob` instead
 (thread replies, #32), run by the caller's ``reply_handler`` on the same
 worker; a comment carrying prxref's attribution marker is ignored at intake.
 
-Release notes (#45): with ``PRXREF_RELEASE_NOTES_FILE`` set, a GitHub
-``pull_request`` ``closed`` delivery whose ``pull_request.merged`` is true
-queues a :class:`ReleaseNoteJob` (the PR URL and title), run by the
-caller's ``release_note_handler`` on the same worker. Unset (the default),
-a closed delivery is ignored exactly as before. It never posts.
+Release notes (#45): with ``PRXREF_RELEASE_NOTES_FILE`` set, a merge
+delivery queues a :class:`ReleaseNoteJob` (the PR URL and title), run by
+the caller's ``release_note_handler`` on the same worker. A merge is a
+GitHub or Gitea/Forgejo ``pull_request`` ``closed`` delivery whose
+``pull_request.merged`` is true, a GitLab Merge Request Hook with action
+``merge``, Bitbucket Cloud ``pullrequest:fulfilled``, Bitbucket Server
+``pr:merged``, or an Azure DevOps ``git.pullrequest.updated`` whose
+status is ``completed``. Unset (the default), every one of these is
+ignored exactly as before. It never posts.
 """
 from __future__ import annotations
 
@@ -65,12 +69,21 @@ _RELEASE_NOTE_PREFIX = "release-note:"
 _BITBUCKET_CLOUD_EVENTS = ("pullrequest:created", "pullrequest:updated")
 _BITBUCKET_SERVER_EVENTS = ("pr:opened", "pr:modified", "pr:from_ref_updated")
 _BITBUCKET_EVENTS = _BITBUCKET_CLOUD_EVENTS + _BITBUCKET_SERVER_EVENTS
+# The merge events (#45), queued for release notes only when that is on.
+# A declined PR (pullrequest:rejected, pr:declined) stays ignored.
+_BITBUCKET_MERGED_EVENTS = ("pullrequest:fulfilled", "pr:merged")
 _GITLAB_ACTIONS = ("open", "update")
+_GITLAB_MERGED_ACTION = "merge"
 # Azure DevOps service hooks send no event header, so they are recognized by
 # the body's publisherId instead, and only after every header-based forge.
 _AZURE_DEVOPS_PUBLISHER = "tfs"
 _AZURE_DEVOPS_EVENTS = ("git.pullrequest.created", "git.pullrequest.updated")
 _AZURE_DEVOPS_REVIEWABLE_STATUS = "active"
+# A completed PR (#45) arrives as git.pullrequest.updated with status
+# "completed". git.pullrequest.merged is a merge attempt, which can fail
+# (conflicts, policy), so it stays ignored.
+_AZURE_DEVOPS_UPDATED_EVENT = "git.pullrequest.updated"
+_AZURE_DEVOPS_COMPLETED_STATUS = "completed"
 # Gitea and Forgejo also send GitHub-compatible headers (X-GitHub-Event,
 # X-Hub-Signature-256) with every delivery, so their own event headers must
 # be checked before the GitHub one.
@@ -307,7 +320,11 @@ def _github_merged(payload: dict, state: str) -> tuple[bool, str]:
     url = pull_request.get("html_url")
     if not url:
         return False, "github payload missing pull_request.html_url"
-    title = pull_request.get("title")
+    return _release_note(state, url, pull_request.get("title"))
+
+
+def _release_note(state: str, url: str, title: object) -> tuple[bool, str]:
+    """Queue a merged PR's release-notes append (#45), carrying the payload's title."""
     fields = json.dumps({"url": url, "title": title if isinstance(title, str) else ""})
     return _result(state, _RELEASE_NOTE_PREFIX + fields)
 
@@ -339,12 +356,16 @@ def _verify_bitbucket(body: bytes, h: dict) -> tuple[bool, str]:
     if state == "reject":
         return False, reason or "bitbucket signature verification failed"
     event = h.get("x-event-key", "")
-    if event not in _BITBUCKET_EVENTS:
+    merged = event in _BITBUCKET_MERGED_EVENTS and _release_notes_on()
+    if event not in _BITBUCKET_EVENTS and not merged:
         return False, f"ignored: bitbucket event {event!r} is not reviewable"
     payload = _parse_json(body)
     if payload is None:
         return False, "invalid JSON payload"
     url = _bitbucket_pr_url(payload)
+    if url and merged:
+        pull_request = payload.get("pullrequest") or payload.get("pullRequest") or {}
+        return _release_note(state, url, pull_request.get("title"))
     if not url:
         return False, (
             "bitbucket payload missing pullrequest.links.html.href "
@@ -393,11 +414,14 @@ def _verify_gitlab(body: bytes, h: dict) -> tuple[bool, str]:
         return False, "invalid JSON payload"
     attrs = payload.get("object_attributes") or {}
     action = attrs.get("action", "")
-    if action not in _GITLAB_ACTIONS:
+    merged = action == _GITLAB_MERGED_ACTION and _release_notes_on()
+    if action not in _GITLAB_ACTIONS and not merged:
         return False, f"ignored: gitlab merge request action {action!r} is not reviewable"
     url = attrs.get("url")
     if not url:
         return False, "gitlab payload missing object_attributes.url"
+    if merged:
+        return _release_note("unsigned" if unsigned else "ok", url, attrs.get("title"))
     return _result("unsigned" if unsigned else "ok", url)
 
 
@@ -422,14 +446,19 @@ def _verify_gitea(body: bytes, h: dict) -> tuple[bool, str]:
     if payload is None:
         return False, "invalid JSON payload"
     action = payload.get("action", "")
-    if action not in _GITEA_ACTIONS:
+    merged = action == "closed" and _release_notes_on()
+    if action not in _GITEA_ACTIONS and not merged:
         return False, f"ignored: gitea pull_request action {action!r} is not reviewable"
     pull_request = payload.get("pull_request")
     if not isinstance(pull_request, dict):
         pull_request = {}
+    if merged and pull_request.get("merged") is not True:
+        return False, "ignored: gitea pull_request closed without merging"
     url = _http_url_without_userinfo(pull_request.get("html_url"))
     if not url or url != str(pull_request.get("html_url")).strip():
         return False, "gitea payload missing a valid pull_request.html_url"
+    if merged:
+        return _release_note("unsigned" if unsigned else "ok", url, pull_request.get("title"))
     return _result("unsigned" if unsigned else "ok", url)
 
 
@@ -452,11 +481,18 @@ def _verify_azure_devops(payload: dict, h: dict) -> tuple[bool, str]:
     if not isinstance(resource, dict):
         resource = {}
     status = resource.get("status", "")
-    if status != _AZURE_DEVOPS_REVIEWABLE_STATUS:
+    merged = (
+        event == _AZURE_DEVOPS_UPDATED_EVENT
+        and status == _AZURE_DEVOPS_COMPLETED_STATUS
+        and _release_notes_on()
+    )
+    if status != _AZURE_DEVOPS_REVIEWABLE_STATUS and not merged:
         return False, f"ignored: azure devops pull request status {status!r} is not reviewable"
     url = _azure_devops_pr_url(resource)
     if not url:
         return False, "azure devops payload missing a pull request URL"
+    if merged:
+        return _release_note("unsigned" if unsigned else "ok", url, resource.get("title"))
     return _result("unsigned" if unsigned else "ok", url)
 
 

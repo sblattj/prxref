@@ -26,7 +26,7 @@ Provides these subcommands:
     excerpt of prxref's summary comment (#45). Commits come from ``git log``
     in the local checkout; no LLM call, nothing posted. With
     ``PRXREF_RELEASE_NOTES_FILE`` set, ``serve`` also appends each merged
-    GitHub PR to that ``Unreleased`` draft file.
+    PR, from any forge's merge webhook, to that ``Unreleased`` draft file.
 
 ``review``, ``eval run`` and ``config check`` read a repository config file
 (#38): ``--config PATH``, else ``PRXREF_CONFIG_FILE``, else ``.prxref.toml``

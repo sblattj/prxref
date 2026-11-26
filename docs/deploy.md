@@ -54,6 +54,8 @@ Configure secret tokens and match the events accepted by `prxref`:
 | **Gitea / Forgejo** | `PRXREF_GITEA_WEBHOOK_SECRET` | `Pull Request` (actions: `opened`, `synchronized`, `reopened`) | Bare-hex HMAC-SHA256 in `X-Forgejo-Signature` or `X-Gitea-Signature`. Webhook type **Forgejo** or **Gitea**, content type `application/json`. See [Gitea / Forgejo](forges.md#6-gitea--forgejo) |
 | **Azure DevOps** | `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET` | `git.pullrequest.created`, `git.pullrequest.updated`, on a PR whose status is `active` | No event header and no signature: recognized by `publisherId: "tfs"` in the body, authenticated by the HTTP Basic auth password (the user name is ignored). Subscriptions: see [Azure DevOps service hooks](#azure-devops-service-hooks) |
 
+*Release-notes draft (#45, optional):* with `PRXREF_RELEASE_NOTES_FILE` set, the daemon also records merged pull requests, so subscribe the merge event too: GitHub and Gitea/Forgejo send it with the `Pull request` events already listed (a `closed` action); GitLab sends it with `Merge request events` (action `merge`); Bitbucket Cloud needs `Pull Request: Merged` (`pullrequest:fulfilled`); Bitbucket Server needs `pr:merged`; Azure DevOps needs a third subscription (below). Unset, these deliveries are ignored. See [release-notes.md](release-notes.md).
+
 *Note on Insecure Development Bypass:* Setting `PRXREF_ALLOW_UNSIGNED=1` allows unsigned payloads for local testing. Do not use in production.
 
 *First deployment:* set `PRXREF_DRY_RUN=1` before pointing webhooks at a busy repository. The daemon then runs every review in full — fetch, chunk, LLM calls, quality gate — and writes nothing back to the forge, so you can read the logs and confirm the review is sane before it starts commenting. Unset it when you are satisfied. This is the only way to observe the daemon against real traffic: `--no-post` covers a single CLI invocation, and `serve` takes only `--host`/`--port`, so the daemon has no flag-based equivalent.
@@ -68,6 +70,7 @@ In **Project settings → Service hooks**, create two **Web Hooks** subscription
 |---|---|---|
 | Pull request created (`git.pullrequest.created`) | a PR is opened | repository and target branch, as you like |
 | Pull request updated (`git.pullrequest.updated`) | a PR changes | **Change: Source branch updated** |
+| *Optional, for the release-notes draft:* Pull request updated (`git.pullrequest.updated`) | a PR changes | **Change: Status changed**. Only a PR whose status becomes `completed` is recorded, and only with `PRXREF_RELEASE_NOTES_FILE` set |
 
 Set the **Change** filter on the updated subscription. Without it, every reviewer vote, status change and description edit triggers a full re-review: the receiver cannot tell those updates from a push, so it relies on the subscription to filter them.
 
