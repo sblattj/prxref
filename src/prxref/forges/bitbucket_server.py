@@ -15,6 +15,8 @@ from prxref.forges.base import (
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     CommitData,
+    Conversation,
+    ConversationComment,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -639,6 +641,84 @@ class ForgeImpl:
 
         return threads
 
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """Every prxref-rooted inline thread plus the PR's general comments (issue #32).
+
+        The whole activity feed is read before anything is grouped. A thread
+        root is a COMMENTED entry's comment that carries no ``parent`` and is
+        not nested under another comment, so a reply's own REPLIED entry never
+        becomes a second thread. A root with an ``anchor`` whose ``text``
+        carries :data:`ATTRIBUTION_MARKER` is an inline thread: the root, then
+        its nested replies at any depth in id order, ``reply_to`` the root id,
+        ``path``/``line`` from the anchor and ``resolved`` as
+        :meth:`list_threads` derives it. The roots without an anchor and their
+        replies form the one ``"pr"`` conversation, sorted by ``createdDate``
+        then id, present only when it has a comment. A feed that cannot be
+        read to the end raises ``FeedReadError``.
+        """
+        comments = [
+            entry.get("comment")
+            for page in self._iter_activity_pages(ref)
+            for entry in page
+            if isinstance(entry.get("comment"), dict)
+        ]
+        nested = {_bbs_id(r) for c in comments for r in _descendants(c)}
+        roots: dict[int, dict] = {}
+        for comment in comments:
+            cid = _bbs_id(comment)
+            if cid is None or cid in nested or cid in roots or comment.get("parent"):
+                continue
+            roots[cid] = comment
+
+        conversations: list[Conversation] = []
+        top_level: list[dict] = []
+        for cid in sorted(roots):
+            root = roots[cid]
+            replies = sorted(_descendants(root), key=lambda r: _bbs_id(r) or 0)
+            anchor = root.get("anchor")
+            if not anchor:
+                top_level.extend([root, *replies])
+                continue
+            if ATTRIBUTION_MARKER not in (root.get("text") or ""):
+                continue
+            anchor = anchor if isinstance(anchor, dict) else {}
+            conversations.append(Conversation(
+                kind="inline",
+                reply_to=str(cid),
+                comments=tuple(_conversation_comment(c) for c in (root, *replies)),
+                path=anchor.get("path"),
+                line=anchor.get("line"),
+                resolved=_is_resolved(root),
+            ))
+        if top_level:
+            top_level.sort(key=lambda c: (_bbs_int(c.get("createdDate")), _bbs_id(c) or 0))
+            conversations.append(Conversation(
+                kind="pr",
+                reply_to="",
+                comments=tuple(_conversation_comment(c) for c in top_level),
+            ))
+        return conversations
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` under root comment ``reply_to``, or as a general comment for ``""`` (issue #32).
+
+        Both go to ``POST .../pull-requests/{id}/comments`` with ``text``; a
+        thread reply adds ``parent.id``. A general reply is a new comment and
+        never the summary ``post_summary`` maintains. Raises on HTTP failure.
+        """
+        headers, auth = self._get_auth()
+        payload: dict[str, object] = {"text": body}
+        if reply_to:
+            payload["parent"] = {"id": int(reply_to)}
+        resp = self._session.post(
+            self._pr_url(ref, "/comments"),
+            json=payload,
+            headers=headers,
+            auth=auth,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
         """Return the text of ``path`` at commit ``sha``, best-effort.
 
@@ -986,6 +1066,43 @@ def _comment_chain(comment: dict) -> list[tuple[str, str]]:
     return [(who(comment), comment.get("text") or "")] + [
         (who(r), r.get("text") or "") for r in replies
     ]
+
+
+def _bbs_int(value: object) -> int:
+    """``value`` when it is an integer, else 0."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _bbs_id(comment: dict) -> int | None:
+    """A Data Center comment's integer ``id``, or ``None``."""
+    value = comment.get("id")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _descendants(comment: dict) -> list[dict]:
+    """Every reply nested under ``comment``, at any depth, in no set order."""
+    found: list[dict] = []
+    stack = [r for r in comment.get("comments") or [] if isinstance(r, dict)]
+    while stack:
+        reply = stack.pop()
+        found.append(reply)
+        stack.extend(r for r in reply.get("comments") or [] if isinstance(r, dict))
+    return found
+
+
+def _conversation_comment(comment: dict) -> ConversationComment:
+    """A Data Center comment as a :class:`ConversationComment`, whole ``text`` kept."""
+    author = comment.get("author") or {}
+    if not isinstance(author, dict):
+        author = {}
+    body = comment.get("text") or ""
+    created = comment.get("createdDate")
+    return ConversationComment(
+        author=author.get("displayName") or author.get("name") or author.get("slug") or "",
+        body=body,
+        is_prxref=ATTRIBUTION_MARKER in body,
+        created_at=str(created) if created is not None else None,
+    )
 
 
 def _is_resolved(comment: dict) -> bool:
