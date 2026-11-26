@@ -10,6 +10,39 @@ tracker.
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-26
+
+### Added
+
+- A read-only run dashboard. `PRXREF_DASHBOARD_PORT` (env-only, default `0` = off) opens a
+  listener on `127.0.0.1:<port>` for `prxref serve` and `prxref gate serve`, serving `/`
+  (one self-contained HTML page) and `/runs.json`: the newest 50 runs with the time, PR,
+  reviewed head, verdict, finding counts, cost, tokens, models and duration. It has no write
+  surface: other methods get 405, and the page runs no script. `gate serve` reads the run
+  records it already writes under `PRXREF_GATE_RUNS_DIR`; `prxref serve` keeps the last 50
+  rows in memory. The run record gains `reviewed_head_sha`. See `docs/dashboard.md` (#41).
+- Review-score trending. `PRXREF_HISTORY_FILE` (env-only, empty = off) appends one compact
+  JSON line per finished review (findings by severity, drops by quality gate, verdict,
+  head), so the file diffs one line per run and CI can commit it back. Once it holds 3
+  prior runs, the executive summary shows this PR's findings against the rolling mean per
+  PR. The opt-in `PRXREF_FAIL_ON_REGRESSION=on` (default `off`) exits 1 when the count beats
+  that mean by more than `PRXREF_REGRESSION_TOLERANCE` (default 0.5); `PRXREF_FAIL_ON` is
+  unchanged. `--format json` gains `history`. See `docs/history.md` (#46).
+- `prxref release-notes --since TAG` builds markdown release notes from the prxref
+  executive summaries of the pull requests merged since a tag, found in the local git log
+  and grouped by conventional-commit category, with no model call. A PR without a summary
+  falls back to its commit subject. `PRXREF_RELEASE_NOTES_FILE` (env-only, off by default)
+  makes `prxref serve` append each merged pull request, from any forge's merge webhook, to a
+  draft file to edit before committing. See `docs/release-notes.md` (#45).
+- An opt-in OSV.dev scan of changed dependency pins. With `PRXREF_VULN_SCAN=on` (env-only,
+  default `off`), pins the diff adds or changes in Maven, Gradle, `package.json`,
+  `requirements*.txt`, `pyproject.toml`, `go.mod` and `Cargo.toml` are checked against
+  `PRXREF_OSV_URL` (env-only, default `https://api.osv.dev`). Each advisory becomes a
+  severity-tagged inline finding on the changed line, exempt from the model-claim gates and
+  capped per PR by `PRXREF_VULN_MAX` (default 10). A network failure skips the scan and
+  never fails the review; the outcome is recorded as `vuln_scan`. See `docs/vuln-scan.md`
+  (#36).
+
 ## [0.44.0] - 2026-11-26
 
 ### Added
