@@ -116,6 +116,11 @@ OSV's JSON) skips the whole scan. No vulnerability finding is posted, the
 review goes on, and the exit code is the one the review would have had
 without the scan.
 
+A review whose every chunk failed ends with verdict `Error` and posts no
+finding at all, deterministic ones included, so the scan's findings are not
+posted either. The record still counts the `advisories` OSV returned, with
+`posted` `0`.
+
 ## The run record
 
 Every review's run record, and `--format json`, carry `vuln_scan`:

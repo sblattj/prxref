@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -23,6 +24,7 @@ from prxref.orchestrator import _summary_only_run, orchestrate_review
 from prxref.triage import Finding, parse_unified_diff
 from prxref.vuln_scan import Pin, changed_pins, scan
 from tests.test_integration import MockOpenAIServer, _completion
+from tests.test_issue_175_contained_claims import CASE_ONE, CASE_ONE_DIFF
 from tests.test_orchestrator import REF, FakeForge, FakeLLM
 
 # ------------------------------------------------------------------ fixtures
@@ -418,12 +420,20 @@ class TestDeterministicFindingsSkipTheModelClaimGates:
         assert out[0] is vuln and reasons[0] == ()
         assert "Unverified fix:" in out[1].body and reasons[1]
 
-    def test_the_other_claim_passes_leave_it_untouched(self):
-        vuln, _ = self._pair()
-        files = _files(NPM_BUMP)
-        assert quality.apply_manifest_claim_check([vuln], files) == [vuln]
-        assert quality.apply_guard_fix_check([vuln], files)[0] == [vuln]
-        assert apply_contained_claim_check([vuln], files)[0] == [vuln]
+    def test_manifest_claim_check(self):
+        [vuln] = [f for f in _scan(NPM_BUMP)[0].findings if "p6mc" in f.title]
+        moved = replace(vuln, line=4)
+        model = replace(moved, confidence=0.9, body=moved.body.removesuffix(heuristics._BODY_SUFFIX))
+        out = quality.apply_manifest_claim_check([moved, model], _files(NPM_BUMP))
+        assert out[0] is moved
+        assert out[1].drop_reason == "anchor mismatch: claims lodash but line 4 is express"
+
+    def test_contained_claim_check(self):
+        model = Finding(**CASE_ONE)
+        deterministic = replace(model, body=model.body + heuristics._BODY_SUFFIX)
+        out, reasons = apply_contained_claim_check([deterministic, model], parse_unified_diff(CASE_ONE_DIFF))
+        assert out[0] is deterministic and reasons[0] is None
+        assert reasons[1] == "null_return_guarded_by_caller" and out[1].severity == "outofscope"
 
 
 # ------------------------------------------------ criterion 3: offline mode
@@ -525,6 +535,13 @@ class TestOrchestrator:
         forge = _diff_forge(REQUIREMENTS_NEW)
         res = _summary_only_run(forge, REF, forge.pr, files, False, 0.0, vuln_findings=[vuln])
         assert res["findings_active"] == [vuln]
+
+    def test_a_totally_failed_review_posts_no_finding_and_says_so(self, contract_stubs):
+        with OSVServer(FakeOSV()) as url:
+            res = orchestrate_review(_diff_forge(NPM_BUMP), REF, FakeLLM(error=RuntimeError("down")),
+                                     vuln_scan="on", osv_url=url)
+        assert res["verdict"] == "Error" and res["findings_active"] == []
+        assert res["vuln_scan"]["advisories"] == 2 and res["vuln_scan"]["posted"] == 0
 
     def test_a_bad_mode_is_refused(self, contract_stubs):
         with pytest.raises(ValueError):
