@@ -5,7 +5,9 @@ hold any of ``worker.md``, ``systemic.md`` and ``summary.md``. Each file found
 there replaces the packaged template of the same name for the whole run; a
 file that is absent falls back to the packaged copy, read from
 ``prxref/prompts`` exactly as :func:`prxref.reviewer.load_prompt` reads it.
-The judge prompt is not overridable, and no other name is read.
+The judge prompt is not overridable, and no other name is read by a review.
+The same directory may also hold ``reply.md``, the thread-reply template
+(#32), which only a reply sweep reads, through :func:`load_reply_template`.
 
 The directory is loaded once, before any network call, and every failure is a
 :class:`~prxref.llm.ConfigError` whose message starts with the ``source`` that
@@ -93,6 +95,12 @@ SUMMARY_GROUP_SLOTS: frozenset[str] = frozenset(
 SUMMARY_OPTIONAL_PLACEHOLDERS: frozenset[str] = SUMMARY_GROUP_SLOTS | frozenset({
     "inline_accounting", "head_sha", "head_sha_short", "chunk_count", "input_tokens", "output_tokens",
 })
+#: The thread-reply template (#32). Overridable through the same directory,
+#: but loaded on its own by :func:`load_reply_template`, so it is not one of
+#: :data:`TEMPLATE_NAMES` and a review run never reads it.
+REPLY_TEMPLATE = "reply"
+#: The heading that splits ``reply.md`` into system (above) and user (from it on).
+REPLY_SPLIT_MARKER = "## Conversation"
 MAX_TEMPLATE_BYTES = 256 * 1024
 PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
@@ -238,7 +246,8 @@ def load_prompt_templates(path: str | os.PathLike[str] | None, *, source: str) -
     except OSError as exc:
         raise ConfigError(f"{source}: cannot list prompts directory {raw!r}: {_reason(exc)}") from exc
     files = [f"{name}.md" for name in TEMPLATE_NAMES]
-    unknown = sorted(e for e in entries if not e.startswith(".") and e not in files)
+    known_files = {*files, f"{REPLY_TEMPLATE}.md"}
+    unknown = sorted(e for e in entries if not e.startswith(".") and e not in known_files)
     if unknown:
         logger.warning(
             "%s: prompts directory %r: ignoring unrecognised %s; only %s are read",
@@ -305,7 +314,57 @@ def _load_one(name: str, path: str, root: str, source: str) -> TemplateFile:
     return TemplateFile(name=name, path=path, text=text, sha256=hashlib.sha256(data).hexdigest(), chars=len(text))
 
 
+def packaged_reply_text() -> str:
+    """The packaged ``reply.md`` (#32), the text a reply sweep renders without an override."""
+    return _packaged_text(REPLY_TEMPLATE)
+
+
+def load_reply_template(path: str | os.PathLike[str] | None, *, source: str) -> str:
+    """The thread-reply template text of one sweep (#32): ``reply.md`` in ``path``, else packaged.
+
+    ``path`` is the prompts directory (``PRXREF_PROMPTS_DIR``); ``None`` or
+    a blank one, or a directory without ``reply.md``, gives
+    :func:`packaged_reply_text`. The directory and the file are refused on
+    exactly the grounds :func:`load_prompt_templates` refuses them, and an
+    override must contain :data:`REPLY_SPLIT_MARKER` with every placeholder
+    the packaged template has after it. Every failure is a
+    :class:`~prxref.llm.ConfigError` starting with ``source``. Makes no
+    network call.
+    """
+    if path is None:
+        return packaged_reply_text()
+    raw = os.fspath(path)
+    if not raw.strip():
+        return packaged_reply_text()
+    if _URL_RE.match(raw.strip()):
+        raise ConfigError(f"{source}: prompts directory must be a local path, not a URL: {raw!r}")
+    root = _open_root(raw, source)
+    file = os.path.join(raw, f"{REPLY_TEMPLATE}.md")
+    if not os.path.lexists(file):
+        return packaged_reply_text()
+    return _load_one(REPLY_TEMPLATE, file, root, source).text
+
+
+def _validate_reply(text: str, path: str, source: str) -> None:
+    _, marker, tail = text.partition(REPLY_SPLIT_MARKER)
+    if not marker:
+        raise ConfigError(
+            f"{source}: prompt template {path!r} is missing the {REPLY_SPLIT_MARKER!r} marker, which "
+            "splits the system prompt (above it) from the user prompt (below it)"
+        )
+    _, _, packaged_tail = packaged_reply_text().partition(REPLY_SPLIT_MARKER)
+    missing = placeholders(packaged_tail) - placeholders(tail)
+    if missing:
+        raise ConfigError(
+            f"{source}: prompt template {path!r} is missing required placeholder(s) "
+            f"{_braced(missing)} after the {REPLY_SPLIT_MARKER!r} marker"
+        )
+
+
 def _validate(name: str, text: str, path: str, source: str) -> None:
+    if name == REPLY_TEMPLATE:
+        _validate_reply(text, path, source)
+        return
     packaged = _packaged_text(name)
     known = placeholders(packaged)
     found = placeholders(text)

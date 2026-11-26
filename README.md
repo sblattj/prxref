@@ -291,6 +291,10 @@ The service exposes:
 
 With `PRXREF_METRICS_PORT` set, `serve` and `gate serve` also expose Prometheus `/metrics` on `127.0.0.1` only, on a separate port: see [docs/metrics.md](docs/metrics.md).
 
+## Thread Replies
+
+Off by default. With `PRXREF_THREAD_REPLIES=mention` (or `thread_replies = "mention"` in `.prxref.toml`), a person who replies under a prxref inline finding, or writes a PR comment, naming `@prxref` gets one grounded answer in that thread; `always` answers every human reply under a prxref finding. Each answer is one bounded model call with the finding, the hunk and the surrounding head-file lines pre-gathered, at most `PRXREF_REPLY_MAX` calls per sweep, and it carries the model attribution line. A resolved or won't-fix thread is not re-argued. The webhook daemon answers GitHub `pull_request_review_comment` and `issue_comment` events; in CI, run `prxref reply --pr-url URL`. Modes, the trigger rule, loop safety and the Actions recipe: [docs/thread-replies.md](docs/thread-replies.md).
+
 ## Review Gate (GitHub App)
 
 `prxref review` and `prxref serve` advise; they never block a merge. To make a prxref
@@ -573,6 +577,8 @@ Replay flags, for evaluation (see [Replay Mode (Evaluation)](#replay-mode-evalua
 - `--no-description` — review with an empty PR description.
 
 `--as-of`, `--description-file` and `--no-description` are mutually exclusive: giving two or more exits `2` naming each one given. They are CLI-only, with no environment variable.
+
+`prxref reply --pr-url URL [--config PATH | --no-config] [--dry-run]` runs one [thread-reply](#thread-replies) sweep over the PR and prints one line per conversation (`answered`, `dry-run`, `skipped (<reason>)` or `failed (<reason>)`). `--dry-run` (or `PRXREF_DRY_RUN`) still makes the model calls but posts nothing, and prints each answer under its line. It exits `0` on every review-type failure and `2` on a configuration error; with `PRXREF_THREAD_REPLIES=off`, the default, it reads nothing and says so.
 
 The other subcommands: `prxref serve [--port N] [--host H] [--config PATH]` runs the [webhook server](#webhook-server) (default port `8080`, default host `0.0.0.0`); `prxref trace render FILE [-o OUT]` renders a JSONL run trace (`PRXREF_TRACE_FILE`) to a standalone HTML pipeline view, written next to the trace unless `-o`/`--out` names the output; and `prxref --version` prints the version.
 

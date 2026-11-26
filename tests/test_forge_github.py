@@ -1056,6 +1056,11 @@ def test_every_request_the_adapter_sends_carries_the_timeout(monkeypatch):
             forge.list_paths(ref, sha=HEAD_SHA), "paths", None
         ) == ("src/app.py",),
         "update_description": lambda: forge.update_description(ref, "b") is None,
+        "list_conversations": lambda: isinstance(forge.list_conversations(ref), list),
+        # Both routes: an inline thread reply and a PR comment.
+        "post_reply": lambda: (
+            forge.post_reply(ref, "1", "b") is None and forge.post_reply(ref, "", "b") is None
+        ),
         "list_labels": lambda: forge.list_labels(ref) == ["fix"],
         # One label to create (POST) and one to apply, so both writes are timed.
         "add_labels": lambda: forge.add_labels(

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from collections.abc import Collection, Iterator, Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -20,6 +21,8 @@ from .base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
     CommitData,
+    Conversation,
+    ConversationComment,
     DescriptionVersion,
     FeedReadError,
     InlineComment,
@@ -220,6 +223,19 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return None
+
+
+def _conversation_comment(item: dict[str, Any]) -> ConversationComment:
+    user = item.get("user") or {}
+    author = user.get("login", "") if isinstance(user, dict) else ""
+    body = str(item.get("body") or "")
+    created = item.get("created_at")
+    return ConversationComment(
+        author=str(author or ""),
+        body=body,
+        is_prxref=ATTRIBUTION_MARKER in body,
+        created_at=created if isinstance(created, str) else None,
+    )
 
 
 def _root_comment_id(item: dict[str, Any]) -> int | None:
@@ -968,6 +984,92 @@ query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!, $after: S
             "GraphQL reviewThread",
             where, patched, len(threads),
         )
+
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """Every prxref-rooted inline thread, then the PR's top-level comment stream (#32).
+
+        Inline threads come from the REST review-comment feed grouped by root
+        (:func:`_root_comment_id`), in feed order, keeping only roots whose
+        body carries :data:`~prxref.forges.base.ATTRIBUTION_MARKER`; a thread
+        a person started is not prxref's to answer. ``reply_to`` is the root
+        comment id. ``line`` is the current ``line``, else ``original_line``
+        for an outdated thread, so its context still points at the code it
+        was about. ``resolved`` and ``url`` come from the same best-effort
+        GraphQL read :meth:`list_threads` uses, so without a token every
+        thread reads unresolved. The issue-comment feed becomes one ``pr``
+        conversation with ``reply_to=""`` when it is not empty. A comment is
+        ``is_prxref`` when its body carries the marker. A failed read raises
+        :class:`~prxref.forges.base.FeedReadError`: a partial listing could
+        make a thread look unanswered.
+        """
+        base = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+        headers = self._headers(ref.host)
+
+        roots: dict[int, dict[str, Any]] = {}
+        replies: dict[int, list[ConversationComment]] = {}
+        for data in self._iter_pages(
+            ref, f"{base}/pulls/{ref.number}/comments", headers, what="review-comment feed",
+        ):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                root_id = _root_comment_id(item)
+                if root_id is None:
+                    continue
+                if root_id == _as_int(item.get("id")):
+                    roots.setdefault(root_id, item)
+                replies.setdefault(root_id, []).append(_conversation_comment(item))
+
+        conversations: list[Conversation] = []
+        probes: list[Thread] = []
+        for root_id, item in roots.items():
+            if ATTRIBUTION_MARKER not in str(item.get("body") or ""):
+                continue
+            line = _as_int(item.get("line")) or _as_int(item.get("original_line"))
+            path = item.get("path")
+            conversations.append(
+                Conversation(
+                    kind="inline",
+                    reply_to=str(root_id),
+                    comments=tuple(replies.get(root_id, ())),
+                    path=path if isinstance(path, str) else None,
+                    line=line if line and line > 0 else None,
+                )
+            )
+            probes.append(
+                Thread(path=None, line=None, resolved=False, author="", body_snippet="", root_id=root_id)
+            )
+        self._patch_thread_states(ref, probes)
+        conversations = [
+            replace(conv, resolved=probe.resolved, url=probe.url)
+            for conv, probe in zip(conversations, probes, strict=True)
+        ]
+
+        stream: list[ConversationComment] = []
+        for data in self._iter_pages(
+            ref, f"{base}/issues/{ref.number}/comments", headers, what="PR comment feed",
+        ):
+            stream.extend(_conversation_comment(item) for item in data if isinstance(item, dict))
+        if stream:
+            conversations.append(Conversation(kind="pr", reply_to="", comments=tuple(stream)))
+        return conversations
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` under inline thread root ``reply_to``, or as a PR comment when it is ``""`` (#32).
+
+        An inline reply uses the review-comment ``replies`` route, so it
+        lands in the thread rather than as a new one. Raises
+        ``requests.HTTPError`` on a non-2xx response.
+        """
+        base = f"{self._api_base(ref)}/repos/{ref.owner}/{ref.repo}"
+        if reply_to:
+            url = f"{base}/pulls/{ref.number}/comments/{quote(reply_to, safe='')}/replies"
+        else:
+            url = f"{base}/issues/{ref.number}/comments"
+        resp = self.session.post(
+            url, json={"body": body}, headers=self._headers(ref.host), timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
 
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
         """Return the text of ``path`` at commit ``sha``, best-effort.

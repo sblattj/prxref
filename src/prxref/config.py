@@ -529,7 +529,27 @@ LLM / pipeline:
   PRXREF_VERIFY_ERRORS_MAX      Error verification (#126): model calls one
                                 run may make at "llm", most confident errors
                                 first; non-negative int (default 5)
-  PRXREF_STABILITY_PASSES       Stability mode (#143): how many times the chunk
+  PRXREF_THREAD_REPLIES         Thread replies (#32): "off" (the default)
+                                answers nothing. "mention" answers a human
+                                reply under a prxref inline finding, or a PR
+                                comment, that names PRXREF_REPLY_MENTION.
+                                "always" answers every human reply under a
+                                prxref inline finding; a PR comment still
+                                needs the mention. One bounded model call
+                                per reply, run by prxref reply or by the
+                                webhook daemon. Any other value is a
+                                configuration error
+  PRXREF_REPLY_MENTION          Thread replies (#32): the token that asks
+                                prxref to answer, matched case-insensitively
+                                (default "@prxref", which empty also
+                                reads as); one token, no whitespace, at
+                                most 64 characters
+  PRXREF_REPLY_MAX              Thread replies (#32): model calls one reply
+                                sweep may make; non-negative int (default 5)
+  PRXREF_REPLY_CONTEXT_CHARS    Thread replies (#32): characters of
+                                conversation and code one reply prompt may
+                                carry; positive int (default 24000)
+  PRXREF_STABILITY_PASSES      Stability mode (#143): how many times the chunk
                                 workers run over the same chunks and prompts;
                                 integer 1 to 5 (default 1, which is off and
                                 leaves the run exactly as it was). Above 1,
@@ -1052,6 +1072,11 @@ _DEFAULTS: dict[str, object] = {
     # prxref.verify.VERIFY_MODES (config stays a leaf module).
     "verify_errors": "names",
     "verify_errors_max": 5,
+    # Thread replies (#32): vocabulary restated from prxref.replies.REPLY_MODES.
+    "thread_replies": "off",
+    "reply_mention": "@prxref",
+    "reply_max": 5,
+    "reply_context_chars": 24000,
     "suggestions": "off",
     "review_depth": "standard",
     "routing_probe": "on",
@@ -1188,6 +1213,7 @@ _INT_KEYS = frozenset({
     "max_findings_per_rule", "repo_context_max_chars", "llm_parse_retries",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "max_areas_per_pr", "evidence_max_chars", "verify_errors_max",
+    "reply_max", "reply_context_chars",
     "context_standards_max_chars",
     "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
     "gate_reconcile_minutes", "stability_passes", "stability_min_agree",
@@ -1220,6 +1246,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "context_followup": frozenset({"off", "on"}),
     "default_branch_check": frozenset({"off", "on"}),
     "verify_errors": frozenset({"off", "names", "llm"}),
+    "thread_replies": frozenset({"off", "mention", "always"}),
     "rule_scoping": frozenset({"off", "on"}),
     "suggestions": frozenset({"off", "on"}),
     "review_depth": frozenset({"standard", "thorough"}),
@@ -1342,6 +1369,8 @@ _RANGES: dict[str, _Range] = {
     "max_outofscope_findings": _Range(0, low_inclusive=True),
     "max_findings_per_rule": _Range(0, low_inclusive=True),
     "verify_errors_max": _Range(0, low_inclusive=True),
+    "reply_max": _Range(0, low_inclusive=True),
+    "reply_context_chars": _Range(0),
     "stability_passes": _Range(1, 5, low_inclusive=True),
     "stability_min_agree": _Range(1, 5, low_inclusive=True),
     "scoped_rules_max_chars": _Range(0),
@@ -1398,6 +1427,7 @@ FILE_KEYS = frozenset({
     "evidence_files", "evidence_max_chars",
     "repo_context", "repo_context_max_chars", "context_followup",
     "default_branch_check", "verify_errors", "verify_errors_max",
+    "thread_replies", "reply_mention", "reply_max", "reply_context_chars",
     "repo_context_max_reads", "repo_context_max_chunk_reads",
     "suggestions", "routing_probe", "incremental", "describe", "labels",
     "context_contract_globs", "context_exclude_globs",
@@ -1924,6 +1954,34 @@ def _check_bullet_separator(cfg: dict[str, object], sources: dict[str, str]) -> 
         )
 
 
+#: The longest ``reply_mention`` accepted, in characters.
+_MAX_REPLY_MENTION_CHARS = 64
+
+
+def _check_reply_mention(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Validate ``reply_mention`` (#32): one non-empty token without whitespace.
+
+    An empty token would be found in every comment, which turns ``mention``
+    mode into ``always``; the loaders already read an empty value as the
+    default, and this refuses one that slips past them. A non-string, an
+    empty or whitespace-bearing value,
+    or more than :data:`_MAX_REPLY_MENTION_CHARS` characters is a
+    ``ConfigError`` naming whichever input supplied it.
+    """
+    value = cfg["reply_mention"]
+    source = sources["reply_mention"]
+    if not isinstance(value, str):
+        raise ConfigError(f"{source}: must be a string, got {value!r}")
+    if not value.strip():
+        raise ConfigError(f"{source}: must not be empty (it would match every comment)")
+    if any(ch.isspace() for ch in value):
+        raise ConfigError(f"{source}: must be one token without whitespace, got {value!r}")
+    if len(value) > _MAX_REPLY_MENTION_CHARS:
+        raise ConfigError(
+            f"{source}: must be at most {_MAX_REPLY_MENTION_CHARS} characters, got {len(value)}"
+        )
+
+
 def _check_metadata_switch(
     cfg: dict[str, object], sources: dict[str, str], supplied: set[str],
 ) -> None:
@@ -2118,6 +2176,7 @@ def load_config_with_sources(
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)
+    _check_reply_mention(cfg, sources)
     _check_metadata_switch(cfg, sources, supplied)
     _check_metadata_rules(cfg, sources)
     return cfg, layers

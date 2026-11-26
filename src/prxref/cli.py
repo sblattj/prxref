@@ -170,7 +170,7 @@ from prxref.metadata_rules import MetadataRules
 from prxref.metrics import observe_result as _metrics_observe
 from prxref.notify import notify as _notify
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
-from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir
+from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir, path_input_source
 from prxref.rules import load_review_rules, load_scoped_rules
 from prxref.text_inputs import check_readable_path, decode_text
 from prxref.ticket import load_ticket_context
@@ -483,6 +483,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_config_flags(rev)
+
+    rp = sub.add_parser(
+        "reply",
+        help="answer due replies in a PR's review threads (#32, PRXREF_THREAD_REPLIES)",
+    )
+    rp.add_argument("--pr-url", required=True, help="PR/MR web URL (any supported forge)")
+    _add_config_flags(rp)
+    rp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="make the model calls and print each answer, but post nothing",
+    )
 
     srv = sub.add_parser("serve", help="run webhook listener daemon")
     srv.add_argument(
@@ -2229,6 +2241,112 @@ def _webhook_handler(url: str, *, config_file: Path | None = None) -> None:
         logger.exception("webhook review failed for %s", url)
 
 
+def _run_reply_sweep(
+    url: str, *, config_file: Path | None = None, post: bool = True,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """One thread-reply sweep (#32) over ``url``: ``(mode, records)``.
+
+    Loads the configuration (``config_file`` between the defaults and the
+    environment) and returns ``(mode, [])`` without building a forge or a
+    client when ``thread_replies`` is ``off``, and ``(mode, None)`` for a
+    URL no forge recognises. Otherwise it builds the forge and the LLM
+    client and runs :func:`prxref.replies.answer_replies`; ``post=False``
+    or ``PRXREF_DRY_RUN`` posts nothing. A configuration error raises
+    ``ConfigError``; a failure inside the sweep is a ``failed`` record.
+    """
+    cfg, layers = load_config_with_sources(config_file=config_file)
+    mode = cfg["thread_replies"]
+    if mode == "off":
+        return mode, []
+    templates = importlib.import_module("prxref.prompt_templates")
+    template = templates.load_reply_template(
+        cfg["prompts_dir"],
+        source=path_input_source("prompts_dir", layers, config_file=config_file),
+    )
+    ref = detect_forge(url)
+    if ref is None:
+        return mode, None
+    forge = make_forge(ref)
+    cfg["LLM_TIMEOUT_IS_DEFAULT"] = layers.get("llm_timeout") == "default"
+    llm = importlib.import_module("prxref.llm_backends").create_llm_client(cfg)
+    records = importlib.import_module("prxref.replies").answer_replies(
+        forge, ref,
+        mode=mode,
+        mention=cfg["reply_mention"],
+        max_replies=cfg["reply_max"],
+        llm=llm,
+        context_chars=cfg["reply_context_chars"],
+        post=post and not cfg["dry_run"],
+        template=template,
+    )
+    return mode, records
+
+
+def _reply_line(record: dict[str, Any]) -> str:
+    where = (
+        f"{record.get('path')}:{record.get('line')}" if record.get("kind") == "inline"
+        else "pr comments" if record.get("kind") == "pr" else "-"
+    )
+    target = record.get("reply_to") or "-"
+    reason = f" ({record['reason']})" if record.get("reason") else ""
+    model = f" model={record['model']}" if record.get("model") else ""
+    return f"{record.get('outcome')}{reason}: {record.get('kind') or '-'} {where} reply_to={target}{model}"
+
+
+def _webhook_reply_handler(url: str, *, config_file: Path | None = None) -> None:
+    """Answer one comment webhook (#32): a reply sweep over ``url``, posting unless PRXREF_DRY_RUN.
+
+    Re-reads the configuration (and ``config_file``) on every webhook, so
+    ``thread_replies=off``, the default, logs one line and reads nothing.
+    Never raises: a failure is logged.
+    """
+    try:
+        mode, records = _run_reply_sweep(url, config_file=config_file, post=True)
+    except Exception:
+        logger.exception("webhook thread reply failed for %s", url)
+        return
+    if mode == "off":
+        logger.info("thread replies are off (PRXREF_THREAD_REPLIES); comment webhook for %s ignored", url)
+        return
+    if records is None:
+        logger.warning("thread replies: unrecognized PR URL %r", url)
+        return
+    for record in records:
+        logger.info("thread reply %s: %s", url, _reply_line(record))
+
+
+def _cmd_reply(args: argparse.Namespace) -> int:
+    """``prxref reply --pr-url URL``: one reply sweep, one printed line per conversation (#32).
+
+    Exits 2 on a configuration error and 0 otherwise, a failed sweep
+    included (advisor, not gate). ``--dry-run`` prints each answer under its
+    line instead of posting it.
+    """
+    try:
+        config_file = _resolve_config_file(args)
+        mode, records = _run_reply_sweep(args.pr_url, config_file=config_file, post=not args.dry_run)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"reply failed: {exc}", file=sys.stderr)
+        logger.debug("reply failed with traceback", exc_info=True)
+        return 0
+    if mode == "off":
+        print("thread replies are off (PRXREF_THREAD_REPLIES=off); nothing read or answered")
+        return 0
+    if records is None:
+        print(f"unrecognized PR URL {args.pr_url!r}; nothing answered", file=sys.stderr)
+        return 0
+    if not records:
+        print("no conversations to answer")
+    for record in records:
+        print(_reply_line(record))
+        if record.get("outcome") == "dry-run" and record.get("body"):
+            print(_fmt_indented_body(record["body"]))
+    return 0
+
+
 def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     """The exit code a returned review result earns under the ``fail_on`` policy.
 
@@ -2501,6 +2619,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         _webhook_handler if config_file is None
         else functools.partial(_webhook_handler, config_file=config_file)
     )
+    reply_handler = (
+        _webhook_reply_handler if config_file is None
+        else functools.partial(_webhook_reply_handler, config_file=config_file)
+    )
     serve_fn = importlib.import_module("prxref.webhooks").serve
     try:
         metrics_server = importlib.import_module("prxref.metrics").start_from_env()
@@ -2508,7 +2630,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
     try:
-        serve_fn(port=args.port, host=args.host, handler=handler)
+        serve_fn(port=args.port, host=args.host, handler=handler, reply_handler=reply_handler)
     finally:
         if metrics_server is not None:
             metrics_server.shutdown()
@@ -2676,7 +2798,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point dispatching ``review``, ``serve``, ``eval <action>``,
+    """CLI entry point dispatching ``review``, ``reply``, ``serve``, ``eval <action>``,
     ``trace render``, ``prompts export``, ``config check``,
     ``gate <action>``, ``learnings harvest``, or ``--version``."""
     parser = _build_parser()
@@ -2696,6 +2818,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_review(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "reply":
+        return _cmd_reply(args)
     if args.command == "eval":
         if args.eval_command is not None:
             return _cmd_eval(args)

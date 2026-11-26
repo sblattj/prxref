@@ -451,7 +451,7 @@ class TestServeSubcommand:
     def test_serve_wiring_and_handler_execution(self, fake_runtime, monkeypatch):
         recorded_serve = []
 
-        def fake_serve(port: int, host: str, handler):
+        def fake_serve(port: int, host: str, handler, reply_handler=None):
             recorded_serve.append({"port": port, "host": host, "handler": handler})
 
         _install_fake_module(monkeypatch, "prxref.webhooks", serve=fake_serve)
@@ -483,7 +483,7 @@ class TestServeSubcommand:
     def test_serve_handler_swallows_exception_safely(self, fake_runtime, monkeypatch):
         recorded_serve = []
 
-        def fake_serve(port: int, host: str, handler):
+        def fake_serve(port: int, host: str, handler, reply_handler=None):
             recorded_serve.append(handler)
 
         _install_fake_module(monkeypatch, "prxref.webhooks", serve=fake_serve)

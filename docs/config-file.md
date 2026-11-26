@@ -168,6 +168,10 @@ its `PRXREF_` name.
 | `default_branch_check` | string | `on` (the default) lowers versioning findings on a stacked PR when the surface is not on the default branch or a recent tag, `off` opts out; with a git `--repo-dir` it runs a fixed `git grep` ([more](env-vars.md#llm--pipeline)). |
 | `verify_errors` | string | Error verification before an error can block: `off`, `names` (the default) or `llm` ([more](env-vars.md#llm--pipeline)). |
 | `verify_errors_max` | integer | Model calls one run's error verification may make at `llm` ([more](env-vars.md#llm--pipeline)). |
+| `thread_replies` | string | AI replies in review threads: `off` (the default), `mention` or `always` ([more](env-vars.md#llm--pipeline); [guide](thread-replies.md)). |
+| `reply_mention` | string | The token that asks prxref to answer in a thread, default `@prxref` ([more](env-vars.md#llm--pipeline); [guide](thread-replies.md)). |
+| `reply_max` | integer | Model calls one reply sweep may make ([more](env-vars.md#llm--pipeline); [guide](thread-replies.md)). |
+| `reply_context_chars` | integer | Characters of conversation and code one reply prompt may carry ([more](env-vars.md#llm--pipeline); [guide](thread-replies.md)). |
 | `context_contract_globs` | array of strings | Globs selecting contract files; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
 | `context_exclude_globs` | array of strings | Globs never read for repository context, added to a fixed floor ([more](env-vars.md#llm--pipeline)). |
 | `context_standards_globs` | array of strings | Globs selecting the repository's own standards documents, excerpted into chunk prompts at every `repo_context` level, on by default; replaces the built-in set; `[]` or `"off"` turns them off ([more](env-vars.md#llm--pipeline)). |

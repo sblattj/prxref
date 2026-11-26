@@ -6,6 +6,11 @@ drains the queue serially so webhook responses return immediately (202)
 instead of blocking on multi-minute reviews. GET /health is a liveness
 probe. The review callable is wired in by the caller (forge + LLM +
 orchestrate_review); this module knows nothing about how reviews run.
+
+GitHub ``pull_request_review_comment`` and ``issue_comment`` (on a PR)
+deliveries with action ``created`` queue a :class:`ReplyJob` instead
+(thread replies, #32), run by the caller's ``reply_handler`` on the same
+worker; a comment carrying prxref's attribution marker is ignored at intake.
 """
 from __future__ import annotations
 
@@ -18,8 +23,11 @@ import os
 import queue
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, urlunsplit
+
+from .forges.base import ATTRIBUTION_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +40,11 @@ _ALLOW_UNSIGNED_ENV = "PRXREF_ALLOW_UNSIGNED"
 _UNSIGNED_PREFIX = "unsigned:"
 
 _GITHUB_ACTIONS = ("opened", "synchronize")
+# Thread replies (#32): a new review comment or PR comment wakes a reply
+# sweep, never a review. Edits and deletions are not new questions.
+_GITHUB_COMMENT_EVENTS = ("pull_request_review_comment", "issue_comment")
+_GITHUB_COMMENT_ACTIONS = ("created",)
+_REPLY_PREFIX = "reply:"
 # Bitbucket Cloud and Bitbucket Server both announce themselves with
 # X-Event-Key, but they do not share an event vocabulary. Cloud sends
 # pullrequest:created / pullrequest:updated; Server sends pr:opened /
@@ -54,6 +67,13 @@ _AZURE_DEVOPS_REVIEWABLE_STATUS = "active"
 _GITEA_EVENT_HEADERS = ("x-forgejo-event", "x-gitea-event")
 _GITEA_SIGNATURE_HEADERS = ("x-forgejo-signature", "x-gitea-signature")
 _GITEA_ACTIONS = ("opened", "synchronized", "reopened")
+
+
+@dataclass(frozen=True)
+class ReplyJob:
+    """A queued thread-reply sweep (#32) for one PR, as opposed to a review (a bare URL string)."""
+
+    url: str
 
 
 def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
@@ -135,7 +155,10 @@ def make_webhook_handler(review_queue: queue.Queue) -> type[BaseHTTPRequestHandl
                 }
                 logger.warning("Accepted unsigned webhook for %s — dev bypass", detail)
             self._respond(202, {"queued": True}, extra_headers)
-            review_queue.put(detail)
+            if detail.startswith(_REPLY_PREFIX):
+                review_queue.put(ReplyJob(detail[len(_REPLY_PREFIX):]))
+            else:
+                review_queue.put(detail)
 
         def _respond(
             self,
@@ -155,11 +178,19 @@ def make_webhook_handler(review_queue: queue.Queue) -> type[BaseHTTPRequestHandl
     return WebhookHandler
 
 
-def serve(handler: Callable[[str], None], host: str = "0.0.0.0", port: int = 8080) -> None:
+def serve(
+    handler: Callable[[str], None],
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    reply_handler: Callable[[str], None] | None = None,
+) -> None:
     """Run the webhook server until interrupted.
 
-    ``handler`` is called once per accepted webhook with the PR URL,
+    ``handler`` is called once per accepted review webhook with the PR URL,
     serially on one background daemon thread, so reviews never overlap.
+    ``reply_handler`` (#32) is called the same way, on the same thread, for
+    each accepted comment webhook; without one, comment webhooks are
+    accepted and dropped.
     """
     if _allow_unsigned():
         logger.warning(
@@ -167,7 +198,7 @@ def serve(handler: Callable[[str], None], host: str = "0.0.0.0", port: int = 808
         )
     review_queue: queue.Queue = queue.Queue()
     threading.Thread(
-        target=_worker_loop, args=(handler, review_queue), daemon=True
+        target=_worker_loop, args=(handler, review_queue, reply_handler), daemon=True
     ).start()
     server = ThreadingHTTPServer((host, port), make_webhook_handler(review_queue))
     logger.info("prxref webhook server listening on %s:%d", host, port)
@@ -221,6 +252,8 @@ def _verify_github(body: bytes, h: dict) -> tuple[bool, str]:
     if state == "reject":
         return False, reason or "github signature verification failed"
     event = h.get("x-github-event", "")
+    if event in _GITHUB_COMMENT_EVENTS:
+        return _github_comment(body, event, state)
     if event != "pull_request":
         return False, f"ignored: github event {event!r} is not pull_request"
     payload = _parse_json(body)
@@ -233,6 +266,28 @@ def _verify_github(body: bytes, h: dict) -> tuple[bool, str]:
     if not url:
         return False, "github payload missing pull_request.html_url"
     return _result(state, url)
+
+
+def _github_comment(body: bytes, event: str, state: str) -> tuple[bool, str]:
+    payload = _parse_json(body)
+    if payload is None:
+        return False, "invalid JSON payload"
+    action = payload.get("action", "")
+    if action not in _GITHUB_COMMENT_ACTIONS:
+        return False, f"ignored: github {event} action {action!r} is not a new comment"
+    comment = payload.get("comment") or {}
+    if ATTRIBUTION_MARKER in str(comment.get("body") or ""):
+        return False, f"ignored: github {event} is prxref's own comment"
+    if event == "issue_comment":
+        issue = payload.get("issue") or {}
+        if "pull_request" not in issue:
+            return False, "ignored: github issue_comment is on an issue, not a pull request"
+        url = (issue.get("pull_request") or {}).get("html_url") or issue.get("html_url")
+    else:
+        url = (payload.get("pull_request") or {}).get("html_url")
+    if not url:
+        return False, f"github {event} payload missing the pull request html_url"
+    return _result(state, _REPLY_PREFIX + url)
 
 
 def _verify_bitbucket(body: bytes, h: dict) -> tuple[bool, str]:
@@ -425,15 +480,26 @@ def _status_for_reason(reason: str) -> tuple[int, dict]:
     return 400, {"error": reason}
 
 
-def _worker_loop(handler: Callable[[str], None], review_queue: queue.Queue) -> None:
+def _worker_loop(
+    handler: Callable[[str], None],
+    review_queue: queue.Queue,
+    reply_handler: Callable[[str], None] | None = None,
+) -> None:
     while True:
-        url = review_queue.get()
-        if url is None:
+        job = review_queue.get()
+        if job is None:
             review_queue.task_done()
             return
         try:
-            handler(url)
+            if isinstance(job, ReplyJob):
+                if reply_handler is None:
+                    logger.info("Thread reply for %s dropped: no reply handler is wired", job.url)
+                else:
+                    reply_handler(job.url)
+            else:
+                handler(job)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Review failed for %s: %s", url, exc)
+            what = "Thread reply" if isinstance(job, ReplyJob) else "Review"
+            logger.error("%s failed for %s: %s", what, getattr(job, "url", job), exc)
         finally:
             review_queue.task_done()

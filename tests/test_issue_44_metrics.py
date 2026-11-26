@@ -260,7 +260,7 @@ def test_cmd_serve_starts_the_listener_when_the_port_is_set(monkeypatch):
     import types
 
     fake = types.ModuleType("prxref.webhooks")
-    fake.serve = lambda port, host, handler: None
+    fake.serve = lambda port, host, handler, reply_handler=None: None
     monkeypatch.setitem(importlib.sys.modules, "prxref.webhooks", fake)
     assert cli.main(["serve", "--port", "9090", "--host", "127.0.0.1"]) == 0
     assert started == [9464]
@@ -276,7 +276,7 @@ def test_cmd_serve_leaves_the_listener_off_by_default(monkeypatch):
     import types
 
     fake = types.ModuleType("prxref.webhooks")
-    fake.serve = lambda port, host, handler: None
+    fake.serve = lambda port, host, handler, reply_handler=None: None
     monkeypatch.setitem(importlib.sys.modules, "prxref.webhooks", fake)
     assert cli.main(["serve"]) == 0
     assert started in ([], [0])

@@ -45,7 +45,12 @@ auto-detects the forge.
   deterministic, the model calls no tools, and a follow-up never triggers
   another. A second: with PRXREF_VERIFY_ERRORS=llm (off by default), each
   remaining model error (up to PRXREF_VERIFY_ERRORS_MAX) gets one bounded
-  verification call with the head file and its callees pre-gathered.
+  verification call with the head file and its callees pre-gathered. A
+  third: with PRXREF_THREAD_REPLIES=mention|always (off by default), each due
+  human reply in a prxref thread gets one bounded answer call with the
+  finding, hunk and head-file window pre-gathered (`src/prxref/replies.py`);
+  no tools, an answer never triggers another, and PRXREF_REPLY_MAX caps the
+  calls per sweep.
 - non-blocking by default: `review` exits 0 on every review error — empty diff,
   network failure, LLM timeout, bad credentials, a totally failed review
   (advisor, not gate). Exit 2 is reserved for a configuration error: a required

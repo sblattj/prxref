@@ -270,7 +270,7 @@ class TestServe:
     def served(self, monkeypatch):
         handlers: list = []
         monkeypatch.setattr(
-            "prxref.webhooks.serve", lambda port, host, handler: handlers.append(handler),
+            "prxref.webhooks.serve", lambda port, host, handler, reply_handler=None: handlers.append(handler),
         )
         return handlers
 
