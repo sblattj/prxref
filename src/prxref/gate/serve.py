@@ -24,7 +24,7 @@ from typing import Any
 
 import requests
 
-from prxref import metrics
+from prxref import dashboard, metrics
 from prxref.config import load_config
 from prxref.gate import GateDependencyError, require_jwt, rulesets
 from prxref.gate import worker as worker_module
@@ -178,12 +178,22 @@ def serve_main(env_file: Path, host: str, port: int) -> int:
     settings = settings_from_config(cfg)
     logger.info("gate env file %s set: %s", env_file, ", ".join(sorted(names)))
     metrics_server = metrics.start_metrics_listener(int(cfg["metrics_port"]))
+    dashboard_server = None
     try:
-        return run_gate(build(settings, cfg), host, port)
+        gate = build(settings, cfg)
+        dashboard_port = int(cfg["dashboard_port"])
+        if dashboard_port:
+            dashboard_server = dashboard.start_dashboard_listener(
+                dashboard_port,
+                dashboard.RunsDirSource(settings.runs_dir, lookup=gate.store.get),
+                source_label="the gate runs directory",
+            )
+        return run_gate(gate, host, port)
     finally:
-        if metrics_server is not None:
-            metrics_server.shutdown()
-            metrics_server.server_close()
+        for server in (dashboard_server, metrics_server):
+            if server is not None:
+                server.shutdown()
+                server.server_close()
 
 
 def _fmt_time(ts: float | None) -> str:

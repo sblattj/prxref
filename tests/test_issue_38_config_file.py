@@ -45,6 +45,7 @@ EXPECTED_ENV_ONLY = {
     "gate_watchdog_seconds": "gate",
     "gate_reconcile_minutes": "gate",
     "metrics_port": "listener",
+    "dashboard_port": "listener",
     "review_skip_globs": "gate",
     "eval_pins": "override",
     "history_file": "local write",

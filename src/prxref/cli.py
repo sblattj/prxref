@@ -170,6 +170,7 @@ from prxref.config import (
     read_config_file,
 )
 from prxref.costs import cost_label
+from prxref.dashboard import observe_result as _dashboard_observe
 from prxref.forges.base import detect_forge
 from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, choose_cutoff, pin_status
 from prxref.forges.repo_dir import RepoDir
@@ -2193,6 +2194,7 @@ def _run_review(
             if baseline is not None else None
         )
         _metrics_observe(result)
+        _dashboard_observe(result, pr_url=None if url is None else ref.url)
     _notify(result, cfg, ref=ref, post=post)
     return result
 
@@ -2784,17 +2786,23 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         else functools.partial(_webhook_reply_handler, config_file=config_file)
     )
     serve_fn = importlib.import_module("prxref.webhooks").serve
+    metrics_server = None
     try:
-        metrics_server = importlib.import_module("prxref.metrics").start_from_env()
+        metrics_server =importlib.import_module("prxref.metrics").start_from_env()
+        dashboard_server = importlib.import_module("prxref.dashboard").start_from_env()
     except ConfigError as exc:
+        if metrics_server is not None:
+            metrics_server.shutdown()
+            metrics_server.server_close()
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
     try:
         serve_fn(port=args.port, host=args.host, handler=handler, reply_handler=reply_handler)
     finally:
-        if metrics_server is not None:
-            metrics_server.shutdown()
-            metrics_server.server_close()
+        for server in (metrics_server, dashboard_server):
+            if server is not None:
+                server.shutdown()
+                server.server_close()
     return 0
 
 

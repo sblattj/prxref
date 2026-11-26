@@ -291,6 +291,8 @@ The service exposes:
 
 With `PRXREF_METRICS_PORT` set, `serve` and `gate serve` also expose Prometheus `/metrics` on `127.0.0.1` only, on a separate port: see [docs/metrics.md](docs/metrics.md).
 
+With `PRXREF_DASHBOARD_PORT` set, they also serve a read-only page of recent runs (verdict, finding counts, cost, tokens, models) on `127.0.0.1` only: see [docs/dashboard.md](docs/dashboard.md).
+
 ## Thread Replies
 
 Off by default. With `PRXREF_THREAD_REPLIES=mention` (or `thread_replies = "mention"` in `.prxref.toml`), a person who replies under a prxref inline finding, or writes a PR comment, naming `@prxref` gets one grounded answer in that thread; `always` answers every human reply under a prxref finding. Each answer is one bounded model call with the finding, the hunk and the surrounding head-file lines pre-gathered, at most `PRXREF_REPLY_MAX` calls per sweep, and it carries the model attribution line. A resolved or won't-fix thread is not re-argued. The webhook daemon answers GitHub `pull_request_review_comment` and `issue_comment` events; in CI, run `prxref reply --pr-url URL`. Modes, the trigger rule, loop safety and the Actions recipe: [docs/thread-replies.md](docs/thread-replies.md).

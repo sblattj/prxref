@@ -926,6 +926,7 @@ Gate (prxref gate serve, #102):
   PRXREF_GATE_WATCHDOG_SECONDS    watchdog interval in seconds (60)
   PRXREF_GATE_RECONCILE_MINUTES   open-PR reconcile interval (10)
   PRXREF_METRICS_PORT             loopback Prometheus /metrics port (0 = off)
+  PRXREF_DASHBOARD_PORT           loopback read-only run dashboard port (0 = off)
 
 List-valued keys (PRXREF_LLM_MODELS, PRXREF_SPEC_SOURCES,
 PRXREF_SIZE_IGNORE_GLOBS, PRXREF_REVIEW_SKIP_GLOBS, PRXREF_SCOPED_RULES,
@@ -1229,6 +1230,7 @@ _DEFAULTS: dict[str, object] = {
     "gate_watchdog_seconds": 60,
     "gate_reconcile_minutes": 10,
     "metrics_port": 0,
+    "dashboard_port": 0,
 }
 
 _INT_KEYS = frozenset({
@@ -1246,7 +1248,7 @@ _INT_KEYS = frozenset({
     "context_standards_max_chars",
     "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
     "gate_reconcile_minutes", "stability_passes", "stability_min_agree",
-    "metrics_port",
+    "metrics_port", "dashboard_port",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -1377,6 +1379,7 @@ _RANGES: dict[str, _Range] = {
     "gate_watchdog_seconds": _Range(0),
     "gate_reconcile_minutes": _Range(0),
     "metrics_port": _Range(0, 65535, low_inclusive=True),
+    "dashboard_port": _Range(0, 65535, low_inclusive=True),
     "llm_max_tokens": _Range(0),
     "llm_timeout": _Range(0),
     "llm_timeout_per_1k": _Range(0),
@@ -1500,6 +1503,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "gate_watchdog_seconds": "gate",
     "gate_reconcile_minutes": "gate",
     "metrics_port": "listener",
+    "dashboard_port": "listener",
     "trace_file": "local write",
     "trace_dir": "local write",
     "fallback": "local write",
