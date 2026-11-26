@@ -1031,7 +1031,7 @@ def _chunk_pressure_line(record: dict) -> str | None:
 
     ``chunks: <n> over the <budget>-token budget (largest ~<tokens>)`` when
     ``chunks_over_budget`` is above 0, and ``<n> file(s) placed past the
-    chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET`` when
+    chunk cap; raise PRXREF_MAX_CHUNKS, PRXREF_CHUNK_MAX_FILES or PRXREF_CHUNK_TOKEN_BUDGET`` when
     ``overflow_files`` is, joined by `` · `` when both are. ``None`` when
     both are 0 or missing, so a normal run prints no new line.
     """
@@ -1051,7 +1051,7 @@ def _chunk_pressure_line(record: dict) -> str | None:
         noun = "file" if overflow == 1 else "files"
         parts.append(
             f"{overflow} {noun} placed past the chunk cap; "
-            "raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET"
+            "raise PRXREF_MAX_CHUNKS, PRXREF_CHUNK_MAX_FILES or PRXREF_CHUNK_TOKEN_BUDGET"
         )
     return "chunks: " + " · ".join(parts)
 

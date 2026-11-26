@@ -384,6 +384,8 @@ from .triage import (
     SCOPE_IN,
     SCOPE_OUT,
     SCOPE_UNKNOWN,
+    ChunkPlan,
+    FileDiff,
     Finding,
     added_lines_by_file,
     count_size_relevant_changes,
@@ -1715,6 +1717,9 @@ def orchestrate_review(
         run_inputs["chunks_over_budget"] = plan.chunks_over_budget
         run_inputs["largest_chunk_tokens"] = plan.largest_chunk_tokens
         run_inputs["overflow_files"] = plan.overflow_files
+        # Issue #205: a review packed past the chunk limits says so where the
+        # reader looks, in the posted summary, not only in the run record.
+        size_advisory_line += _chunk_pressure_note(plan, review_files)
     except Exception as e:  # noqa: BLE001
         logger.error("build_chunks failed: %s", e)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
@@ -5897,6 +5902,48 @@ def _review_skip_line(skipped: Sequence[str] | None) -> str:
     more = f" and {len(skipped) - 5} more" if len(skipped) > 5 else ""
     n = len(skipped)
     return f"> ℹ️ Not reviewed ({n} file{'s' if n != 1 else ''} matched PRXREF_REVIEW_SKIP_GLOBS): {shown}{more}\n\n"
+
+
+def _chunk_pressure_note(plan: ChunkPlan, files: Sequence[FileDiff]) -> str:
+    """The blockquote a review packed past the chunk limits prepends (issue #205).
+
+    ``""`` when no file went through the overflow branch of
+    :func:`prxref.triage.plan_chunks`, so an unpressured run's summary is
+    byte-identical; a lone hunk over the token budget (#148) opens a chunk of
+    its own and is read alone, which is no reason for the note. Otherwise one
+    ``> ⚠️ Reduced review depth: …`` line counts the files placed past the
+    chunk limits (with their changed lines, out of the PR's reviewable
+    files) and the chunks over budget (with the largest estimate), says that
+    every file was still sent to the reviewer, and names the three settings
+    that buy room. Advisory only: the verdict, ``degraded`` and the exit code
+    are untouched.
+    """
+    over = plan.chunks_over_budget
+    overflow = plan.overflow_files
+    if overflow <= 0:
+        return ""
+    paths = set(plan.overflow_paths)
+    lines = sum(f.lines_added + f.lines_removed for f in files if f.path in paths)
+    total = sum(1 for f in files if not f.is_binary)
+    parts = [
+        f"{overflow} of {total} file{'s' if total != 1 else ''} "
+        f"({lines} changed line{'s' if lines != 1 else ''}) were placed past "
+        "the chunk limits into already full chunks"
+    ]
+    if over > 0:
+        count = len(plan.chunk_tokens)
+        parts.append(
+            f"{over} of {count} chunk{'s' if count != 1 else ''} "
+            f"ran over the {plan.token_budget}-token budget "
+            f"(largest ~{plan.largest_chunk_tokens})"
+        )
+    return (
+        f"> ⚠️ Reduced review depth: {', and '.join(parts)}. Every file was "
+        "sent to the reviewer, but an overstuffed chunk is read less closely, "
+        "so findings may be missing for this part of the diff. Raise "
+        "PRXREF_MAX_CHUNKS, PRXREF_CHUNK_MAX_FILES or PRXREF_CHUNK_TOKEN_BUDGET, "
+        "or split the PR.\n\n"
+    )
 
 
 def _size_advisory_line(stats: Mapping[str, Any] | None) -> str:

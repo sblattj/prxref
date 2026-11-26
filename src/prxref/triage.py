@@ -667,12 +667,15 @@ class ChunkPlan:
     ``max_chunks`` and no chunk had room (under ``token_budget`` and under
     ``max_files_per_chunk``), so the file joined the smallest chunk anyway.
     ``token_budget`` is the budget the pass placed against.
+    ``overflow_paths`` names those overflow files, each once, in placement
+    order (issue #205: the posted summary counts their changed lines).
     """
 
     chunks: list[list[FileDiff]]
     chunk_tokens: tuple[int, ...]
     overflow_files: int
     token_budget: int
+    overflow_paths: tuple[str, ...] = ()
 
     @property
     def chunks_over_budget(self) -> int:
@@ -750,7 +753,7 @@ def plan_chunks(
 
     chunks: list[list[FileDiff]] = []
     chunk_tokens: list[int] = []
-    overflow_paths: set[str] = set()
+    overflow_paths: dict[str, None] = {}
 
     for f in sorted_files:
         ftokens = est_tokens(f)
@@ -777,7 +780,7 @@ def plan_chunks(
             smallest = min(range(len(chunks)), key=lambda k: chunk_tokens[k])
             chunks[smallest].append(f)
             chunk_tokens[smallest] += ftokens
-            overflow_paths.add(f.path)
+            overflow_paths.setdefault(f.path, None)
 
     if split_paths:
         chunks = [_rejoin_pieces(chunk, split_paths) for chunk in chunks]
@@ -787,6 +790,7 @@ def plan_chunks(
         chunk_tokens=tuple(chunk_tokens),
         overflow_files=len(overflow_paths),
         token_budget=token_budget,
+        overflow_paths=tuple(overflow_paths),
     )
 
 

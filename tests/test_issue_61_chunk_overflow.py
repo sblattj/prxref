@@ -325,7 +325,7 @@ class TestTheTextLine:
         assert lines == [
             "verdict: Approved",
             "chunks: 2 over the 25000-token budget (largest ~61200) · 5 files placed past the "
-            "chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET",
+            "chunk cap; raise PRXREF_MAX_CHUNKS, PRXREF_CHUNK_MAX_FILES or PRXREF_CHUNK_TOKEN_BUDGET",
         ]
 
     def test_over_budget_alone(self):
@@ -337,14 +337,15 @@ class TestTheTextLine:
         record = {**BASE_RECORD, "chunks_over_budget": 0, "largest_chunk_tokens": 80,
                   "overflow_files": 1, "chunk_token_budget": 25000}
         assert _text(record).splitlines()[1] == (
-            "chunks: 1 file placed past the chunk cap; raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET"
+            "chunks: 1 file placed past the chunk cap; "
+            "raise PRXREF_MAX_CHUNKS, PRXREF_CHUNK_MAX_FILES or PRXREF_CHUNK_TOKEN_BUDGET"
         )
 
     def test_the_line_comes_from_a_real_run(self):
         out = _text(_review(THREE_FILES, max_chunks=1, token_budget=500))
         assert (
             "chunks: 1 over the 500-token budget (largest ~1200) · 2 files placed past the chunk cap; "
-            "raise PRXREF_MAX_CHUNKS or PRXREF_CHUNK_TOKEN_BUDGET"
+            "raise PRXREF_MAX_CHUNKS, PRXREF_CHUNK_MAX_FILES or PRXREF_CHUNK_TOKEN_BUDGET"
         ) in out.splitlines()
 
     def test_a_real_run_without_pressure_prints_no_line(self):
