@@ -189,7 +189,33 @@ LLM / pipeline:
                                 failure (verdict "Approved", exit 0). The
                                 webhook daemon has no exit code and is
                                 unaffected.
-  PRXREF_POST_MODE              What gets posted to the forge:
+  PRXREF_HISTORY_FILE           env-only path of the review history file
+                                (#46); empty (the default) is off. Each
+                                finished ``prxref review`` appends one
+                                compact JSON line (findings by severity,
+                                drops by gate) for CI to commit back, and
+                                with at least 3 prior runs the summary
+                                gains a trend line. A run with verdict
+                                "Error" or "Incomplete", or one that
+                                reviewed only part of the PR, appends
+                                nothing. A write failure is logged and
+                                never changes the verdict or the exit
+                                code. The webhook daemon and the gate
+                                ignore it. See docs/history.md.
+  PRXREF_FAIL_ON_REGRESSION     env-only opt-in gate (#46): "off"
+                                (default) | "on". When on, ``prxref
+                                review`` exits 1 when the history holds at
+                                least 3 prior runs and this run's active
+                                findings exceed the rolling mean of the
+                                last 20 by more than
+                                PRXREF_REGRESSION_TOLERANCE. "on" needs
+                                PRXREF_HISTORY_FILE. Separate from, and
+                                never changing, PRXREF_FAIL_ON.
+  PRXREF_REGRESSION_TOLERANCE   env-only allowed ratio over the mean for
+                                PRXREF_FAIL_ON_REGRESSION, 0 to 10
+                                (default 0.5: up to 50% above the mean
+                                passes).
+  PRXREF_POST_MODE             What gets posted to the forge:
                                 "summary+inline" (default) | "summary" |
                                 "inline". Any other value is a
                                 configuration error. Superseded entirely by
@@ -1022,6 +1048,9 @@ _DEFAULTS: dict[str, object] = {
     "max_workers": 4,
     "max_inline_comments": 15,
     "fail_on": "never",
+    "history_file": "",
+    "fail_on_regression": "off",
+    "regression_tolerance": 0.5,
     "dry_run": False,
     "notify_url": "",
     "trace_file": "",
@@ -1221,6 +1250,7 @@ _INT_KEYS = frozenset({
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
+    "regression_tolerance",
 })
 _BOOL_KEYS = frozenset({
     "allow_unsigned", "dry_run", "post_verdict", "post_cost", "group_findings",
@@ -1242,6 +1272,7 @@ _LIST_KEYS = frozenset({
 _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "rules_source": frozenset({"head", "base"}),
     "fail_on": frozenset({"never", "error", "any"}),
+    "fail_on_regression": frozenset({"off", "on"}),
     "repo_context": frozenset({"off", "diff", "repo"}),
     "context_followup": frozenset({"off", "on"}),
     "default_branch_check": frozenset({"off", "on"}),
@@ -1382,6 +1413,7 @@ _RANGES: dict[str, _Range] = {
     "context_standards_max_chars": _Range(0, low_inclusive=True),
     "confidence_floor": _Range(0.0, 1.0, low_inclusive=True),
     "dedup_similarity": _Range(0.0, 1.0),
+    "regression_tolerance": _Range(0.0, 10.0, low_inclusive=True),
 }
 
 _LEGACY_ENV_ALIASES: dict[str, str] = {
@@ -1444,6 +1476,9 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "llm_api_key": "credential",
     "llm_cli_path": "executable",
     "fail_on": "gate",
+    "history_file": "local write",
+    "fail_on_regression": "gate",
+    "regression_tolerance": "gate",
     "dry_run": "gate",
     "notify_url": "credential",
     "allow_unsigned": "gate",
@@ -1870,6 +1905,20 @@ def _check_stability(cfg: dict[str, object], sources: dict[str, str]) -> None:
         )
 
 
+def _check_regression_gate(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Require ``history_file`` when ``fail_on_regression`` is ``on`` (#46).
+
+    The gate measures against the history file, so with none it could
+    never fire and would read as a gate that passed. A ``ConfigError``
+    (exit 2) naming the variable that turned the gate on.
+    """
+    if cfg["fail_on_regression"] == "on" and not str(cfg["history_file"] or "").strip():
+        raise ConfigError(
+            f"{sources['fail_on_regression']}: 'on' needs PRXREF_HISTORY_FILE "
+            "to name the history file it measures against"
+        )
+
+
 def _check_title_tickets(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """With ``ticket_ids_from_title`` on, require a usable Jira setup (#145).
 
@@ -2172,6 +2221,7 @@ def load_config_with_sources(
     _check_choices(cfg, sources)
     _check_post_mode(cfg, sources)
     _check_stability(cfg, sources)
+    _check_regression_gate(cfg, sources)
     _check_title_tickets(cfg, sources)
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)

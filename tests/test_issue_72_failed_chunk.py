@@ -516,7 +516,7 @@ class TestPartialRunByteIdentityOfCleanOutput:
             '"incremental": null, "ci_wiring": null, "evidence": null, '
             '"stable_ids": null, "degraded": null, "metadata_rules": null, '
             '"config_file": null, "review_depth": null, "learnings": null, "describe": null, '
-            '"eval_pins": null}',
+            '"eval_pins": null, "history": null}',
         )
         assert json.dumps(_build_json_result({
             "verdict": "Approved", "findings_active": [], "findings_dropped": [],

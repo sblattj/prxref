@@ -119,6 +119,13 @@ worse than none. An empty PR diff is not a failure: it is reviewed as
 value — nothing was reviewed, so there is no outcome to gate on. The webhook
 daemon has no exit code and is unaffected by the knob.
 
+``PRXREF_FAIL_ON_REGRESSION=on`` (#46) is a second, separate opt-in that
+never changes ``PRXREF_FAIL_ON``: with ``PRXREF_HISTORY_FILE`` holding at
+least 3 prior runs, a completed review whose active findings exceed the
+rolling mean of the last 20 times ``1 + PRXREF_REGRESSION_TOLERANCE`` exits
+1. The exit code is the higher of the two gates' codes. Each finished
+``review`` appends one line to the history file (docs/history.md).
+
 ``PRXREF_DRY_RUN=1`` suppresses every write to the forge on both paths — the
 one-shot review and the webhook daemon — and ``--no-post`` does the same for a
 single invocation.
@@ -150,6 +157,7 @@ from typing import Any
 
 import prxref
 from prxref import ci_fallback, markers
+from prxref import history as review_history
 from prxref.config import (
     _DEFAULTS,
     _ENV_ONLY_REASONS,
@@ -910,6 +918,37 @@ def _scope_counts(result: dict) -> tuple[int, int, int]:
     return n_in, n_out, len(scopes) - n_in - n_out
 
 
+def _history_lines(hist: dict[str, Any]) -> list[str]:
+    """The text-mode lines of a run's ``history`` record (#46).
+
+    ``history: appended to <file> (<n> prior runs, mean <m>)`` or
+    ``history: not appended (<reason>)``; ``history: <error>`` for a read or
+    write failure; the posted trend line when there is one, without its
+    blockquote marker; and ``regression gate: <reason>`` when the gate is on.
+    """
+    mean = hist.get("mean")
+    mean_text = "-" if mean is None else f"{mean:g}"
+    if hist.get("written"):
+        lines = [
+            f"history: appended to {hist.get('file')} "
+            f"({hist.get('prior_runs')} prior runs, mean {mean_text})"
+        ]
+    else:
+        lines = [f"history: not appended ({hist.get('reason') or hist.get('error') or 'unknown'})"]
+    for key in ("read_error", "error"):
+        if hist.get(key):
+            lines.append(f"history: {hist[key]}")
+    trend = hist.get("trend")
+    if trend:
+        lines.append(f"history: {str(trend).removeprefix('> ')}")
+    gate = hist.get("regression")
+    if isinstance(gate, dict) and gate.get("enabled"):
+        threshold = gate.get("threshold")
+        limit = "" if threshold is None else f", limit {threshold:g}"
+        lines.append(f"regression gate: {gate.get('reason')}{limit}")
+    return lines
+
+
 def _print_summary(
     result: Any,
     elapsed_s: float,
@@ -926,8 +965,10 @@ def _print_summary(
     past the chunk cap (:func:`_chunk_pressure_line`); ``size advisory:``
     when the PR-size advisory fired; one ``pr metadata:`` line naming each
     PR-metadata violation (#70; the checks are summary notes, never
-    findings); and ``replay:`` when the run was a
-    replay, so a replay can never be read as a live review.
+    findings); ``replay:`` when the run was a
+    replay, so a replay can never be read as a live review; and, with
+    ``PRXREF_HISTORY_FILE`` set, the ``history:`` lines of
+    :func:`_history_lines` (#46).
     The ``replay:`` line carries the stamp as ``key=value`` pairs, ending in
     ``description=<status>`` and, when a cutoff was chosen,
     `` as_of=<time> (<source>)``.
@@ -982,6 +1023,10 @@ def _print_summary(
             f"description={_dash(replay.get('description'))}{cutoff}",
             file=target,
         )
+    hist = record.get("history")
+    if isinstance(hist, dict):
+        for line in _history_lines(hist):
+            print(line, file=target)
     if not verbose:
         return
     dropped = record.get("findings_dropped", [])
@@ -1271,6 +1316,9 @@ def _build_json_result(result: Any) -> dict:
     head, labels_mode, labels_applied, labels_reason, error}``.
     ``eval_pins`` (#137) is the pinned mapping a ``--eval-pins`` or
     ``PRXREF_EVAL_PINS=on`` run applied, ``null`` when the pins were off.
+    ``history`` (#46) is the record of :func:`_history_record`, ``null``
+    whenever ``PRXREF_HISTORY_FILE`` is empty or the run is not a
+    ``prxref review``.
     ``failed_chunks`` (issue #72) sits right after ``chunks_failed`` —
     ``[]`` when every unit completed, ``null`` in an error-shaped result.
 
@@ -1395,6 +1443,7 @@ def _build_json_result(result: Any) -> dict:
         "learnings": result.get("learnings"),
         "describe": result.get("describe"),
         "eval_pins": result.get("eval_pins"),
+        "history": result.get("history"),
     }
     if "sampling" in result:
         payload["sampling"] = result["sampling"]
@@ -1881,6 +1930,7 @@ def _run_review(
     metadata_rules: str | None = None,
     forge: Any = None,
     eval_pins: str | None = None,
+    history: bool = False,
 ) -> Any:
     replay = _resolve_replay(
         url, base_sha=base_sha, head_sha=head_sha, no_threads=no_threads,
@@ -2018,6 +2068,19 @@ def _run_review(
             "because a gate's verdict must see the whole PR", cfg["fail_on"],
         )
         full_review_reason = f"PRXREF_FAIL_ON={cfg['fail_on']}"
+    elif incremental == "on" and history and cfg["fail_on_regression"] == "on":
+        logger.info(
+            "PRXREF_FAIL_ON_REGRESSION=on: reviewing every file although "
+            "PRXREF_INCREMENTAL=on, because the gate compares whole PRs",
+        )
+        full_review_reason = "PRXREF_FAIL_ON_REGRESSION=on"
+    # Issue #46: only `prxref review` passes history=True. The webhook daemon
+    # and the gate review many repositories from one working directory, so a
+    # single relative history file there would mix them.
+    history_path = str(cfg["history_file"] or "").strip() if history else ""
+    baseline = (
+        review_history.baseline(review_history.read(history_path)) if history_path else None
+    )
     # Not a config key: a hint this caller adds for the LLM factory, which
     # the layers know here and the resolved cfg cannot express on its own
     # (it always carries an llm_timeout value, so default and explicit are
@@ -2116,10 +2179,19 @@ def _run_review(
         llm_require_models=cfg["llm_require_models"],
         stability_passes=cfg["stability_passes"],
         stability_min_agree=cfg["stability_min_agree"],
+        history_baseline=baseline,
     )
     if isinstance(result, dict):
         result["config_file"] = config_stamp
         result["eval_pins"] = pins
+        result["history"] = (
+            _history_record(
+                result, path=history_path, baseline=baseline, pr=ref.number,
+                gate=cfg["fail_on_regression"] == "on",
+                tolerance=float(cfg["regression_tolerance"]),
+            )
+            if baseline is not None else None
+        )
         _metrics_observe(result)
     _notify(result, cfg, ref=ref, post=post)
     return result
@@ -2347,6 +2419,90 @@ def _cmd_reply(args: argparse.Namespace) -> int:
     return 0
 
 
+def _history_skip_reason(result: dict[str, Any]) -> str | None:
+    """Why a finished run is left out of the history (#46), ``None`` to record it.
+
+    A run that did not complete (verdict ``Error`` or ``Incomplete``, or any
+    failed review unit, whatever the verdict) and an incremental run scoped
+    to part of the PR both count fewer findings than the PR has.
+    """
+    verdict = result.get("verdict")
+    if verdict in ("Error", "Incomplete"):
+        return f"verdict {verdict}"
+    failed = result.get("chunks_failed")
+    if isinstance(failed, int) and failed > 0:
+        return "partial review"
+    incremental = result.get("incremental")
+    if isinstance(incremental, dict) and incremental.get("mode") not in (None, "full"):
+        return "incremental review of part of the PR"
+    return None
+
+
+def _history_record(
+    result: dict[str, Any], *, path: str, baseline: review_history.Baseline,
+    pr: object, gate: bool, tolerance: float,
+) -> dict[str, Any]:
+    """Append this run to the history file and return the run's ``history`` record (#46).
+
+    Keys, in order: ``file`` (as configured), ``written``, ``reason`` (why
+    nothing was appended, else ``None``), ``error`` (the append failure, else
+    ``None``), ``read_error``, ``skipped_lines`` (corrupt lines skipped on
+    read), ``prior_runs`` and ``mean`` (the baseline the trend and the gate
+    used, read before the review), ``window``, ``trend`` (the line the
+    summary carries, ``None`` without one) and ``regression``
+    (:func:`prxref.history.regression`). A failure is logged and recorded
+    here; it never changes the verdict or the exit code.
+    """
+    seen = result.get("history") if isinstance(result.get("history"), dict) else {}
+    reason = _history_skip_reason(result)
+    error: str | None = None
+    if reason is None:
+        entry = review_history.make_line(
+            result, pr=pr, head_sha=str(seen.get("head_sha") or ""), version=prxref.__version__,
+        )
+        error = review_history.append(path, entry)
+    total = len(result.get("findings_active") or [])
+    if reason is None:
+        regression = review_history.regression(baseline, total, enabled=gate, tolerance=tolerance)
+    else:
+        regression = {
+            "enabled": gate, "fired": False, "threshold": None,
+            "reason": f"skipped: {reason}" if gate else "off",
+        }
+    mean = baseline.mean
+    return {
+        "file": path,
+        "written": reason is None and error is None,
+        "reason": reason,
+        "error": error,
+        "read_error": baseline.error,
+        "skipped_lines": baseline.skipped,
+        "prior_runs": baseline.prior_runs,
+        "mean": None if mean is None else round(mean, 4),
+        "window": baseline.window,
+        "trend": (seen.get("trend") or None) if reason is None else None,
+        "regression": regression,
+    }
+
+
+def _regression_exit(result: Any) -> tuple[int, str | None]:
+    """The exit code ``PRXREF_FAIL_ON_REGRESSION`` adds (#46): 1 only on a measured regression.
+
+    Read from the run's ``history.regression`` record, so the gate and the
+    record can never disagree. Anything else, the gate off included, is 0.
+    """
+    hist = result.get("history") if isinstance(result, dict) else None
+    gate = hist.get("regression") if isinstance(hist, dict) else None
+    if not isinstance(gate, dict) or not gate.get("fired"):
+        return 0, None
+    total = len(result.get("findings_active") or [])
+    return 1, (
+        f"PRXREF_FAIL_ON_REGRESSION=on: {total} active finding{'s' if total != 1 else ''} "
+        f"is above {gate.get('threshold'):g}, the mean of {hist.get('mean'):g} per PR over "
+        f"the last {hist.get('prior_runs')} runs plus the tolerance; exiting 1"
+    )
+
+
 def _fail_on_exit(result: Any, fail_on: str) -> tuple[int, str | None]:
     """The exit code a returned review result earns under the ``fail_on`` policy.
 
@@ -2546,6 +2702,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             context_standards_globs=_standards_globs_arg(args.context_standards_globs),
             metadata_rules=args.metadata_rules,
             eval_pins="on" if args.eval_pins else None,
+            history=True,
         )
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
@@ -2591,7 +2748,10 @@ def _cmd_review(args: argparse.Namespace) -> int:
     code, note = _fail_on_exit(result, fail_on)
     if note:
         print(note, file=sys.stderr)
-    return code
+    regression_code, regression_note = _regression_exit(result)
+    if regression_note:
+        print(regression_note, file=sys.stderr)
+    return max(code, regression_code)
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:

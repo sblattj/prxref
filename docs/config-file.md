@@ -311,6 +311,9 @@ instead, even when the value is empty.
 | `stability_passes` | spend | Runs every chunk review that many times; a file could multiply the lane's token spend. |
 | `stability_min_agree` | gate | Decides which findings are listed and so what `PRXREF_FAIL_ON` sees. |
 | `fail_on` | gate | The pipeline's exit-code policy. |
+| `history_file` | local write | Appends one line per review run at a chosen path (`PRXREF_HISTORY_FILE`). |
+| `fail_on_regression` | gate | Exits 1 when findings per PR rise above the history's rolling mean (`PRXREF_FAIL_ON_REGRESSION`). |
+| `regression_tolerance` | gate | How far above the rolling mean the regression gate allows (`PRXREF_REGRESSION_TOLERANCE`). |
 | `dry_run` | gate | The switch that suppresses every forge write. |
 | `notify_url` | credential | A webhook URL (a Slack webhook URL is a secret); `config check` prints it as `<set>`. |
 | `allow_unsigned` | gate | The webhook signature safety switch. |

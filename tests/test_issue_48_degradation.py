@@ -485,6 +485,7 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("learnings") is None  # #33: null when no learnings file is configured
         assert payload.pop("describe") is None  # #37: null when PRXREF_DESCRIBE is off
         assert payload.pop("eval_pins") is None  # #137: null when PRXREF_EVAL_PINS is off
+        assert payload.pop("history") is None  # #46: null when PRXREF_HISTORY_FILE is empty
         assert [payload.pop(key) for key in (
             "chunks_over_budget", "largest_chunk_tokens", "overflow_files", "chunk_token_budget",
         )] == [0, 800, 0, 25000]

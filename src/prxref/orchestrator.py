@@ -276,6 +276,7 @@ from . import (
     fixture_pii,
     followup,
     heuristics,
+    history,
     repo_contracts,
     repo_reader,
     repo_unit,
@@ -696,6 +697,7 @@ def orchestrate_review(
     llm_require_models: Sequence[str] = (),
     stability_passes: int = 1,
     stability_min_agree: int = 1,
+    history_baseline: history.Baseline | None = None,
 ) -> dict:
     """Run one full review pass over a PR and optionally post results.
 
@@ -765,6 +767,14 @@ def orchestrate_review(
     cost sum across passes. The run record gains a ``stability`` key and each
     finding ``agreement`` and ``passes_ok``, only then; at 1 pass the run is
     byte for byte what it was without the mode.
+
+    ``history_baseline`` (``PRXREF_HISTORY_FILE``, issue #46) is the rolling
+    mean :func:`prxref.history.baseline` read before the run, or ``None``.
+    With one, the finished exits (the full review and the no-chunk one)
+    carry ``history`` = ``{"head_sha", "trend"}``, where ``trend`` is the
+    :func:`prxref.history.trend_note` line, ``""`` without enough prior
+    runs, and every summary they render places that line before the footer.
+    Without one the run is byte for byte what it was before the setting.
 
     ``chunk_count`` counts the review units: ``len(chunks)`` plus one for
     the systemic sweep, which runs whenever at least one chunk exists, and on
@@ -1776,6 +1786,9 @@ def orchestrate_review(
             reviewed_head=_mark_reviewed_head(
                 run_inputs, scope, pr, post_mode=post_mode, complete=True,
             ),
+            history_baseline=(
+                None if scope is not None and scope.active else history_baseline
+            ),
         ), run_inputs)
 
     # PR auto-description and labels (#37): opt-in, posting runs only (post
@@ -2677,6 +2690,14 @@ def orchestrate_review(
         if chunks_failed or model_violations
         else "Approved"
     )
+    # Issue #46: only a whole, completed review compares with the history.
+    # A partial run or an incremental one scoped to the latest push counts
+    # fewer findings than the PR has, so its trend would mislead.
+    trend_note = (
+        history.trend_note(history_baseline, len(findings_active), len(findings_dropped))
+        if history_baseline is not None and not chunks_failed and not model_violations
+        and not (scope is not None and scope.active) else ""
+    )
 
     elapsed_ms = _elapsed_ms(t0)
     reviewed_head = _mark_reviewed_head(
@@ -2720,6 +2741,7 @@ def orchestrate_review(
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             stability_note=stability_note,
+            trend_note=trend_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -2787,6 +2809,7 @@ def orchestrate_review(
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             stability_note=stability_note,
+            trend_note=trend_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             inline_accounting=_inline_accounting(
@@ -2821,6 +2844,7 @@ def orchestrate_review(
             size_advisory_line=size_advisory_line,
             metadata_section=metadata_section,
             stability_note=stability_note,
+            trend_note=trend_note,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
             thread_accounting=_thread_dedup_accounting(
@@ -2842,7 +2866,7 @@ def orchestrate_review(
         **_cost_meta(run_inputs),
         **(_scope_counts(findings_active) if ticket_active else {}),
     )
-    return _run_record(_with_degraded({
+    record = {
         "verdict": verdict,
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
@@ -2855,7 +2879,10 @@ def orchestrate_review(
         "output_tokens": output_tokens,
         "posted": posted,
         "sampling": _sampling(llm),
-    }, degraded, fallback_summary), run_inputs)
+    }
+    if history_baseline is not None:
+        record["history"] = {"head_sha": getattr(pr, "source_sha", "") or "", "trend": trend_note}
+    return _run_record(_with_degraded(record, degraded, fallback_summary), run_inputs)
 
 
 def _origin_key(finding: Finding) -> tuple:
@@ -5584,6 +5611,7 @@ def _render_summary(
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
     metadata_section: str = "",
     stability_note: str = "",
+    trend_note: str = "",
 ) -> str:
     """Render the PR summary comment body.
 
@@ -5615,7 +5643,9 @@ def _render_summary(
     every template, ahead of any other appended block, so an empty one
     leaves the summary byte-identical. ``stability_note``
     (:func:`prxref.stability.summary_line`, issue #143, ``""`` with the mode
-    off) rides the same slot, right after it.
+    off) rides the same slot, right after it, and ``trend_note``
+    (:func:`prxref.history.trend_note`, issue #46, ``""`` without a history
+    file or enough prior runs) right after that.
     ``summary_template`` is an operator override of ``summary.md``
     (:meth:`prxref.prompt_templates.PromptTemplates.override`); ``""`` reads
     the packaged template through ``reviewer.load_prompt``, and only that
@@ -5747,6 +5777,8 @@ def _render_summary(
     extras: list[str] = [metadata_section] if metadata_section else []
     if stability_note:
         extras.append(stability_note)
+    if trend_note:
+        extras.append(trend_note)
     if stray:
         logger.warning(
             "summary template has no {findings} and no slot for the %s finding group(s); "
@@ -6340,6 +6372,7 @@ def _summary_only_run(
     summary_template: str = "", reviewed_head: str | None = None,
     summary_bullet_separator: str = SUMMARY_BULLET_SEPARATOR,
     metadata_section: str = "",
+    history_baseline: history.Baseline | None = None,
 ) -> dict:
     """The no-chunk exit: an empty diff, or every file binary.
 
@@ -6378,7 +6411,9 @@ def _summary_only_run(
     :data:`SUMMARY_BULLET_SEPARATOR`.
     ``reviewed_head`` is stamped on the body by :func:`_with_reviewed_head`;
     ``None`` (the default) leaves it as before. The run-record keys are added
-    by the caller's :func:`_run_record`, not here.
+    by the caller's :func:`_run_record`, not here. ``history_baseline``
+    (#46) adds the trend line and the ``history`` key exactly as on a full
+    review; ``None`` changes nothing.
     """
     tracer = tracer if tracer is not None else get_tracer()
     elapsed_ms = _elapsed_ms(t0)
@@ -6408,6 +6443,10 @@ def _summary_only_run(
         if any(f.severity == "error" for f in findings_active)
         else "Approved"
     )
+    trend_note = (
+        history.trend_note(history_baseline, len(findings_active), len(findings_dropped))
+        if history_baseline is not None else ""
+    )
 
     wanted = post and post_mode in POST_SUMMARY_MODES
     _trace_post_begin(
@@ -6425,6 +6464,7 @@ def _summary_only_run(
             metadata_section=metadata_section,
             summary_template=summary_template,
             summary_bullet_separator=summary_bullet_separator,
+            trend_note=trend_note,
         )
         try:
             forge.post_summary(ref, _with_reviewed_head(summary, reviewed_head))
@@ -6433,7 +6473,7 @@ def _summary_only_run(
             logger.error("post_summary failed: %s", e)
             degraded = _degraded_record([("summary", post_failure_cause(e))])
     _trace_post_end(tracer, wanted=wanted, posted=posted, mode=post_mode)
-    return _with_degraded({
+    record = {
         "verdict": verdict,
         "findings_active": findings_active,
         "findings_dropped": findings_dropped,
@@ -6445,7 +6485,10 @@ def _summary_only_run(
         "output_tokens": 0,
         "posted": posted,
         "sampling": sampling if sampling is not None else _sampling(None),
-    }, degraded, summary)
+    }
+    if history_baseline is not None:
+        record["history"] = {"head_sha": getattr(pr, "source_sha", "") or "", "trend": trend_note}
+    return _with_degraded(record, degraded, summary)
 
 
 def _error_run(
