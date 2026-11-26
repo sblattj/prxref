@@ -54,7 +54,7 @@ RECORD_KEYS = {
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "removal_claims",
-    "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+    "suggestions", "incremental", "ci_wiring", "vuln_scan", "evidence", "stable_ids", "degraded",
     "review_depth", "learnings", "describe", "default_branch_check", "reviewed_head_sha",
 }
 NULL_WHEN_OFF = (
@@ -64,6 +64,10 @@ NULL_WHEN_OFF = (
     "removal_claims", "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids",
     "degraded", "learnings", "describe",
 )
+VULN_SCAN_OFF = {
+    "status": "off", "reason": None, "manifests": 0, "queried": 0, "advisories": 0,
+    "posted": 0, "capped": 0, "unpinned": 0,
+}
 
 REPLAY = {
     "base_sha": "b" * 40,
@@ -228,6 +232,7 @@ class TestTheRecordKeys:
             if key in ("stable_ids", "error_verification", "removal_claims") and path == "success":
                 continue
             assert res[key] is None, key
+        assert res["vuln_scan"] == VULN_SCAN_OFF
         if path == "success":
             # #126: error verification is on ("names") by default.
             assert res["error_verification"]["mode"] == "names"
@@ -254,6 +259,7 @@ class TestTheRecordKeys:
         assert set(res) == BASE_KEYS | RECORD_KEYS
         for key in NULL_WHEN_OFF:
             assert (res[key] is None) is (key != "scoped_rules"), key
+        assert res["vuln_scan"] == VULN_SCAN_OFF
         assert res["scoped_rules"]["max_chars"] == 0
         assert res["scoped_rules"]["units"] is None
         assert res["cost_usd"] == 0.0 and res["cost_estimated"] is False

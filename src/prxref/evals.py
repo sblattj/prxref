@@ -93,6 +93,7 @@ EVAL_PINS: Mapping[str, Any] = {
     "routing_probe": "off",
     "context_standards_globs": [],
     "ticket_ids_from_title": "off",
+    "vuln_scan": "off",
 }
 SCORE_VERSION = 1
 SCORE_RUN_KEYS = ("prompts", "sampling", "review_rules", "scoped_rules", "config")
@@ -145,8 +146,9 @@ def eval_run(
     environment's ticket and spec inputs cannot leak into a case. The
     default-on features that would move a baseline are pinned off for every
     case by :data:`EVAL_PINS` (OD2): ``ci_wiring="off"``,
-    ``routing_probe="off"``, ``context_standards_globs=[]`` and
-    ``ticket_ids_from_title="off"`` reach
+    ``routing_probe="off"``, ``context_standards_globs=[]``,
+    ``ticket_ids_from_title="off"`` and ``vuln_scan="off"`` (#36: a
+    network lookup whose answers change over time) reach
     ``run_review`` as overrides, and the same values are the ``load_config``
     overrides ``run.json``'s ``config`` is read from, so it records what
     ran whatever the environment or the config file says.

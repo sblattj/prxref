@@ -103,7 +103,7 @@ class TestTheSameMapping:
     def test_the_pins_come_from_the_eval_helper_not_a_copy(self, repo, recorder, monkeypatch, capsys):
         swapped = {
             "ci_wiring": "on", "routing_probe": "off", "context_standards_globs": ["X.md"],
-            "ticket_ids_from_title": "off",
+            "ticket_ids_from_title": "off", "vuln_scan": "on",
         }
         monkeypatch.setattr(evals, "EVAL_PINS", swapped)
         monkeypatch.setenv("PRXREF_CI_WIRING", "off")
@@ -121,7 +121,7 @@ class TestTheSameMapping:
         (call,) = recorder
         assert _pinned(call) == {
             "ci_wiring": "on", "routing_probe": "on", "context_standards_globs": [STANDARDS],
-            "ticket_ids_from_title": "off",
+            "ticket_ids_from_title": "off", "vuln_scan": "off",
         }
         assert _pinned(call) != evals._pins()
 

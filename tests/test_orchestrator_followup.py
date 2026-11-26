@@ -507,7 +507,7 @@ class TestTheCli:
                                             "sampling": {"seed": 1}, "replay": {}}))
         assert keys[keys.index("parse_retries") + 1:] == [
             "context_followup", "error_verification",
-            "removal_claims", "suggestions", "incremental", "ci_wiring", "evidence",
+            "removal_claims", "suggestions", "incremental", "ci_wiring", "vuln_scan", "evidence",
             "stable_ids", "degraded", "metadata_rules", "config_file", "review_depth",
             "learnings", "describe", "eval_pins", "history", "sampling", "replay",
         ]

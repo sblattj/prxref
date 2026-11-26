@@ -110,7 +110,7 @@ The CI wiring check (#66, on by default; `--ci-wiring off` or
 `PRXREF_CI_WIRING=off` turns it off) flags a verification script, shebang,
 test, or `make`/`npm` check target the PR adds that no CI configuration
 file invokes (a shebang-only script that prompts the terminal, runs an
-interactive login or writes into `$HOME` is an operator helper, not a check). Two more
+interactive login or writes into `$HOME` is an operator helper, not a check). Three more
 deterministic checks are opt-in: the PR metadata rules (#70,
 `metadata_rules = ".prxref/metadata.toml"` naming a separate TOML rules
 file with `branch_patterns`, `commit_reference` and `area_globs`; see
@@ -118,7 +118,12 @@ file with `branch_patterns`, `commit_reference` and `area_globs`; see
 commit subjects and the touched areas with zero model calls and report
 a violation in a `PR metadata` section of the summary, never as a finding,
 so it is never posted inline and never moves the verdict or
-`PRXREF_FAIL_ON`; and the
+`PRXREF_FAIL_ON`; the known-vulnerability scan (#36,
+`PRXREF_VULN_SCAN=on`, env-only since it sends the changed dependency names
+and versions to OSV.dev), which posts one finding per advisory affecting a
+dependency pin the PR changes, at most `PRXREF_VULN_MAX` per PR, and skips
+itself without failing the review when OSV.dev cannot be reached (see
+[vuln-scan.md](docs/vuln-scan.md)); and the
 execution-evidence drop (#69, `--evidence-file`), which drops a finding
 claiming a header is missing when an exit-0 evidence item shows that header
 as a `Name: value` line for the resource the finding names (a missing
@@ -559,6 +564,7 @@ prints it as `<set>`.
   - `suggestions`: the code-suggestion tally (#30). Always present, and `null` while `PRXREF_SUGGESTIONS` is `off`; when it is `on`, `{"kept": n, "cleared": {"<reason>": n, ...}}` over the posted findings, one `cleared` entry per reason a suggestion was withheld (see [docs/llm.md](docs/llm.md));
   - `incremental`: the incremental re-review scope (#34). Always present, and `null` while `PRXREF_INCREMENTAL` is `off`; when it is `on`, `{"mode", "reason", "since_sha", "files_total", "files_reviewed", "marker_sha"}`: `mode` is `incremental` or `full`, `reason` says why a run is full (`null` when incremental), `since_sha` is the reviewed head the run compared from, and `marker_sha` the head its summary is stamped with. See [Incremental Re-review](#incremental-re-review);
   - `ci_wiring`: the CI wiring check's tally (#66). Always present, and `null` while `PRXREF_CI_WIRING` is `off`; when it is `on` (the default), `{"candidates", "ci_files", "picked_up_default", "triggered"}`, or `{"triggered": false, "reason": ...}` when the run had no repository reader. See [docs/env-vars.md](docs/env-vars.md);
+  - `vuln_scan`: the known-vulnerability scan's tally (#36). Always present: `{"status", "reason", "manifests", "queried", "advisories", "posted", "capped", "unpinned"}`, `status` `off` while `PRXREF_VULN_SCAN` is `off` (the default), `ok` when OSV.dev answered, and `skipped` with a `reason` when it could not be reached; `posted` counts the scan's findings left after the quality gates. See [docs/vuln-scan.md](docs/vuln-scan.md).
   - `evidence`: the execution-evidence tally (#69). Always present, and `null` while no evidence file was given; otherwise `{"files", "items", "matched_chunks", "max_chars"}`. See [docs/env-vars.md](docs/env-vars.md);
   - `stable_ids`: the stable-finding-id tally (#71). Always present, and `null` only on a summary-only or error run, which ends before the id pass; otherwise `{"assigned", "reused_from_verdict", "reused_from_thread", "collisions"}` over every finding of the run. See [docs/env-vars.md](docs/env-vars.md);
   - `degraded`: the posts that failed (#48). Always present, and `null` when every attempted post succeeded or nothing was posted; otherwise `{"cause", "failed", "fallback", "annotations"}`: `cause` is `permission` when a post was refused with HTTP 401 or 403 (a read-only token) and `error` otherwise, `failed` lists `summary` and/or `inline`, `fallback` lists what the CI fallback emitted instead (`github-annotations`, `github-step-summary`, `azure-logging`, `gitlab-codequality`, `log`; empty with `PRXREF_FALLBACK=off`), and `annotations` counts the annotation lines or report entries emitted. Under `--format json` the stdout annotations and Azure logging commands are skipped, so `github-annotations` and `azure-logging` never appear in `fallback`. See [When prxref cannot post](docs/forges.md#when-prxref-cannot-post);
@@ -567,7 +573,7 @@ prints it as `<set>`.
   - `review_depth`: the `PRXREF_REVIEW_DEPTH` the run used, `standard` or `thorough`. Always present; a custom `worker.md` override still records the configured value.
   - `learnings`: the team-learnings tally (#33). Always present, and `null` while no `PRXREF_LEARNINGS_FILE` was loaded; otherwise `{"file", "sha256", "loaded", "expired", "suppressed"}`, where `suppressed` lists one `{"learning_id", "finding_id", "title"}` per finding a learning dropped. See [docs/learnings.md](docs/learnings.md).
   - `describe`: the generated PR description and labels step (#37). Always present, and `null` while `PRXREF_DESCRIBE` is `off`; otherwise `{"mode", "written", "reason", "head", "labels_mode", "labels_applied", "labels_reason", "error"}`: whether the description was written and why (or why not), the PR head SHA it is pinned to, the labels applied, and the error of a failed model call or forge write (`null` when none). See [Generated PR descriptions and labels](#generated-pr-descriptions-and-labels).
-  - `eval_pins`: the eval pins the run applied (#137). Always present, and `null` unless `--eval-pins` or `PRXREF_EVAL_PINS=on` was in force; otherwise the pinned mapping, `{"ci_wiring": "off", "routing_probe": "off", "context_standards_globs": [], "ticket_ids_from_title": "off"}`, so a CI log shows the review ran under the settings `prxref eval run` measures with.
+  - `eval_pins`: the eval pins the run applied (#137). Always present, and `null` unless `--eval-pins` or `PRXREF_EVAL_PINS=on` was in force; otherwise the pinned mapping, `{"ci_wiring": "off", "routing_probe": "off", "context_standards_globs": [], "ticket_ids_from_title": "off", "vuln_scan": "off"}`, so a CI log shows the review ran under the settings `prxref eval run` measures with.
   - `history`: the review history file's record (#46). Always present, and `null` while `PRXREF_HISTORY_FILE` is empty; otherwise `{"file", "written", "reason", "error", "read_error", "skipped_lines", "prior_runs", "mean", "window", "trend", "regression"}`: whether this run's line was appended (and why not), the rolling mean it was compared with, the trend line the summary carries, and the `PRXREF_FAIL_ON_REGRESSION` outcome. See [docs/history.md](docs/history.md).
   - `sampling`: the `temperature`, `seed`, and `models` the run had in force (every review result carries it);
   - `replay`: the replay stamp (`base_sha`, `head_sha`, `threads`, `diff_file`, `description`, `as_of`, `as_of_source`), on replay runs only.

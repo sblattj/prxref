@@ -57,6 +57,8 @@ EXPECTED_ENV_ONLY = {
     "fallback": "local write",
     "price_table": "local read",
     "ticket_ids_from_title": "endpoint",
+    "vuln_scan": "endpoint",
+    "osv_url": "endpoint",
     "jira_base_url": "endpoint",
     "jira_email": "credential",
     "jira_api_token": "credential",

@@ -315,8 +315,8 @@ class TestJson:
         # right after chunks_failed; learnings (#33), describe (#37) and
         # eval_pins (#137) then history (#46) last; error_verification (#126)
         # follows context_followup, and removal_claims (#116) follows
-        # error_verification.
-        assert keys.index("sampling") == keys.index("scoped_rules") + 21
+        # error_verification; vuln_scan (#36) follows ci_wiring.
+        assert keys.index("sampling") == keys.index("scoped_rules") + 22
 
     def test_the_key_is_null_for_a_pre_0_15_result(self):
         assert cli._build_json_result({})["scoped_rules"] is None

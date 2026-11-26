@@ -259,6 +259,7 @@ instead.
 | `max_areas_per_pr` | integer | Most distinct areas a PR may touch before the area check flags it ([more](env-vars.md#llm--pipeline)). |
 | `ci_wiring` | string | `on` (the default) flags a check the PR adds that no CI configuration file invokes; `off` reads nothing ([more](env-vars.md#llm--pipeline)). |
 | `ci_wiring_globs` | array of strings | Globs selecting the CI configuration files the CI wiring check reads; replaces the built-in set ([more](env-vars.md#llm--pipeline)). |
+| `vuln_max` | integer | Most known-vulnerability findings posted per PR when the env-only `PRXREF_VULN_SCAN` is `on`; the most severe are kept ([more](env-vars.md#llm--pipeline)). |
 
 ### Stable finding ids
 
@@ -302,6 +303,8 @@ instead, even when the value is empty.
 | `llm_base_url` | endpoint | The host the diff and the prompts are sent to. |
 | `jira_base_url` | endpoint | The host Jira credentials are sent to. |
 | `ticket_ids_from_title` | endpoint | Fetches every Jira key in the PR title from that host (`PRXREF_TICKET_IDS_FROM_TITLE`). |
+| `vuln_scan` | endpoint | Sends the changed dependency names and versions to the OSV.dev host (`PRXREF_VULN_SCAN`). |
+| `osv_url` | endpoint | The host the vulnerability scan queries (`PRXREF_OSV_URL`). |
 | `llm_backend` | executable | Can select `claude-cli`, `kiro-cli` or `codex-cli`, which run a local binary, and picks where the diff goes. |
 | `llm_cli_path` | executable | The path of a binary prxref runs. |
 | `trace_file` | local write | Appends a JSONL trace at a chosen path. |
@@ -334,7 +337,7 @@ instead, even when the value is empty.
 | `metrics_port` | listener | Opens a local Prometheus `/metrics` listener. |
 | `dashboard_port` | listener | Opens a local read-only run dashboard listener. |
 | `review_skip_globs` | gate | Removes files from review; a PR could otherwise exempt its own changes. |
-| `eval_pins` | override | Overrides other keys (`ci_wiring`, `routing_probe`, `context_standards_globs`, `ticket_ids_from_title`) above every layer, so a file that set it would override the file's own values. |
+| `eval_pins` | override | Overrides other keys (`ci_wiring`, `routing_probe`, `context_standards_globs`, `ticket_ids_from_title`, `vuln_scan`) above every layer, so a file that set it would override the file's own values. |
 
 ## Paths
 

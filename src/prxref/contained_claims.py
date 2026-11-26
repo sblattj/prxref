@@ -54,6 +54,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import PurePosixPath
 
+from .heuristics import is_deterministic
 from .triage import FileDiff, Finding
 
 CONTAINED_REASONS: tuple[str, ...] = (
@@ -155,7 +156,10 @@ def apply_contained_claim_check(
     out: list[Finding] = []
     reasons: list[str | None] = []
     for f in findings:
-        if f.drop_reason is not None or f.severity not in _LOWERED or _MARK in (f.body or ""):
+        if (
+            f.drop_reason is not None or f.severity not in _LOWERED or _MARK in (f.body or "")
+            or is_deterministic(f)
+        ):
             out.append(f)
             reasons.append(None)
             continue

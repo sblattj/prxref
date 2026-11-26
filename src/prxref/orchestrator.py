@@ -395,6 +395,9 @@ from .triage import (
     parse_unified_diff,
     plan_chunks,
 )
+from .vuln_scan import DEFAULT_OSV_URL, DEFAULT_VULN_MAX, VULN_SCAN_MODES, is_vuln_finding
+from .vuln_scan import off_record as _vuln_off_record
+from .vuln_scan import scan as _osv_scan
 
 logger = logging.getLogger("prxref")
 
@@ -686,6 +689,9 @@ def orchestrate_review(
     max_areas_per_pr: int = 2,
     ci_wiring: str | None = None,
     ci_wiring_globs: Sequence[str] = (),
+    vuln_scan: str = "off",
+    osv_url: str = DEFAULT_OSV_URL,
+    vuln_max: int = DEFAULT_VULN_MAX,
     evidence: Any = None,
     evidence_max_chars: int = 8000,
     stable_ids: bool = True,
@@ -708,7 +714,7 @@ def orchestrate_review(
     spec_grounding, size_advisory, prompt_templates, scoped_rules,
     rule_counts, repo_context, parse_retries, context_followup,
     suggestions, incremental, ci_wiring, evidence, stable_ids, degraded,
-    review_depth, learnings}``, plus
+    review_depth, learnings, vuln_scan}``, plus
     ``replay`` on a replay run only. Every exit, error and empty-diff exits
     included, goes through
     :func:`_run_record`, so the last sixteen keys are always present and are
@@ -967,6 +973,20 @@ def orchestrate_review(
     ``{candidates, ci_files, picked_up_default, triggered}``, echoed by
     one ``ci_wiring ok`` trace event. Never changes the verdict or the
     exit code.
+
+    ``vuln_scan`` (issue #36, ``PRXREF_VULN_SCAN``) is ``"off"`` (the
+    default) or ``"on"``. On, the dependency pins the PR changes are looked
+    up on OSV.dev at ``osv_url`` (``PRXREF_OSV_URL``) by
+    :func:`prxref.vuln_scan.scan`, reading head files through the same
+    reader the cross-slot Redis check uses: one deterministic finding per
+    changed pin and advisory, at most ``vuln_max`` (``PRXREF_VULN_MAX``)
+    of them, the most severe kept, and a top-of-summary note counting the
+    rest. Any network failure skips the scan and the review goes on. The
+    record's ``vuln_scan`` key is always present:
+    ``{status, reason, manifests, queried, advisories, posted, capped,
+    unpinned}``, ``status`` ``"off"``, ``"ok"`` or ``"skipped"``, and
+    ``posted`` the scan's findings left in ``findings_active``. On, one
+    ``vuln_scan`` trace event echoes it.
 
     ``evidence`` (issue #69) is the loaded execution evidence
     (:class:`prxref.evidence.EvidenceBundle`, as
@@ -1420,6 +1440,10 @@ def orchestrate_review(
         raise ValueError(
             f"ci_wiring must be one of {CI_WIRING_MODES}, got {ci_wiring!r}"
         )
+    if vuln_scan not in VULN_SCAN_MODES:
+        raise ValueError(
+            f"vuln_scan must be one of {VULN_SCAN_MODES}, got {vuln_scan!r}"
+        )
     t0 = time.perf_counter()
     tracer = get_tracer(trace_file)
     sampling = _sampling(llm)
@@ -1451,6 +1475,10 @@ def orchestrate_review(
         "suggestions": _suggestion_record() if suggestions == "on" else None,
         "incremental": _incremental_record(None, 0, None) if incremental == "on" else None,
         "ci_wiring": None,
+        "vuln_scan": (
+            _vuln_off_record() if vuln_scan == "off"
+            else {**_vuln_off_record(), "status": "skipped", "reason": "not reached"}
+        ),
         "evidence": None,
         "stable_ids": None,
         "degraded": None,
@@ -1724,6 +1752,20 @@ def orchestrate_review(
     # crash here drops the check, never the review.
     redis_findings = _redis_crossslot_findings(files, forge, ref, pr, repo_dir)
 
+    # Known vulnerabilities in changed dependency pins (#36): off by default;
+    # on, one bounded OSV.dev lookup whose failure skips the scan, never the
+    # review. Its overflow note rides the top-of-summary slot.
+    vuln_findings: list[Finding] = []
+    if vuln_scan == "on":
+        vuln_findings, run_inputs["vuln_scan"], vuln_note = _vuln_scan_findings(
+            files, forge, ref, pr, repo_dir, osv_url=osv_url, vuln_max=vuln_max,
+        )
+        size_advisory_line += vuln_note
+        tracer.event(
+            "vuln_scan", "ok" if run_inputs["vuln_scan"]["status"] == "ok" else "skipped",
+            **run_inputs["vuln_scan"],
+        )
+
     try:
         with tracer.span("build_chunks") as sp:
             plan = plan_chunks(
@@ -1766,7 +1808,7 @@ def orchestrate_review(
         )
         deterministic_findings = (
             release_shape + toggle_findings + ci_findings + redis_findings
-            + evidence_findings
+            + vuln_findings + evidence_findings
         )
         tracer.event(
             "run", "ok", chunks_reviewed=0, findings=len(deterministic_findings),
@@ -1780,6 +1822,7 @@ def orchestrate_review(
             toggle_findings=toggle_findings,
             ci_findings=ci_findings,
             redis_findings=redis_findings,
+            vuln_findings=vuln_findings,
             evidence_findings=evidence_findings,
             confidence_floor=confidence_floor, max_errors=max_errors,
             max_warning_findings=max_warning_findings,
@@ -2257,7 +2300,7 @@ def orchestrate_review(
         )
     deterministic_findings = (
         release_shape + toggle_findings + ci_findings + redis_findings
-        + evidence_findings
+        + vuln_findings + evidence_findings
     )
     findings = (
         findings[:sweep_start] + deterministic_findings + findings[sweep_start:]
@@ -3461,7 +3504,9 @@ def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
     semantics — a key the exit's own dict already carries wins — except
     ``replay``, which is written only when it is not ``None``: a normal run's
     record has no ``replay`` key at all, and a replay's is a copy of the
-    stamp, never the caller's mapping. ``failed_chunks`` (issue #72) is
+    stamp, never the caller's mapping. ``vuln_scan`` (#36) is copied too,
+    its ``posted`` recounted from the exit's ``findings_active`` when the
+    scan ran, so a finding a later gate dropped is not counted as posted. ``failed_chunks`` (issue #72) is
     ``None`` on an exit that never reached review. ``cost_api_equivalent`` is written
     only when it is ``True``, so a run not priced by claude-cli has the same
     record it had before the label existed. Returns ``result`` itself.
@@ -3473,6 +3518,13 @@ def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
         elif key == "cost_api_equivalent":
             if value is True:
                 result.setdefault(key, True)
+        elif key == "vuln_scan" and isinstance(value, Mapping):
+            stamp = dict(value)
+            if stamp.get("status") == "ok":
+                stamp["posted"] = sum(
+                    1 for f in result.get("findings_active") or [] if is_vuln_finding(f)
+                )
+            result.setdefault(key, stamp)
         else:
             result.setdefault(key, value)
     result.setdefault("failed_chunks", None)
@@ -6369,6 +6421,30 @@ def _redis_crossslot_findings(files, forge, ref, pr, repo_dir) -> list[Finding]:
         return []
 
 
+def _vuln_scan_findings(
+    files, forge, ref, pr, repo_dir, *, osv_url: str, vuln_max: int,
+) -> tuple[list[Finding], dict, str]:
+    """The OSV.dev advisory findings (#36, :func:`prxref.vuln_scan.scan`), its record and summary note.
+
+    Reads head files through the forge's head-sha reader, or ``--repo-dir``
+    when the forge has none, the same as :func:`_redis_crossslot_findings`;
+    with neither, changed pins are read from the hunks alone. Never raises:
+    any failure yields no findings and a ``skipped`` record.
+    """
+    try:
+        reader = repo_reader.forge_reader(forge, ref, getattr(pr, "source_sha", "") or "")
+        if reader is None and repo_dir is not None:
+            reader = repo_reader.repo_dir_reader(repo_dir)
+        result = _osv_scan(
+            files, read=reader.read if reader is not None else None,
+            osv_url=osv_url, vuln_max=vuln_max,
+        )
+        return result.findings, result.record, result.note
+    except Exception as e:  # noqa: BLE001
+        logger.warning("vulnerability scan failed (continuing without it): %s", e)
+        return [], {**_vuln_off_record(), "status": "skipped", "reason": e.__class__.__name__}, ""
+
+
 def _summary_only_run(
     forge: Forge, ref: PRRef, pr: PRData, files, post: bool, t0: float,
     *, post_mode: str = "summary+inline", post_verdict: bool = True,
@@ -6377,6 +6453,7 @@ def _summary_only_run(
     toggle_findings: list[Finding] | None = None,
     ci_findings: list[Finding] | None = None,
     redis_findings: list[Finding] | None = None,
+    vuln_findings: list[Finding] | None = None,
     evidence_findings: list[Finding] | None = None,
     confidence_floor: float | None = None, max_errors: int | None = None,
     max_warning_findings: int | None = None,
@@ -6398,7 +6475,8 @@ def _summary_only_run(
     (:func:`apply_location_validation`, :func:`apply_quality_gate`) before
     they reach ``findings_active`` / ``verdict`` / the summary. The
     CI-wiring findings (#66, ``ci_findings``), the cross-slot Redis
-    findings (#183, ``redis_findings``) and the findings failing
+    findings (#183, ``redis_findings``), the OSV.dev advisory findings (#36,
+    ``vuln_findings``) and the findings failing
     execution evidence raises (#69, ``evidence_findings``,
     :func:`prxref.evidence.failure_findings`) join them the same way.
     Location validation runs only when the diff holds files; every
@@ -6437,7 +6515,7 @@ def _summary_only_run(
     findings = (
         list(release_shape_findings or []) + list(toggle_findings or [])
         + list(ci_findings or []) + list(redis_findings or [])
-        + list(evidence_findings or [])
+        + list(vuln_findings or []) + list(evidence_findings or [])
     )
     if findings:
         if files:

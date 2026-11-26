@@ -281,7 +281,7 @@ class TestHappyPath:
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
-            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "suggestions", "incremental", "ci_wiring", "vuln_scan", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "default_branch_check", "reviewed_head_sha",
         }
         assert res["verdict"] == "Request-Changes"
@@ -759,7 +759,7 @@ class TestMaxTokensThreading:
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
-            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "suggestions", "incremental", "ci_wiring", "vuln_scan", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "default_branch_check", "reviewed_head_sha",
         }
 
@@ -1078,7 +1078,7 @@ class TestQualityGateKnobsAreThreaded:
             "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
             "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
-            "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+            "suggestions", "incremental", "ci_wiring", "vuln_scan", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "default_branch_check", "reviewed_head_sha",
         }
 
@@ -1092,7 +1092,7 @@ RESULT_KEYS = {
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "removal_claims",
-    "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
+    "suggestions", "incremental", "ci_wiring", "vuln_scan", "evidence", "stable_ids", "degraded",
     "review_depth", "learnings", "describe", "default_branch_check", "reviewed_head_sha",
 }
 

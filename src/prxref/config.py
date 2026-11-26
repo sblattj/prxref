@@ -153,7 +153,8 @@ LLM / pipeline:
   PRXREF_EVAL_PINS              "on" applies the eval harness's pins
                                 (prxref.evals.EVAL_PINS: ci_wiring "off",
                                 routing_probe "off", context_standards_globs
-                                empty, ticket_ids_from_title "off") to ``prxref review`` and the webhook
+                                empty, ticket_ids_from_title "off",
+                                vuln_scan "off") to ``prxref review`` and the webhook
                                 daemon, exactly as ``prxref eval run`` applies
                                 them: above the environment, the config file
                                 and any flag that sets the same key, so a CI
@@ -655,6 +656,27 @@ LLM / pipeline:
                                 azure-pipelines.yml, .circleci/config.yml,
                                 Jenkinsfile, bitbucket-pipelines.yml,
                                 .drone.yml, cloudbuild.yaml, .travis.yml
+  PRXREF_VULN_SCAN              Known vulnerabilities (#36): "off" (the
+                                default) sends nothing and stamps
+                                vuln_scan.status "off" on the run record.
+                                "on" looks up every dependency pin the PR
+                                changes (package.json, requirements*.txt,
+                                pyproject.toml, go.mod, Cargo.toml, pom.xml,
+                                Gradle build files and libs.versions.toml)
+                                on OSV.dev and posts one deterministic
+                                finding per pin and advisory: "error" for
+                                CRITICAL/HIGH, "warning" otherwise. It sends
+                                those names and versions to a third party,
+                                so it is env-only. Any network failure
+                                skips the scan, never the review, and the
+                                record says why. Matched exactly; any other
+                                value is a configuration error
+  PRXREF_OSV_URL                Base URL of the OSV API the scan queries
+                                (default https://api.osv.dev); an http(s)
+                                URL, else a configuration error. Env-only
+  PRXREF_VULN_MAX               Most vulnerability findings posted per PR
+                                (default 10); the most severe are kept and
+                                the summary counts the rest. Positive int
   PRXREF_INCREMENTAL            Incremental re-review on push (#34): "off"
                                 (the default) reviews every file on every run
                                 and writes no marker. "on" stamps each summary
@@ -1186,6 +1208,11 @@ _DEFAULTS: dict[str, object] = {
         "cloudbuild.yaml",
         ".travis.yml",
     ],
+    # Known vulnerabilities in changed dependency pins (#36): off by default,
+    # since on it sends the changed names and versions to OSV.dev.
+    "vuln_scan": "off",
+    "osv_url": "https://api.osv.dev",
+    "vuln_max": 10,
     # PR-metadata rules (#70): "off", "on" (the back-compat alias reading
     # the four flat keys below) or the path to a separate TOML rules file
     # holding the same four settings. The "off" default keeps every check
@@ -1258,6 +1285,7 @@ _INT_KEYS = frozenset({
     "gate_secret_grace_minutes", "gate_review_deadline", "gate_watchdog_seconds",
     "gate_reconcile_minutes", "stability_passes", "stability_min_agree",
     "metrics_port", "dashboard_port",
+    "vuln_max",
 })
 _FLOAT_KEYS = frozenset({
     "confidence_floor", "llm_timeout", "llm_timeout_per_1k", "dedup_similarity",
@@ -1299,6 +1327,7 @@ _CHOICE_KEYS: dict[str, frozenset[str]] = {
     "labels": frozenset({"off", "existing", "create"}),
     "fallback": frozenset({"auto", "off"}),
     "ci_wiring": frozenset({"off", "on"}),
+    "vuln_scan": frozenset({"off", "on"}),
     "ticket_ids_from_title": frozenset({"off", "on"}),
 }
 
@@ -1389,6 +1418,7 @@ _RANGES: dict[str, _Range] = {
     "gate_reconcile_minutes": _Range(0),
     "metrics_port": _Range(0, 65535, low_inclusive=True),
     "dashboard_port": _Range(0, 65535, low_inclusive=True),
+    "vuln_max": _Range(0),
     "llm_max_tokens": _Range(0),
     "llm_timeout": _Range(0),
     "llm_timeout_per_1k": _Range(0),
@@ -1478,7 +1508,7 @@ FILE_KEYS = frozenset({
     "context_standards_globs", "context_standards_max_chars",
     "metadata_rules", "branch_patterns", "commit_reference",
     "area_globs", "max_areas_per_pr",
-    "ci_wiring", "ci_wiring_globs",
+    "ci_wiring", "ci_wiring_globs", "vuln_max",
     "stable_ids", "verdict_store", "rule_scoping", "learnings_file",
 })
 
@@ -1519,6 +1549,8 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "fallback": "local write",
     "price_table": "local read",
     "ticket_ids_from_title": "endpoint",
+    "vuln_scan": "endpoint",
+    "osv_url": "endpoint",
     "jira_base_url": "endpoint",
     "jira_email": "credential",
     "jira_api_token": "credential",
@@ -1961,6 +1993,19 @@ def _check_title_tickets(cfg: dict[str, object], sources: dict[str, str]) -> Non
         )
 
 
+def _check_osv_url(cfg: dict[str, object], sources: dict[str, str]) -> None:
+    """Require ``osv_url`` to be an http(s) URL (#36).
+
+    Checked whether or not ``vuln_scan`` is on, so a typo'd endpoint fails
+    before it is first used. Same doctrine as :func:`_check_post_mode`: a
+    ``ConfigError`` (exit 2) naming the variable that supplied the value.
+    """
+    url = cfg["osv_url"]
+    if not isinstance(url, str) or not re.match(r"https?://[^/\s]+", url.strip()):
+        raise ConfigError(f"{sources['osv_url']}: must be an http(s) URL, got {url!r}")
+    cfg["osv_url"] = url.strip()
+
+
 def _check_price_table(cfg: dict[str, object], sources: dict[str, str]) -> None:
     """Parse ``price_table`` in place, rejecting a malformed table.
 
@@ -2237,6 +2282,7 @@ def load_config_with_sources(
     _check_stability(cfg, sources)
     _check_regression_gate(cfg, sources)
     _check_title_tickets(cfg, sources)
+    _check_osv_url(cfg, sources)
     _check_price_table(cfg, sources)
     _check_severity_markers(cfg, sources)
     _check_bullet_separator(cfg, sources)

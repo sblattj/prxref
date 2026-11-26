@@ -1383,7 +1383,11 @@ def _build_json_result(result: Any) -> dict:
     ``off``; otherwise ``{candidates, ci_files, picked_up_default,
     triggered}`` from :func:`prxref.ci_wiring.ci_wiring_findings`, or
     ``{"triggered": false, "reason": ...}`` when the run had no reader or
-    the stage failed), and so is
+    the stage failed), and so is ``vuln_scan`` (#36: never ``null`` on a
+    review run; ``{status, reason, manifests, queried, advisories, posted,
+    capped, unpinned}``, ``status`` ``"off"`` whenever ``PRXREF_VULN_SCAN``
+    is ``off``, ``"ok"`` when OSV.dev answered, ``"skipped"`` with a
+    ``reason`` when it could not be reached), and so is
     ``evidence`` (#69: ``null`` whenever no evidence file is configured;
     otherwise ``{files, items, matched_chunks, max_chars}`` — the paths as
     configured, the item count, how many chunk prompts matched items rode,
@@ -1466,6 +1470,7 @@ def _build_json_result(result: Any) -> dict:
         "suggestions": result.get("suggestions"),
         "incremental": result.get("incremental"),
         "ci_wiring": result.get("ci_wiring"),
+        "vuln_scan": result.get("vuln_scan"),
         "evidence": result.get("evidence"),
         "stable_ids": result.get("stable_ids"),
         "degraded": result.get("degraded"),
@@ -1959,6 +1964,7 @@ def _run_review(
     context_standards_globs: list[str] | None = None,
     routing_probe: str | None = None,
     ticket_ids_from_title: str | None = None,
+    vuln_scan: str | None = None,
     metadata_rules: str | None = None,
     forge: Any = None,
     eval_pins: str | None = None,
@@ -2005,6 +2011,7 @@ def _run_review(
         context_standards_globs=context_standards_globs,
         routing_probe=routing_probe,
         ticket_ids_from_title=ticket_ids_from_title,
+        vuln_scan=vuln_scan,
     )
     cfg, layers = load_config_with_sources(
         config_file=config_file,
@@ -2201,6 +2208,9 @@ def _run_review(
         full_review_reason=full_review_reason,
         ci_wiring=None if layers.get("ci_wiring") == "default" else cfg["ci_wiring"],
         ci_wiring_globs=cfg["ci_wiring_globs"],
+        vuln_scan=cfg["vuln_scan"],
+        osv_url=cfg["osv_url"],
+        vuln_max=cfg["vuln_max"],
         evidence=evidence,
         evidence_max_chars=cfg["evidence_max_chars"],
         verdict_store=cfg["verdict_store"],

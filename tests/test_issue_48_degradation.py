@@ -319,9 +319,10 @@ class TestTheCliEmits:
             "fallback": ["github-step-summary"], "annotations": 0,
         }
         assert list(payload)[list(payload).index("incremental") + 1] == "ci_wiring"
-        assert list(payload)[list(payload).index("incremental") + 2] == "evidence"
-        assert list(payload)[list(payload).index("incremental") + 3] == "stable_ids"
-        assert list(payload)[list(payload).index("incremental") + 4] == "degraded"
+        assert list(payload)[list(payload).index("incremental") + 2] == "vuln_scan"
+        assert list(payload)[list(payload).index("incremental") + 3] == "evidence"
+        assert list(payload)[list(payload).index("incremental") + 4] == "stable_ids"
+        assert list(payload)[list(payload).index("incremental") + 5] == "degraded"
         assert DEGRADED_SUMMARY_KEY not in payload
         assert (tmp_path / "s.md").is_file()
 
@@ -470,6 +471,8 @@ class TestASuccessfulPostIsUnchanged:
         assert payload.pop("rule_scope_cleared") is None  # 0.29 (#75): null when no scope declared
         # #66: on by default (OD2); this forge has no reader, so the check records why.
         assert payload.pop("ci_wiring") == {"triggered": False, "reason": "no reader"}
+        # #36: off by default, so nothing is queried and the record says so.
+        assert payload.pop("vuln_scan")["status"] == "off"
         # #146: on by default; this forge cannot name a default branch, so nothing is checked.
         assert payload.pop("default_branch_check") == {
             "branch": None, "stacked": False, "checked": 0, "lowered": 0, "present": 0,

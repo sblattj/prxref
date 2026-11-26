@@ -19,7 +19,18 @@ these passes emit is tabulated for operators in ``docs/quality.md``.
 
 The cross-slot Redis check (#183, ``prxref.redis_cluster.crossslot_findings``)
 adds its findings the same way, from the orchestrator, and is not counted
-above either.
+above either. So does the known-vulnerability scan (#36,
+``prxref.vuln_scan.scan``, ``PRXREF_VULN_SCAN``, off by default).
+
+A deterministic finding (``heuristics.is_deterministic``: its body ends with
+the no-model suffix) makes no model claim for the claim-checking passes to
+judge, so passes 5 (``apply_manifest_claim_check``), 14
+(``apply_hedge_gate``), 22 (``apply_containment_note``) and 23
+(``apply_guard_fix_check``), and the contained-claim check, pass it through
+unchanged: an advisory summary that reads "unless", "crash" or "removed" is
+the advisory database's text, not a hedge or an unsupported claim (#36).
+It still counts toward the confidence floor and the severity caps of
+``apply_quality_gate``, as it always has.
 
 The default-branch check (#146, ``PRXREF_DEFAULT_BRANCH_CHECK``) is not a
 numbered pass: ``prxref.default_branch`` runs from the orchestrator right after
@@ -668,7 +679,7 @@ def apply_manifest_claim_check(
     result: list[Finding] = []
     for f in findings:
         hunks = hunks_by_file.get(f.file)
-        if f.drop_reason is not None or not hunks:
+        if f.drop_reason is not None or not hunks or heuristics.is_deterministic(f):
             result.append(f)
             continue
         claim = f"{f.title}\n{f.body}"
@@ -2291,7 +2302,8 @@ def apply_containment_note(findings: Sequence[Finding]) -> list[Finding]:
     for f in findings:
         claim = f"{f.title} {f.body}"
         if (
-            f.body.endswith(CONTAINMENT_NOTE_SUFFIX)
+            heuristics.is_deterministic(f)
+            or f.body.endswith(CONTAINMENT_NOTE_SUFFIX)
             or not _THROW_CLASS_RE.search(claim)
             or _CONTAINMENT_BOUNDARY_RE.search(f.body)
         ):
@@ -2528,7 +2540,7 @@ def apply_guard_fix_check(
     out: list[Finding] = []
     reasons: list[tuple[str, ...]] = []
     for f in findings:
-        if f.drop_reason is not None:
+        if f.drop_reason is not None or heuristics.is_deterministic(f):
             out.append(f)
             reasons.append(())
             continue
@@ -3484,7 +3496,7 @@ def apply_hedge_gate(
     """
     out: list[Finding] = []
     for f in findings:
-        if f.drop_reason is not None:
+        if f.drop_reason is not None or heuristics.is_deterministic(f):
             out.append(f)
             continue
         body = _blank_spec_quotes(f.body or "", spec_digest)
