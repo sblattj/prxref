@@ -20,6 +20,13 @@ Provides these subcommands:
     ``PRXREF_LEARNINGS_FILE`` entries, one per prxref comment a reviewer
     closed as won't fix, printed as TOML for a human to edit and commit
     (prxref never writes them into the repository itself).
+  * ``release-notes --since TAG [--until REV] [--repo DIR] (--pr-url-base URL
+    | --repo-url URL) [--out FILE]``: markdown release notes for the PRs
+    merged since a tag, grouped by conventional-commit category, each with an
+    excerpt of prxref's summary comment (#45). Commits come from ``git log``
+    in the local checkout; no LLM call, nothing posted. With
+    ``PRXREF_RELEASE_NOTES_FILE`` set, ``serve`` also appends each merged
+    GitHub PR to that ``Unreleased`` draft file.
 
 ``review``, ``eval run`` and ``config check`` read a repository config file
 (#38): ``--config PATH``, else ``PRXREF_CONFIG_FILE``, else ``.prxref.toml``
@@ -819,6 +826,30 @@ def _build_parser() -> argparse.ArgumentParser:
     lr_harvest.add_argument(
         "--out", help="write the TOML to FILE instead of stdout (an existing FILE is replaced)",
     )
+
+    rn = sub.add_parser(
+        "release-notes",
+        help=(
+            "print release notes, grouped by conventional-commit category, for the PRs "
+            "merged since a tag (read from git log and prxref's summaries; nothing is posted)"
+        ),
+    )
+    rn.add_argument("--since", required=True, help="tag or revision the notes start after")
+    rn.add_argument("--until", default="HEAD", help="revision the notes end at (default HEAD)")
+    rn.add_argument("--repo", default=".", help="local git checkout to read commits from (default .)")
+    rn_url = rn.add_mutually_exclusive_group(required=True)
+    rn_url.add_argument(
+        "--pr-url-base",
+        help="pull request URL up to its number, e.g. https://github.com/OWNER/REPO/pull/",
+    )
+    rn_url.add_argument(
+        "--repo-url",
+        help=(
+            "repository web URL; the PR URL shape is derived for github.com, gitlab.com, "
+            "bitbucket.org, codeberg.org, Bitbucket Server and Azure DevOps"
+        ),
+    )
+    rn.add_argument("--out", help="write the markdown to FILE instead of stdout (an existing FILE is replaced)")
 
     cf = sub.add_parser(
         "config", help="check the repository config file (.prxref.toml) and the settings in force",
@@ -2787,6 +2818,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     )
     serve_fn = importlib.import_module("prxref.webhooks").serve
     metrics_server = None
+    extra: dict[str, Any] = {}
+    if os.environ.get("PRXREF_RELEASE_NOTES_FILE", "").strip():
+        extra["release_note_handler"] = _webhook_release_note_handler
     try:
         metrics_server =importlib.import_module("prxref.metrics").start_from_env()
         dashboard_server = importlib.import_module("prxref.dashboard").start_from_env()
@@ -2797,7 +2831,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
     try:
-        serve_fn(port=args.port, host=args.host, handler=handler, reply_handler=reply_handler)
+        serve_fn(
+            port=args.port, host=args.host, handler=handler, reply_handler=reply_handler, **extra,
+        )
     finally:
         for server in (metrics_server, dashboard_server):
             if server is not None:
@@ -2909,6 +2945,89 @@ def _cmd_learnings_harvest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_release_notes(args: argparse.Namespace) -> int:
+    """Print release notes for the PRs merged in ``--since..--until`` of ``--repo`` (#45).
+
+    Commits come from ``git log`` in the local checkout, the PR number from
+    each commit's merge or squash shape, and each bullet's excerpt from
+    prxref's summary comment, read through the forge's ``get_summary``. No
+    LLM call is made and nothing is written to the forge. A PR whose summary
+    cannot be read, or has none, keeps its title alone; every such fallback
+    and the count of commits naming no PR go to stderr. An unknown
+    revision, a checkout that is not a git repository, an unrecognised or
+    ambiguous URL flag, or an unwritable ``--out`` is a configuration error
+    (exit 2, naming the flag). Every other outcome exits 0.
+    """
+    from prxref import release_notes as rn
+
+    try:
+        base = rn.pr_url_base(pr_url_base=args.pr_url_base, repo_url=args.repo_url)
+        commits = rn.read_commits(args.repo, args.since, args.until)
+        prs, without = rn.merged_pull_requests(commits)
+        read_summary = None
+        if prs:
+            ref = detect_forge(f"{base}{prs[0].number}")
+            read_summary = getattr(make_forge(ref), "get_summary", None) if ref else None
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    bodies = {c.sha: c.body for c in commits}
+    notes = rn.build_notes(prs, base, read_summary, bodies=bodies)
+    notes.commits_without_pr = without
+    text = rn.render(notes.entries) or "No merged pull requests in this range.\n"
+    for number, reason in notes.fallbacks:
+        print(f"release-notes: #{number}: fallback to the commit subject ({reason})", file=sys.stderr)
+    print(
+        f"release-notes: {len(notes.entries)} pull requests, {notes.summaries_found} prxref "
+        f"summaries, {len(notes.fallbacks)} fallbacks, {without} commits naming no pull request",
+        file=sys.stderr,
+    )
+    if args.out:
+        try:
+            Path(args.out).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"configuration error: --out: cannot write {args.out!r}: {exc}", file=sys.stderr)
+            return 2
+        return 0
+    sys.stdout.write(text)
+    return 0
+
+
+def _webhook_release_note_handler(url: str, title: str) -> None:
+    """Append one merged PR to the ``PRXREF_RELEASE_NOTES_FILE`` draft (#45); never raises.
+
+    The bullet is built from ``title`` (the PR title in the merge webhook)
+    and, when the forge can read it, prxref's summary comment on the PR;
+    a summary read that fails leaves the title alone. A PR already in the
+    draft is skipped. Nothing is posted to the forge. Any failure, the
+    draft write included, is logged at ERROR and swallowed.
+    """
+    from prxref import release_notes as rn
+
+    try:
+        path = load_config()["release_notes_file"]
+        if not path:
+            return
+        ref = detect_forge(url)
+        if ref is None:
+            logger.error("release notes: %s is not a pull request URL", url)
+            return
+        summary = None
+        read_summary = getattr(make_forge(ref), "get_summary", None)
+        if read_summary is not None:
+            try:
+                summary = read_summary(ref)
+            except Exception as exc:  # noqa: BLE001 - a failed read is a fallback bullet
+                logger.warning("release notes: summary read failed for %s: %s", url, exc)
+        entry, _ = rn.entry_for(ref.number, title or f"PR #{ref.number}", url, summary)
+        if rn.append_to_draft(path, entry):
+            logger.info("release notes: added #%d to %s", ref.number, path)
+        else:
+            logger.info("release notes: #%d is already in %s", ref.number, path)
+    except Exception as exc:  # noqa: BLE001 - the daemon never dies over a draft file
+        logger.error("release notes: could not record %s: %s", url, exc)
+
+
 def _config_value_text(value: Any) -> str:
     """One ``config check`` text value: JSON for a list or dict, ``str`` otherwise."""
     if isinstance(value, (list, dict)):
@@ -2968,7 +3087,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point dispatching ``review``, ``reply``, ``serve``, ``eval <action>``,
     ``trace render``, ``prompts export``, ``config check``,
-    ``gate <action>``, ``learnings harvest``, or ``--version``."""
+    ``gate <action>``, ``learnings harvest``, ``release-notes``, or ``--version``."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -3008,6 +3127,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_learnings_harvest(args)
         parser.print_help(sys.stderr)
         return 2
+    if args.command == "release-notes":
+        return _cmd_release_notes(args)
     if args.command == "config":
         if args.config_command == "check":
             return _cmd_config_check(args)

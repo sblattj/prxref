@@ -31,6 +31,7 @@ EXPECTED_ENV_ONLY = {
     "dry_run": "gate",
     "notify_url": "credential",
     "allow_unsigned": "gate",
+    "release_notes_file": "local write",
     "rules_source": "gate",
     "gate_app_id": "credential",
     "gate_private_key_file": "credential",

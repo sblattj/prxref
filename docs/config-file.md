@@ -306,6 +306,7 @@ instead, even when the value is empty.
 | `llm_cli_path` | executable | The path of a binary prxref runs. |
 | `trace_file` | local write | Appends a JSONL trace at a chosen path. |
 | `trace_dir` | local write | Writes prompt and response files into a chosen directory. |
+| `release_notes_file` | local write | `prxref serve` appends each merged pull request to the release-notes draft at that path. |
 | `fallback` | local write | `auto` writes `gl-code-quality-report.json` into the working directory and emits CI annotations. |
 | `price_table` | local read | Its value may be a path to any JSON file on the runner. |
 | `stability_passes` | spend | Runs every chunk review that many times; a file could multiply the lane's token spend. |

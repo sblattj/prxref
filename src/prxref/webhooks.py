@@ -11,6 +11,12 @@ GitHub ``pull_request_review_comment`` and ``issue_comment`` (on a PR)
 deliveries with action ``created`` queue a :class:`ReplyJob` instead
 (thread replies, #32), run by the caller's ``reply_handler`` on the same
 worker; a comment carrying prxref's attribution marker is ignored at intake.
+
+Release notes (#45): with ``PRXREF_RELEASE_NOTES_FILE`` set, a GitHub
+``pull_request`` ``closed`` delivery whose ``pull_request.merged`` is true
+queues a :class:`ReleaseNoteJob` (the PR URL and title), run by the
+caller's ``release_note_handler`` on the same worker. Unset (the default),
+a closed delivery is ignored exactly as before. It never posts.
 """
 from __future__ import annotations
 
@@ -45,6 +51,10 @@ _GITHUB_ACTIONS = ("opened", "synchronize")
 _GITHUB_COMMENT_EVENTS = ("pull_request_review_comment", "issue_comment")
 _GITHUB_COMMENT_ACTIONS = ("created",)
 _REPLY_PREFIX = "reply:"
+# Release notes (#45): a merged close appends to a draft file, only when
+# the operator named one.
+_RELEASE_NOTES_FILE_ENV = "PRXREF_RELEASE_NOTES_FILE"
+_RELEASE_NOTE_PREFIX = "release-note:"
 # Bitbucket Cloud and Bitbucket Server both announce themselves with
 # X-Event-Key, but they do not share an event vocabulary. Cloud sends
 # pullrequest:created / pullrequest:updated; Server sends pr:opened /
@@ -74,6 +84,18 @@ class ReplyJob:
     """A queued thread-reply sweep (#32) for one PR, as opposed to a review (a bare URL string)."""
 
     url: str
+
+
+@dataclass(frozen=True)
+class ReleaseNoteJob:
+    """A queued release-notes append (#45) for one merged PR: its URL and its title."""
+
+    url: str
+    title: str
+
+
+def _release_notes_on() -> bool:
+    return bool(os.environ.get(_RELEASE_NOTES_FILE_ENV, "").strip())
 
 
 def verify_signature(body: bytes, headers: dict) -> tuple[bool, str]:
@@ -157,6 +179,9 @@ def make_webhook_handler(review_queue: queue.Queue) -> type[BaseHTTPRequestHandl
             self._respond(202, {"queued": True}, extra_headers)
             if detail.startswith(_REPLY_PREFIX):
                 review_queue.put(ReplyJob(detail[len(_REPLY_PREFIX):]))
+            elif detail.startswith(_RELEASE_NOTE_PREFIX):
+                fields = json.loads(detail[len(_RELEASE_NOTE_PREFIX):])
+                review_queue.put(ReleaseNoteJob(fields["url"], fields["title"]))
             else:
                 review_queue.put(detail)
 
@@ -183,6 +208,7 @@ def serve(
     host: str = "0.0.0.0",
     port: int = 8080,
     reply_handler: Callable[[str], None] | None = None,
+    release_note_handler: Callable[[str, str], None] | None = None,
 ) -> None:
     """Run the webhook server until interrupted.
 
@@ -190,7 +216,8 @@ def serve(
     serially on one background daemon thread, so reviews never overlap.
     ``reply_handler`` (#32) is called the same way, on the same thread, for
     each accepted comment webhook; without one, comment webhooks are
-    accepted and dropped.
+    accepted and dropped. ``release_note_handler`` (#45) is called with the
+    PR URL and title for each accepted merged-close webhook, the same way.
     """
     if _allow_unsigned():
         logger.warning(
@@ -198,7 +225,9 @@ def serve(
         )
     review_queue: queue.Queue = queue.Queue()
     threading.Thread(
-        target=_worker_loop, args=(handler, review_queue, reply_handler), daemon=True
+        target=_worker_loop,
+        args=(handler, review_queue, reply_handler, release_note_handler),
+        daemon=True,
     ).start()
     server = ThreadingHTTPServer((host, port), make_webhook_handler(review_queue))
     logger.info("prxref webhook server listening on %s:%d", host, port)
@@ -260,12 +289,27 @@ def _verify_github(body: bytes, h: dict) -> tuple[bool, str]:
     if payload is None:
         return False, "invalid JSON payload"
     action = payload.get("action", "")
+    if action == "closed" and _release_notes_on():
+        return _github_merged(payload, state)
     if action not in _GITHUB_ACTIONS:
         return False, f"ignored: github pull_request action {action!r} is not reviewable"
     url = (payload.get("pull_request") or {}).get("html_url")
     if not url:
         return False, "github payload missing pull_request.html_url"
     return _result(state, url)
+
+
+def _github_merged(payload: dict, state: str) -> tuple[bool, str]:
+    """A ``closed`` pull_request delivery with release notes on: queue it only when merged (#45)."""
+    pull_request = payload.get("pull_request") or {}
+    if pull_request.get("merged") is not True:
+        return False, "ignored: github pull_request closed without merging"
+    url = pull_request.get("html_url")
+    if not url:
+        return False, "github payload missing pull_request.html_url"
+    title = pull_request.get("title")
+    fields = json.dumps({"url": url, "title": title if isinstance(title, str) else ""})
+    return _result(state, _RELEASE_NOTE_PREFIX + fields)
 
 
 def _github_comment(body: bytes, event: str, state: str) -> tuple[bool, str]:
@@ -484,6 +528,7 @@ def _worker_loop(
     handler: Callable[[str], None],
     review_queue: queue.Queue,
     reply_handler: Callable[[str], None] | None = None,
+    release_note_handler: Callable[[str, str], None] | None = None,
 ) -> None:
     while True:
         job = review_queue.get()
@@ -496,10 +541,19 @@ def _worker_loop(
                     logger.info("Thread reply for %s dropped: no reply handler is wired", job.url)
                 else:
                     reply_handler(job.url)
+            elif isinstance(job, ReleaseNoteJob):
+                if release_note_handler is None:
+                    logger.info("Release note for %s dropped: no release-notes handler is wired", job.url)
+                else:
+                    release_note_handler(job.url, job.title)
             else:
                 handler(job)
         except Exception as exc:  # noqa: BLE001
-            what = "Thread reply" if isinstance(job, ReplyJob) else "Review"
+            what = (
+                "Thread reply" if isinstance(job, ReplyJob)
+                else "Release note" if isinstance(job, ReleaseNoteJob)
+                else "Review"
+            )
             logger.error("%s failed for %s: %s", what, getattr(job, "url", job), exc)
         finally:
             review_queue.task_done()

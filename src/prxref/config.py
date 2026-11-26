@@ -906,6 +906,14 @@ Webhooks:
                                   401 unless PRXREF_ALLOW_UNSIGNED is "1"
   PRXREF_ALLOW_UNSIGNED           literal "1" accepts unsigned
                                   webhooks (default off; insecure)
+  PRXREF_RELEASE_NOTES_FILE       release notes (#45): a path. When set,
+                                  ``prxref serve`` appends each merged
+                                  GitHub PR (pull_request closed, merged)
+                                  to this "Unreleased" markdown draft,
+                                  under its conventional-commit category,
+                                  skipping a PR already in it. Never
+                                  posts. Empty (the default) = off.
+                                  Environment-only: it writes a file.
 
 Gate (prxref gate serve, #102):
   PRXREF_RULES_SOURCE             where repository rules are read: head
@@ -1216,6 +1224,7 @@ _DEFAULTS: dict[str, object] = {
     "gitea_webhook_secret": "",
     "azure_devops_webhook_secret": "",
     "allow_unsigned": False,
+    "release_notes_file": "",
     "rules_source": "head",
     "gate_app_id": "",
     "gate_private_key_file": "",
@@ -1485,6 +1494,7 @@ _ENV_ONLY_REASONS: dict[str, str] = {
     "dry_run": "gate",
     "notify_url": "credential",
     "allow_unsigned": "gate",
+    "release_notes_file": "local write",
     "rules_source": "gate",
     "review_skip_globs": "gate",
     "eval_pins": "override",
