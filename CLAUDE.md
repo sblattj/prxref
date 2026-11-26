@@ -56,9 +56,12 @@ auto-detects the forge.
   (advisor, not gate). Exit 2 is reserved for a configuration error: a required
   value missing, one malformed or out of range, or one outside its allowed
   vocabulary, reported naming the env var or the CLI flag that supplied it.
-  `PRXREF_FAIL_ON` is the one opt-in: `never` (the default) is the doctrine;
+  Two opt-ins only. `PRXREF_FAIL_ON`: `never` (the default) is the doctrine;
   `error`/`any` exit 1 on findings and on a failed review, for CI lanes that
-  explicitly want the gate. Do not widen that knob by accident.
+  explicitly want the gate. `PRXREF_FAIL_ON_REGRESSION=on` (off by default,
+  needs `PRXREF_HISTORY_FILE`) exits 1 when a recorded run's finding count
+  beats the history mean by more than `PRXREF_REGRESSION_TOLERANCE`
+  (`docs/history.md`). Do not widen either knob by accident.
 - config lives in one place: `config._DEFAULTS` plus the `_INT_KEYS` /
   `_FLOAT_KEYS` / `_RANGES` / `_CHOICE_KEYS` tables. A new key needs those
   tables, the `config.py` docstring, `.env.example`, `docs/env-vars.md`, and a
