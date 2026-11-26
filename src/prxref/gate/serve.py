@@ -128,6 +128,7 @@ def build(settings: GateSettings, cfg: Mapping[str, Any], *, session: Any = None
         sorted(settings.repos),
         watchdog_s=float(settings.watchdog_seconds),
         reconcile_s=float(settings.reconcile_minutes * 60),
+        app_id=settings.app_id,
     )
     return Gate(settings, store, auth, client, publisher, receiver, worker, watchdog)
 

@@ -346,6 +346,7 @@ def _watchdog_deps() -> WatchdogDeps:
             sorted(settings.repos),
             watchdog_s=float(settings.watchdog_seconds),
             reconcile_s=float(settings.reconcile_minutes * 60),
+            app_id=settings.app_id,
         )
         return WatchdogDeps(store=store, watchdog=watchdog, send=_sender())
 

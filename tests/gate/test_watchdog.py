@@ -136,10 +136,10 @@ def test_reconcile_keeps_pages_fetched_before_an_error(store):
 
 def test_tick_does_not_mark_reconciled_when_reconcile_raises(store, monkeypatch):
     dog = watchdog.Watchdog(store, _Client({}), [], watchdog_s=60, reconcile_s=600)
-    monkeypatch.setattr(watchdog, "reconcile", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(watchdog, "reconcile", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
     with pytest.raises(RuntimeError):
         dog.tick(1000.0)
-    monkeypatch.setattr(watchdog, "reconcile", lambda *a: [])
+    monkeypatch.setattr(watchdog, "reconcile", lambda *a, **k: [])
     assert dog.tick(1001.0)["reconciled"] == []
 
 

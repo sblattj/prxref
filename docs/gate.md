@@ -15,7 +15,11 @@ One process (`prxref gate serve`) runs three threads on one SQLite file:
   it reads `.prxref.toml`, rule packs and standards from the PR's **base** commit
   (`PRXREF_RULES_SOURCE=base`), so a PR cannot weaken the rules that judge it;
 - the **watchdog**: re-queues work a dead worker left behind and reconciles open
-  PRs against the queue every `PRXREF_GATE_RECONCILE_MINUTES`.
+  PRs against the queue every `PRXREF_GATE_RECONCILE_MINUTES`. A head its own queue has
+  never seen is skipped when GitHub already shows a completed `sdlc-review` run from the
+  same App on it, so a second gate left running against the same installation cannot post
+  a newer run over the first one's verdict. Run one gate per App anyway: stop a retired one
+  with `launchctl bootout`, not `launchctl stop`, or launchd starts it again at login.
 
 Before every write the worker re-reads the PR. If the head, the base branch or the
 base commit moved, or the PR closed, the result is dropped and a fresh generation
