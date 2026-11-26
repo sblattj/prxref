@@ -16,6 +16,8 @@ from prxref.forges.base import (
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     CommitData,
+    Conversation,
+    ConversationComment,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -126,6 +128,42 @@ def _note_author(note: dict) -> str:
     if not isinstance(info, dict):
         return ""
     return info.get("username") or info.get("name") or ""
+
+
+def _int_id(item: dict) -> int:
+    """An item's integer ``id``, or 0 when it has none."""
+    value = item.get("id")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _conversation_comment(note: dict) -> ConversationComment:
+    """A GitLab note as a :class:`ConversationComment`, whole body kept."""
+    body = note.get("body") or ""
+    created = note.get("created_at")
+    return ConversationComment(
+        author=_note_author(note),
+        body=body,
+        is_prxref=ATTRIBUTION_MARKER in body,
+        created_at=str(created) if created else None,
+    )
+
+
+def _discussion_anchor(disc: dict, notes: list[dict]) -> tuple[str | None, int | None, bool]:
+    """``(path, line, resolved)`` of a discussion, derived as ``list_threads`` derives them."""
+    resolved = bool(disc["resolved"]) if "resolved" in disc else False
+    path: str | None = None
+    line: int | None = None
+    for note in notes:
+        pos = note.get("position")
+        if pos and isinstance(pos, dict):
+            if not path:
+                path = pos.get("new_path") or pos.get("old_path")
+            if line is None:
+                line = pos.get("new_line") or pos.get("old_line")
+        if "resolved" in note and not resolved:
+            resolved = bool(note["resolved"])
+    return path, line, resolved
+
 
 class ForgeImpl:
     """GitLab Forge adapter."""
@@ -694,6 +732,75 @@ class ForgeImpl:
             )
 
         return threads
+
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """Every prxref-rooted diff discussion plus the MR's top-level notes (issue #32).
+
+        One walk of ``GET .../merge_requests/:iid/discussions``. A discussion
+        whose first non-system note has a ``position`` is an inline thread,
+        kept only when that note carries :data:`ATTRIBUTION_MARKER`; its
+        ``reply_to`` is the discussion id, and ``path``/``line``/``resolved``
+        are derived as :meth:`list_threads` derives them. The non-system notes
+        of every other discussion form the one ``"pr"`` conversation, sorted
+        by ``created_at`` then id, present only when it has a note. System
+        notes are dropped everywhere. Unlike :meth:`list_threads` a feed that
+        cannot be read to the end raises ``FeedReadError``.
+        """
+        url = f"{self._api_base(ref)}/merge_requests/{ref.number}/discussions"
+        inline: list[Conversation] = []
+        top_level: list[dict] = []
+        for discussions in self._iter_pages(
+            ref, url, self._get_auth_headers(), what="discussion feed",
+        ):
+            for disc in discussions:
+                notes = [n for n in disc.get("notes") or [] if isinstance(n, dict)]
+                spoken = [n for n in notes if not n.get("system")]
+                if not spoken:
+                    continue
+                root = spoken[0]
+                if not isinstance(root.get("position"), dict):
+                    top_level.extend(spoken)
+                    continue
+                discussion_id = disc.get("id")
+                if not discussion_id or ATTRIBUTION_MARKER not in (root.get("body") or ""):
+                    continue
+                path, line, resolved = _discussion_anchor(disc, notes)
+                inline.append(Conversation(
+                    kind="inline",
+                    reply_to=str(discussion_id),
+                    comments=tuple(_conversation_comment(n) for n in spoken),
+                    path=path,
+                    line=line,
+                    resolved=resolved,
+                ))
+        if top_level:
+            top_level.sort(key=lambda n: (str(n.get("created_at") or ""), _int_id(n)))
+            inline.append(Conversation(
+                kind="pr",
+                reply_to="",
+                comments=tuple(_conversation_comment(n) for n in top_level),
+            ))
+        return inline
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` into discussion ``reply_to``, or as a top-level note for ``""`` (issue #32).
+
+        A thread reply is ``POST .../merge_requests/:iid/discussions/:id/notes``;
+        a top-level reply is ``POST .../merge_requests/:iid/notes``, a new note
+        and never the summary ``post_summary`` maintains. Raises on HTTP failure.
+        """
+        base = f"{self._api_base(ref)}/merge_requests/{ref.number}"
+        if reply_to:
+            url = f"{base}/discussions/{quote(reply_to, safe='')}/notes"
+        else:
+            url = f"{base}/notes"
+        resp = self._session.post(
+            url,
+            headers=self._get_auth_headers(),
+            json={"body": body},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
 
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
         """Return the text of ``path`` at commit ``sha``, best-effort.
