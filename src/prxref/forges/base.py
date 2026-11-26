@@ -181,6 +181,45 @@ class Thread:
         return (self.resolved or self.outdated) and not self.decided
 
 
+@dataclass(frozen=True)
+class ConversationComment:
+    """One comment of a :class:`Conversation`, with its whole body (issue #32).
+
+    ``is_prxref`` is True when ``body`` carries :data:`ATTRIBUTION_MARKER`,
+    the one test of authorship every reply rule shares: an adapter never
+    guesses it from the author name, because the bot account differs per
+    install. ``created_at`` is the forge's timestamp string, or ``None``.
+    """
+
+    author: str
+    body: str
+    is_prxref: bool
+    created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class Conversation:
+    """A discussion prxref can answer in (issue #32), its comments oldest first.
+
+    ``kind`` is ``"inline"`` for a review thread whose root comment is
+    prxref's, and ``"pr"`` for the PR's top-level comment stream (where the
+    summary and @-mentions live). ``reply_to`` is the forge-opaque target
+    :meth:`Forge.post_reply` answers: a root comment id, a discussion id or a
+    thread id as the forge needs, and ``""`` for a ``"pr"`` conversation,
+    whose reply is a new top-level comment. ``path``/``line`` anchor an
+    inline thread and are ``None`` for ``"pr"``. ``resolved`` is False on a
+    forge that cannot report it.
+    """
+
+    kind: str
+    reply_to: str
+    comments: tuple[ConversationComment, ...]
+    path: str | None = None
+    line: int | None = None
+    resolved: bool = False
+    url: str | None = None
+
+
 @dataclass
 class PRData:
     """Normalized PR metadata returned by get_pr()."""
@@ -565,6 +604,25 @@ class Forge(Protocol):
         """
         ...
 
+
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """Every prxref-rooted review thread plus the PR's top-level stream (issue #32).
+
+        Optional: a forge without it answers no replies. Inline threads whose
+        root comment does not carry :data:`ATTRIBUTION_MARKER` are left out.
+        Comments carry whole bodies, oldest first. Raises on transport or HTTP
+        failure like ``get_diff``.
+        """
+        ...
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` as a reply in the conversation ``reply_to`` names (issue #32).
+
+        Optional, paired with :meth:`list_conversations`. ``reply_to`` is a
+        :attr:`Conversation.reply_to` this adapter produced; ``""`` posts a new
+        top-level PR comment. Raises on transport or HTTP failure.
+        """
+        ...
 
 def detect_forge(url: str) -> PRRef | None:
     """Try each registered forge's URL parser in order.
