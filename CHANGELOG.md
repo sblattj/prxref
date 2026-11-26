@@ -10,6 +10,24 @@ tracker.
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-11-26
+
+### Fixed
+
+- A review packed past the chunk limits now says so in the posted summary. When any file
+  is placed past `PRXREF_MAX_CHUNKS` and the per-chunk file cap into an already full chunk,
+  the summary opens with a "Reduced review depth" note counting those files and their
+  changed lines, the chunks over the token budget and the largest one, and naming
+  `PRXREF_MAX_CHUNKS`, `PRXREF_CHUNK_MAX_FILES` and `PRXREF_CHUNK_TOKEN_BUDGET`. Every file
+  was already sent to the reviewer; a 150-file PR used to read as a plain `Approved` with no
+  sign that most of it was reviewed in overstuffed chunks. The verdict, `degraded` and the
+  exit code are unchanged, and a lone hunk over the budget adds no note. The text-mode
+  `chunks:` hint names `PRXREF_CHUNK_MAX_FILES` too (#205).
+- The CI wiring check no longer flags a new source module whose name contains "test"
+  (`src/lib/feature-test-version.ts`) when another changed file imports it and it has no
+  entry point: the test-file branch now applies the same library guard as the name-hint
+  branch. With no importer, or with an entry point, it is still flagged (#206).
+
 ## [0.43.0] - 2026-11-22
 
 ### Changed
