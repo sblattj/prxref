@@ -34,6 +34,8 @@ from prxref.forges.base import (
     ATTRIBUTION_MARKER,
     SUMMARY_MARKER,
     CommitData,
+    Conversation,
+    ConversationComment,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -89,6 +91,7 @@ _PIPELINE_TOKEN_ENV = "SYSTEM_ACCESSTOKEN"
 _INLINE_THREAD_STATUS = "active"
 _SUMMARY_THREAD_STATUS = "closed"
 _COMMENT_TYPE_TEXT = 1
+_ROOT_COMMENT_ID = 1
 _RESOLVED_STATUSES = frozenset({"fixed", "wontfix", "closed", "bydesign"})
 _WONT_FIX_STATUSES = frozenset({"wontfix", "bydesign"})
 
@@ -191,6 +194,21 @@ def _make_retry_session() -> requests.Session:
 
 
 _DEFAULT_SESSION = _make_retry_session()
+
+
+def _conversation_comment(comment: dict) -> ConversationComment:
+    """An Azure DevOps comment as a :class:`ConversationComment`, whole ``content`` kept."""
+    author = comment.get("author") or {}
+    if not isinstance(author, dict):
+        author = {}
+    body = comment.get("content") or ""
+    published = comment.get("publishedDate")
+    return ConversationComment(
+        author=author.get("displayName") or author.get("uniqueName") or "",
+        body=body,
+        is_prxref=ATTRIBUTION_MARKER in body,
+        created_at=str(published) if published else None,
+    )
 
 
 def _strip_heads(ref_name: str) -> str:
@@ -956,6 +974,97 @@ class ForgeImpl:
                 ref.owner, ref.repo, ref.number, len(threads), e,
             )
         return threads
+
+    @staticmethod
+    def _spoken(thread: dict) -> list[dict]:
+        """The thread's live, non-system comments in id order."""
+        comments = [
+            c for c in thread.get("comments") or []
+            if isinstance(c, dict) and not c.get("isDeleted") and c.get("commentType") != "system"
+        ]
+        return sorted(comments, key=lambda c: c.get("id") if isinstance(c.get("id"), int) else 0)
+
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """Every prxref-rooted file thread plus the PR's general threads (issue #32).
+
+        One read of ``GET .../pullrequests/{id}/threads``, skipping the
+        threads :meth:`list_threads` skips. A thread with a ``threadContext``
+        whose root comment carries :data:`ATTRIBUTION_MARKER` is an inline
+        conversation: its live non-system comments in id order, ``reply_to``
+        the thread id, and ``path``/``line``/``resolved`` as
+        :meth:`list_threads` derives them from the context and the status.
+        The comments of every thread without a ``threadContext`` form the one
+        ``"pr"`` conversation, sorted by ``publishedDate``, thread id and
+        comment id, present only when it has a comment. A read that fails
+        raises ``FeedReadError``.
+        """
+        conversations: list[Conversation] = []
+        top_level: list[tuple[str, int, int, dict]] = []
+        for thread in self._read_threads(ref):
+            if not self._usable(thread):
+                continue
+            spoken = self._spoken(thread)
+            if not spoken:
+                continue
+            context = thread.get("threadContext")
+            thread_id = thread.get("id")
+            if not context:
+                tid = thread_id if isinstance(thread_id, int) else 0
+                top_level.extend(
+                    (str(c.get("publishedDate") or ""), tid, c.get("id") or 0, c) for c in spoken
+                )
+                continue
+            if thread_id is None or ATTRIBUTION_MARKER not in (self._root(thread).get("content") or ""):
+                continue
+            conversations.append(Conversation(
+                kind="inline",
+                reply_to=str(thread_id),
+                comments=tuple(_conversation_comment(c) for c in spoken),
+                path=(context.get("filePath") or "").lstrip("/") or None,
+                line=(context.get("rightFileStart") or {}).get("line"),
+                resolved=str(thread.get("status") or "").lower() in _RESOLVED_STATUSES,
+            ))
+        if top_level:
+            top_level.sort(key=lambda entry: entry[:3])
+            conversations.append(Conversation(
+                kind="pr",
+                reply_to="",
+                comments=tuple(_conversation_comment(entry[3]) for entry in top_level),
+            ))
+        return conversations
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` into thread ``reply_to``, or as a new general thread for ``""`` (issue #32).
+
+        A thread reply is ``POST .../threads/{threadId}/comments`` with
+        ``parentCommentId`` 1, the thread's first comment (comment ids start
+        at 1 in every thread). A general reply is a new ``POST .../threads``
+        with no ``threadContext``, opened ``closed`` like the summary so an
+        answer never counts as an unresolved comment against a merge policy,
+        and never the summary ``post_summary`` maintains. Raises on HTTP
+        failure.
+        """
+        if reply_to:
+            url = self._pr_api(ref, f"/threads/{int(reply_to)}/comments")
+            payload: dict[str, Any] = {
+                "content": body,
+                "parentCommentId": _ROOT_COMMENT_ID,
+                "commentType": _COMMENT_TYPE_TEXT,
+            }
+        else:
+            url = self._pr_api(ref, "/threads")
+            payload = {
+                "comments": [{"parentCommentId": 0, "content": body, "commentType": _COMMENT_TYPE_TEXT}],
+                "status": _SUMMARY_THREAD_STATUS,
+            }
+        resp = self._session.post(
+            url,
+            params={"api-version": _API_VERSION},
+            json=payload,
+            headers=self._headers(),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
 
     def _find_summary(self, ref: PRRef) -> tuple[dict, dict] | None:
         """Return the ``(thread, root comment)`` of the summary ``post_summary`` overwrites.
