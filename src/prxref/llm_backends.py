@@ -177,6 +177,28 @@ def _openai_error_message(resp: requests.Response) -> str:
     return getattr(resp, "text", "") or ""
 
 
+_REASON_MAX = 160
+
+
+def _provider_reason(resp: requests.Response, api_key: str | None) -> str:
+    """The provider's 4xx error message as one bounded line, or ``""``.
+
+    Whitespace runs collapse to one space, the client's own API key is
+    removed if the provider echoed it, and anything past ``_REASON_MAX``
+    characters is cut with an ellipsis. The text later passes through
+    :func:`prxref.orchestrator.redact_for_post` before it is posted.
+    """
+    message = _openai_error_message(resp)
+    if not isinstance(message, str):
+        return ""
+    if api_key:
+        message = message.replace(api_key, "")
+    message = " ".join(message.split())
+    if len(message) > _REASON_MAX:
+        message = message[:_REASON_MAX].rstrip() + "…"
+    return message
+
+
 def _header(headers: object, name: str) -> object:
     """Case-insensitive lookup of one response header; ``None`` when absent.
 
@@ -426,11 +448,14 @@ class OpenAICompatClient(LLMClient):
                 continue
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             if resp.status_code >= 400:
+                reason = _provider_reason(resp, self.api_key) if resp.status_code < 500 else ""
                 logger.warning(
-                    "llm attempt %d/%d failed: model=%s HTTP %d after %dms",
+                    "llm attempt %d/%d failed: model=%s HTTP %d after %dms%s",
                     attempt, len(self.models), model, resp.status_code, elapsed_ms,
+                    f" ({reason})" if reason else "",
                 )
-                failures.append(f"{model}: HTTP {resp.status_code}")
+                failure = f"{model}: HTTP {resp.status_code}"
+                failures.append(f"{failure}: {reason}" if reason else failure)
                 if 400 <= resp.status_code < 500:
                     message = _openai_error_message(resp)
                     if _looks_permanently_unavailable(message):

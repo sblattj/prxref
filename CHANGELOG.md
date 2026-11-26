@@ -10,6 +10,19 @@ tracker.
 
 ## [Unreleased]
 
+### Fixed
+
+- The gate's reconcile no longer re-reviews a head that another instance of the same App
+  already reviewed. A head its own queue has never seen is skipped when GitHub shows a
+  completed `sdlc-review` run from the App on it; a run still in progress does not count, so
+  a dead instance's leftover run is still repaired, and a failed lookup keeps the old
+  behavior. A stale second gate had re-reviewed a head 44 seconds after the live gate passed
+  it, and its failing run replaced the pass and blocked the merge (#209).
+- An LLM call that fails with a 4xx now keeps the provider's error message, as one line of
+  at most 160 characters with the API key removed, in the failure text, the posted check and
+  the operator log: `glm-5.3: HTTP 400: This model always engages in thinking ...` instead of
+  a bare `glm-5.3: HTTP 400`. A 5xx is unchanged (#209).
+
 ## [0.43.1] - 2026-11-26
 
 ### Fixed
