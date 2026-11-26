@@ -250,7 +250,8 @@ class RunsDirSource:
                 pr_url=url,
                 repo=repo,
                 pr_number=number,
-                head_sha=getattr(gen, "head_sha", None),
+                head_sha=getattr(gen, "head_sha", None) or (
+                    extra.get("reviewed_head_sha") if isinstance(extra, dict) else None),
                 finished_at=getattr(gen, "finished_at", None) or mtime,
                 source="runs_dir",
                 extra=extra if isinstance(extra, dict) else None,
@@ -293,6 +294,7 @@ def observe_result(result: object, *, pr_url: str | None = None) -> None:
         repo, number = _repo_of(url) if url else (None, None)
         _RING.add(summarize(
             result, pr_url=url, repo=repo, pr_number=number,
+            head_sha=result.get("reviewed_head_sha"),
             finished_at=time.time(), source="memory",
         ))
     except Exception:  # noqa: BLE001

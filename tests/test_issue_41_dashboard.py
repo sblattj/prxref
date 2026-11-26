@@ -272,6 +272,26 @@ def test_webhook_review_lands_in_the_served_ring(stubbed_review, served):
     assert sorted(p.name for p in stubbed_review.iterdir()) == []
 
 
+def test_a_serve_row_shows_the_short_reviewed_head(stubbed_review, served, monkeypatch):
+    head = "abcdef1" + "2" * 33
+
+    def _orchestrate(**kwargs):
+        res = _result(posted=False, chunk_count=1, chunks_reviewed=1, chunks_failed=0)
+        res["reviewed_head_sha"] = head
+        return res
+
+    monkeypatch.setattr("prxref.orchestrator.orchestrate_review", _orchestrate)
+    cli._webhook_handler("https://github.com/acme/widget/pull/12")
+    server = served(dashboard.ring())
+    with _get(server, "/runs.json") as resp:
+        rows = json.loads(resp.read())
+    with _get(server, "/") as resp:
+        page = resp.read().decode("utf-8")
+    assert [r["head_sha"] for r in rows] == [head]
+    assert "<code>abcdef1</code>" in page
+    assert head not in page
+
+
 # Criterion 2: the data source is the existing run records; no new persistence.
 
 

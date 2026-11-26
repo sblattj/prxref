@@ -631,7 +631,7 @@ class TestOffPathMatchesBase:
             "cost_by_model", "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-            "review_depth", "learnings", "describe", "failed_chunks", *CHUNK_KEYS,
+            "review_depth", "learnings", "describe", "failed_chunks", *CHUNK_KEYS, "reviewed_head_sha",
         }
         assert res["rule_counts"] is None
         assert res["rule_scope_cleared"] is None  # no section scope: #75's check never ran

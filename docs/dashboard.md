@@ -47,7 +47,7 @@ Each row is one finished review, newest first, at most 50:
 | --- | --- |
 | `finished_at` | When the review finished, as Unix seconds. |
 | `repo`, `pr_number`, `pr_url` | The PR reviewed. The page links the PR URL only when it is `http` or `https`. |
-| `head_sha` | The head commit reviewed (the page shows 7 characters). The gate always knows it; `prxref serve` leaves it `null`, because its run result does not carry it. |
+| `head_sha` | The head commit reviewed (the page shows 7 characters). The gate takes it from its queue; `prxref serve` takes the run record's `reviewed_head_sha`, the PR head the diff was fetched at. It is `null` when the run failed before the diff was fetched, or the forge gave no head (a local diff file). |
 | `verdict` | `Approved`, `Request-Changes` or `Error`. |
 | `findings` | Active (posted) findings by severity: `error`, `warning`, `spec`, `outofscope`, and `other` for anything else. Dropped findings are not counted. |
 | `cost_usd`, `cost_estimated` | The run's cost in USD, `null` (shown as "unknown") when no source could price it. `cost_estimated` marks an estimate. |

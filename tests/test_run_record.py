@@ -55,7 +55,7 @@ RECORD_KEYS = {
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "removal_claims",
     "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
-    "review_depth", "learnings", "describe", "default_branch_check",
+    "review_depth", "learnings", "describe", "default_branch_check", "reviewed_head_sha",
 }
 NULL_WHEN_OFF = (
     "review_rules", "ticket_context", "spec_grounding", "size_advisory", "prompt_templates",
@@ -236,6 +236,17 @@ class TestTheRecordKeys:
             )
         assert res["cost_estimated"] is False
 
+    @pytest.mark.parametrize("path", PATHS)
+    def test_the_reviewed_head_is_the_pr_head_once_the_diff_is_fetched(
+        self, monkeypatch, tmp_path, path,
+    ):
+        """#41: the record names the head the diff was fetched at, and nothing before that."""
+        res, forge, _ = _run(monkeypatch, path, tmp_path)
+        if path in ("get_pr", "get_diff"):
+            assert res["reviewed_head_sha"] is None
+        else:
+            assert res["reviewed_head_sha"] == forge.pr.source_sha == "a" * 40
+
     @pytest.mark.parametrize("path", SCOPED_PATHS)
     def test_the_scoped_rules_exit_carries_the_same_keys(self, monkeypatch, tmp_path, path):
         res, forge, _ = _run(monkeypatch, path, tmp_path, post=True)
@@ -294,8 +305,10 @@ class TestTheRecordKeys:
         assert "replay" not in normal_payload
         assert set(replay_payload) == set(normal_payload) | {"replay"}
         assert replay_payload["replay"] == REPLAY
-        for key in RECORD_KEYS - {"cost_by_model"}:
+        for key in RECORD_KEYS - {"cost_by_model", "reviewed_head_sha"}:
             assert key in normal_payload, key
+        # The reviewed head feeds the serve dashboard; --format json is unchanged.
+        assert "reviewed_head_sha" not in normal_payload
         assert normal_payload["size_advisory"] is None
         assert normal_payload["cost_estimated"] is False
 

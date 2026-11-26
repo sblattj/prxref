@@ -1024,6 +1024,11 @@ def orchestrate_review(
     logs one WARNING at ``thorough``. Only the chunk worker changes, and the
     run record's ``review_depth`` echoes the value on every exit.
 
+    The run record's ``reviewed_head_sha`` is the PR head
+    (``PRData.source_sha``) the diff was fetched at, ``None`` on an exit
+    before the diff was fetched or when the forge gives no head. It is not
+    ``incremental``'s marker sha, and ``--format json`` does not carry it.
+
     ``scoped_rules`` is the loaded path-scoped review rules
     (:class:`prxref.rules.ScopedRules`, as
     :func:`prxref.rules.load_scoped_rules` returns them, taken duck-typed
@@ -1458,6 +1463,7 @@ def orchestrate_review(
         "describe": (
             _describe_record(describe_mode, labels_mode) if describe_mode != "off" else None
         ),
+        "reviewed_head_sha": None,
     }
     if default_branch_check == "on":
         run_inputs["default_branch_check"] = default_branch.CheckOutcome().record()
@@ -1563,6 +1569,7 @@ def orchestrate_review(
             raw = forge.get_diff(ref)
             sp["bytes"] = len(raw.encode("utf-8"))
         _write_trace_diff(trace_dir, raw)
+        run_inputs["reviewed_head_sha"] = _reviewed_head_sha(pr)
     except Exception as e:  # noqa: BLE001
         logger.error("get_diff failed: %s", e)
         tracer.event("run", "fail", **_cost_meta(run_inputs))
@@ -3437,6 +3444,12 @@ def _sampling(llm: object) -> dict:
 
 def _elapsed_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
+
+
+def _reviewed_head_sha(pr: object) -> str | None:
+    """The PR head the diff was fetched at (``PRData.source_sha``), or ``None`` when it has none."""
+    sha = getattr(pr, "source_sha", None)
+    return sha.strip() if isinstance(sha, str) and sha.strip() else None
 
 
 def _run_record(result: dict, run_inputs: Mapping[str, Any]) -> dict:
