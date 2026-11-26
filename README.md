@@ -289,6 +289,8 @@ The service exposes:
 - `POST /webhook` — verifies HMAC or token signatures per forge (for Gitea and Forgejo, the `X-Forgejo-Signature` or `X-Gitea-Signature` HMAC against `PRXREF_GITEA_WEBHOOK_SECRET`, checked before the GitHub-compatible headers those forges also send; for Azure DevOps service hooks, the Basic-auth password against `PRXREF_AZURE_DEVOPS_WEBHOOK_SECRET`), enqueues incoming PR events, and responds immediately with `202 Accepted`. A background worker processes reviews serially. Registering each forge's webhook: [docs/deploy.md](docs/deploy.md#2-webhook-registration).
 - `GET /health` — liveness probe returning `{"ok": true}`.
 
+With `PRXREF_METRICS_PORT` set, `serve` and `gate serve` also expose Prometheus `/metrics` on `127.0.0.1` only, on a separate port: see [docs/metrics.md](docs/metrics.md).
+
 ## Review Gate (GitHub App)
 
 `prxref review` and `prxref serve` advise; they never block a merge. To make a prxref

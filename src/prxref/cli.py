@@ -167,6 +167,7 @@ from prxref.forges.replay import DescriptionPin, LocalDiffForge, ReplayForge, ch
 from prxref.forges.repo_dir import RepoDir
 from prxref.llm import ConfigError
 from prxref.metadata_rules import MetadataRules
+from prxref.metrics import observe_result as _metrics_observe
 from prxref.notify import notify as _notify
 from prxref.prompt_templates import export_prompt_templates, load_prompt_templates
 from prxref.review_inputs import PathLoaders, load_path_inputs, load_prompts_dir
@@ -2107,6 +2108,7 @@ def _run_review(
     if isinstance(result, dict):
         result["config_file"] = config_stamp
         result["eval_pins"] = pins
+        _metrics_observe(result)
     _notify(result, cfg, ref=ref, post=post)
     return result
 
@@ -2500,7 +2502,17 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         else functools.partial(_webhook_handler, config_file=config_file)
     )
     serve_fn = importlib.import_module("prxref.webhooks").serve
-    serve_fn(port=args.port, host=args.host, handler=handler)
+    try:
+        metrics_server = importlib.import_module("prxref.metrics").start_from_env()
+    except ConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        serve_fn(port=args.port, host=args.host, handler=handler)
+    finally:
+        if metrics_server is not None:
+            metrics_server.shutdown()
+            metrics_server.server_close()
     return 0
 
 
