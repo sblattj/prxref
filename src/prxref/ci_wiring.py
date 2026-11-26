@@ -649,7 +649,9 @@ def candidate_checks(
     gains (on an added line, absent from the removed lines) contains such
     a word — so a modified script counts only for a new flag, and a
     body-only edit never does. A NEW file whose name says test or spec but
-    sits outside every default include counts too. The
+    sits outside every default include counts too, unless it is a library
+    (issue #206: ``src/lib/feature-test-version.ts`` imported by a component
+    in the same PR is a module, not a test). The
     :func:`target_candidates` follow, each on the runner file that
     defines it (``read`` is handed through for the package.json check).
     The result is sorted by path, then target, so both the findings and
@@ -691,7 +693,10 @@ def candidate_checks(
         ) and not _is_interactive_helper(file):
             candidates[path] = ("it gains a shebang line", True)
             continue
-        if file.status == "added" and _looks_like_test(path) and not default_include(path):
+        if (
+            file.status == "added" and _looks_like_test(path)
+            and not default_include(path) and not _is_library(file, files)
+        ):
             candidates[path] = (
                 "it is a new test file outside the runner's default include",
                 True,
