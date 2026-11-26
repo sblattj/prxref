@@ -312,7 +312,7 @@ What either backend contributes to `cost_usd` is set out in [Cost accounting](#c
 
 ## Cost accounting
 
-Every run record carries `cost_usd` (USD) and `cost_estimated` (bool), on every exit, and `--format json` prints both. A run's cost is in exactly one of three states:
+Every run record carries `cost_usd` (USD) and `cost_estimated` (bool), on every exit, and `--format json` prints both. The run record also carries `cost_by_model` (#44): `{model name: USD or null}` for each exact model name a review unit reported, by the same rules (a model with a unit no source could price is `null`, never a partial sum; `{}` when no unit came back). It feeds the `prxref_llm_cost_usd_total{model}` metric ([metrics.md](metrics.md)) and it is not in `--format json`. A run's cost is in exactly one of three states:
 
 - **Reported.** The backend returned a dollar figure for each call. A reported figure always wins, even over a price-table entry for the same model.
 - **Estimated.** No figure came back, but `PRXREF_PRICE_TABLE` prices the model. `cost_estimated` is `true`.

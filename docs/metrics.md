@@ -35,8 +35,8 @@ listener is on.
 | `prxref_reviews_total` | counter | `verdict` (`Approved`, `Request-Changes`, `Error`, `other`) | Finished reviews. |
 | `prxref_findings_posted_total` | counter | `severity` (`error`, `warning`, `spec`, `outofscope`, `other`) | Active findings of finished reviews. |
 | `prxref_findings_dropped_total` | counter | `gate` | Findings dropped by a quality pass, labelled with the pass that wrote the `drop_reason` (for example `apply_hedge_gate`, `apply_quality_gate`, `apply_thread_dedup`, `apply_sweep_dedup`); `other` when no known reason matches. The reasons are tabulated in [quality.md](quality.md#drop-reasons). |
-| `prxref_llm_cost_usd_total` | counter | `model` | Dollar cost of reviews with a known cost. `model` is the run's configured model chain, comma-joined. A run's result carries one cost for the whole run, so a fallback chain is not split per model. |
-| `prxref_llm_cost_unknown_reviews_total` | counter | none | Reviews whose cost no source could price (never counted as 0). |
+| `prxref_llm_cost_usd_total` | counter | `model` | Dollar cost of reviews, split by the exact model name that answered each review unit (the run record's `cost_by_model`). A model with a unit no source could price is left out and counts in `prxref_llm_cost_unknown_reviews_total` instead. |
+| `prxref_llm_cost_unknown_reviews_total` | counter | none | Reviews in which at least one model's cost no source could price (never counted as 0). |
 | `prxref_llm_tokens_total` | counter | `direction` (`input`, `output`) | LLM tokens of finished reviews. |
 | `prxref_review_duration_seconds` | histogram | `le` | Wall time of one review, buckets 5 s to 1800 s. |
 | `prxref_review_errors_total` | counter | none | Reviews that ended with the `Error` verdict. |

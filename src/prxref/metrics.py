@@ -9,8 +9,8 @@ that binds ``127.0.0.1`` and never the webhook port.
 No label carries a PR URL, a repository or a file path. ``verdict`` and
 ``severity`` come from closed sets, ``gate`` is the quality pass that wrote
 a finding's ``drop_reason`` (anything unrecognised is ``other``), and
-``model`` is the configured model chain of the run (the result carries one
-cost for the whole run, not one per model).
+``model`` is the exact model name a unit reported (``cost_by_model``), so it
+is bounded by the configured fallback chain.
 """
 from __future__ import annotations
 
@@ -150,7 +150,7 @@ class Registry:
             "Findings dropped by a quality gate, by the gate that dropped them.", ("gate",))
         self.cost = _Counter(
             "prxref_llm_cost_usd_total",
-            "Dollar cost of finished reviews, by the run's configured model chain.", ("model",))
+            "Dollar cost of finished reviews with a known cost, by the model that answered.", ("model",))
         self.cost_unknown = _Counter(
             "prxref_llm_cost_unknown_reviews_total",
             "Finished reviews whose cost no source could price.")
@@ -203,18 +203,18 @@ class Registry:
                 n = data.get(key)
                 if isinstance(n, int) and not isinstance(n, bool) and n > 0:
                     self.tokens.inc((direction,), n)
-            cost = data.get("cost_usd")
-            if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
-                self.cost.inc((_model_label(data),), float(cost))
-            elif isinstance(data.get("cost_usd", False), type(None)):
+            by_model = data.get("cost_by_model")
+            if isinstance(by_model, dict) and by_model:
+                unknown = False
+                for model, cost in sorted(by_model.items(), key=lambda kv: str(kv[0])):
+                    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+                        self.cost.inc((str(model)[:_MODEL_LABEL_MAX],), float(cost))
+                    else:
+                        unknown = True
+                if unknown:
+                    self.cost_unknown.inc()
+            elif "cost_usd" in data and data["cost_usd"] is None:
                 self.cost_unknown.inc()
-
-
-def _model_label(data: Mapping[str, Any]) -> str:
-    sampling = data.get("sampling")
-    models = sampling.get("models") if isinstance(sampling, dict) else None
-    names = [m for m in models or [] if isinstance(m, str) and m]
-    return ",".join(names)[:_MODEL_LABEL_MAX] or "unknown"
 
 
 _REGISTRY = Registry()

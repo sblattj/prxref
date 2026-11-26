@@ -628,7 +628,7 @@ class TestOffPathMatchesBase:
         text, res = rules_capture(name, max_findings_per_rule=0)
         assert _sha(text) == RULES_GOLDEN[name]
         assert set(res) == set(A81_RECORD_KEYS) | {
-            "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
+            "cost_by_model", "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup",
             "error_verification", "removal_claims",
             "suggestions", "incremental", "ci_wiring", "evidence", "stable_ids", "degraded",
             "review_depth", "learnings", "describe", "failed_chunks", *CHUNK_KEYS,

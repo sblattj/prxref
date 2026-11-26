@@ -237,6 +237,44 @@ def run_cost(
     return round(math.fsum(parts), 10), estimated, []
 
 
+def run_cost_by_model(
+    units: Iterable[Mapping[str, Any]], table: Mapping[str, ModelPrice] | None
+) -> dict[str, float | None]:
+    """Split :func:`run_cost` by the exact model name each unit reported.
+
+    The per-unit rules are :func:`run_cost`'s: a unit never received is
+    skipped, a reported cost wins, else the table prices the exact model for a
+    unit that counted input tokens, else the unit is unknown. A model with any
+    unknown unit maps to ``None`` (never a partial sum); every other model maps
+    to its total, rounded to 10 decimals. A received unit with no model name
+    groups under ``"<unknown model>"``. No received unit gives ``{}``.
+    """
+    parts: dict[str, list[float]] = {}
+    unknown: set[str] = set()
+    for unit in units:
+        received, reported, _source = unit_cost(unit)
+        if not received:
+            continue
+        model = unit.get("model")
+        model = model if isinstance(model, str) and model else _UNKNOWN_MODEL
+        parts.setdefault(model, [])
+        if reported is not None:
+            parts[model].append(reported)
+            continue
+        input_tokens = _count(unit.get("input_tokens"))
+        estimate = None
+        if table and model != _UNKNOWN_MODEL and input_tokens > 0:
+            estimate = estimate_usd(table, model, input_tokens, _count(unit.get("output_tokens")))
+        if estimate is None:
+            unknown.add(model)
+        else:
+            parts[model].append(estimate)
+    return {
+        model: None if model in unknown else round(math.fsum(values), 10)
+        for model, values in sorted(parts.items())
+    }
+
+
 def api_equivalent_run(units: Iterable[Mapping[str, Any]]) -> bool:
     """Whether a run's reported cost is claude-cli's API-equivalent figure.
 

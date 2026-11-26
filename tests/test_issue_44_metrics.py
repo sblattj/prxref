@@ -80,6 +80,7 @@ def _result(**over) -> dict:
         "input_tokens": 1000,
         "output_tokens": 200,
         "cost_usd": 0.0125,
+        "cost_by_model": {"acme/model-a": 0.01, "acme/model-b": 0.0025},
         "sampling": {"temperature": 0, "seed": None, "models": ["acme/model-a", "acme/model-b"]},
     }
     result.update(over)
@@ -135,7 +136,8 @@ def test_observing_a_result_counts_verdict_severity_gate_and_duration():
     assert "prxref_review_duration_seconds_sum 2.5" in text
     assert 'prxref_review_duration_seconds_bucket{le="+Inf"} 1' in text
     assert "prxref_review_errors_total 0" in text
-    assert 'prxref_llm_cost_usd_total{model="acme/model-a,acme/model-b"} 0.0125' in text
+    assert 'prxref_llm_cost_usd_total{model="acme/model-a"} 0.01' in text
+    assert 'prxref_llm_cost_usd_total{model="acme/model-b"} 0.0025' in text
     assert 'prxref_llm_tokens_total{direction="input"} 1000' in text
 
 
@@ -147,10 +149,88 @@ def test_an_error_result_counts_an_error():
 
 
 def test_an_unknown_cost_is_counted_not_zeroed():
-    metrics.observe_result(_result(cost_usd=None))
+    metrics.observe_result(_result(cost_usd=None, cost_by_model={"acme/model-a": None}))
     text = metrics.render()
     assert "prxref_llm_cost_unknown_reviews_total 1" in text
     assert "prxref_llm_cost_usd_total{" not in text
+
+
+def test_an_unpriced_model_is_unknown_and_a_priced_one_still_counts():
+    metrics.observe_result(_result(cost_by_model={"acme/model-a": 0.5, "acme/model-b": None}))
+    text = metrics.render()
+    assert 'prxref_llm_cost_usd_total{model="acme/model-a"} 0.5' in text
+    assert 'model="acme/model-b"' not in text
+    assert "prxref_llm_cost_unknown_reviews_total 1" in text
+
+
+def _unit(model, cost=None, tokens_in=100):
+    return {"model": model, "cost_usd": cost, "input_tokens": tokens_in, "output_tokens": 10}
+
+
+def test_run_cost_by_model_groups_by_exact_model_with_the_run_cost_rules():
+    from prxref import costs
+
+    table = costs.parse_price_table({"acme/b": {"input": 1.0, "output": 2.0}})
+    units = [
+        _unit("acme/a", 0.01), _unit("acme/a", 0.02), _unit("acme/b"),
+        {"model": "", "input_tokens": 0, "output_tokens": 0},
+    ]
+    out = costs.run_cost_by_model(units, table)
+    assert set(out) == {"acme/a", "acme/b"}
+    assert out["acme/a"] == pytest.approx(0.03)
+    assert out["acme/b"] == pytest.approx(100 * 1.0 / 1e6 + 10 * 2.0 / 1e6)
+
+
+def test_run_cost_by_model_marks_only_the_unpriced_model_unknown():
+    from prxref import costs
+
+    out = costs.run_cost_by_model([_unit("acme/a", 0.01), _unit("acme/c")], {})
+    assert out == {"acme/a": pytest.approx(0.01), "acme/c": None}
+
+
+def test_run_cost_by_model_one_unknown_unit_makes_that_model_unknown():
+    from prxref import costs
+
+    out = costs.run_cost_by_model([_unit("acme/a", 0.01), _unit("acme/a")], {})
+    assert out == {"acme/a": None}
+
+
+def test_the_run_record_stamps_cost_by_model_beside_cost_usd():
+    from prxref import orchestrator
+
+    run_inputs: dict = {}
+    orchestrator._stamp_run_cost(run_inputs, [_unit("acme/a", 0.01), _unit("acme/b", 0.02)], {})
+    assert run_inputs["cost_usd"] == pytest.approx(0.03)
+    assert run_inputs["cost_by_model"] == {"acme/a": pytest.approx(0.01), "acme/b": pytest.approx(0.02)}
+
+
+def test_every_emitted_drop_reason_maps_to_a_known_gate():
+    sources = [ROOT / "src" / "prxref" / n for n in ("quality.py", "orchestrator.py")]
+    sources += [
+        ROOT / "src" / "prxref" / n
+        for n in ("stability.py", "stable_ids.py", "followup_merge.py", "evidence.py")
+    ]
+    seen: list[str] = []
+    for path in sources:
+        for m in re.finditer(r'drop_reason\s*=\s*\(?\s*f?"([^"{]+)', path.read_text(encoding="utf-8")):
+            seen.append(m.group(1))
+    prefixes = {
+        "GROUPED_INTO_PREFIX": "grouped into ", "RULE_CAP_PREFIX": "rule cap exceeded ",
+        "ROOT_CAUSE_PREFIX": "same root cause as ", "EVIDENCE_DROP_PREFIX": "contradicted by execution evidence: ",
+        "EXAMPLE_ECHO_PREFIX": "echoes the prompt's example: ",
+        "COMMENT_ONLY_PREFIX": "claims a code change, but only comments changed: ",
+        "RESTATED_DROP_PREFIX": "restates execution evidence: ", "STABILITY_DROP_PREFIX": "stability: ",
+        "UNCONFIRMED_PREFIX": "not confirmed by context follow-up",
+    }
+    seen.extend(prefixes.values())
+    assert len(seen) >= 20, seen
+    known = [prefix for prefix, _gate in metrics._GATES]
+    seen = [" ".join(r.split()) + (" " if r.endswith(" ") else "") for r in seen]
+    other = sorted({
+        r for r in seen
+        if metrics.gate_for(r) == "other" and not any(k.startswith(r.strip()) for k in known)
+    })
+    assert not other, f"drop reasons with no gate in metrics._GATES: {other}"
 
 
 def test_a_non_dict_or_unknown_verdict_is_bounded():

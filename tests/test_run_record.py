@@ -50,7 +50,7 @@ BASE_KEYS = {
     "output_tokens", "posted", "sampling", "failed_chunks",
 }
 RECORD_KEYS = {
-    "cost_usd", "cost_estimated", "review_rules", "ticket_context",
+    "cost_usd", "cost_by_model", "cost_estimated", "review_rules", "ticket_context",
     "spec_grounding", "size_advisory", "prompt_templates", "scoped_rules",
     "rule_counts", "rule_scope_cleared", "repo_context", "parse_retries", "context_followup", "error_verification",
     "removal_claims",
@@ -294,7 +294,7 @@ class TestTheRecordKeys:
         assert "replay" not in normal_payload
         assert set(replay_payload) == set(normal_payload) | {"replay"}
         assert replay_payload["replay"] == REPLAY
-        for key in RECORD_KEYS:
+        for key in RECORD_KEYS - {"cost_by_model"}:
             assert key in normal_payload, key
         assert normal_payload["size_advisory"] is None
         assert normal_payload["cost_estimated"] is False

@@ -1414,6 +1414,7 @@ def orchestrate_review(
     # carries is the one in force at that exit.
     run_inputs: dict[str, Any] = {
         "cost_usd": 0.0,
+        "cost_by_model": {},
         "cost_estimated": False,
         "cost_api_equivalent": False,
         "review_rules": None,
@@ -1800,6 +1801,7 @@ def orchestrate_review(
             except Exception as e:  # noqa: BLE001
                 logger.warning("cost accounting failed (continuing): %s", e)
                 run_inputs["cost_usd"] = None
+                run_inputs["cost_by_model"] = {}
                 run_inputs["cost_estimated"] = False
                 run_inputs["cost_api_equivalent"] = False
     cost_units_extra = [describe_unit] if describe_unit is not None else []
@@ -2119,6 +2121,7 @@ def orchestrate_review(
     except Exception as e:  # noqa: BLE001
         logger.warning("cost accounting failed (continuing): %s", e)
         run_inputs["cost_usd"] = None
+        run_inputs["cost_by_model"] = {}
         run_inputs["cost_estimated"] = False
         run_inputs["cost_api_equivalent"] = False
     cost_label = _cost_label(run_inputs, post_cost)
@@ -3571,6 +3574,7 @@ def _stamp_run_cost(
             ", ".join(repr(m) for m in unpriced),
         )
     run_inputs["cost_usd"] = cost_usd
+    run_inputs["cost_by_model"] = costs.run_cost_by_model(units, price_table)
     run_inputs["cost_estimated"] = cost_estimated
     run_inputs["cost_api_equivalent"] = costs.api_equivalent_run(units)
 
@@ -4719,6 +4723,7 @@ def _verify_error_findings(
     except Exception as e:  # noqa: BLE001
         logger.warning("cost accounting failed (continuing): %s", e)
         run_inputs["cost_usd"] = None
+        run_inputs["cost_by_model"] = {}
         run_inputs["cost_estimated"] = False
         run_inputs["cost_api_equivalent"] = False
     input_tokens += sum(int(u.get("input_tokens") or 0) for u in units)
