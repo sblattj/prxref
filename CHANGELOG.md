@@ -10,6 +10,37 @@ tracker.
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-26
+
+### Added
+
+- Opt-in AI replies in review threads. With `thread_replies = "mention"` or `"always"`
+  (`PRXREF_THREAD_REPLIES`, default `off`), a person's reply to a prxref inline finding, or
+  a PR comment naming `reply_mention` (default `@prxref`), gets one grounded answer: a
+  single bounded model call with the thread, the diff hunk and a head-file window
+  pre-gathered, no tools and no follow-up. A conversation is due only when its last comment
+  is human, so prxref's own reply ends it and a redelivered webhook posts once. A settled
+  thread (resolved, won't fix, or a rebuttal with no question) is skipped, or answered
+  without raising the finding again when it names the token. `reply_max` (default 5) caps
+  the calls per sweep, and `reply_context_chars` (default 24000) caps the context. Every
+  reply carries the model attribution line. It runs from `prxref serve` on GitHub review
+  and PR comment webhooks, and from the new `prxref reply --pr-url URL [--dry-run]` in CI,
+  on GitHub, GitLab, Bitbucket Cloud and Server and Azure DevOps. Gitea/Forgejo answers the
+  PR conversation only. The template is `reply.md`, overridable through
+  `PRXREF_PROMPTS_DIR`, and `prxref prompts export` now writes it (#32).
+- Prometheus metrics. `PRXREF_METRICS_PORT` (env-only, default `0` = off) opens a second
+  listener on `127.0.0.1:<port>` for `prxref serve` and `prxref gate serve`, serving
+  `/metrics`: reviews by verdict, findings posted by severity and dropped by quality gate,
+  LLM cost by model (and reviews whose cost is unknown), tokens, review wall time and
+  errors. It is never on the webhook port. The run record gains `cost_by_model`.
+  `docs/metrics.md` lists every metric and has an example Grafana panel (#44).
+- `PRXREF_NOTIFY_URL` (env-only, empty by default) POSTs a one-line summary of each posted
+  review to a webhook, such as a Slack incoming webhook: the verdict, the finding counts by
+  severity, the PR, the models and the version. One attempt with a 10-second timeout and no
+  redirects; a failure never changes the verdict, the comments or the exit code, and only
+  the URL's host is logged. The outcome is recorded on the result as `notify`. A dry run or
+  `--no-post` never notifies. This is the narrowed scope of the hook-system issue (#40).
+
 ### Fixed
 
 - The gate's reconcile no longer re-reviews a head that another instance of the same App
