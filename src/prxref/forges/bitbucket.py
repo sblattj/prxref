@@ -16,6 +16,8 @@ from prxref.forges.base import (
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     CommitData,
+    Conversation,
+    ConversationComment,
     DescriptionVersion,
     FeedReadError,
     InlineComment,
@@ -158,6 +160,50 @@ def _thread_dismissals(items: Sequence[dict]) -> list[str | None]:
         for root, group in members.items()
     }
     return [dismissals.get(root) if root is not None else None for root in roots]
+
+
+def _comment_id(item: dict) -> int | None:
+    """A comment's integer ``id``, or ``None``."""
+    value = item.get("id")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _thread_roots(items: Sequence[dict]) -> list[int | None]:
+    """Each comment's thread root id along its ``parent`` chain, 1:1 with ``items``.
+
+    A parent missing from the feed ends the chain, as in
+    :func:`_thread_dismissals`.
+    """
+    by_id = {i: item for item in items if (i := _comment_id(item)) is not None}
+
+    def parent_of(item: dict) -> int | None:
+        parent = item.get("parent")
+        return _comment_id(parent) if isinstance(parent, dict) else None
+
+    roots: list[int | None] = []
+    for item in items:
+        node, seen = item, set()
+        while (parent := parent_of(node)) is not None and parent in by_id and parent not in seen:
+            seen.add(parent)
+            node = by_id[parent]
+        roots.append(_comment_id(node))
+    return roots
+
+
+def _conversation_comment(item: dict) -> ConversationComment:
+    """A Cloud comment as a :class:`ConversationComment`, whole ``content.raw`` kept."""
+    user = item.get("user") or item.get("author") or {}
+    if not isinstance(user, dict):
+        user = {}
+    body = (item.get("content") or {}).get("raw") or ""
+    created = item.get("created_on")
+    return ConversationComment(
+        author=user.get("display_name") or user.get("nickname") or user.get("uuid") or "",
+        body=body,
+        is_prxref=ATTRIBUTION_MARKER in body,
+        created_at=str(created) if created else None,
+    )
+
 
 class ForgeImpl:
     """Bitbucket Cloud Forge adapter."""
@@ -581,6 +627,80 @@ class ForgeImpl:
         for t, dismissal in zip(threads, _thread_dismissals(items), strict=True):
             t.dismissal = dismissal
         return threads
+
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """Every prxref-rooted inline thread plus the PR's top-level comments (issue #32).
+
+        The whole comment feed is read before anything is grouped, since a
+        reply can sit on a later page than its root. A comment belongs to the
+        root its ``parent`` chain ends at. A root with ``inline`` whose body
+        carries :data:`ATTRIBUTION_MARKER` is an inline thread: its comments
+        in id order, ``reply_to`` the root id, ``path``/``line`` the root's
+        ``inline.path``/``inline.to``, ``resolved`` as :meth:`list_threads`
+        derives it (a tombstoned root), ``url`` the root's ``links.html``.
+        The comments under every root without ``inline`` form the one
+        ``"pr"`` conversation, sorted by ``created_on`` then id, present only
+        when it has a comment. Deleted comments are left out. A feed that
+        cannot be read to the end raises ``FeedReadError``.
+        """
+        items = [item for page in self._iter_comment_pages(ref) for item in page]
+        roots = _thread_roots(items)
+        by_id = {item["id"]: item for item in items if _comment_id(item) is not None}
+        members: dict[int, list[dict]] = {}
+        for item, root in zip(items, roots, strict=True):
+            if root is not None and not _is_deleted(item):
+                members.setdefault(root, []).append(item)
+
+        conversations: list[Conversation] = []
+        top_level: list[dict] = []
+        for root_id in sorted(members):
+            root = by_id.get(root_id) or {}
+            group = sorted(members[root_id], key=lambda c: _comment_id(c) or 0)
+            inline = root.get("inline")
+            if not isinstance(inline, dict):
+                top_level.extend(group)
+                continue
+            if ATTRIBUTION_MARKER not in ((root.get("content") or {}).get("raw") or ""):
+                continue
+            href = ((root.get("links") or {}).get("html") or {}).get("href")
+            conversations.append(Conversation(
+                kind="inline",
+                reply_to=str(root_id),
+                comments=tuple(_conversation_comment(c) for c in group),
+                path=inline.get("path"),
+                line=inline.get("to"),
+                resolved=_is_deleted(root),
+                url=href if isinstance(href, str) else None,
+            ))
+        if top_level:
+            top_level.sort(key=lambda c: (str(c.get("created_on") or ""), _comment_id(c) or 0))
+            conversations.append(Conversation(
+                kind="pr",
+                reply_to="",
+                comments=tuple(_conversation_comment(c) for c in top_level),
+            ))
+        return conversations
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` under root comment ``reply_to``, or top-level for ``""`` (issue #32).
+
+        Both go to ``POST .../pullrequests/{id}/comments`` with
+        ``content.raw``; a thread reply adds ``parent.id``. A top-level reply
+        is a new comment and never the summary ``post_summary`` maintains.
+        Raises on HTTP failure.
+        """
+        headers, auth = self._get_auth()
+        payload: dict[str, object] = {"content": {"raw": body}}
+        if reply_to:
+            payload["parent"] = {"id": int(reply_to)}
+        resp = self._session.post(
+            self._pr_url(ref, "/comments"),
+            json=payload,
+            headers=headers,
+            auth=auth,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
 
     def get_file_content(self, ref: PRRef, path: str, *, sha: str) -> str | None:
         """Return the text of ``path`` at commit ``sha``, best-effort.
