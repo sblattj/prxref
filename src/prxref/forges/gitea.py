@@ -36,6 +36,8 @@ from .base import (
     MAX_LISTING_PAGES,
     SUMMARY_MARKER,
     CommitData,
+    Conversation,
+    ConversationComment,
     FeedReadError,
     InlineComment,
     PathListing,
@@ -110,6 +112,19 @@ def _create_default_session() -> requests.Session:
 
 def _is_positive_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _conversation_comment(item: dict) -> ConversationComment:
+    """A Gitea issue comment as a :class:`ConversationComment`, whole body kept."""
+    user = item.get("user") or {}
+    body = item.get("body") or ""
+    created = item.get("created_at")
+    return ConversationComment(
+        author=user.get("login", "") if isinstance(user, dict) else "",
+        body=body,
+        is_prxref=ATTRIBUTION_MARKER in body,
+        created_at=str(created) if created else None,
+    )
 
 
 class ForgeImpl:
@@ -568,6 +583,41 @@ class ForgeImpl:
                 self._where(ref), len(threads), e,
             )
         return threads
+
+    def list_conversations(self, ref: PRRef) -> list[Conversation]:
+        """The PR's top-level comment stream as one ``"pr"`` conversation (issue #32).
+
+        Reads ``GET /repos/{o}/{r}/issues/{n}/comments`` (unpaged, as
+        ``_find_summary`` notes) and sorts it by ``created_at`` then id; an
+        empty stream gives ``[]``. Review threads are never listed: a review
+        comment carries no field naming the comment it answers, so a thread
+        cannot be rebuilt, and Forgejo and Gitea up to 1.26 serve no route
+        to reply in one. A read that fails raises ``FeedReadError``.
+        """
+        items = self._get_list(ref, f"{self._repo_url(ref)}/issues/{ref.number}/comments", what="comment feed")
+        if not items:
+            return []
+        items.sort(key=lambda c: (str(c.get("created_at") or ""), c.get("id") if _is_positive_int(c.get("id")) else 0))
+        return [Conversation(kind="pr", reply_to="", comments=tuple(_conversation_comment(c) for c in items))]
+
+    def post_reply(self, ref: PRRef, reply_to: str, body: str) -> None:
+        """Post ``body`` as a new top-level PR comment; only ``reply_to=""`` is served (issue #32).
+
+        The reply is ``POST /repos/{o}/{r}/issues/{n}/comments``, a new
+        comment and never the summary ``post_summary`` maintains. A non-empty
+        ``reply_to`` raises ``NotImplementedError`` before any request, since
+        :meth:`list_conversations` never produces one. Raises on HTTP failure.
+        """
+        if reply_to:
+            raise NotImplementedError(
+                f"Gitea/Forgejo replies in review threads are not supported (reply_to={reply_to!r}); "
+                "only top-level PR comments are answered"
+            )
+        resp = self.session.post(
+            f"{self._repo_url(ref)}/issues/{ref.number}/comments",
+            json={"body": body}, headers=self._headers(), timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
 
     def prune_inline_comments(self, ref: PRRef, *, paths: Collection[str] | None = None) -> int:
         """Delete prxref-attributed inline comments; returns the count removed.
