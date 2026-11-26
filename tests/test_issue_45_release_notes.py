@@ -113,8 +113,10 @@ class TestExecutiveExcerpt:
 
     def test_real_error_summary_without_the_heading(self):
         excerpt = rn.executive_excerpt(ERROR)
-        assert excerpt.startswith("🤖 **prxref review")
-        assert "Reviewed by prxref" not in excerpt
+        assert excerpt == (
+            "Error: The review could not complete: all 4 worker reviews failed "
+            "(LLMError: all models failed: glm-5.3: HTTP 400)"
+        )
 
     def test_markers_banners_and_footer_never_leak(self):
         body = (

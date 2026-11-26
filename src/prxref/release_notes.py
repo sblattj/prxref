@@ -81,6 +81,7 @@ _AZURE_MERGE_RE = re.compile(r"^Merged PR (?P<n>\d+): (?P<title>\S.*)$")
 
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _VERDICT_HEADING_RE = re.compile(r"^#{1,6}\s*prxref automated review:\s*(?P<verdict>.+?)\s*$")
+_VERDICT_BANNER_RE = re.compile(r"^\W*\*\*prxref review\s*[\u2014-]\s*(?P<verdict>[^*]+?)\s*\*\*\s*$")
 _PR_LINE_RE = re.compile(r"^PR: .* · files reviewed: \d+\s*$")
 
 
@@ -263,7 +264,8 @@ def executive_excerpt(body: str | None, max_chars: int = EXCERPT_MAX_CHARS) -> s
     HTML comments (the summary and reviewed-head markers) are removed, and
     the footer with it: everything from the last ``---`` rule, and any
     paragraph carrying the attribution. The verdict is read from the
-    ``## prxref automated review: <verdict>`` heading. Headings, blockquotes
+    ``## prxref automated review: <verdict>`` heading, or from the bold
+    ``prxref review - <verdict>`` banner of a failed review. Headings, blockquotes
     (the size and partial-review banners) and the ``PR: ... · files
     reviewed: N`` line are skipped, and the first paragraph left is the
     excerpt: on the packaged template, the finding counts. The result is
@@ -284,7 +286,7 @@ def executive_excerpt(body: str | None, max_chars: int = EXCERPT_MAX_CHARS) -> s
             stripped = line.strip()
             if not stripped:
                 continue
-            heading = _VERDICT_HEADING_RE.match(stripped)
+            heading = _VERDICT_HEADING_RE.match(stripped) or _VERDICT_BANNER_RE.match(stripped)
             if heading:
                 verdict = verdict or heading["verdict"]
                 continue

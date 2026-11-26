@@ -125,7 +125,9 @@ The indented line is the summary excerpt. It is built from prxref's summary
 comment like this: HTML comments (the summary and reviewed-head markers) are
 removed, and so is the footer, everything from the last `---` rule, plus any
 paragraph with the `Reviewed by prxref` attribution. The verdict comes from
-the `## prxref automated review: VERDICT` heading. Headings, blockquotes
+the `## prxref automated review: VERDICT` heading, or from the bold
+`prxref review` banner of a review that failed (so its excerpt reads
+`Error: The review could not complete: ...`). Headings, blockquotes
 (the size and partial-review banners) and the `PR: ... · files reviewed: N`
 line are skipped, and the first paragraph left is the excerpt. On the
 packaged summary template that is the finding counts, because the first two
